@@ -1,0 +1,39 @@
+package bus
+
+import "testing"
+
+func TestFanOutAndDropAccounting(t *testing.T) {
+	b := New()
+	fast := b.Subscribe(4)
+	slow := b.Subscribe(1)
+	defer fast.Close()
+	defer slow.Close()
+
+	for range 3 {
+		b.Publish(FrameHeard{Relay: "r"})
+	}
+
+	if got := len(fast.C); got != 3 {
+		t.Errorf("fast subscriber has %d events, want 3", got)
+	}
+	if got := len(slow.C); got != 1 {
+		t.Errorf("slow subscriber has %d events, want 1", got)
+	}
+	if got := slow.Dropped(); got != 2 {
+		t.Errorf("slow dropped = %d, want 2", got)
+	}
+	if got := fast.Dropped(); got != 0 {
+		t.Errorf("fast dropped = %d, want 0", got)
+	}
+}
+
+func TestCloseUnregisters(t *testing.T) {
+	b := New()
+	s := b.Subscribe(1)
+	s.Close()
+	s.Close()                         // idempotent
+	b.Publish(RelayState{Relay: "r"}) // must not panic on a closed channel
+	if _, ok := <-s.C; ok {
+		t.Error("channel should be closed and drained")
+	}
+}

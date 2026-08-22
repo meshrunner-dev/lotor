@@ -1,0 +1,71 @@
+# Development tasks. `task check` is the gate: everything a commit must
+# pass, composed from the atomic tasks below in the order that fails
+# fastest. Tools run through `go run` at pinned versions, so the gate is
+# reproducible on any machine with a Go toolchain and nothing else.
+version: "3"
+
+vars:
+  GOLANGCI: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.0
+  GOVULNCHECK: go run golang.org/x/vuln/cmd/govulncheck@latest
+
+tasks:
+  default:
+    desc: List the available tasks (run `task check` for the full gate)
+    silent: true
+    cmds:
+      - task --list
+
+  check:
+    desc: "Full gate: formatting, tidy, lint, race tests, govulncheck"
+    cmds:
+      - task: fmt
+      - task: tidy
+      - task: lint
+      - task: test:race
+      - task: vuln
+
+  fmt:
+    desc: Verify formatting without rewriting anything
+    cmds:
+      - |
+        unformatted="$(gofmt -l .)"
+        if [ -n "$unformatted" ]; then
+          echo "gofmt — files need formatting:"
+          echo "$unformatted"
+          exit 1
+        fi
+
+  tidy:
+    desc: Verify go.mod/go.sum are minimal and complete
+    cmds:
+      - go mod tidy -diff
+
+  lint:
+    desc: Run golangci-lint (strict baseline in .golangci.yml; wraps vet and staticcheck)
+    cmds:
+      - "{{.GOLANGCI}} run"
+
+  test:
+    desc: Run the test suite
+    cmds:
+      - go test ./...
+
+  test:race:
+    desc: Tests under the race detector
+    cmds:
+      - go test -race ./...
+
+  vuln:
+    desc: Scan dependencies for known vulnerabilities
+    cmds:
+      - "{{.GOVULNCHECK}} ./..."
+
+  build:
+    desc: Build the daemon into ./bin
+    cmds:
+      - go build -o bin/ ./cmd/...
+
+  build:arm64:
+    desc: Cross-compile the daemon for a 64-bit ARM board
+    cmds:
+      - GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o bin/lotor-arm64 ./cmd/lotor

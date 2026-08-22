@@ -1,0 +1,134 @@
+# Strict baseline: everything on, then a curated list of exceptions —
+# each disable is either pure style noise or a rule that fights the
+# nature of this repo (a hardware driver full of register bytes, with
+# transcript-heavy tests).
+version: "2"
+
+linters:
+  default: all
+  disable:
+    # Style opinions with no defect-finding value.
+    - nlreturn
+    - wsl
+    # Radio drivers and protocols register themselves database/sql
+    # style: package registries filled from init are the design.
+    - gochecknoglobals
+    - gochecknoinits
+    # Config validation speaks to humans in full sentences; the errors
+    # callers branch on are proper sentinels regardless.
+    - err113
+    - wsl_v5
+    - varnamelen
+    - ireturn
+    # Require a curated import allowlist; overkill for three dependencies.
+    - depguard
+    - gomodguard
+    - gomodguard_v2
+    # Demand every struct literal list all fields; zero values are
+    # idiomatic Go and kill readable tests.
+    - exhaustruct
+    - exhaustruct_v5
+    # `if err := f(); err != nil` is the language's own idiom.
+    - noinlineerr
+    # A register map is legitimately full of magic numbers; naming each
+    # would only push the datasheet reference one hop away.
+    - mnd
+    # Same-package tests are deliberate: the transcript harness drives
+    # unexported internals (the device layer, the expiry clock).
+    - testpackage
+    # A driver returns its own sentinel errors; wrapping every stdlib
+    # error would bloat the API surface.
+    - wrapcheck
+    # Tests share one scripted chip per case and are sequential by
+    # construction.
+    - paralleltest
+    # Files are ordered by lifecycle narrative (Open next to its init
+    # helpers, Configure next to its apply), not by visibility.
+    - funcorder
+    # Multi-value returns of one type ((rssi, snr), (preamble, header),
+    # (lo, hi)) need names to be documentable, and AssessChannel's
+    # named error is load-bearing for its restore-on-every-path defer.
+    - nonamedreturns
+
+  settings:
+    # Config files speak snake_case — the convention every preset and
+    # example uses.
+    tagliatelle:
+      case:
+        rules:
+          yaml: snake
+    exhaustive:
+      default-signifies-exhaustive: true
+    gosec:
+      excludes:
+        # G115 (integer truncation): a register driver truncates by
+        # design — every conversion is masked or bounds-checked against
+        # the field width the datasheet gives it.
+        - G115
+    cyclop:
+      max-complexity: 20
+    gocognit:
+      min-complexity: 25
+    gocyclo:
+      min-complexity: 20
+    lll:
+      line-length: 120
+    revive:
+      rules:
+        - name: exported
+          disabled: false
+    gochecknoglobals: {}
+
+  exclusions:
+    rules:
+      # CLI declaration tags (kong) carry inline help texts that cannot
+      # wrap.
+      - linters: [lll]
+        source: '`.*(cmd|arg|help|enum|placeholder):'
+
+      # cmd/ tools are CLIs: printing to stdout is their purpose.
+      - path: ^cmd/
+        linters:
+          - forbidigo
+
+      # Lookup tables (IRQ names, device-error names, TCXO voltages,
+      # band calibration columns) are package-level by nature.
+      - linters: [gochecknoglobals]
+        source: 'Names = |tcxoVoltages|agcCal|paTable'
+
+      # The ioctl layer is what the unsafe package exists for; every
+      # conversion is pinned and commented.
+      - path: ^linux/spi\.go$
+        linters: [gosec]
+
+      # The compiled quickstart: it exists so the toolchain keeps the
+      # README honest, not to run — there is no hardware in CI to
+      # assert output against, and log.Fatal after defer is the honest
+      # shape of a main-like example.
+      - path: ^example_linux_test\.go$
+        linters:
+          - testableexamples
+          - gocritic
+
+      # Test files: pinned byte transcripts trip length and duplication
+      # linters by design.
+      - path: _test\.go
+        linters:
+          - gosec
+          - dupl
+          - funlen
+          - gochecknoglobals
+          - goconst
+          - lll
+          - maintidx
+          - err113
+          - errcheck
+          - cyclop
+          - gocognit
+          - gocyclo
+
+formatters:
+  enable:
+    - gofmt
+
+    # (see linters.settings below)

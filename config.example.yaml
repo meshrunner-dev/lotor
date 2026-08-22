@@ -1,0 +1,23 @@
+# Example: one MeshCore relay on an SX1262 HAT.
+#
+# Layering: `profile` selects a preset by name ("custom" starts from
+# nothing), and `overrides` patches it — scoped by profile name, so
+# switching profiles never drags the previous profile's tuning along.
+
+radios:
+  slot1:
+    driver: sx126x-spi
+    profile: rak6421-13300x-slot1
+    overrides:
+      rak6421-13300x-slot1:
+        # The preset fits this board; patch pins here if yours differ.
+
+relays:
+  meshcore-868:
+    protocol: meshcore
+    radio: slot1
+    profile: eu-868-narrow
+    overrides:
+      eu-868-narrow:
+        # Waveform comes from the preset; engine knobs are patchable:
+        # dedup_ttl: 60s
