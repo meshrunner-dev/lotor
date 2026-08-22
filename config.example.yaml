@@ -10,7 +10,9 @@ radios:
     profile: rak6421-13300x-slot1
     overrides:
       rak6421-13300x-slot1:
-        # The preset fits this board; patch pins here if yours differ.
+        # The preset fixes what the PCB fixes; where the board sits on
+        # THIS host is yours to say (gpiochip defaults to gpiochip0).
+        spi: /dev/spidev0.0
 
 relays:
   meshcore-868:

@@ -1,15 +1,15 @@
 package sx126x
 
-// presets are the known board profiles. Each carries the attachment
-// and the board's envelope; a config file patches them through its
-// override scopes without ever editing them.
+// presets are the known board profiles. A preset states what the PCB
+// fixes — pins, enables, oscillator, RF switch wiring, the envelope —
+// and nothing the host kernel names: bus paths and gpiochip labels
+// vary per machine and belong in the config's override scopes.
 var presets = map[string]map[string]any{
 	// RAK6421 Pi HAT with the 868 MHz SX1262 module in slot 1:
 	// chip-driven RF switch on DIO2, both front-end enables held high,
-	// 1.8 V TCXO on DIO3.
+	// 1.8 V TCXO on DIO3. Pin numbers are BCM lines, fixed by the HAT
+	// connector.
 	"rak6421-13300x-slot1": {
-		"spi":              "/dev/spidev0.0",
-		"gpiochip":         "gpiochip0",
 		"reset_pin":        16,
 		"busy_pin":         24,
 		"dio1_pin":         22,
