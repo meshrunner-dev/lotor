@@ -9,6 +9,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/signal"
 	"sort"
@@ -39,10 +41,41 @@ func main() {
 	logLevel := flag.String("log-level", "info", "zap level: debug, info, warn, error")
 	flag.Parse()
 
-	if err := run(*configPath, *logLevel); err != nil {
+	var err error
+	if flag.Arg(0) == "attach" {
+		err = attach(flag.Arg(1))
+	} else {
+		err = run(*configPath, *logLevel)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "fatal:", err)
 		os.Exit(1)
 	}
+}
+
+// attach connects the terminal to a running daemon's CLI and behaves
+// the way a terminal should: Ctrl+D half-closes and lets the session
+// finish, and the daemon closing (quit) ends the process immediately —
+// no netcat-variant guesswork.
+func attach(addr string) error {
+	if addr == "" {
+		addr = config.DefaultCLIListen
+	}
+	var d net.Dialer
+	conn, err := d.DialContext(context.Background(), "tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+
+	go func() {
+		_, _ = io.Copy(conn, os.Stdin)
+		if t, ok := conn.(*net.TCPConn); ok {
+			_ = t.CloseWrite() // Ctrl+D: send EOF, keep reading the goodbye
+		}
+	}()
+	_, _ = io.Copy(os.Stdout, conn)
+	return nil
 }
 
 func run(configPath, logLevel string) error {

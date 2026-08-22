@@ -16,10 +16,16 @@ func ServeTelnet(ctx context.Context, addr string, deps Deps, log *zap.Logger) e
 	if err != nil {
 		return err
 	}
+	log.Info("cli listening", zap.String("addr", addr))
+	return ServeListener(ctx, ln, deps)
+}
+
+// ServeListener accepts sessions on an existing listener — the
+// telnet entry point above, and the tests' doorway.
+func ServeListener(ctx context.Context, ln net.Listener, deps Deps) error {
 	unlisten := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer unlisten()
 
-	log.Info("cli listening", zap.String("addr", addr))
 	for {
 		conn, err := ln.Accept()
 		if err != nil {

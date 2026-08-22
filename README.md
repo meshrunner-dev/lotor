@@ -26,6 +26,13 @@ go build -o bin/ ./cmd/lotor
 bin/lotor -config config.example.yaml -log-level debug
 ```
 
+Talk to a running daemon with the built-in client — it ends cleanly on
+`quit` and on Ctrl+D, which netcat variants do not agree on:
+
+```
+lotor attach            # 127.0.0.1:2323 by default
+```
+
 `task check` is the development gate: formatting, tidy, strict lint,
 race tests, vulnerability scan.
 

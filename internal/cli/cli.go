@@ -75,6 +75,7 @@ func Serve(ctx context.Context, rw io.ReadWriter, deps Deps) {
 			continue
 		}
 		if args[0] == "quit" || args[0] == "exit" {
+			fmt.Fprint(s.out, "bye.\r\n")
 			return
 		}
 		s.dispatch(ctx, args)
