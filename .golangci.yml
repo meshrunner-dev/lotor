@@ -51,6 +51,13 @@ linters:
     - nonamedreturns
 
   settings:
+    errcheck:
+      # Best-effort writes to interactive streams (CLI sessions): a dead
+      # transport surfaces on the next read, not on every print.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
     # Config files speak snake_case — the convention every preset and
     # example uses.
     tagliatelle:

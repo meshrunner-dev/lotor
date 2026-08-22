@@ -21,6 +21,11 @@ sentinel:
   journal: /var/lib/lotor/journal.db
   retention: 720h
 
+# Optional: the operator CLI over telnet. Plaintext and read-only, so
+# loopback by default; omit the block for no listener at all.
+cli:
+  listen: 127.0.0.1:2323
+
 relays:
   meshcore-868:
     protocol: meshcore

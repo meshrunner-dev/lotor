@@ -68,7 +68,7 @@ type store struct {
 	db *sql.DB
 }
 
-func openStore(path string) (*store, error) {
+func openStore(ctx context.Context, path string) (*store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -77,17 +77,17 @@ func openStore(path string) (*store, error) {
 	if path != MemoryJournal {
 		// WAL batches fsyncs — kinder to flash, and crash-safe enough
 		// for an observation archive.
-		if _, err := db.ExecContext(context.Background(),
+		if _, err := db.ExecContext(ctx,
 			"PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("journal pragmas: %w", err)
 		}
 	}
-	if _, err := db.ExecContext(context.Background(), schema); err != nil {
+	if _, err := db.ExecContext(ctx, schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("journal schema: %w", err)
 	}
-	if err := migrate(db); err != nil {
+	if err := migrate(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("journal migration: %w", err)
 	}
@@ -97,8 +97,7 @@ func openStore(path string) (*store, error) {
 // migrate brings a journal created by an earlier schema up to date.
 // CREATE IF NOT EXISTS leaves an existing table alone, so columns
 // added since are grafted here, idempotently.
-func migrate(db *sql.DB) error {
-	ctx := context.Background()
+func migrate(ctx context.Context, db *sql.DB) error {
 	cols := map[string]bool{}
 	rows, err := db.QueryContext(ctx, `PRAGMA table_info(frames)`)
 	if err != nil {
@@ -202,6 +201,140 @@ func (s *store) RecentFrames(ctx context.Context, txnPrefix string, limit int) (
 		out = append(out, f)
 	}
 	return out, rows.Err()
+}
+
+// Node is one entry of the directory the mesh writes about itself.
+type Node struct {
+	Name     string
+	Type     string
+	PubKey   string
+	Heard    int
+	LastAt   time.Time
+	BestRSSI float64
+}
+
+// Nodes lists every advertising node ever journalled, most recently
+// heard first. Name and type come from the freshest advert that
+// carried them.
+func (s *store) Nodes(ctx context.Context) ([]Node, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT f.pubkey,
+		       (SELECT node   FROM frames n WHERE n.pubkey = f.pubkey AND n.node   != '' ORDER BY n.at_ms DESC LIMIT 1),
+		       (SELECT detail FROM frames n WHERE n.pubkey = f.pubkey AND n.detail != '' ORDER BY n.at_ms DESC LIMIT 1),
+		       COUNT(*), MAX(f.at_ms), MAX(f.rssi_dbm)
+		FROM frames f WHERE f.pubkey != ''
+		GROUP BY f.pubkey ORDER BY MAX(f.at_ms) DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Node
+	for rows.Next() {
+		var n Node
+		var name, typ sql.NullString
+		var lastMS int64
+		if err := rows.Scan(&n.PubKey, &name, &typ, &n.Heard, &lastMS, &n.BestRSSI); err != nil {
+			return nil, err
+		}
+		n.Name, n.Type = name.String, typ.String
+		n.LastAt = time.UnixMilli(lastMS)
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// Chain returns a transaction's frames and everything linked to it:
+// the original it duplicates, and the duplicates that point at it.
+func (s *store) Chain(ctx context.Context, txnPrefix string) ([]Frame, error) {
+	own, err := s.RecentFrames(ctx, txnPrefix, 16)
+	if err != nil || len(own) == 0 {
+		return own, err
+	}
+	seen := map[string]bool{}
+	var out []Frame
+	add := func(frames []Frame) {
+		for _, f := range frames {
+			if !seen[f.Txn] {
+				seen[f.Txn] = true
+				out = append(out, f)
+			}
+		}
+	}
+	add(own)
+	for _, f := range own {
+		if f.DuplicateOf != "" {
+			orig, err := s.RecentFrames(ctx, f.DuplicateOf, 4)
+			if err != nil {
+				return nil, err
+			}
+			add(orig)
+		}
+		short := f.Txn[:min(len(f.Txn), 12)]
+		dups, err := s.duplicatesOf(ctx, short)
+		if err != nil {
+			return nil, err
+		}
+		add(dups)
+	}
+	return out, nil
+}
+
+func (s *store) duplicatesOf(ctx context.Context, short string) ([]Frame, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT txn FROM frames WHERE duplicate_of = ? ORDER BY at_ms`, short)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var txns []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		txns = append(txns, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []Frame
+	for _, t := range txns {
+		f, err := s.RecentFrames(ctx, t, 1)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f...)
+	}
+	return out, nil
+}
+
+// VerdictCounts sums a relay's judgements by verdict.
+func (s *store) VerdictCounts(ctx context.Context, relay string) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT verdict, COUNT(*) FROM frames WHERE relay = ? AND verdict != '' GROUP BY verdict`,
+		relay)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]int{}
+	for rows.Next() {
+		var v string
+		var n int
+		if err := rows.Scan(&v, &n); err != nil {
+			return nil, err
+		}
+		out[v] = n
+	}
+	return out, rows.Err()
+}
+
+// FrameCount is the journal's current size.
+func (s *store) FrameCount(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM frames`).Scan(&n)
+	return n, err
 }
 
 func (s *store) Close() error { return s.db.Close() }

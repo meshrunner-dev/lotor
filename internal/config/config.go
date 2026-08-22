@@ -48,11 +48,24 @@ type Sentinel struct {
 // observation archive should.
 const DefaultRetention = 30 * 24 * time.Hour
 
+// CLI configures the line-based operator interface. Absent means no
+// listener at all, the same optionality rule as the sentinel.
+type CLI struct {
+	// Listen is the TCP address; loopback by default — the transport
+	// is plaintext and v1 is read-only.
+	Listen string `yaml:"listen"`
+}
+
+// DefaultCLIListen is where the CLI listens when the block is present
+// but silent on the address.
+const DefaultCLIListen = "127.0.0.1:2323"
+
 // File is the top-level configuration.
 type File struct {
 	Radios   map[string]Radio `yaml:"radios"`
 	Relays   map[string]Relay `yaml:"relays"`
 	Sentinel *Sentinel        `yaml:"sentinel"`
+	CLI      *CLI             `yaml:"cli"`
 }
 
 // Load reads, decodes and cross-validates a configuration file.
@@ -100,6 +113,9 @@ func (f *File) validate() error {
 		if r.Driver == "" {
 			return fmt.Errorf("radio %q: driver is required", name)
 		}
+	}
+	if f.CLI != nil && f.CLI.Listen == "" {
+		f.CLI.Listen = DefaultCLIListen
 	}
 	if f.Sentinel != nil {
 		if f.Sentinel.Journal == "" {

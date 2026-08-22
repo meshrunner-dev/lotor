@@ -13,7 +13,7 @@ import (
 
 func testSentinel(t *testing.T) *Sentinel {
 	t.Helper()
-	s, err := Open(MemoryJournal, time.Hour, bus.New(), zap.NewNop())
+	s, err := Open(context.Background(), MemoryJournal, time.Hour, bus.New(), zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,11 +26,11 @@ func TestHeardThenJudgedBecomesOneRow(t *testing.T) {
 	id := txn.New()
 	at := time.Now()
 
-	s.process(context.Background(), bus.FrameHeard{
+	s.Process(context.Background(), bus.FrameHeard{
 		Relay: "meshcore-868", Txn: id, At: at,
 		Bytes: 132, RSSI: -69, SNR: 8.5, Airtime: 1295 * time.Millisecond,
 	})
-	s.process(context.Background(), bus.FrameJudged{
+	s.Process(context.Background(), bus.FrameJudged{
 		Relay: "meshcore-868", Txn: id,
 		Verdict: "would-relay-flood", Type: "ADVERT", Route: "FLOOD", PathLen: 6,
 		Node: "Wanadoo", PubKey: "de1234567890", Detail: "repeater",
@@ -55,8 +55,8 @@ func TestHeardThenJudgedBecomesOneRow(t *testing.T) {
 func TestShortPrefixFindsItsTransaction(t *testing.T) {
 	s := testSentinel(t)
 	id := txn.New()
-	s.process(context.Background(), bus.FrameHeard{Relay: "r", Txn: id, At: time.Now()})
-	s.process(context.Background(), bus.FrameHeard{Relay: "r", Txn: txn.New(), At: time.Now()})
+	s.Process(context.Background(), bus.FrameHeard{Relay: "r", Txn: id, At: time.Now()})
+	s.Process(context.Background(), bus.FrameHeard{Relay: "r", Txn: txn.New(), At: time.Now()})
 
 	frames, err := s.RecentFrames(context.Background(), id.Short(), 10)
 	if err != nil {
@@ -71,8 +71,8 @@ func TestRetentionPrunes(t *testing.T) {
 	s := testSentinel(t)
 	old := txn.New()
 	fresh := txn.New()
-	s.process(context.Background(), bus.FrameHeard{Relay: "r", Txn: old, At: time.Now().Add(-2 * time.Hour)})
-	s.process(context.Background(), bus.FrameHeard{Relay: "r", Txn: fresh, At: time.Now()})
+	s.Process(context.Background(), bus.FrameHeard{Relay: "r", Txn: old, At: time.Now().Add(-2 * time.Hour)})
+	s.Process(context.Background(), bus.FrameHeard{Relay: "r", Txn: fresh, At: time.Now()})
 
 	if err := s.store.prune(context.Background(), time.Now().Add(-time.Hour)); err != nil {
 		t.Fatal(err)
@@ -88,7 +88,7 @@ func TestRetentionPrunes(t *testing.T) {
 
 func TestRelayStatesJournalled(t *testing.T) {
 	s := testSentinel(t)
-	s.process(context.Background(), bus.RelayState{Relay: "meshcore-868", State: "error", Err: "radio gone"})
+	s.Process(context.Background(), bus.RelayState{Relay: "meshcore-868", State: "error", Err: "radio gone"})
 
 	var n int
 	if err := s.store.db.QueryRowContext(context.Background(),

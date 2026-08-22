@@ -11,13 +11,16 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"sync"
 	"syscall"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/cli"
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/protocol"
 	"meshrunner.dev/lotor/internal/radio"
@@ -27,6 +30,9 @@ import (
 	_ "meshrunner.dev/lotor/internal/protocol/meshcore"
 	_ "meshrunner.dev/lotor/internal/radio/sx126x"
 )
+
+// version identifies this build in the CLI banner and status.
+const version = "0.1.0-dev"
 
 func main() {
 	configPath := flag.String("config", "/etc/lotor/config.yaml", "configuration file")
@@ -52,29 +58,30 @@ func run(configPath, logLevel string) error {
 	}
 
 	b := bus.New()
+	started := time.Now()
 	relays := make([]*relay.Relay, 0, len(f.Relays))
+	deps := cli.Deps{
+		Version: version,
+		Started: started,
+		Bus:     b,
+		Traces:  map[string][]config.Trace{},
+	}
 	for name, rc := range f.Relays {
-		r, err := assemble(name, rc, f.Radios[rc.Radio], b, log)
+		r, info, err := assemble(name, rc, f.Radios[rc.Radio], b, log, deps.Traces)
 		if err != nil {
 			return fmt.Errorf("relay %q: %w", name, err)
 		}
 		relays = append(relays, r)
+		deps.Relays = append(deps.Relays, info)
 	}
+	sort.Slice(deps.Relays, func(i, j int) bool { return deps.Relays[i].Name < deps.Relays[j].Name })
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	var wg sync.WaitGroup
-	if f.Sentinel != nil {
-		sent, err := sentinel.Open(f.Sentinel.Journal, f.Sentinel.Retention, b,
-			log.Named("sentinel"))
-		if err != nil {
-			return fmt.Errorf("sentinel: %w", err)
-		}
-		wg.Go(func() { sent.Run(ctx) })
-		log.Info("sentinel journalling",
-			zap.String("journal", f.Sentinel.Journal),
-			zap.Duration("retention", f.Sentinel.Retention))
+	if err := startConsumers(ctx, f, &deps, b, &wg, log); err != nil {
+		return err
 	}
 	for _, r := range relays {
 		wg.Go(func() { r.Run(ctx) })
@@ -86,30 +93,62 @@ func run(configPath, logLevel string) error {
 	return nil
 }
 
+// startConsumers brings up the optional bus consumers — sentinel and
+// CLI — that the configuration asked for.
+func startConsumers(ctx context.Context, f *config.File, deps *cli.Deps,
+	b *bus.Bus, wg *sync.WaitGroup, log *zap.Logger,
+) error {
+	if f.Sentinel != nil {
+		sent, err := sentinel.Open(ctx, f.Sentinel.Journal, f.Sentinel.Retention, b,
+			log.Named("sentinel"))
+		if err != nil {
+			return fmt.Errorf("sentinel: %w", err)
+		}
+		deps.Sentinel = sent
+		wg.Go(func() { sent.Run(ctx) })
+		log.Info("sentinel journalling",
+			zap.String("journal", f.Sentinel.Journal),
+			zap.Duration("retention", f.Sentinel.Retention))
+	}
+	if f.CLI != nil {
+		addr := f.CLI.Listen
+		d := *deps
+		wg.Go(func() {
+			if err := cli.ServeTelnet(ctx, addr, d, log.Named("cli")); err != nil {
+				log.Error("cli listener failed", zap.Error(err))
+			}
+		})
+	}
+	return nil
+}
+
 // assemble resolves one relay's layered configurations — hardware
 // against the driver's presets, waveform against the protocol's —
 // and logs every resolved key with its provenance, so a running
 // config is always explainable from the log alone.
 func assemble(name string, rc config.Relay, radioSpec config.Radio,
-	b *bus.Bus, log *zap.Logger,
-) (*relay.Relay, error) {
+	b *bus.Bus, log *zap.Logger, traces map[string][]config.Trace,
+) (*relay.Relay, cli.RelayInfo, error) {
+	none := cli.RelayInfo{}
 	drv, err := radio.Lookup(radioSpec.Driver)
 	if err != nil {
-		return nil, err
+		return nil, none, err
 	}
 	radioCfg, radioTraces, err := radioSpec.Layered.Resolve(drv.Presets)
 	if err != nil {
-		return nil, fmt.Errorf("radio %q: %w", rc.Radio, err)
+		return nil, none, fmt.Errorf("radio %q: %w", rc.Radio, err)
 	}
 
 	builder, err := protocol.Lookup(rc.Protocol)
 	if err != nil {
-		return nil, err
+		return nil, none, err
 	}
 	relayCfg, relayTraces, err := rc.Layered.Resolve(builder.Presets)
 	if err != nil {
-		return nil, err
+		return nil, none, err
 	}
+	traces["radio "+rc.Radio] = radioTraces
+	traces["relay "+name] = relayTraces
 
 	rlog := log.With(zap.String("relay", name))
 	for _, t := range radioTraces {
@@ -123,9 +162,18 @@ func assemble(name string, rc config.Relay, radioSpec config.Radio,
 
 	eng, err := builder.Build(name, relayCfg, b, rlog)
 	if err != nil {
-		return nil, err
+		return nil, none, err
 	}
-	return relay.New(name, drv, radioCfg, eng, b, log), nil
+	r := relay.New(name, drv, radioCfg, eng, b, log)
+	info := cli.RelayInfo{
+		Name:     name,
+		Protocol: rc.Protocol,
+		Radio:    rc.Radio,
+		Driver:   radioSpec.Driver,
+		Waveform: eng.Waveform(),
+		State:    r.State,
+	}
+	return r, info, nil
 }
 
 func newLogger(level string) (*zap.Logger, error) {

@@ -17,26 +17,52 @@ const pruneEvery = time.Hour
 
 // Sentinel journals bus traffic into its store.
 type Sentinel struct {
-	store     *store
-	bus       *bus.Bus
-	log       *zap.Logger
-	retention time.Duration
+	store       *store
+	bus         *bus.Bus
+	log         *zap.Logger
+	retention   time.Duration
+	journalPath string
 }
 
 // Open prepares the journal. The path may be MemoryJournal for hosts
 // whose storage dislikes continuous writes.
-func Open(journalPath string, retention time.Duration, b *bus.Bus, log *zap.Logger) (*Sentinel, error) {
-	st, err := openStore(journalPath)
+func Open(ctx context.Context, journalPath string, retention time.Duration,
+	b *bus.Bus, log *zap.Logger,
+) (*Sentinel, error) {
+	st, err := openStore(ctx, journalPath)
 	if err != nil {
 		return nil, err
 	}
-	return &Sentinel{store: st, bus: b, log: log, retention: retention}, nil
+	return &Sentinel{store: st, bus: b, log: log, retention: retention, journalPath: journalPath}, nil
 }
 
 // RecentFrames exposes the journal to future consumers (CLI, web). A
 // txn prefix — the short displayed form — filters to its transaction.
 func (s *Sentinel) RecentFrames(ctx context.Context, txnPrefix string, limit int) ([]Frame, error) {
 	return s.store.RecentFrames(ctx, txnPrefix, limit)
+}
+
+// Nodes lists the directory the mesh writes about itself.
+func (s *Sentinel) Nodes(ctx context.Context) ([]Node, error) { return s.store.Nodes(ctx) }
+
+// Chain returns a transaction and everything duplicate-linked to it.
+func (s *Sentinel) Chain(ctx context.Context, txnPrefix string) ([]Frame, error) {
+	return s.store.Chain(ctx, txnPrefix)
+}
+
+// VerdictCounts sums a relay's judgements by verdict.
+func (s *Sentinel) VerdictCounts(ctx context.Context, relay string) (map[string]int, error) {
+	return s.store.VerdictCounts(ctx, relay)
+}
+
+// FrameCount is the journal's current size.
+func (s *Sentinel) FrameCount(ctx context.Context) (int, error) {
+	return s.store.FrameCount(ctx)
+}
+
+// Journal reports where the archive lives and how long it reaches.
+func (s *Sentinel) Journal() (path string, retention time.Duration) {
+	return s.journalPath, s.retention
 }
 
 // Run consumes the bus until the context ends. Journal errors are
@@ -59,7 +85,7 @@ func (s *Sentinel) Run(ctx context.Context) {
 			if !ok {
 				return
 			}
-			s.process(ctx, ev)
+			s.Process(ctx, ev)
 		case <-ticker.C:
 			s.pruneNow(ctx)
 			if d := sub.Dropped(); d > reportedDrops {
@@ -71,7 +97,9 @@ func (s *Sentinel) Run(ctx context.Context) {
 	}
 }
 
-func (s *Sentinel) process(ctx context.Context, ev bus.Event) {
+// Process journals one event synchronously. Run feeds it from the
+// bus; tests and tools may feed it directly.
+func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 	var err error
 	switch e := ev.(type) {
 	case bus.FrameHeard:
