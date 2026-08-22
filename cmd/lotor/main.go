@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"sync"
 	"syscall"
@@ -29,6 +30,7 @@ import (
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/relay"
 	"meshrunner.dev/lotor/internal/sentinel"
+	"meshrunner.dev/lotor/internal/single"
 
 	_ "meshrunner.dev/lotor/internal/protocol/meshcore"
 	_ "meshrunner.dev/lotor/internal/radio/sx126x"
@@ -115,6 +117,12 @@ func run(configPath, logLevel string) error {
 	}
 	defer func() { _ = log.Sync() }()
 
+	release, err := acquireInstanceLock(configPath)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	f, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -154,6 +162,16 @@ func run(configPath, logLevel string) error {
 	log.Info("shutting down")
 	wg.Wait()
 	return nil
+}
+
+// acquireInstanceLock refuses a second daemon on the same
+// configuration; the lock dies with the process, crash included.
+func acquireInstanceLock(configPath string) (func(), error) {
+	abs, err := filepath.Abs(configPath)
+	if err != nil {
+		return nil, err
+	}
+	return single.Acquire(context.Background(), "lotor", abs)
 }
 
 // startConsumers brings up the optional bus consumers — sentinel and
