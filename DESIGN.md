@@ -29,6 +29,13 @@ endorsed by the MeshCore project.
 - **radio** — a physical transceiver attachment: a bus, pins, and the
   board's physical envelope. Radios carry no waveform *choice*; they
   declare what choices are possible.
+- **sentinel** — the observation and archival instantiation: the
+  packet and routing-decision views the UI shows, the disk or network
+  archival of heard frames, and the storage behind them. Whether one
+  sentinel serves the daemon or each relay carries its own is an open
+  question; what is decided is that a deployment may run **none at
+  all** — embedded hosts with tight RAM and CPU relay without
+  observing, and nothing else may depend on a sentinel existing.
 
 ## Architecture
 
@@ -147,16 +154,19 @@ says so at startup — traceability includes configuration.
 - **Metrics** live in an in-RAM registry, with optional periodic
   persistence — embedded systems on write-fragile eMMC can keep them
   RAM-only. A future Prometheus exporter reads the same registry.
-- **The message journal** records transiting frames (SQLite; RAM/tmpfs
-  mode for eMMC), browsable from the web UI, retained on disk for a
-  long default.
+- **The message journal is the sentinel's storage**: transiting frames
+  recorded (SQLite; RAM/tmpfs mode for eMMC), browsable from the web
+  UI, retained on disk for a long default — and entirely absent when
+  no sentinel runs.
 
 ## Interfaces
 
 - **Internal event bus** — the spine. Typed envelopes with provenance
   for every event: frame heard, relayed, dropped, radio state change.
-  Consumers today: journal, metrics, SSE stream, CLI. The bus is what
-  keeps later ambitions cheap (see below).
+  Consumers today: the sentinel (journal and live traffic views),
+  metrics, SSE stream, CLI. The bus is what makes the sentinel's
+  optionality free — publishing to zero subscribers costs nothing —
+  and what keeps later ambitions cheap (see below).
 - **Web UI** — minimalist first, backed by SSE from the bus. The visual
   structure for multi-relay realities will iterate; the data feed will
   not.
@@ -173,6 +183,13 @@ None of this exists, and nothing above may contradict it:
   metrics registry.
 - **Alerting** (webhooks, bot messages) — one more bus consumer.
 - **Log shipping** to a collector — protocol undecided.
+- **ESP32-class targets**, to be studied short-term. Linux stays the
+  first-class platform; an embedded build would keep the core — relay,
+  protocol, radio seam — and shed the optional layers, the sentinel
+  first. The radio library's transport interfaces are the door: a
+  bare-metal SPI transport behind the same seam. The implication
+  honoured today is that the core stays dependency-light and every
+  heavy subsystem is optional.
 
 ## Ground rules
 
