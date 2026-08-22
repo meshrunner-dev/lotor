@@ -47,3 +47,13 @@ func TestPrintableNeutralisesControls(t *testing.T) {
 		t.Error("graphic runes must pass untouched")
 	}
 }
+
+func TestQuotedDelimitsAndEscapes(t *testing.T) {
+	if got := quoted("RPT VHN HV4"); got != `"RPT VHN HV4"` {
+		t.Errorf("quoted = %s", got)
+	}
+	// A name cannot close its own quotation.
+	if got := quoted(`fake" end`); got != `"fake\" end"` {
+		t.Errorf("escaped = %s", got)
+	}
+}

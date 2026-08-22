@@ -110,7 +110,7 @@ func TestFramesAndChain(t *testing.T) {
 
 	out := run(t, deps, "frames", "txn "+dup.Short()[:4])
 	for _, want := range []string{
-		"Radio-Club (repeater)",
+		`"Radio-Club" (repeater)`,
 		"duplicate → " + orig.Short(),
 		orig.Short(), // the chain pulls the original in
 		"would-relay-flood",

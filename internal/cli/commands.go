@@ -189,7 +189,7 @@ func verdictWithChain(f sentinel.Frame) string {
 func who(f sentinel.Frame) string {
 	switch {
 	case f.Node != "":
-		return fmt.Sprintf("%s (%s)", printable(f.Node), f.Detail)
+		return fmt.Sprintf("%s (%s)", quoted(f.Node), f.Detail)
 	case f.Detail != "":
 		return f.Detail
 	default:
@@ -243,7 +243,7 @@ func (s *session) nodes(ctx context.Context, args []string) error {
 	tb := &table{}
 	tb.row("name", "type", "pubkey", "heard", "last", "best rssi")
 	for _, n := range nodes {
-		tb.row(printable(n.Name), n.Type, n.PubKey,
+		tb.row(quoted(n.Name), n.Type, n.PubKey,
 			fmt.Sprintf("%d×", n.Heard), ago(n.LastAt),
 			fmt.Sprintf("%.0f dBm", n.BestRSSI))
 	}
@@ -300,7 +300,7 @@ func (s *session) watch(ctx context.Context, opts map[string]string) error {
 				line += " → " + j.DuplicateOf
 			}
 			if j.Node != "" {
-				line += fmt.Sprintf("  %s (%s)", printable(j.Node), j.Detail)
+				line += fmt.Sprintf("  %s (%s)", quoted(j.Node), j.Detail)
 			} else if j.Detail != "" {
 				line += "  " + j.Detail
 			}

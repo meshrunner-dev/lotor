@@ -61,3 +61,11 @@ func printable(s string) string {
 		return '?'
 	}, s)
 }
+
+// quoted wraps a mesh-sourced string in double quotes so its start
+// and end are unmistakable among keywords and column gaps — names
+// carry spaces. Inner quotes are escaped: a name cannot close its own
+// quotation. Neutralisation rides along.
+func quoted(s string) string {
+	return `"` + strings.ReplaceAll(printable(s), `"`, `\"`) + `"`
+}
