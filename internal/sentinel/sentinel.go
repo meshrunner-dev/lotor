@@ -80,8 +80,11 @@ func (s *Sentinel) process(ctx context.Context, ev bus.Event) {
 			Bytes: e.Bytes, RSSI: e.RSSI, SNR: e.SNR, Airtime: e.Airtime,
 		})
 	case bus.FrameJudged:
-		err = s.store.applyJudgement(ctx,
-			e.Txn.String(), e.Type, e.Route, e.PathLen, e.Verdict, e.DuplicateOf)
+		err = s.store.applyJudgement(ctx, e.Txn.String(), Frame{
+			Type: e.Type, Route: e.Route, PathLen: e.PathLen,
+			Verdict: e.Verdict, DuplicateOf: e.DuplicateOf,
+			Node: e.Node, PubKey: e.PubKey, Detail: e.Detail,
+		})
 	case bus.RelayState:
 		err = s.store.insertRelayState(ctx, time.Now(), e.Relay, e.State, e.Err)
 	default:

@@ -125,6 +125,7 @@ func (e *engine) judge(frame radio.Frame) {
 		Route:   pkt.Route().String(),
 		PathLen: len(pkt.Path),
 	}
+	log = log.With(describe(pkt, &judged)...)
 	if first, dup := e.seen.witness(pkt.Hash(), id, frame.At); dup {
 		log.Info("frame judged",
 			zap.String("verdict", "duplicate"),

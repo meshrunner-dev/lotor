@@ -33,6 +33,7 @@ func TestHeardThenJudgedBecomesOneRow(t *testing.T) {
 	s.process(context.Background(), bus.FrameJudged{
 		Relay: "meshcore-868", Txn: id,
 		Verdict: "would-relay-flood", Type: "ADVERT", Route: "FLOOD", PathLen: 6,
+		Node: "Wanadoo", PubKey: "de1234567890", Detail: "repeater",
 	})
 
 	frames, err := s.RecentFrames(context.Background(), "", 10)
@@ -45,7 +46,8 @@ func TestHeardThenJudgedBecomesOneRow(t *testing.T) {
 	f := frames[0]
 	if f.Txn != id.String() || f.Verdict != "would-relay-flood" ||
 		f.Type != "ADVERT" || f.Route != "FLOOD" || f.PathLen != 6 ||
-		f.Bytes != 132 || f.RSSI != -69 {
+		f.Bytes != 132 || f.RSSI != -69 ||
+		f.Node != "Wanadoo" || f.PubKey != "de1234567890" || f.Detail != "repeater" {
 		t.Errorf("row = %+v", f)
 	}
 }

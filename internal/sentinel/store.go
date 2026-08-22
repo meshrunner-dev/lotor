@@ -28,7 +28,10 @@ CREATE TABLE IF NOT EXISTS frames (
 	route        TEXT NOT NULL DEFAULT '',
 	path_len     INTEGER NOT NULL DEFAULT 0,
 	verdict      TEXT NOT NULL DEFAULT '',
-	duplicate_of TEXT NOT NULL DEFAULT ''
+	duplicate_of TEXT NOT NULL DEFAULT '',
+	node         TEXT NOT NULL DEFAULT '',
+	pubkey       TEXT NOT NULL DEFAULT '',
+	detail       TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS frames_at ON frames(at_ms);
 CREATE TABLE IF NOT EXISTS relay_states (
@@ -54,6 +57,9 @@ type Frame struct {
 	PathLen     int
 	Verdict     string
 	DuplicateOf string
+	Node        string
+	PubKey      string
+	Detail      string
 }
 
 // store is the journal's SQLite backend. A single connection serialises
@@ -81,7 +87,45 @@ func openStore(path string) (*store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("journal schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("journal migration: %w", err)
+	}
 	return &store{db: db}, nil
+}
+
+// migrate brings a journal created by an earlier schema up to date.
+// CREATE IF NOT EXISTS leaves an existing table alone, so columns
+// added since are grafted here, idempotently.
+func migrate(db *sql.DB) error {
+	ctx := context.Background()
+	cols := map[string]bool{}
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(frames)`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		cols[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, col := range []string{"node", "pubkey", "detail"} {
+		if !cols[col] {
+			if _, err := db.ExecContext(ctx,
+				fmt.Sprintf(`ALTER TABLE frames ADD COLUMN %s TEXT NOT NULL DEFAULT ''`, col)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *store) insertHeard(ctx context.Context, f Frame) error {
@@ -94,13 +138,13 @@ func (s *store) insertHeard(ctx context.Context, f Frame) error {
 	return err
 }
 
-func (s *store) applyJudgement(ctx context.Context, txn, ptype, route string,
-	pathLen int, verdict, duplicateOf string,
-) error {
+func (s *store) applyJudgement(ctx context.Context, txn string, f Frame) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE frames SET ptype = ?, route = ?, path_len = ?, verdict = ?, duplicate_of = ?
+		`UPDATE frames SET ptype = ?, route = ?, path_len = ?, verdict = ?, duplicate_of = ?,
+		        node = ?, pubkey = ?, detail = ?
 		 WHERE txn = ?`,
-		ptype, route, pathLen, verdict, duplicateOf, txn,
+		f.Type, f.Route, f.PathLen, f.Verdict, f.DuplicateOf,
+		f.Node, f.PubKey, f.Detail, txn,
 	)
 	return err
 }
@@ -127,7 +171,7 @@ func (s *store) prune(ctx context.Context, before time.Time) error {
 // filters — the short displayed form of an id finds its full row.
 func (s *store) RecentFrames(ctx context.Context, txnPrefix string, limit int) ([]Frame, error) {
 	q := `SELECT txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms,
-	             ptype, route, path_len, verdict, duplicate_of
+	             ptype, route, path_len, verdict, duplicate_of, node, pubkey, detail
 	      FROM frames`
 	args := []any{}
 	if txnPrefix != "" {
@@ -149,7 +193,8 @@ func (s *store) RecentFrames(ctx context.Context, txnPrefix string, limit int) (
 		var atMS int64
 		var airtimeMS float64
 		if err := rows.Scan(&f.Txn, &f.Relay, &atMS, &f.Bytes, &f.RSSI, &f.SNR,
-			&airtimeMS, &f.Type, &f.Route, &f.PathLen, &f.Verdict, &f.DuplicateOf); err != nil {
+			&airtimeMS, &f.Type, &f.Route, &f.PathLen, &f.Verdict, &f.DuplicateOf,
+			&f.Node, &f.PubKey, &f.Detail); err != nil {
 			return nil, err
 		}
 		f.At = time.UnixMilli(atMS)

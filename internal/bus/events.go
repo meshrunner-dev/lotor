@@ -30,6 +30,11 @@ type FrameJudged struct {
 	Type    string
 	Route   string
 	PathLen int
+	// What the frame says, when its payload speaks an open format:
+	// the advertised node name, a public-key prefix, a human detail.
+	Node   string
+	PubKey string
+	Detail string
 }
 
 // RelayState is published on every relay lifecycle transition.
