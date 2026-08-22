@@ -23,8 +23,11 @@ single-relay setup.
 
 ```
 go build -o bin/ ./cmd/lotor
-bin/lotor -config config.example.yaml -log-level debug
+bin/lotor run --config config.example.yaml --log-level debug
 ```
+
+Bare `lotor` prints the help — running the daemon is an explicit
+`lotor run`.
 
 Open the console of a running daemon with the built-in client — it
 ends cleanly on `quit` and on Ctrl+D, which netcat variants do not

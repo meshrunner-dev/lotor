@@ -8,7 +8,7 @@ Documentation=https://meshrunner.dev/lotor
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/lotor -config /etc/lotor/config.yaml
+ExecStart=/usr/local/bin/lotor run --config /etc/lotor/config.yaml
 Restart=on-failure
 RestartSec=5
 StateDirectory=lotor

@@ -3,6 +3,7 @@ module meshrunner.dev/lotor
 go 1.26
 
 require (
+	github.com/alecthomas/kong v1.16.1
 	go.uber.org/zap v1.28.0
 	gopkg.in/yaml.v3 v3.0.1
 	meshrunner.dev/pkg/lora v0.3.0

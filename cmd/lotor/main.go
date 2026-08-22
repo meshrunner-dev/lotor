@@ -7,7 +7,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -17,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/alecthomas/kong"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -36,22 +37,49 @@ import (
 // version identifies this build in the CLI banner and status.
 const version = "0.1.0-dev"
 
-func main() {
-	configPath := flag.String("config", "/etc/lotor/config.yaml", "configuration file")
-	logLevel := flag.String("log-level", "info", "zap level: debug, info, warn, error")
-	flag.Parse()
+// commandLine is the Kong grammar. Bare `lotor` prints this help and
+// does nothing else — running the daemon is an explicit choice.
+type commandLine struct {
+	Run     runCmd           `cmd:""                              help:"Run the relay daemon in the foreground (what the systemd unit does)."`
+	Console consoleCmd       `cmd:""                              help:"Open the console of a running daemon."`
+	Attach  consoleCmd       `cmd:""                              help:"Alias of console."                                                    hidden:""`
+	Version kong.VersionFlag `help:"Print the version and leave."`
+}
 
-	var err error
-	switch flag.Arg(0) {
-	case "console", "attach": // console is the word; attach an alias
-		err = console(flag.Arg(1))
-	default:
-		err = run(*configPath, *logLevel)
-	}
+type runCmd struct {
+	Config   string `default:"/etc/lotor/config.yaml" help:"Configuration file."`
+	LogLevel string `default:"info"                   help:"Zap level: debug, info, warn, error."`
+}
+
+func (c *runCmd) Run() error { return run(c.Config, c.LogLevel) }
+
+type consoleCmd struct {
+	Addr string `arg:"" help:"CLI address (default ${default_cli})." optional:""`
+}
+
+func (c *consoleCmd) Run() error { return console(c.Addr) }
+
+func main() {
+	root := commandLine{}
+	parser, err := kong.New(&root,
+		kong.Name("lotor"),
+		kong.Description("A mesh relay daemon."),
+		kong.Vars{
+			"version":     version,
+			"default_cli": config.DefaultCLIListen,
+		},
+		kong.UsageOnError(),
+	)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "fatal:", err)
-		os.Exit(1)
+		panic(err)
 	}
+	args := os.Args[1:]
+	if len(args) == 0 {
+		args = []string{"--help"}
+	}
+	kctx, err := parser.Parse(args)
+	parser.FatalIfErrorf(err)
+	kctx.FatalIfErrorf(kctx.Run())
 }
 
 // console connects the terminal to a running daemon's CLI — the
