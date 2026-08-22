@@ -44,6 +44,10 @@ var (
 	floodAdvert = []byte{0x01 | 0x04<<2, 0x00, 0xAA, 0xBB, 0xCC}
 	zeroHopCtl  = []byte{0x02 | 0x0B<<2, 0x00, 0x80, 0x04}
 	directPath  = []byte{0x02 | 0x02<<2, 0x02, 0x11, 0x22, 0x01, 0x02, 0x03}
+	// Transport routes carry a 4-byte transport-code block after the
+	// header, before the path descriptor.
+	transportFlood = []byte{0x00 | 0x05<<2, 0x01, 0x02, 0x03, 0x04, 0x00, 0xDD, 0xEE}
+	transportPath  = []byte{0x03 | 0x00<<2, 0x01, 0x02, 0x03, 0x04, 0x01, 0x33, 0x01, 0x02}
 )
 
 func drainJudged(t *testing.T, sub *bus.Subscription) []bus.FrameJudged {
@@ -67,10 +71,15 @@ func TestVerdicts(t *testing.T) {
 	e.judge(frame(floodAdvert))
 	e.judge(frame(zeroHopCtl))
 	e.judge(frame(directPath))
+	e.judge(frame(transportFlood))
+	e.judge(frame(transportPath))
 	e.judge(frame([]byte{0x01})) // truncated
 
 	judged := drainJudged(t, sub)
-	want := []string{"would-relay-flood", "heard-zero-hop", "would-relay-direct", "malformed"}
+	want := []string{
+		"would-relay-flood", "heard-zero-hop", "would-relay-direct",
+		"would-relay-flood", "would-relay-direct", "malformed",
+	}
 	if len(judged) != len(want) {
 		t.Fatalf("judged %d frames, want %d", len(judged), len(want))
 	}

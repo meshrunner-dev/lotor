@@ -140,10 +140,13 @@ func (e *engine) judge(frame radio.Frame) {
 // The vocabulary is the dry run's contract: when transmit arrives,
 // each "would-…" becomes an action with the same name.
 func (e *engine) verdict(pkt *meshcore.Packet) string {
-	switch pkt.Route() {
-	case meshcore.RouteFlood:
+	// Transport variants are their base route with transport codes on
+	// top; the library's IsRoute* predicates carry the reference
+	// semantics, so the verdict never re-derives them.
+	switch {
+	case pkt.IsRouteFlood():
 		return "would-relay-flood"
-	case meshcore.RouteDirect:
+	case pkt.IsRouteDirect():
 		if len(pkt.Path) == 0 {
 			// Zero-hop: addressed to whoever hears it, never relayed.
 			return "heard-zero-hop"
