@@ -169,7 +169,9 @@ says so at startup — traceability includes configuration.
   and what keeps later ambitions cheap (see below).
 - **Web UI** — minimalist first, backed by SSE from the bus. The visual
   structure for multi-relay realities will iterate; the data feed will
-  not.
+  not. The whole web server is a build-time option: light builds omit
+  it and embed no UI filesystem at all — a headless binary for hosts
+  where flash and RAM are counted.
 - **CLI over telnet** for now (SSH considered later).
 
 ## Later — designed for, not built
@@ -183,13 +185,12 @@ None of this exists, and nothing above may contradict it:
   metrics registry.
 - **Alerting** (webhooks, bot messages) — one more bus consumer.
 - **Log shipping** to a collector — protocol undecided.
-- **ESP32-class targets**, to be studied short-term. Linux stays the
+- **ESP32-class targets**, to be studied short-term. A study, not a
+  contract: current work takes no constraint from it. Linux stays the
   first-class platform; an embedded build would keep the core — relay,
   protocol, radio seam — and shed the optional layers, the sentinel
   first. The radio library's transport interfaces are the door: a
-  bare-metal SPI transport behind the same seam. The implication
-  honoured today is that the core stays dependency-light and every
-  heavy subsystem is optional.
+  bare-metal SPI transport behind the same seam.
 
 ## Ground rules
 
