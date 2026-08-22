@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -32,10 +33,26 @@ type Relay struct {
 	Layered  Layered `yaml:",inline"`
 }
 
+// Sentinel configures the observation and archival instantiation.
+// Its absence is meaningful: no sentinel block, no journal, no
+// storage — the mode for hosts with tight RAM and CPU.
+type Sentinel struct {
+	// Journal is the SQLite path, or ":memory:" to keep the archive
+	// in RAM on storage that dislikes continuous writes.
+	Journal string `yaml:"journal"`
+	// Retention bounds how far back the journal reaches.
+	Retention time.Duration `yaml:"retention"`
+}
+
+// DefaultRetention keeps the journal for a long default, as an
+// observation archive should.
+const DefaultRetention = 30 * 24 * time.Hour
+
 // File is the top-level configuration.
 type File struct {
-	Radios map[string]Radio `yaml:"radios"`
-	Relays map[string]Relay `yaml:"relays"`
+	Radios   map[string]Radio `yaml:"radios"`
+	Relays   map[string]Relay `yaml:"relays"`
+	Sentinel *Sentinel        `yaml:"sentinel"`
 }
 
 // Load reads, decodes and cross-validates a configuration file.
@@ -82,6 +99,14 @@ func (f *File) validate() error {
 	for name, r := range f.Radios {
 		if r.Driver == "" {
 			return fmt.Errorf("radio %q: driver is required", name)
+		}
+	}
+	if f.Sentinel != nil {
+		if f.Sentinel.Journal == "" {
+			return errors.New(`sentinel: journal path is required (":memory:" for RAM-only)`)
+		}
+		if f.Sentinel.Retention == 0 {
+			f.Sentinel.Retention = DefaultRetention
 		}
 	}
 	return nil

@@ -22,6 +22,7 @@ import (
 	"meshrunner.dev/lotor/internal/protocol"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/relay"
+	"meshrunner.dev/lotor/internal/sentinel"
 
 	_ "meshrunner.dev/lotor/internal/protocol/meshcore"
 	_ "meshrunner.dev/lotor/internal/radio/sx126x"
@@ -64,6 +65,17 @@ func run(configPath, logLevel string) error {
 	defer stop()
 
 	var wg sync.WaitGroup
+	if f.Sentinel != nil {
+		sent, err := sentinel.Open(f.Sentinel.Journal, f.Sentinel.Retention, b,
+			log.Named("sentinel"))
+		if err != nil {
+			return fmt.Errorf("sentinel: %w", err)
+		}
+		wg.Go(func() { sent.Run(ctx) })
+		log.Info("sentinel journalling",
+			zap.String("journal", f.Sentinel.Journal),
+			zap.Duration("retention", f.Sentinel.Retention))
+	}
 	for _, r := range relays {
 		wg.Go(func() { r.Run(ctx) })
 	}

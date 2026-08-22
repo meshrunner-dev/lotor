@@ -14,6 +14,13 @@ radios:
         # THIS host is yours to say (gpiochip defaults to gpiochip0).
         spi: /dev/spidev0.0
 
+# Optional: the sentinel journals every frame and verdict. Omit the
+# whole block to run without observation (tight-RAM hosts); use
+# journal: ":memory:" to observe without touching storage.
+sentinel:
+  journal: /var/lib/lotor/journal.db
+  retention: 720h
+
 relays:
   meshcore-868:
     protocol: meshcore

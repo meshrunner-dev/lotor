@@ -119,21 +119,25 @@ func (e *engine) judge(frame radio.Frame) {
 		zap.Int("path_len", len(pkt.Path)),
 	)
 
+	judged := bus.FrameJudged{
+		Relay: e.relay, Txn: id,
+		Type:    pkt.PayloadType().String(),
+		Route:   pkt.Route().String(),
+		PathLen: len(pkt.Path),
+	}
 	if first, dup := e.seen.witness(pkt.Hash(), id, frame.At); dup {
 		log.Info("frame judged",
 			zap.String("verdict", "duplicate"),
 			zap.String("duplicate_of", first.Short()),
 		)
-		e.bus.Publish(bus.FrameJudged{
-			Relay: e.relay, Txn: id,
-			Verdict: "duplicate", DuplicateOf: first.Short(),
-		})
+		judged.Verdict, judged.DuplicateOf = "duplicate", first.Short()
+		e.bus.Publish(judged)
 		return
 	}
 
-	verdict := e.verdict(pkt)
-	log.Info("frame judged", zap.String("verdict", verdict))
-	e.bus.Publish(bus.FrameJudged{Relay: e.relay, Txn: id, Verdict: verdict})
+	judged.Verdict = e.verdict(pkt)
+	log.Info("frame judged", zap.String("verdict", judged.Verdict))
+	e.bus.Publish(judged)
 }
 
 // verdict states what a transmitting relay would do with the packet.

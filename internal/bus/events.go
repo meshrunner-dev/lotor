@@ -26,6 +26,10 @@ type FrameJudged struct {
 	// DuplicateOf links a suppressed frame to the transaction that
 	// carried the first copy, so log chains can be followed.
 	DuplicateOf string
+	// Wire identity, protocol vocabulary; empty on malformed frames.
+	Type    string
+	Route   string
+	PathLen int
 }
 
 // RelayState is published on every relay lifecycle transition.
