@@ -42,9 +42,10 @@ func main() {
 	flag.Parse()
 
 	var err error
-	if flag.Arg(0) == "attach" {
-		err = attach(flag.Arg(1))
-	} else {
+	switch flag.Arg(0) {
+	case "console", "attach": // console is the word; attach an alias
+		err = console(flag.Arg(1))
+	default:
 		err = run(*configPath, *logLevel)
 	}
 	if err != nil {
@@ -53,11 +54,12 @@ func main() {
 	}
 }
 
-// attach connects the terminal to a running daemon's CLI and behaves
-// the way a terminal should: Ctrl+D half-closes and lets the session
-// finish, and the daemon closing (quit) ends the process immediately —
-// no netcat-variant guesswork.
-func attach(addr string) error {
+// console connects the terminal to a running daemon's CLI — the
+// console-port gesture of network gear — and behaves the way a
+// terminal should: Ctrl+D half-closes and lets the session finish,
+// and the daemon closing (quit) ends the process immediately — no
+// netcat-variant guesswork.
+func console(addr string) error {
 	if addr == "" {
 		addr = config.DefaultCLIListen
 	}
