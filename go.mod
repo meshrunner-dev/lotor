@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/alecthomas/kong v1.16.1
+	github.com/mattn/go-runewidth v0.0.28
 	go.uber.org/zap v1.28.0
 	gopkg.in/yaml.v3 v3.0.1
 	meshrunner.dev/pkg/lora v0.3.0
@@ -13,6 +14,7 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
+	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect

@@ -9,20 +9,19 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/sentinel"
 )
 
 func (s *session) status(ctx context.Context) error {
-	w := tabwriter.NewWriter(s.out, 2, 4, 3, ' ', 0)
-	fmt.Fprintf(w, "daemon\tup %s\tlotor %s\r\n", uptime(s.deps.Started), s.deps.Version)
+	tb := &table{}
+	tb.row("daemon", "up "+uptime(s.deps.Started), "lotor "+s.deps.Version)
 	for _, r := range s.deps.Relays {
-		fmt.Fprintf(w, "relay\t%s\t%s\tradio %s\t%.3f MHz sf%d bw%.1fk\r\n",
-			r.Name, r.State(), r.Radio,
-			float64(r.Waveform.FrequencyHz)/1e6, r.Waveform.SpreadingFactor,
-			float64(r.Waveform.BandwidthHz)/1e3)
+		tb.row("relay", r.Name, r.State(), "radio "+r.Radio,
+			fmt.Sprintf("%.3f MHz sf%d bw%.1fk",
+				float64(r.Waveform.FrequencyHz)/1e6, r.Waveform.SpreadingFactor,
+				float64(r.Waveform.BandwidthHz)/1e3))
 	}
 	if s.deps.Sentinel != nil {
 		path, retention := s.deps.Sentinel.Journal()
@@ -30,21 +29,21 @@ func (s *session) status(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(w, "sentinel\tjournalling\t%s\t%d frames\t%s retention\r\n",
-			path, n, retention)
+		tb.row("sentinel", "journalling", path,
+			fmt.Sprintf("%d frames", n), fmt.Sprintf("%s retention", retention))
 	} else {
-		fmt.Fprintf(w, "sentinel\tnone\r\n")
+		tb.row("sentinel", "none")
 	}
-	return w.Flush()
+	return tb.flush(s.out)
 }
 
 func (s *session) relay(ctx context.Context, args []string) error {
 	if len(args) == 0 || args[0] == "list" {
-		w := tabwriter.NewWriter(s.out, 2, 4, 3, ' ', 0)
+		tb := &table{}
 		for _, r := range s.deps.Relays {
-			fmt.Fprintf(w, "%s\t%s\t%s\tradio %s\r\n", r.Name, r.Protocol, r.State(), r.Radio)
+			tb.row(r.Name, r.Protocol, r.State(), "radio "+r.Radio)
 		}
-		return w.Flush()
+		return tb.flush(s.out)
 	}
 	if args[0] != verbShow || len(args) < 2 {
 		return errors.New("usage: relay list | relay show <name>")
@@ -53,14 +52,14 @@ func (s *session) relay(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	w := tabwriter.NewWriter(s.out, 2, 4, 3, ' ', 0)
-	fmt.Fprintf(w, "state\t%s\r\n", r.State())
-	fmt.Fprintf(w, "protocol\t%s\r\n", r.Protocol)
-	fmt.Fprintf(w, "radio\t%s (%s)\r\n", r.Radio, r.Driver)
-	fmt.Fprintf(w, "waveform\t%.3f MHz  sf%d  bw %d  cr 4/%d  preamble %d  sync 0x%02x  crc %v\r\n",
+	tb := &table{}
+	tb.row("state", r.State())
+	tb.row("protocol", r.Protocol)
+	tb.row("radio", fmt.Sprintf("%s (%s)", r.Radio, r.Driver))
+	tb.row("waveform", fmt.Sprintf("%.3f MHz  sf%d  bw %d  cr 4/%d  preamble %d  sync 0x%02x  crc %v",
 		float64(r.Waveform.FrequencyHz)/1e6, r.Waveform.SpreadingFactor,
 		r.Waveform.BandwidthHz, r.Waveform.CodingRate, r.Waveform.Preamble,
-		r.Waveform.SyncWord, r.Waveform.CRC)
+		r.Waveform.SyncWord, r.Waveform.CRC))
 	if s.deps.Sentinel != nil {
 		counts, err := s.deps.Sentinel.VerdictCounts(ctx, r.Name)
 		if err != nil {
@@ -77,18 +76,18 @@ func (s *session) relay(ctx context.Context, args []string) error {
 			fmt.Fprintf(&line, "  %d %s", counts[v], v)
 			total += counts[v]
 		}
-		fmt.Fprintf(w, "judged\t%d frames —%s\r\n", total, line.String())
+		tb.row("judged", fmt.Sprintf("%d frames —%s", total, line.String()))
 	}
-	return w.Flush()
+	return tb.flush(s.out)
 }
 
 func (s *session) radio(args []string) error {
 	if len(args) == 0 || args[0] == "list" {
-		w := tabwriter.NewWriter(s.out, 2, 4, 3, ' ', 0)
+		tb := &table{}
 		for _, r := range s.deps.Relays {
-			fmt.Fprintf(w, "%s\t%s\trelay %s\r\n", r.Radio, r.Driver, r.Name)
+			tb.row(r.Radio, r.Driver, "relay "+r.Name)
 		}
-		return w.Flush()
+		return tb.flush(s.out)
 	}
 	if args[0] != verbShow || len(args) < 2 {
 		return errors.New("usage: radio list | radio show <name>")
@@ -113,12 +112,12 @@ func (s *session) showTraces(key string) error {
 		sort.Strings(keys)
 		return fmt.Errorf("no %q (known: %v)", key, keys)
 	}
-	w := tabwriter.NewWriter(s.out, 2, 4, 3, ' ', 0)
-	fmt.Fprintf(w, "key\tvalue\tsource\r\n")
+	tb := &table{}
+	tb.row("key", "value", "source")
 	for _, t := range traces {
-		fmt.Fprintf(w, "%s\t%v\t%s\r\n", t.Key, t.Value, t.Source)
+		tb.row(t.Key, fmt.Sprintf("%v", t.Value), t.Source)
 	}
-	return w.Flush()
+	return tb.flush(s.out)
 }
 
 func (s *session) frames(ctx context.Context, args []string) error {
@@ -155,13 +154,12 @@ func (s *session) frames(ctx context.Context, args []string) error {
 	if opts["json"] == optOn {
 		return s.printJSON(frames)
 	}
-	w := tabwriter.NewWriter(s.out, 2, 4, 2, ' ', 0)
+	tb := &table{}
 	for _, f := range slices.Backward(frames) { // oldest first, like a log
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s /%d\t%s\t%s\r\n",
-			f.At.Format("15:04:05"), f.Txn[:12], f.Type, f.Route, f.PathLen,
-			verdictWithChain(f), who(f))
+		tb.row(f.At.Format("15:04:05"), f.Txn[:12], f.Type,
+			fmt.Sprintf("%s /%d", f.Route, f.PathLen), verdictWithChain(f), who(f))
 	}
-	return w.Flush()
+	return tb.flush(s.out)
 }
 
 func filterFrames(frames []sentinel.Frame, opts map[string]string) []sentinel.Frame {
@@ -191,7 +189,7 @@ func verdictWithChain(f sentinel.Frame) string {
 func who(f sentinel.Frame) string {
 	switch {
 	case f.Node != "":
-		return fmt.Sprintf("%s (%s)", f.Node, f.Detail)
+		return fmt.Sprintf("%s (%s)", printable(f.Node), f.Detail)
 	case f.Detail != "":
 		return f.Detail
 	default:
@@ -242,13 +240,14 @@ func (s *session) nodes(ctx context.Context, args []string) error {
 	if opts["json"] == optOn {
 		return s.printJSON(nodes)
 	}
-	w := tabwriter.NewWriter(s.out, 2, 4, 3, ' ', 0)
-	fmt.Fprintf(w, "name\ttype\tpubkey\theard\tlast\tbest rssi\r\n")
+	tb := &table{}
+	tb.row("name", "type", "pubkey", "heard", "last", "best rssi")
 	for _, n := range nodes {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d×\t%s\t%.0f dBm\r\n",
-			n.Name, n.Type, n.PubKey, n.Heard, ago(n.LastAt), n.BestRSSI)
+		tb.row(printable(n.Name), n.Type, n.PubKey,
+			fmt.Sprintf("%d×", n.Heard), ago(n.LastAt),
+			fmt.Sprintf("%.0f dBm", n.BestRSSI))
 	}
-	return w.Flush()
+	return tb.flush(s.out)
 }
 
 func (s *session) sentinelStatus(ctx context.Context) error {
@@ -301,7 +300,7 @@ func (s *session) watch(ctx context.Context, opts map[string]string) error {
 				line += " → " + j.DuplicateOf
 			}
 			if j.Node != "" {
-				line += fmt.Sprintf("  %s (%s)", j.Node, j.Detail)
+				line += fmt.Sprintf("  %s (%s)", printable(j.Node), j.Detail)
 			} else if j.Detail != "" {
 				line += "  " + j.Detail
 			}
