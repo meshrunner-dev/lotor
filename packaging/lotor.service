@@ -1,0 +1,18 @@
+# Lotor mesh relay daemon.
+#
+# StateDirectory gives the journal its home at /var/lib/lotor; point
+# the sentinel there in /etc/lotor/config.yaml.
+[Unit]
+Description=Lotor mesh relay daemon
+Documentation=https://meshrunner.dev/lotor
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/lotor -config /etc/lotor/config.yaml
+Restart=on-failure
+RestartSec=5
+StateDirectory=lotor
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
