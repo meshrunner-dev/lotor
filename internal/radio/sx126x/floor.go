@@ -27,12 +27,15 @@ const (
 	// floorRestEvery separates batch starts: the floor refreshes at
 	// this cadence when the channel is idle, slower when it is busy.
 	floorRestEvery = 2 * time.Second
-	// floorBatchMaxAge bounds one batch's span. A busy channel (heavy
-	// duty cycle, dense traffic) starves the sampling; a batch left to
-	// stretch would median across epochs and describe a moment that
-	// never existed. Past the bound, the partial batch is abandoned —
-	// counted, so starvation is observable — and a fresh one starts.
-	floorBatchMaxAge = 30 * time.Second
+	// floorBatchMaxAge bounds one batch's span — a freshness filter,
+	// not a survival deadline: an abandoned batch restarts at once and
+	// retries its luck, so only batches this coherent ever publish. A
+	// batch left to stretch would median across epochs and describe a
+	// moment that never existed. The bound covers the p99 collection
+	// time at 70% channel occupancy — own transmit at a saturated
+	// duty cycle plus dense traffic; beyond that the floor refreshes
+	// intermittently and the starved counter names the condition.
+	floorBatchMaxAge = 10 * time.Second
 )
 
 // floorTracker turns accepted idle samples into a published floor. Its
