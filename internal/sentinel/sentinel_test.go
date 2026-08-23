@@ -74,7 +74,7 @@ func TestRetentionPrunes(t *testing.T) {
 	s.Process(context.Background(), bus.FrameHeard{Relay: "r", Txn: old, At: time.Now().Add(-2 * time.Hour)})
 	s.Process(context.Background(), bus.FrameHeard{Relay: "r", Txn: fresh, At: time.Now()})
 
-	if err := s.store.prune(context.Background(), time.Now().Add(-time.Hour), 0); err != nil {
+	if err := s.store.prune(context.Background(), time.Now(), time.Hour, 0); err != nil {
 		t.Fatal(err)
 	}
 	frames, err := s.RecentFrames(context.Background(), FrameQuery{Limit: 10})
@@ -126,6 +126,55 @@ func TestNoiseFloorKeepsOnlyTheLastMeasure(t *testing.T) {
 	}
 	if n != 1 || dbm != -101 || atMS != last.UnixMilli() {
 		t.Errorf("noise_floor: rows=%d dbm=%v at=%d — want one row with the last measure", n, dbm, atMS)
+	}
+}
+
+func TestMetricsRollUpThroughTheTiers(t *testing.T) {
+	s := testSentinel(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	// Two points in one hour two days ago (rolls to hourly, then that
+	// hour is older than the test retention so it rolls again to
+	// daily), plus one fresh point that must stay raw.
+	old := now.Add(-48 * time.Hour).Truncate(time.Hour)
+	for _, p := range []struct {
+		at  time.Time
+		dbm float64
+	}{{old, -100}, {old.Add(time.Minute), -90}, {now, -82}} {
+		s.Process(ctx, bus.NoiseFloor{Relay: "meshcore-868", At: p.at, DBm: p.dbm})
+	}
+	// Retention of 24h: the 48h-old hourly bucket ages into daily.
+	if err := s.store.prune(ctx, now, 24*time.Hour, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	var rawN, hourlyN, dailyN int
+	for table, dst := range map[string]*int{
+		"metrics_raw": &rawN, "metrics_hourly": &hourlyN, "metrics_daily": &dailyN,
+	} {
+		if err := s.store.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM `+table).Scan(dst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rawN != 1 || hourlyN != 0 || dailyN != 1 {
+		t.Fatalf("tiers raw=%d hourly=%d daily=%d, want 1/0/1", rawN, hourlyN, dailyN)
+	}
+
+	buckets, err := s.NoiseHistory(ctx, "meshcore-868", now.Add(-72*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("history buckets = %+v, want 2", buckets)
+	}
+	day := buckets[0]
+	if day.Min != -100 || day.Max != -90 || day.Avg != -95 || day.N != 2 {
+		t.Errorf("daily bucket = %+v, want min -100 avg -95 max -90 n 2", day)
+	}
+	if buckets[1].Avg != -82 || buckets[1].N != 1 {
+		t.Errorf("raw bucket = %+v, want avg -82 n 1", buckets[1])
 	}
 }
 

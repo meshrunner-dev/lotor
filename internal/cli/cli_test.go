@@ -167,6 +167,25 @@ func TestNoiseFloorIsShown(t *testing.T) {
 	}
 }
 
+func TestNoiseHistoryCommand(t *testing.T) {
+	deps := testDeps(t)
+	at := time.Now().Add(-30 * time.Minute)
+	for _, dbm := range []float64{-104, -98} {
+		deps.Sentinel.Process(context.Background(), bus.NoiseFloor{
+			Relay: "meshcore-868", At: at, DBm: dbm})
+	}
+	out := run(t, deps, "noise", "noise --last 7d")
+	if !strings.Contains(out, "current  -104 dBm (3s ago)") {
+		t.Errorf("noise lacks the live value:\n%s", out)
+	}
+	if !strings.Contains(out, "min -104.0") || !strings.Contains(out, "max -98.0") {
+		t.Errorf("noise lacks the consolidated bucket:\n%s", out)
+	}
+	if bad := run(t, deps, "noise --last nope"); !strings.Contains(bad, "--last wants a duration") {
+		t.Errorf("bad span accepted:\n%s", bad)
+	}
+}
+
 func TestWatchValidatesItsRelayFilter(t *testing.T) {
 	// A typo'd --relay must error like the query path does, not stream
 	// nothing forever.

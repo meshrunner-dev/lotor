@@ -178,6 +178,22 @@ says so at startup — traceability includes configuration.
   where flash and RAM are counted.
 - **CLI over telnet** for now (SSH considered later).
 
+## Build profiles
+
+Two build flavours share one source tree; the `lean` tag selects the
+second. The contract per feature:
+
+| | normal | lean |
+|---|---|---|
+| noise-floor measurement | always on (a base function of receiving) | always on |
+| noise-floor archiving | on by default, `noise_history: false` per relay opts out | off by default, `noise_history: true` opts in |
+| shell command history | on | absent |
+| web UI | on by default (build-time option) | absent |
+
+Archiving gates exist because disk writes are a budget, like the
+sentinel itself: a gate closed keeps the live value in RAM, nothing
+else. Measurement never gates — knowing the channel is not optional.
+
 ## Later — designed for, not built
 
 None of this exists, and nothing above may contradict it:

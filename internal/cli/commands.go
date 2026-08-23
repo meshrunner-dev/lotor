@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/radio"
@@ -333,6 +334,76 @@ func (s *session) sentinelStatus(ctx context.Context) error {
 			nz.Relay, nz.Count, ago(nz.LastAt), nz.LastErr)
 	}
 	return nil
+}
+
+// noise shows a relay's noise-floor history: the live value, then the
+// asked window's consolidated buckets, oldest first.
+func (s *session) noise(ctx context.Context, args []string) error {
+	_, opts, err := flags(args)
+	if err != nil {
+		return err
+	}
+	r, err := s.oneRelay(opts[scopeRelay])
+	if err != nil {
+		return err
+	}
+	span := 24 * time.Hour
+	if v, ok := opts["last"]; ok {
+		if span, err = parseSpan(v); err != nil {
+			return err
+		}
+	}
+	sen, err := s.needSentinel()
+	if err != nil {
+		return err
+	}
+	buckets, err := sen.NoiseHistory(ctx, r.Name, time.Now().Add(-span))
+	if err != nil {
+		return err
+	}
+	if opts["json"] == optOn {
+		return s.printJSON(buckets)
+	}
+	fmt.Fprintf(s.out, "current  %s\r\n", floorText(r))
+	if len(buckets) == 0 {
+		fmt.Fprint(s.out, "no history yet\r\n")
+		return nil
+	}
+	tb := &table{}
+	for _, b := range buckets {
+		tb.row(b.At.Format("02/01 15:04"),
+			fmt.Sprintf("min %.1f", b.Min), fmt.Sprintf("avg %.1f", b.Avg),
+			fmt.Sprintf("max %.1f", b.Max), fmt.Sprintf("%d×", b.N))
+	}
+	return tb.flush(s.out)
+}
+
+// oneRelay resolves an optional relay name: the sole relay when only
+// one runs, otherwise the name is required.
+func (s *session) oneRelay(name string) (RelayInfo, error) {
+	if name != "" {
+		return s.findRelay(name)
+	}
+	if len(s.deps.Relays) == 1 {
+		return s.deps.Relays[0], nil
+	}
+	return RelayInfo{}, errors.New("--relay is needed when several relays run")
+}
+
+// parseSpan reads a history window: Go durations plus a d suffix for
+// days, the unit journals think in.
+func parseSpan(v string) (time.Duration, error) {
+	if days, err := strconv.Atoi(strings.TrimSuffix(v, "d")); err == nil && strings.HasSuffix(v, "d") {
+		if days < 1 {
+			return 0, errors.New("--last wants a duration like 24h or 7d")
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, errors.New("--last wants a duration like 24h or 7d")
+	}
+	return d, nil
 }
 
 // watch streams judgements live from the bus until input arrives. An

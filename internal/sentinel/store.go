@@ -54,6 +54,33 @@ CREATE TABLE IF NOT EXISTS noise_floor (
 	at_ms INTEGER NOT NULL,
 	dbm   REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS metrics_raw (
+	series TEXT NOT NULL,
+	relay  TEXT NOT NULL,
+	at_ms  INTEGER NOT NULL,
+	value  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS metrics_raw_key ON metrics_raw(series, relay, at_ms);
+CREATE TABLE IF NOT EXISTS metrics_hourly (
+	series TEXT NOT NULL,
+	relay  TEXT NOT NULL,
+	at_ms  INTEGER NOT NULL,
+	min    REAL NOT NULL,
+	avg    REAL NOT NULL,
+	max    REAL NOT NULL,
+	n      INTEGER NOT NULL,
+	PRIMARY KEY (series, relay, at_ms)
+);
+CREATE TABLE IF NOT EXISTS metrics_daily (
+	series TEXT NOT NULL,
+	relay  TEXT NOT NULL,
+	at_ms  INTEGER NOT NULL,
+	min    REAL NOT NULL,
+	avg    REAL NOT NULL,
+	max    REAL NOT NULL,
+	n      INTEGER NOT NULL,
+	PRIMARY KEY (series, relay, at_ms)
+);
 `
 
 // Frame is one journalled reception, judgement included once it lands.
@@ -218,6 +245,121 @@ func (s *store) upsertNoiseFloor(ctx context.Context, at time.Time, relay string
 	return err
 }
 
+// The metrics tiers, RRD-style but in SQL: raw points age into hourly
+// consolidation, hourly into daily, each tier bounded in time. The
+// tables are generic — series names the measurement — because the
+// noise floor will not be the last archived series.
+const (
+	metricRawKeep   = 24 * time.Hour
+	metricDailyKeep = 2 * 365 * 24 * time.Hour
+
+	hourMS = int64(time.Hour / time.Millisecond)
+	dayMS  = 24 * hourMS
+)
+
+// insertMetric records one raw point of a series.
+func (s *store) insertMetric(ctx context.Context, series, relay string, at time.Time, value float64) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO metrics_raw (series, relay, at_ms, value) VALUES (?, ?, ?, ?)`,
+		series, relay, at.UnixMilli(), value)
+	return err
+}
+
+// The two consolidation steps, one query each. Everything strictly
+// older than ?1 (bucket-aligned) aggregates per ?2-wide bucket and
+// merges into the destination — merged on conflict, so a bucket
+// rolled in two passes still sums correctly.
+const (
+	rollupRawSQL = `
+	INSERT INTO metrics_hourly (series, relay, at_ms, min, avg, max, n)
+	SELECT series, relay, (at_ms/?2)*?2, MIN(value), AVG(value), MAX(value), COUNT(*)
+	FROM metrics_raw WHERE at_ms < ?1 GROUP BY series, relay, (at_ms/?2)*?2
+	ON CONFLICT(series, relay, at_ms) DO UPDATE SET
+	  avg = (metrics_hourly.avg*metrics_hourly.n + excluded.avg*excluded.n)
+	        / (metrics_hourly.n + excluded.n),
+	  min = MIN(metrics_hourly.min, excluded.min),
+	  max = MAX(metrics_hourly.max, excluded.max),
+	  n   = metrics_hourly.n + excluded.n`
+
+	rollupHourlySQL = `
+	INSERT INTO metrics_daily (series, relay, at_ms, min, avg, max, n)
+	SELECT series, relay, (at_ms/?2)*?2, MIN(min), SUM(avg*n)/SUM(n), MAX(max), SUM(n)
+	FROM metrics_hourly WHERE at_ms < ?1 GROUP BY series, relay, (at_ms/?2)*?2
+	ON CONFLICT(series, relay, at_ms) DO UPDATE SET
+	  avg = (metrics_daily.avg*metrics_daily.n + excluded.avg*excluded.n)
+	        / (metrics_daily.n + excluded.n),
+	  min = MIN(metrics_daily.min, excluded.min),
+	  max = MAX(metrics_daily.max, excluded.max),
+	  n   = metrics_daily.n + excluded.n`
+)
+
+// rollupMetrics ages the tiers: raw older than a day consolidates into
+// hourly buckets, hourly older than the journal's retention into daily
+// ones, and daily rows fall off after two years.
+func (s *store) rollupMetrics(ctx context.Context, now time.Time, retention time.Duration) error {
+	rawCut := (now.Add(-metricRawKeep).UnixMilli() / hourMS) * hourMS
+	if _, err := s.db.ExecContext(ctx, rollupRawSQL, rawCut, hourMS); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM metrics_raw WHERE at_ms < ?`, rawCut); err != nil {
+		return err
+	}
+	hourlyCut := (now.Add(-retention).UnixMilli() / dayMS) * dayMS
+	if _, err := s.db.ExecContext(ctx, rollupHourlySQL, hourlyCut, dayMS); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM metrics_hourly WHERE at_ms < ?`, hourlyCut); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM metrics_daily WHERE at_ms < ?`, now.Add(-metricDailyKeep).UnixMilli())
+	return err
+}
+
+// MetricBucket is one consolidated span of a series' history.
+type MetricBucket struct {
+	At  time.Time
+	Min float64
+	Avg float64
+	Max float64
+	N   int
+}
+
+// MetricHistory returns a series' buckets since the given instant,
+// oldest first, across every tier: daily and hourly rows as stored,
+// raw points consolidated per hour on the fly — one uniform shape.
+func (s *store) MetricHistory(ctx context.Context, series, relay string, since time.Time) ([]MetricBucket, error) {
+	q := `SELECT at_ms, min, avg, max, n FROM metrics_daily
+	        WHERE series = ?1 AND relay = ?2 AND at_ms >= ?3
+	      UNION ALL
+	      SELECT at_ms, min, avg, max, n FROM metrics_hourly
+	        WHERE series = ?1 AND relay = ?2 AND at_ms >= ?3
+	      UNION ALL
+	      SELECT (at_ms/?4)*?4, MIN(value), AVG(value), MAX(value), COUNT(*)
+	        FROM metrics_raw
+	        WHERE series = ?1 AND relay = ?2 AND at_ms >= ?3
+	        GROUP BY (at_ms/?4)*?4
+	      ORDER BY at_ms`
+	rows, err := s.db.QueryContext(ctx, q, series, relay, since.UnixMilli(), hourMS)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []MetricBucket
+	for rows.Next() {
+		var b MetricBucket
+		var atMS int64
+		if err := rows.Scan(&atMS, &b.Min, &b.Avg, &b.Max, &b.N); err != nil {
+			return nil, err
+		}
+		b.At = time.UnixMilli(atMS)
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
 // Noise is one relay's corrupt-reception tally.
 type Noise struct {
 	Relay   string
@@ -255,12 +397,13 @@ func (s *store) insertRelayState(ctx context.Context, at time.Time, relay, state
 	return err
 }
 
-// prune drops everything older than the cutoff and, when maxFrames is
-// set, everything beyond the newest maxFrames rows — the journal is
-// bounded in time always and in size when asked. Freed pages go back
-// to the filesystem where auto_vacuum applies.
-func (s *store) prune(ctx context.Context, before time.Time, maxFrames int) error {
-	cutoff := before.UnixMilli()
+// prune drops everything older than the retention and, when maxFrames
+// is set, everything beyond the newest maxFrames rows — the journal is
+// bounded in time always and in size when asked. The metrics tiers age
+// in the same pass. Freed pages go back to the filesystem where
+// auto_vacuum applies.
+func (s *store) prune(ctx context.Context, now time.Time, retention time.Duration, maxFrames int) error {
+	cutoff := now.Add(-retention).UnixMilli()
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM frames WHERE at_ms < ?`, cutoff); err != nil {
 		return err
 	}
@@ -274,6 +417,9 @@ func (s *store) prune(ctx context.Context, before time.Time, maxFrames int) erro
 			maxFrames); err != nil {
 			return err
 		}
+	}
+	if err := s.rollupMetrics(ctx, now, retention); err != nil {
+		return err
 	}
 	_, err := s.db.ExecContext(ctx, `PRAGMA incremental_vacuum;`)
 	return err

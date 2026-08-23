@@ -32,6 +32,12 @@ type Relay struct {
 	Protocol string  `yaml:"protocol"`
 	Radio    string  `yaml:"radio"`
 	Layered  Layered `yaml:",inline"`
+	// NoiseHistory gates archiving this relay's noise floor: it is a
+	// disk-write subject, so it is opt-out-able like the sentinel is.
+	// Unset takes the build's default (on normally, off in lean); the
+	// measurement itself always runs — off just keeps the latest value
+	// in RAM only.
+	NoiseHistory *bool `yaml:"noise_history"`
 }
 
 // Sentinel configures the observation and archival instantiation.

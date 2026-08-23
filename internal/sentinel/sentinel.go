@@ -77,6 +77,12 @@ func (s *Sentinel) Noise(ctx context.Context) ([]Noise, error) {
 	return s.store.Noise(ctx)
 }
 
+// NoiseHistory returns a relay's consolidated noise-floor history
+// since the given instant, oldest first.
+func (s *Sentinel) NoiseHistory(ctx context.Context, relay string, since time.Time) ([]MetricBucket, error) {
+	return s.store.MetricHistory(ctx, "noise_floor", relay, since)
+}
+
 // Journal reports where the archive lives and how long it reaches.
 func (s *Sentinel) Journal() (path string, retention time.Duration) {
 	return s.journalPath, s.retention
@@ -157,7 +163,11 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 	case bus.FrameCorrupt:
 		err = s.store.recordCorrupt(ctx, e.At, e.Relay, e.Err)
 	case bus.NoiseFloor:
-		err = s.store.upsertNoiseFloor(ctx, e.At, e.Relay, e.DBm)
+		// Twice on purpose: the last value for O(1) status reads, a raw
+		// point for the consolidated history.
+		if err = s.store.upsertNoiseFloor(ctx, e.At, e.Relay, e.DBm); err == nil {
+			err = s.store.insertMetric(ctx, "noise_floor", e.Relay, e.At, e.DBm)
+		}
 	case bus.RelayState:
 		err = s.store.insertRelayState(ctx, e.At, e.Relay, e.State, e.Err)
 	default:
@@ -172,7 +182,7 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 }
 
 func (s *Sentinel) pruneNow(ctx context.Context) {
-	if err := s.store.prune(ctx, time.Now().Add(-s.retention), s.maxFrames); err != nil {
+	if err := s.store.prune(ctx, time.Now(), s.retention, s.maxFrames); err != nil {
 		s.log.Warn("journal prune failed", zap.Error(err))
 	}
 }

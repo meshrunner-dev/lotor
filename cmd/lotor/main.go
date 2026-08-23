@@ -319,7 +319,7 @@ func assemble(name string, rc config.Relay, radioSpec config.Radio,
 		return nil, none, fmt.Errorf("radio %q: %w", rc.Radio, err)
 	}
 
-	r := relay.New(name, drv, radioCfg, eng, b, log)
+	r := relay.New(name, drv, radioCfg, eng, b, log, rc.NoiseHistory)
 	deps.Radios = append(deps.Radios, cli.RadioInfo{
 		Name: rc.Radio, Driver: radioSpec.Driver, Envelope: env, Relay: name,
 	})

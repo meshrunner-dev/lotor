@@ -217,6 +217,8 @@ func (s *session) dispatch(ctx context.Context, args []string) {
 		err = s.txn(ctx, rest)
 	case "nodes":
 		err = s.nodes(ctx, rest)
+	case "noise":
+		err = s.noise(ctx, rest)
 	case "sentinel":
 		err = s.sentinelStatus(ctx)
 	default:
@@ -237,6 +239,7 @@ func (s *session) help() {
 		"frames watch [--type T]         live feed (enter stops)\r\n"+
 		"txn <prefix>                    one transaction and its chain\r\n"+
 		"nodes [--json]                  the directory the mesh writes about itself\r\n"+
+		"noise [--relay R] [--last 24h|7d] [--json]  noise-floor history, consolidated\r\n"+
 		"sentinel                        journal status\r\n"+
 		"quit\r\n")
 }

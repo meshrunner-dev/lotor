@@ -46,6 +46,10 @@ type Relay struct {
 	// noise holds the last radio.NoiseFloor the session's monitor saw;
 	// it outlives the session so the last reading stays consultable.
 	noise atomic.Value
+	// noiseHistory gates publishing the floor to the bus — the write
+	// path to the journal. Off, the measurement still runs and the
+	// latest value stays readable here, in RAM only.
+	noiseHistory bool
 	// stillborn marks a relay whose configuration failed: it exists to
 	// be visible in the error state, never to retry — a config error
 	// does not heal by waiting.
@@ -58,17 +62,23 @@ type lifecycle struct {
 	cause string
 }
 
-// New assembles a relay from its resolved parts.
+// New assembles a relay from its resolved parts. noiseHistory decides
+// whether the floor reaches the bus (and so the journal); nil takes
+// the build's default.
 func New(name string, drv radio.Driver, radioCfg map[string]any,
-	eng protocol.Engine, b *bus.Bus, log *zap.Logger,
+	eng protocol.Engine, b *bus.Bus, log *zap.Logger, noiseHistory *bool,
 ) *Relay {
 	r := &Relay{
-		Name:     name,
-		driver:   drv,
-		radioCfg: radioCfg,
-		engine:   eng,
-		bus:      b,
-		log:      log.With(zap.String("relay", name)),
+		Name:         name,
+		driver:       drv,
+		radioCfg:     radioCfg,
+		engine:       eng,
+		bus:          b,
+		log:          log.With(zap.String("relay", name)),
+		noiseHistory: NoiseHistoryDefault,
+	}
+	if noiseHistory != nil {
+		r.noiseHistory = *noiseHistory
 	}
 	r.status.Store(lifecycle{state: StateStarting})
 	return r
@@ -197,8 +207,9 @@ const (
 	// noisePublishDelta is the change worth telling the bus about.
 	noisePublishDelta = 1.0 // dBm
 	// noisePublishEvery bounds the silence between publications, so a
-	// perfectly stable floor still leaves a fresh trace.
-	noisePublishEvery = 10 * time.Minute
+	// perfectly stable floor still leaves regular points for the
+	// journal's consolidation to work with.
+	noisePublishEvery = 5 * time.Minute
 )
 
 // watchNoise mirrors the device's noise floor for the session: the
@@ -220,6 +231,9 @@ func (r *Relay) watchNoise(ctx context.Context, dev radio.Device) {
 				continue
 			}
 			r.noise.Store(nf)
+			if !r.noiseHistory {
+				continue // measurement stays; the disk hears nothing
+			}
 			moved := abs(nf.DBm-published.DBm) >= noisePublishDelta
 			if publishedAt.IsZero() || moved ||
 				time.Since(publishedAt) >= noisePublishEvery {
