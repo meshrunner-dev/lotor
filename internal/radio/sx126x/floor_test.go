@@ -5,6 +5,12 @@ import (
 	"time"
 )
 
+func feed(t *floorTracker, at time.Time, rssi float64, n int) {
+	for range n {
+		t.sample(rssi, at)
+	}
+}
+
 func TestFloorConvergesOnFirstBatch(t *testing.T) {
 	tr := &floorTracker{}
 	now := time.Now()
@@ -17,41 +23,49 @@ func TestFloorConvergesOnFirstBatch(t *testing.T) {
 		}
 	}
 	nf, ok := tr.value()
-	if !ok || nf.DBm != -105 {
-		t.Fatalf("floor = %v %v, want -105", nf.DBm, ok)
+	if !ok || nf.DBm != -105 || nf.SpreadDB != 0 {
+		t.Fatalf("floor = %+v, want median -105 spread 0", nf)
 	}
 	if !nf.At.Equal(now) {
 		t.Errorf("floor dated %v, want %v", nf.At, now)
 	}
 }
 
-func TestFloorGateRejectsTraffic(t *testing.T) {
-	// Once a floor is known, a strong carrier the preamble detector
-	// missed must not drag it up.
+func TestFloorMedianShrugsOffImpulses(t *testing.T) {
+	// Impulsive bursts inside the gate would drag a mean; the median
+	// does not move, and the spread names the impulsiveness instead.
 	tr := &floorTracker{}
 	now := time.Now()
-	for range floorSamples {
-		tr.sample(-105, now)
-	}
+	feed(tr, now, -105, floorSamples)
 	later := now.Add(floorRestEvery)
-	for range floorSamples {
-		tr.sample(-60, later) // all rejected: above floor + gate
-	}
-	for range floorSamples {
-		tr.sample(-103, later) // accepted: within the gate
-	}
+	feed(tr, later, -105, 50)
+	feed(tr, later, -93, 14) // within the gate (-105 + 14 = -91)
 	nf, _ := tr.value()
-	if nf.DBm != -103 {
+	if nf.DBm != -105 {
+		t.Fatalf("median floor = %v, moved by impulses", nf.DBm)
+	}
+	if nf.SpreadDB != 12 {
+		t.Fatalf("spread = %v, want 12 (p90 -93 over median -105)", nf.SpreadDB)
+	}
+}
+
+func TestFloorGateRejectsTraffic(t *testing.T) {
+	// Once a floor is known, a strong carrier the preamble detector
+	// missed must not enter the batch at all.
+	tr := &floorTracker{}
+	now := time.Now()
+	feed(tr, now, -105, floorSamples)
+	later := now.Add(floorRestEvery)
+	feed(tr, later, -60, floorSamples) // all rejected: above floor + gate
+	feed(tr, later, -103, floorSamples)
+	if nf, _ := tr.value(); nf.DBm != -103 {
 		t.Fatalf("floor = %v, want -103 (the -60 carrier must not count)", nf.DBm)
 	}
 }
 
 func TestFloorClampsBelow(t *testing.T) {
 	tr := &floorTracker{}
-	now := time.Now()
-	for range floorSamples {
-		tr.sample(-140, now)
-	}
+	feed(tr, time.Now(), -140, floorSamples)
 	if nf, _ := tr.value(); nf.DBm != floorClampDBm {
 		t.Fatalf("floor = %v, want the %d clamp", nf.DBm, floorClampDBm)
 	}
@@ -60,22 +74,15 @@ func TestFloorClampsBelow(t *testing.T) {
 func TestFloorRestsBetweenBatches(t *testing.T) {
 	tr := &floorTracker{}
 	now := time.Now()
-	for range floorSamples {
-		tr.sample(-105, now)
-	}
+	feed(tr, now, -105, floorSamples)
 	// Immediately after a batch, new samples must not start another —
 	// -100 passes the gate, only the rest holds it back.
-	for range floorSamples {
-		tr.sample(-100, now.Add(time.Millisecond))
-	}
+	feed(tr, now.Add(time.Millisecond), -100, floorSamples)
 	if nf, _ := tr.value(); nf.DBm != -105 {
 		t.Fatalf("floor = %v, refreshed before the rest elapsed", nf.DBm)
 	}
-	// After the rest, they do.
 	later := now.Add(floorRestEvery + time.Millisecond)
-	for range floorSamples {
-		tr.sample(-100, later)
-	}
+	feed(tr, later, -100, floorSamples)
 	if nf, _ := tr.value(); nf.DBm != -100 {
 		t.Fatalf("floor = %v, want -100 after the rest", nf.DBm)
 	}

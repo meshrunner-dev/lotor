@@ -142,8 +142,8 @@ func (s *session) radio(_ context.Context, in input) error {
 	return s.showTraces("radio " + args[1])
 }
 
-// floorText renders a relay's noise floor: a measurement with its age,
-// or an honest word for its absence.
+// floorText renders a relay's noise floor: the median, how far above
+// it the site pulses, and the age — or an honest word for absence.
 func floorText(r RelayInfo) string {
 	if r.NoiseFloor == nil {
 		return "unmeasured"
@@ -152,7 +152,7 @@ func floorText(r RelayInfo) string {
 	if !ok {
 		return "calibrating"
 	}
-	return fmt.Sprintf("%.0f dBm (%s)", nf.DBm, ago(nf.At))
+	return fmt.Sprintf("p50 %.0f dBm (p90-p50 %.1f dB, %s)", nf.DBm, nf.SpreadDB, ago(nf.At))
 }
 
 func envelopeText(e radio.Envelope) string {
@@ -362,12 +362,17 @@ func (s *session) noise(ctx context.Context, in input) error {
 	if err != nil {
 		return err
 	}
-	buckets, err := sen.NoiseHistory(ctx, name, time.Now().Add(-span))
+	since := time.Now().Add(-span)
+	buckets, err := sen.NoiseHistory(ctx, name, since)
+	if err != nil {
+		return err
+	}
+	spreads, err := sen.NoiseSpreadHistory(ctx, name, since)
 	if err != nil {
 		return err
 	}
 	if opts[optJSON] == optOn {
-		return s.printJSON(buckets)
+		return s.printJSON(struct{ Floor, Spread []sentinel.MetricBucket }{buckets, spreads})
 	}
 	current := "archived — relay not running"
 	if live {
@@ -380,11 +385,20 @@ func (s *session) noise(ctx context.Context, in input) error {
 		fmt.Fprint(s.out, "no history yet\r\n")
 		return nil
 	}
+	spreadAt := make(map[int64]float64, len(spreads))
+	for _, b := range spreads {
+		spreadAt[b.At.UnixMilli()] = b.Avg
+	}
 	tb := &table{}
 	for _, b := range buckets {
+		// Every point is a batch median: min/max bound the p50s the
+		// bucket saw, avg(p50) is their consolidation — the telemetry
+		// idiom for naming the estimator and the fold separately.
 		tb.row(b.At.Format("02/01 15:04"),
-			fmt.Sprintf("min %.1f", b.Min), fmt.Sprintf("avg %.1f", b.Avg),
-			fmt.Sprintf("max %.1f", b.Max), fmt.Sprintf("%d×", b.N))
+			fmt.Sprintf("min %.1f", b.Min), fmt.Sprintf("avg(p50) %.1f", b.Avg),
+			fmt.Sprintf("max %.1f", b.Max),
+			fmt.Sprintf("p90-p50 %.1f", spreadAt[b.At.UnixMilli()]),
+			fmt.Sprintf("%d×", b.N))
 	}
 	return tb.flush(s.out)
 }

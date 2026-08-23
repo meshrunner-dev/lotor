@@ -113,19 +113,32 @@ func TestNoiseFloorKeepsOnlyTheLastMeasure(t *testing.T) {
 	s := testSentinel(t)
 	first := time.Now().Add(-time.Minute)
 	last := time.Now()
-	s.Process(context.Background(), bus.NoiseFloor{Relay: "meshcore-868", At: first, DBm: -104})
-	s.Process(context.Background(), bus.NoiseFloor{Relay: "meshcore-868", At: last, DBm: -101})
+	s.Process(context.Background(), bus.NoiseFloor{
+		Relay: "meshcore-868", At: first, DBm: -104, SpreadDB: 2})
+	s.Process(context.Background(), bus.NoiseFloor{
+		Relay: "meshcore-868", At: last, DBm: -101, SpreadDB: 7.5})
 
 	var n int
 	var atMS int64
-	var dbm float64
+	var dbm, spread float64
 	if err := s.store.db.QueryRowContext(context.Background(),
-		`SELECT COUNT(*), MAX(at_ms), MAX(dbm) FROM noise_floor WHERE relay = 'meshcore-868'`,
-	).Scan(&n, &atMS, &dbm); err != nil {
+		`SELECT COUNT(*), MAX(at_ms), MAX(dbm), MAX(spread_db) FROM noise_floor WHERE relay = 'meshcore-868'`,
+	).Scan(&n, &atMS, &dbm, &spread); err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 || dbm != -101 || atMS != last.UnixMilli() {
-		t.Errorf("noise_floor: rows=%d dbm=%v at=%d — want one row with the last measure", n, dbm, atMS)
+	if n != 1 || dbm != -101 || spread != 7.5 || atMS != last.UnixMilli() {
+		t.Errorf("noise_floor: rows=%d dbm=%v spread=%v at=%d — want one row with the last measure",
+			n, dbm, spread, atMS)
+	}
+
+	var spreadPoints int
+	if err := s.store.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM metrics_raw WHERE series = 'noise_spread'`,
+	).Scan(&spreadPoints); err != nil {
+		t.Fatal(err)
+	}
+	if spreadPoints != 2 {
+		t.Errorf("noise_spread raw points = %d, want 2", spreadPoints)
 	}
 }
 
@@ -149,6 +162,8 @@ func TestMetricsRollUpThroughTheTiers(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Each NoiseFloor event lands two raw points: its floor and its
+	// spread — both series age through the tiers.
 	var rawN, hourlyN, dailyN int
 	for table, dst := range map[string]*int{
 		"metrics_raw": &rawN, "metrics_hourly": &hourlyN, "metrics_daily": &dailyN,
@@ -158,8 +173,8 @@ func TestMetricsRollUpThroughTheTiers(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if rawN != 1 || hourlyN != 0 || dailyN != 1 {
-		t.Fatalf("tiers raw=%d hourly=%d daily=%d, want 1/0/1", rawN, hourlyN, dailyN)
+	if rawN != 2 || hourlyN != 0 || dailyN != 2 {
+		t.Fatalf("tiers raw=%d hourly=%d daily=%d, want 2/0/2", rawN, hourlyN, dailyN)
 	}
 
 	buckets, err := s.NoiseHistory(ctx, "meshcore-868", now.Add(-72*time.Hour))

@@ -234,10 +234,15 @@ func (r *Relay) watchNoise(ctx context.Context, dev radio.Device) {
 			if !r.noiseHistory {
 				continue // measurement stays; the disk hears nothing
 			}
-			moved := abs(nf.DBm-published.DBm) >= noisePublishDelta
+			// A moving spread is news too: a site turning impulsive
+			// under a stable median is exactly what the archive is for.
+			moved := abs(nf.DBm-published.DBm) >= noisePublishDelta ||
+				abs(nf.SpreadDB-published.SpreadDB) >= noisePublishDelta
 			if publishedAt.IsZero() || moved ||
 				time.Since(publishedAt) >= noisePublishEvery {
-				r.bus.Publish(bus.NoiseFloor{Relay: r.Name, At: nf.At, DBm: nf.DBm})
+				r.bus.Publish(bus.NoiseFloor{
+					Relay: r.Name, At: nf.At, DBm: nf.DBm, SpreadDB: nf.SpreadDB,
+				})
 				published, publishedAt = nf, time.Now()
 			}
 		}

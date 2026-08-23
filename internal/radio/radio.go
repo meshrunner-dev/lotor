@@ -62,9 +62,15 @@ var ErrCorrupt = errors.New("radio: corrupt frame")
 
 // NoiseFloor is the channel's ambient level: what the radio hears
 // between frames, when nothing is arriving and nothing transmits.
+// DBm is the batch's median — the robust estimator radio-noise
+// practice characterizes ambient noise by, immune to the impulsive
+// bursts that drag a mean up. SpreadDB is the batch's 90th percentile
+// above that median: the site's impulsiveness, near zero on a clean
+// channel, growing when something pulses.
 type NoiseFloor struct {
-	DBm float64
-	At  time.Time
+	DBm      float64
+	SpreadDB float64
+	At       time.Time
 }
 
 // Device is an opened radio owned by exactly one relay.

@@ -223,7 +223,7 @@ func TestErrorsAreOneLiners(t *testing.T) {
 func TestNoiseFloorIsShown(t *testing.T) {
 	deps := testDeps(t)
 	out := run(t, deps, "status", "relay show meshcore-868")
-	if strings.Count(out, "-104 dBm (3s ago)") != 2 {
+	if strings.Count(out, "p50 -104 dBm (p90-p50 0.0 dB, 3s ago)") != 2 {
 		t.Errorf("noise floor missing from status or relay show:\n%s", out)
 	}
 	// Before the first measurement converges, the shell says so.
@@ -237,15 +237,16 @@ func TestNoiseFloorIsShown(t *testing.T) {
 func TestNoiseHistoryCommand(t *testing.T) {
 	deps := testDeps(t)
 	at := time.Now().Add(-30 * time.Minute)
-	for _, dbm := range []float64{-104, -98} {
+	for _, p := range []struct{ dbm, spread float64 }{{-104, 3}, {-98, 0}} {
 		deps.Sentinel.Process(context.Background(), bus.NoiseFloor{
-			Relay: "meshcore-868", At: at, DBm: dbm})
+			Relay: "meshcore-868", At: at, DBm: p.dbm, SpreadDB: p.spread})
 	}
 	out := run(t, deps, "noise", "noise --last 7d")
-	if !strings.Contains(out, "current  -104 dBm (3s ago)") {
+	if !strings.Contains(out, "current  p50 -104 dBm (p90-p50 0.0 dB, 3s ago)") {
 		t.Errorf("noise lacks the live value:\n%s", out)
 	}
-	if !strings.Contains(out, "min -104.0") || !strings.Contains(out, "max -98.0") {
+	if !strings.Contains(out, "min -104.0") || !strings.Contains(out, "max -98.0") ||
+		!strings.Contains(out, "p90-p50 1.5") {
 		t.Errorf("noise lacks the consolidated bucket:\n%s", out)
 	}
 	if bad := run(t, deps, "noise --last nope"); !strings.Contains(bad, "--last wants a duration") {
@@ -292,7 +293,7 @@ func TestArchivedRelayStaysAddressable(t *testing.T) {
 		t.Errorf("archived relay's frames unreachable:\n%s", out)
 	}
 	if !strings.Contains(out, "archived — relay not running") ||
-		!strings.Contains(out, "avg -101.0") {
+		!strings.Contains(out, "avg(p50) -101.0") {
 		t.Errorf("archived relay's noise history unreachable:\n%s", out)
 	}
 	if w := run(t, deps, "frames watch --relay meshcore-433"); !strings.Contains(w, `no relay "meshcore-433"`) {
