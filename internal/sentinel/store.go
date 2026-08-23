@@ -623,6 +623,34 @@ func (s *store) VerdictCounts(ctx context.Context, relay string) (map[string]int
 	return out, rows.Err()
 }
 
+// Relays lists every relay name the journal holds records for, from
+// any table that carries one — configuration is not consulted, so a
+// removed relay's archive stays addressable.
+func (s *store) Relays(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT relay FROM frames
+		UNION SELECT relay FROM relay_states
+		UNION SELECT relay FROM noise
+		UNION SELECT relay FROM noise_floor
+		UNION SELECT relay FROM metrics_raw
+		UNION SELECT relay FROM metrics_hourly
+		UNION SELECT relay FROM metrics_daily
+		ORDER BY relay`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // FrameCount is the journal's current size.
 func (s *store) FrameCount(ctx context.Context) (int, error) {
 	var n int

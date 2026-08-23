@@ -230,6 +230,37 @@ func TestNoiseIsVisible(t *testing.T) {
 	}
 }
 
+func TestArchivedRelayStaysAddressable(t *testing.T) {
+	// A relay removed from the configuration keeps its archive: the
+	// journal queries accept its name, only the live stream refuses.
+	deps := testDeps(t)
+	ctx := context.Background()
+	id := txn.New()
+	deps.Sentinel.Process(ctx, bus.FrameHeard{
+		Relay: "meshcore-433", Txn: id, At: time.Now(), Bytes: 20, RSSI: -90, SNR: 5})
+	deps.Sentinel.Process(ctx, bus.FrameJudged{
+		Relay: "meshcore-433", Txn: id, Verdict: "would-relay-flood",
+		Type: "ADVERT", Route: "FLOOD"})
+	deps.Sentinel.Process(ctx, bus.NoiseFloor{
+		Relay: "meshcore-433", At: time.Now(), DBm: -101})
+
+	out := run(t, deps, "frames --relay meshcore-433", "noise --relay meshcore-433")
+	if !strings.Contains(out, "would-relay-flood") {
+		t.Errorf("archived relay's frames unreachable:\n%s", out)
+	}
+	if !strings.Contains(out, "archived — relay not running") ||
+		!strings.Contains(out, "avg -101.0") {
+		t.Errorf("archived relay's noise history unreachable:\n%s", out)
+	}
+	if w := run(t, deps, "frames watch --relay meshcore-433"); !strings.Contains(w, `no relay "meshcore-433"`) {
+		t.Errorf("watch accepted an archived relay:\n%s", w)
+	}
+	if bad := run(t, deps, "frames --relay nope"); !strings.Contains(bad,
+		"running: meshcore-868; archived: meshcore-433") {
+		t.Errorf("error should name both worlds:\n%s", bad)
+	}
+}
+
 func TestNoSentinelIsHonest(t *testing.T) {
 	deps := testDeps(t)
 	deps.Sentinel = nil

@@ -77,6 +77,12 @@ func (s *Sentinel) Noise(ctx context.Context) ([]Noise, error) {
 	return s.store.Noise(ctx)
 }
 
+// KnownRelays lists every relay the journal has records for —
+// including relays no longer configured, whose archive outlives them.
+func (s *Sentinel) KnownRelays(ctx context.Context) ([]string, error) {
+	return s.store.Relays(ctx)
+}
+
 // NoiseHistory returns a relay's consolidated noise-floor history
 // since the given instant, oldest first.
 func (s *Sentinel) NoiseHistory(ctx context.Context, relay string, since time.Time) ([]MetricBucket, error) {

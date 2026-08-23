@@ -221,7 +221,7 @@ func (s *session) frames(ctx context.Context, args []string) error {
 		}
 	}
 	if v, ok := opts[scopeRelay]; ok {
-		if _, err := s.findRelay(v); err != nil {
+		if _, err := s.relayFilter(ctx, v); err != nil {
 			return err
 		}
 	}
@@ -355,7 +355,14 @@ func (s *session) noise(ctx context.Context, args []string) error {
 	if len(pos) > 0 {
 		return fmt.Errorf("unknown argument %q — try noise --help", pos[0])
 	}
-	r, err := s.oneRelay(opts[scopeRelay])
+	name := opts[scopeRelay]
+	if name == "" {
+		if len(s.deps.Relays) != 1 {
+			return errors.New("--relay is needed when several relays run")
+		}
+		name = s.deps.Relays[0].Name
+	}
+	live, err := s.relayFilter(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -369,14 +376,20 @@ func (s *session) noise(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	buckets, err := sen.NoiseHistory(ctx, r.Name, time.Now().Add(-span))
+	buckets, err := sen.NoiseHistory(ctx, name, time.Now().Add(-span))
 	if err != nil {
 		return err
 	}
 	if opts["json"] == optOn {
 		return s.printJSON(buckets)
 	}
-	fmt.Fprintf(s.out, "current  %s\r\n", floorText(r))
+	current := "archived — relay not running"
+	if live {
+		if r, err := s.findRelay(name); err == nil {
+			current = floorText(r)
+		}
+	}
+	fmt.Fprintf(s.out, "current  %s\r\n", current)
 	if len(buckets) == 0 {
 		fmt.Fprint(s.out, "no history yet\r\n")
 		return nil
@@ -390,16 +403,45 @@ func (s *session) noise(ctx context.Context, args []string) error {
 	return tb.flush(s.out)
 }
 
-// oneRelay resolves an optional relay name: the sole relay when only
-// one runs, otherwise the name is required.
-func (s *session) oneRelay(name string) (RelayInfo, error) {
-	if name != "" {
-		return s.findRelay(name)
+// relayFilter validates a journal query's relay name: running relays
+// first, then the names the journal itself knows — a removed relay's
+// archive stays addressable. live reports whether it still runs.
+func (s *session) relayFilter(ctx context.Context, name string) (live bool, err error) {
+	if _, err := s.findRelay(name); err == nil {
+		return true, nil
 	}
-	if len(s.deps.Relays) == 1 {
-		return s.deps.Relays[0], nil
+	if s.deps.Sentinel != nil {
+		if known, kerr := s.deps.Sentinel.KnownRelays(ctx); kerr == nil &&
+			slices.Contains(known, name) {
+			return false, nil
+		}
 	}
-	return RelayInfo{}, errors.New("--relay is needed when several relays run")
+	return false, s.relayFilterError(ctx, name)
+}
+
+// relayFilterError names both worlds when they differ: what runs, and
+// what only the archive remembers.
+func (s *session) relayFilterError(ctx context.Context, name string) error {
+	running := make([]string, 0, len(s.deps.Relays))
+	for _, r := range s.deps.Relays {
+		running = append(running, r.Name)
+	}
+	sort.Strings(running)
+	var archived []string
+	if s.deps.Sentinel != nil {
+		if known, err := s.deps.Sentinel.KnownRelays(ctx); err == nil {
+			for _, k := range known {
+				if !slices.Contains(running, k) {
+					archived = append(archived, k)
+				}
+			}
+		}
+	}
+	if len(archived) == 0 {
+		return fmt.Errorf("no relay %q (relays: %s)", name, strings.Join(running, ", "))
+	}
+	return fmt.Errorf("no relay %q (running: %s; archived: %s)",
+		name, strings.Join(running, ", "), strings.Join(archived, ", "))
 }
 
 // parseSpan reads a history window: Go durations plus a d suffix for
