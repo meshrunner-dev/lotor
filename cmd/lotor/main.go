@@ -149,18 +149,26 @@ func run(configPath, logLevel string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// The sentinel outlives the publishers: phase one stops relays and
+	// CLI sessions, phase two lets the journal drain what they left on
+	// the bus before it closes. The last frames of a session are
+	// journalled, not discarded.
+	journalCtx, journalDone := context.WithCancel(context.Background())
+	defer journalDone()
 
-	var wg sync.WaitGroup
-	if err := startConsumers(ctx, f, &deps, b, &wg, log); err != nil {
+	var producers, journal sync.WaitGroup
+	if err := startConsumers(ctx, journalCtx, f, &deps, b, &producers, &journal, log); err != nil {
 		return err
 	}
 	for _, r := range relays {
-		wg.Go(func() { r.Run(ctx) })
+		producers.Go(func() { r.Run(ctx) })
 	}
 	log.Info("daemon up", zap.Int("relays", len(relays)))
 	<-ctx.Done()
 	log.Info("shutting down")
-	wg.Wait()
+	producers.Wait()
+	journalDone()
+	journal.Wait()
 	return nil
 }
 
@@ -175,9 +183,10 @@ func acquireInstanceLock(configPath string) (func(), error) {
 }
 
 // startConsumers brings up the optional bus consumers — sentinel and
-// CLI — that the configuration asked for.
-func startConsumers(ctx context.Context, f *config.File, deps *cli.Deps,
-	b *bus.Bus, wg *sync.WaitGroup, log *zap.Logger,
+// CLI — that the configuration asked for. The sentinel runs on its
+// own context so it drains after every publisher has stopped.
+func startConsumers(ctx, journalCtx context.Context, f *config.File, deps *cli.Deps,
+	b *bus.Bus, producers, journal *sync.WaitGroup, log *zap.Logger,
 ) error {
 	if f.Sentinel != nil {
 		sent, err := sentinel.Open(ctx, f.Sentinel.Journal, f.Sentinel.Retention, b,
@@ -186,7 +195,7 @@ func startConsumers(ctx context.Context, f *config.File, deps *cli.Deps,
 			return fmt.Errorf("sentinel: %w", err)
 		}
 		deps.Sentinel = sent
-		wg.Go(func() { sent.Run(ctx) })
+		journal.Go(func() { sent.Run(journalCtx) })
 		log.Info("sentinel journalling",
 			zap.String("journal", f.Sentinel.Journal),
 			zap.Duration("retention", f.Sentinel.Retention))
@@ -194,7 +203,7 @@ func startConsumers(ctx context.Context, f *config.File, deps *cli.Deps,
 	if f.CLI != nil {
 		addr := f.CLI.Listen
 		d := *deps
-		wg.Go(func() {
+		producers.Go(func() {
 			if err := cli.ServeTelnet(ctx, addr, d, log.Named("cli")); err != nil {
 				log.Error("cli listener failed", zap.Error(err))
 			}

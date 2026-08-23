@@ -264,7 +264,9 @@ func (s *session) sentinelStatus(ctx context.Context) error {
 	return nil
 }
 
-// watch streams judgements live from the bus until any input arrives.
+// watch streams judgements live from the bus until input arrives. An
+// empty line just stops the watch; a command stops it and then runs,
+// so a piped script never loses the line that ended the stream.
 func (s *session) watch(ctx context.Context, opts map[string]string) error {
 	if s.deps.Bus == nil {
 		return errors.New("no bus attached")
@@ -273,16 +275,14 @@ func (s *session) watch(ctx context.Context, opts map[string]string) error {
 	sub := s.deps.Bus.Subscribe(64)
 	defer sub.Close()
 
-	stop := make(chan struct{})
-	go func() {
-		_, _ = s.in.ReadString('\n')
-		close(stop)
-	}()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-stop:
+		case line, ok := <-s.lines:
+			if ok && line != "" {
+				s.command(ctx, line)
+			}
 			return nil
 		case ev, ok := <-sub.C:
 			if !ok {

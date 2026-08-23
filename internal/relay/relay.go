@@ -78,9 +78,14 @@ func (r *Relay) setState(state string, err error) {
 func (r *Relay) Run(ctx context.Context) {
 	backoff := backoffFirst
 	for {
-		err := r.session(ctx)
+		reached, err := r.session(ctx)
 		if ctx.Err() != nil {
 			return
+		}
+		if reached {
+			// A session that ran resets the ladder: the next fault is
+			// a fresh incident, not the continuation of the last one.
+			backoff = backoffFirst
 		}
 		r.setState(StateError, err)
 		r.log.Error("relay down, will retry",
@@ -94,13 +99,14 @@ func (r *Relay) Run(ctx context.Context) {
 	}
 }
 
-// session runs one open→configure→listen cycle to completion.
-func (r *Relay) session(ctx context.Context) error {
+// session runs one open→configure→listen cycle to completion, and
+// reports whether it reached the running state.
+func (r *Relay) session(ctx context.Context) (reached bool, err error) {
 	r.setState(StateStarting, nil)
 
 	dev, err := r.driver.Open(r.radioCfg, r.log)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() {
 		if cerr := dev.Close(); cerr != nil {
@@ -110,13 +116,13 @@ func (r *Relay) session(ctx context.Context) error {
 
 	w := r.engine.Waveform()
 	if err := dev.Envelope().Allows(w); err != nil {
-		return err
+		return false, err
 	}
 	if err := dev.Configure(w); err != nil {
-		return err
+		return false, err
 	}
 	if err := dev.StartReceive(); err != nil {
-		return err
+		return false, err
 	}
 
 	r.setState(StateRunning, nil)
@@ -125,5 +131,5 @@ func (r *Relay) session(ctx context.Context) error {
 		zap.Int("sf", w.SpreadingFactor),
 		zap.Int("bandwidth_hz", w.BandwidthHz),
 	)
-	return r.engine.Run(ctx, dev)
+	return true, r.engine.Run(ctx, dev)
 }

@@ -52,33 +52,98 @@ type Deps struct {
 	Traces map[string][]config.Trace
 }
 
-// session is one connected operator.
+// maxLineBytes bounds one command line: a client that never sends a
+// newline exhausts this, not the daemon's memory.
+const maxLineBytes = 4096
+
+// session is one connected operator. Lines arrive on a channel fed by
+// a single reader goroutine, so features like watch can select on
+// input without fighting over the reader.
 type session struct {
-	deps Deps
-	in   *bufio.Reader
-	out  io.Writer
+	deps  Deps
+	lines <-chan string
+	out   io.Writer
+	// quitting is set when the operator asked to leave from inside a
+	// nested command (a watch stopped by "quit").
+	quitting bool
 }
 
 // Serve runs the REPL until the stream ends or the operator quits.
 func Serve(ctx context.Context, rw io.ReadWriter, deps Deps) {
-	s := &session{deps: deps, in: bufio.NewReader(rw), out: rw}
+	lines := make(chan string)
+	done := make(chan struct{})
+	defer close(done)
+	go readLines(rw, lines, done)
+
+	s := &session{deps: deps, lines: lines, out: rw}
 	fmt.Fprintf(s.out, "lotor %s — read-only. \"help\" lists commands, \"quit\" leaves.\r\n",
 		deps.Version)
 	for ctx.Err() == nil {
 		fmt.Fprint(s.out, "> ")
-		line, err := s.in.ReadString('\n')
+		select {
+		case <-ctx.Done():
+			return
+		case line, ok := <-lines:
+			if !ok {
+				return
+			}
+			if s.command(ctx, line); s.quitting {
+				return
+			}
+		}
+	}
+}
+
+// command runs one line; it reports quit through s.quitting.
+func (s *session) command(ctx context.Context, line string) {
+	args := strings.Fields(line)
+	if len(args) == 0 {
+		return
+	}
+	if args[0] == "quit" || args[0] == "exit" {
+		fmt.Fprint(s.out, "bye.\r\n")
+		s.quitting = true
+		return
+	}
+	s.dispatch(ctx, args)
+}
+
+// readLines feeds trimmed lines until EOF, an oversized line, or the
+// session's end. A final line without a newline still counts — the
+// operator's intent does not need a terminator. Oversized input ends
+// the session: that is a hostile client, not a command.
+func readLines(r io.Reader, lines chan<- string, done <-chan struct{}) {
+	defer close(lines)
+	br := bufio.NewReader(r)
+	for {
+		line, err := readBounded(br)
+		if line != "" || err == nil {
+			select {
+			case lines <- line:
+			case <-done:
+				return
+			}
+		}
 		if err != nil {
 			return
 		}
-		args := strings.Fields(strings.TrimSpace(line))
-		if len(args) == 0 {
-			continue
+	}
+}
+
+func readBounded(br *bufio.Reader) (string, error) {
+	var b strings.Builder
+	for {
+		c, err := br.ReadByte()
+		if err != nil {
+			return strings.TrimSpace(b.String()), err
 		}
-		if args[0] == "quit" || args[0] == "exit" {
-			fmt.Fprint(s.out, "bye.\r\n")
-			return
+		if c == '\n' {
+			return strings.TrimSpace(b.String()), nil
 		}
-		s.dispatch(ctx, args)
+		if b.Len() >= maxLineBytes {
+			return "", errors.New("line too long")
+		}
+		b.WriteByte(c)
 	}
 }
 

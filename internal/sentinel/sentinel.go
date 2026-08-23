@@ -19,9 +19,11 @@ const pruneEvery = time.Hour
 type Sentinel struct {
 	store       *store
 	bus         *bus.Bus
+	sub         *bus.Subscription
 	log         *zap.Logger
 	retention   time.Duration
 	journalPath string
+	reported    uint64
 }
 
 // Open prepares the journal. The path may be MemoryJournal for hosts
@@ -33,7 +35,13 @@ func Open(ctx context.Context, journalPath string, retention time.Duration,
 	if err != nil {
 		return nil, err
 	}
-	return &Sentinel{store: st, bus: b, log: log, retention: retention, journalPath: journalPath}, nil
+	// Subscribing here — not in Run — means the journal misses nothing
+	// published between construction and the consumer goroutine's first
+	// breath, the daemon's opening relay states included.
+	return &Sentinel{
+		store: st, bus: b, sub: b.Subscribe(256),
+		log: log, retention: retention, journalPath: journalPath,
+	}, nil
 }
 
 // RecentFrames exposes the journal to future consumers (CLI, web). A
@@ -65,35 +73,59 @@ func (s *Sentinel) Journal() (path string, retention time.Duration) {
 	return s.journalPath, s.retention
 }
 
-// Run consumes the bus until the context ends. Journal errors are
+// Run consumes the bus until the context ends, then drains what the
+// subscription still buffers before closing the store — the last
+// frames of a session belong in the journal. Journal errors are
 // logged, never fatal: an ailing sentinel must not take relays down.
 func (s *Sentinel) Run(ctx context.Context) {
-	sub := s.bus.Subscribe(256)
-	defer sub.Close()
+	defer s.sub.Close()
 	defer func() { _ = s.store.Close() }()
 
 	s.pruneNow(ctx)
 	ticker := time.NewTicker(pruneEvery)
 	defer ticker.Stop()
 
-	var reportedDrops uint64
 	for {
 		select {
 		case <-ctx.Done():
+			// The daemon's context is done; the drain writes must not
+			// be — hence the detached context.
+			s.drain(context.WithoutCancel(ctx))
 			return
-		case ev, ok := <-sub.C:
+		case ev, ok := <-s.sub.C:
 			if !ok {
 				return
 			}
 			s.Process(ctx, ev)
+			s.reportDrops()
 		case <-ticker.C:
 			s.pruneNow(ctx)
-			if d := sub.Dropped(); d > reportedDrops {
-				s.log.Warn("journal fell behind the bus",
-					zap.Uint64("events_dropped", d-reportedDrops))
-				reportedDrops = d
-			}
+			s.reportDrops()
 		}
+	}
+}
+
+// drain journals everything still buffered. The caller sequences the
+// shutdown so publishers are already stopped.
+func (s *Sentinel) drain(ctx context.Context) {
+	for {
+		select {
+		case ev := <-s.sub.C:
+			s.Process(ctx, ev)
+		default:
+			s.reportDrops()
+			return
+		}
+	}
+}
+
+// reportDrops warns as soon as the subscription lost events, not an
+// hour later: silent degradation is a bug by definition.
+func (s *Sentinel) reportDrops() {
+	if d := s.sub.Dropped(); d > s.reported {
+		s.log.Warn("journal fell behind the bus",
+			zap.Uint64("events_dropped", d-s.reported))
+		s.reported = d
 	}
 }
 

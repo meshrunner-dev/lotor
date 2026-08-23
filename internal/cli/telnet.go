@@ -2,8 +2,11 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
+	"sync"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -21,20 +24,32 @@ func ServeTelnet(ctx context.Context, addr string, deps Deps, log *zap.Logger) e
 }
 
 // ServeListener accepts sessions on an existing listener — the
-// telnet entry point above, and the tests' doorway.
+// telnet entry point above, and the tests' doorway. Transient accept
+// errors (fd exhaustion and kin) are ridden out, never fatal: the
+// daemon must not lose its console for the rest of its life over one
+// bad moment. Sessions are waited for on the way out, so their last
+// output is flushed, not truncated.
 func ServeListener(ctx context.Context, ln net.Listener, deps Deps) error {
 	unlisten := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer unlisten()
+	defer func() { _ = ln.Close() }()
 
+	var sessions sync.WaitGroup
+	defer sessions.Wait()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
 			}
-			return err
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(250 * time.Millisecond):
+			}
+			continue
 		}
-		go func() {
+		sessions.Go(func() {
 			hangup := context.AfterFunc(ctx, func() { _ = conn.Close() })
 			defer hangup()
 			defer func() { _ = conn.Close() }()
@@ -42,7 +57,7 @@ func ServeListener(ctx context.Context, ln net.Listener, deps Deps) error {
 				io.Reader
 				io.Writer
 			}{Reader: &iacStripper{r: conn}, Writer: conn}, deps)
-		}()
+		})
 	}
 }
 
