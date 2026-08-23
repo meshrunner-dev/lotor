@@ -55,9 +55,16 @@ func (e *editor) readLine() (string, error) {
 			}
 		case c == 0x7f || c == 0x08: // backspace
 			if e.cur > 0 {
+				atEnd := e.cur == len(e.buf)
+				erased := runewidth.RuneWidth(e.buf[e.cur-1])
 				e.buf = append(e.buf[:e.cur-1], e.buf[e.cur:]...)
 				e.cur--
-				e.render()
+				if atEnd {
+					// Erase in place: no repaint for the common case.
+					fmt.Fprint(e.out, strings.Repeat("\b \b", erased))
+				} else {
+					e.render()
+				}
 			}
 		case c == 0x1b: // escape sequence
 			if err := e.escape(); err != nil {
@@ -156,9 +163,16 @@ func (e *editor) insertByte(c byte) error {
 		return errLineTooLong
 	}
 	r := []rune(string(raw))
+	atEnd := e.cur == len(e.buf)
 	e.buf = append(e.buf[:e.cur], append(r, e.buf[e.cur:]...)...)
 	e.cur += len(r)
-	e.render()
+	if atEnd {
+		// Appending at the end just echoes the keystroke: terminals
+		// stay smooth and piped transcripts stay readable.
+		fmt.Fprint(e.out, string(raw))
+	} else {
+		e.render()
+	}
 	return nil
 }
 

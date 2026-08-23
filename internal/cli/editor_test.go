@@ -111,3 +111,17 @@ func TestHistorySkipsRepeats(t *testing.T) {
 		t.Fatalf("history size = %d, want 1", h.size())
 	}
 }
+
+func TestAppendingEchoesWithoutRepaint(t *testing.T) {
+	var out bytes.Buffer
+	ed := newEditor(strings.NewReader("ok\r"), &out)
+	if _, err := ed.readLine(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "\x1b[K") {
+		t.Errorf("plain typing repainted the line: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "> ok") {
+		t.Errorf("echo incomplete: %q", out.String())
+	}
+}
