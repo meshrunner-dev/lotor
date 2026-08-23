@@ -27,15 +27,23 @@ const (
 	// floorRestEvery separates batch starts: the floor refreshes at
 	// this cadence when the channel is idle, slower when it is busy.
 	floorRestEvery = 2 * time.Second
+	// floorBatchMaxAge bounds one batch's span. A busy channel (heavy
+	// duty cycle, dense traffic) starves the sampling; a batch left to
+	// stretch would median across epochs and describe a moment that
+	// never existed. Past the bound, the partial batch is abandoned —
+	// counted, so starvation is observable — and a fresh one starts.
+	floorBatchMaxAge = 30 * time.Second
 )
 
 // floorTracker turns accepted idle samples into a published floor. Its
 // accumulation belongs to the radio's owning goroutine; the published
-// value may be read from anywhere.
+// value and the starvation counter may be read from anywhere.
 type floorTracker struct {
 	samples []float64
+	began   time.Time // the current batch's first sample
 	rest    time.Time // no new batch before this instant
 	floor   atomic.Value
+	starved atomic.Uint64
 }
 
 // sample feeds one idle RSSI reading; the caller has already
@@ -47,6 +55,13 @@ func (t *floorTracker) sample(rssi float64, now time.Time) (converged bool) {
 	}
 	if nf, ok := t.value(); ok && rssi >= nf.DBm+floorGateDB {
 		return false
+	}
+	if len(t.samples) > 0 && now.Sub(t.began) > floorBatchMaxAge {
+		t.samples = t.samples[:0]
+		t.starved.Add(1)
+	}
+	if len(t.samples) == 0 {
+		t.began = now
 	}
 	t.samples = append(t.samples, rssi)
 	if len(t.samples) < floorSamples {
@@ -70,6 +85,9 @@ func (t *floorTracker) value() (radio.NoiseFloor, bool) {
 	nf, ok := t.floor.Load().(radio.NoiseFloor)
 	return nf, ok
 }
+
+// starvedCount reports how many batches were abandoned, cumulatively.
+func (t *floorTracker) starvedCount() uint64 { return t.starved.Load() }
 
 // percentile reads the p-th percentile off sorted samples, by the
 // nearest-rank method.

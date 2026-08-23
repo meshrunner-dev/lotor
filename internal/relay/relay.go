@@ -221,11 +221,22 @@ func (r *Relay) watchNoise(ctx context.Context, dev radio.Device) {
 	defer tick.Stop()
 	var published radio.NoiseFloor
 	var publishedAt time.Time
+	var starved uint64
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+			// Starvation is checked before the floor: a channel too
+			// busy to ever converge is exactly the case to report.
+			if cur := dev.NoiseStarved(); cur > starved {
+				if r.noiseHistory {
+					r.bus.Publish(bus.NoiseStarved{
+						Relay: r.Name, At: time.Now(), Aborted: cur - starved,
+					})
+				}
+				starved = cur
+			}
 			nf, ok := dev.NoiseFloor()
 			if !ok {
 				continue

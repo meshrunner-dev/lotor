@@ -86,6 +86,10 @@ type Device interface {
 	// the first measurement converges. Safe to call from any
 	// goroutine — it reads state, it never touches the hardware.
 	NoiseFloor() (NoiseFloor, bool)
+	// NoiseStarved counts noise-floor batches abandoned because the
+	// channel left too few idle gaps to observe within a batch's age
+	// bound. Cumulative; same calling rules as NoiseFloor.
+	NoiseStarved() uint64
 	Close() error
 }
 

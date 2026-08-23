@@ -49,6 +49,23 @@ func TestFloorMedianShrugsOffImpulses(t *testing.T) {
 	}
 }
 
+func TestFloorAbandonsStaleBatches(t *testing.T) {
+	// A starved channel must not let a batch span epochs: past the age
+	// bound the partial batch is dropped, counted, and restarted.
+	tr := &floorTracker{}
+	now := time.Now()
+	feed(tr, now, -105, 10)
+	later := now.Add(floorBatchMaxAge + time.Second)
+	feed(tr, later, -100, floorSamples)
+	nf, ok := tr.value()
+	if !ok || nf.DBm != -100 {
+		t.Fatalf("floor = %+v, want -100 from the fresh batch alone", nf)
+	}
+	if got := tr.starvedCount(); got != 1 {
+		t.Fatalf("starved = %d, want 1", got)
+	}
+}
+
 func TestFloorGateRejectsTraffic(t *testing.T) {
 	// Once a floor is known, a strong carrier the preamble detector
 	// missed must not enter the batch at all.

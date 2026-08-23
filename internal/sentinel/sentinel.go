@@ -95,6 +95,12 @@ func (s *Sentinel) NoiseSpreadHistory(ctx context.Context, relay string, since t
 	return s.store.MetricHistory(ctx, "noise_spread", relay, since)
 }
 
+// NoiseStarvedHistory returns the abandoned-batch counts: when the
+// channel was too busy for the floor to be measured at all.
+func (s *Sentinel) NoiseStarvedHistory(ctx context.Context, relay string, since time.Time) ([]MetricBucket, error) {
+	return s.store.MetricHistory(ctx, "noise_starved", relay, since)
+}
+
 // Journal reports where the archive lives and how long it reaches.
 func (s *Sentinel) Journal() (path string, retention time.Duration) {
 	return s.journalPath, s.retention
@@ -183,6 +189,8 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 				err = s.store.insertMetric(ctx, "noise_spread", e.Relay, e.At, e.SpreadDB)
 			}
 		}
+	case bus.NoiseStarved:
+		err = s.store.insertMetric(ctx, "noise_starved", e.Relay, e.At, float64(e.Aborted))
 	case bus.RelayState:
 		err = s.store.insertRelayState(ctx, e.At, e.Relay, e.State, e.Err)
 	default:

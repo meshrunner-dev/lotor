@@ -371,8 +371,14 @@ func (s *session) noise(ctx context.Context, in input) error {
 	if err != nil {
 		return err
 	}
+	starveds, err := sen.NoiseStarvedHistory(ctx, name, since)
+	if err != nil {
+		return err
+	}
 	if opts[optJSON] == optOn {
-		return s.printJSON(struct{ Floor, Spread []sentinel.MetricBucket }{buckets, spreads})
+		return s.printJSON(struct {
+			Floor, Spread, Starved []sentinel.MetricBucket
+		}{buckets, spreads, starveds})
 	}
 	current := "archived — relay not running"
 	if live {
@@ -385,22 +391,33 @@ func (s *session) noise(ctx context.Context, in input) error {
 		fmt.Fprint(s.out, "no history yet\r\n")
 		return nil
 	}
+	return noiseTable(buckets, spreads, starveds).flush(s.out)
+}
+
+// noiseTable renders the floor buckets with their companion series.
+// Every point is a batch median: min/max bound the p50s the bucket
+// saw, avg(p50) is their consolidation — the telemetry idiom naming
+// the estimator and the fold separately. starved counts the batches
+// the channel was too busy to let converge.
+func noiseTable(buckets, spreads, starveds []sentinel.MetricBucket) *table {
 	spreadAt := make(map[int64]float64, len(spreads))
 	for _, b := range spreads {
 		spreadAt[b.At.UnixMilli()] = b.Avg
 	}
+	starvedAt := make(map[int64]float64, len(starveds))
+	for _, b := range starveds {
+		starvedAt[b.At.UnixMilli()] = b.Avg * float64(b.N)
+	}
 	tb := &table{}
 	for _, b := range buckets {
-		// Every point is a batch median: min/max bound the p50s the
-		// bucket saw, avg(p50) is their consolidation — the telemetry
-		// idiom for naming the estimator and the fold separately.
 		tb.row(b.At.Format("02/01 15:04"),
 			fmt.Sprintf("min %.1f", b.Min), fmt.Sprintf("avg(p50) %.1f", b.Avg),
 			fmt.Sprintf("max %.1f", b.Max),
 			fmt.Sprintf("p90-p50 %.1f", spreadAt[b.At.UnixMilli()]),
+			fmt.Sprintf("starved %.0f", starvedAt[b.At.UnixMilli()]),
 			fmt.Sprintf("%d×", b.N))
 	}
-	return tb.flush(s.out)
+	return tb
 }
 
 // relayFilter validates a journal query's relay name: running relays

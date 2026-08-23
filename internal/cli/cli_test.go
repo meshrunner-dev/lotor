@@ -241,12 +241,14 @@ func TestNoiseHistoryCommand(t *testing.T) {
 		deps.Sentinel.Process(context.Background(), bus.NoiseFloor{
 			Relay: "meshcore-868", At: at, DBm: p.dbm, SpreadDB: p.spread})
 	}
+	deps.Sentinel.Process(context.Background(), bus.NoiseStarved{
+		Relay: "meshcore-868", At: at, Aborted: 2})
 	out := run(t, deps, "noise", "noise --last 7d")
 	if !strings.Contains(out, "current  p50 -104 dBm (p90-p50 0.0 dB, 3s ago)") {
 		t.Errorf("noise lacks the live value:\n%s", out)
 	}
 	if !strings.Contains(out, "min -104.0") || !strings.Contains(out, "max -98.0") ||
-		!strings.Contains(out, "p90-p50 1.5") {
+		!strings.Contains(out, "p90-p50 1.5") || !strings.Contains(out, "starved 2") {
 		t.Errorf("noise lacks the consolidated bucket:\n%s", out)
 	}
 	if bad := run(t, deps, "noise --last nope"); !strings.Contains(bad, "--last wants a duration") {

@@ -59,6 +59,16 @@ type NoiseFloor struct {
 	SpreadDB float64
 }
 
+// NoiseStarved reports abandoned noise-floor measurement batches: the
+// channel was too busy to collect one within its age bound. Aborted
+// counts the abandonments since the previous report — a channel this
+// starved is a fact about the site worth archiving.
+type NoiseStarved struct {
+	Relay   string
+	At      time.Time
+	Aborted uint64
+}
+
 // RelayState is published on every relay lifecycle transition. At is
 // the transition time as the producer saw it: a consumer may dequeue
 // long after — the shutdown drain by design does — and stamping at

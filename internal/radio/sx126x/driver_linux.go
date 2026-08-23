@@ -187,6 +187,9 @@ func (d *device) NoiseFloor() (radio.NoiseFloor, bool) {
 	return d.floor.value()
 }
 
+// NoiseStarved counts abandoned measurement batches; any goroutine.
+func (d *device) NoiseStarved() uint64 { return d.floor.starvedCount() }
+
 func (d *device) Close() error {
 	err := d.r.Close()
 	for _, h := range d.held {
