@@ -109,6 +109,26 @@ func TestRelayStatesJournalled(t *testing.T) {
 	}
 }
 
+func TestNoiseFloorKeepsOnlyTheLastMeasure(t *testing.T) {
+	s := testSentinel(t)
+	first := time.Now().Add(-time.Minute)
+	last := time.Now()
+	s.Process(context.Background(), bus.NoiseFloor{Relay: "meshcore-868", At: first, DBm: -104})
+	s.Process(context.Background(), bus.NoiseFloor{Relay: "meshcore-868", At: last, DBm: -101})
+
+	var n int
+	var atMS int64
+	var dbm float64
+	if err := s.store.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*), MAX(at_ms), MAX(dbm) FROM noise_floor WHERE relay = 'meshcore-868'`,
+	).Scan(&n, &atMS, &dbm); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || dbm != -101 || atMS != last.UnixMilli() {
+		t.Errorf("noise_floor: rows=%d dbm=%v at=%d — want one row with the last measure", n, dbm, atMS)
+	}
+}
+
 func TestCorruptReceptionsAreTallied(t *testing.T) {
 	s := testSentinel(t)
 	at := time.Now()

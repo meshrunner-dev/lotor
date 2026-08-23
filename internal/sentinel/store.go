@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS noise (
 	last_at_ms INTEGER NOT NULL,
 	last_err   TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS noise_floor (
+	relay TEXT PRIMARY KEY,
+	at_ms INTEGER NOT NULL,
+	dbm   REAL NOT NULL
+);
 `
 
 // Frame is one journalled reception, judgement included once it lands.
@@ -196,6 +201,19 @@ func (s *store) recordCorrupt(ctx context.Context, at time.Time, relay, errText 
 		   count = count + 1, last_at_ms = excluded.last_at_ms,
 		   last_err = excluded.last_err`,
 		relay, at.UnixMilli(), errText,
+	)
+	return err
+}
+
+// upsertNoiseFloor keeps each relay's latest measured floor — the last
+// value only, by design: the measurement is continuous, the archive's
+// job here is just to remember where the floor stood.
+func (s *store) upsertNoiseFloor(ctx context.Context, at time.Time, relay string, dbm float64) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO noise_floor (relay, at_ms, dbm) VALUES (?, ?, ?)
+		 ON CONFLICT(relay) DO UPDATE SET
+		   at_ms = excluded.at_ms, dbm = excluded.dbm`,
+		relay, at.UnixMilli(), dbm,
 	)
 	return err
 }

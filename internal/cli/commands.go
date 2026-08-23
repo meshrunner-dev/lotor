@@ -22,7 +22,8 @@ func (s *session) status(ctx context.Context) error {
 		tb.row("relay", r.Name, r.State(), "radio "+r.Radio,
 			fmt.Sprintf("%.3f MHz sf%d bw%.1fk",
 				float64(r.Waveform.FrequencyHz)/1e6, r.Waveform.SpreadingFactor,
-				float64(r.Waveform.BandwidthHz)/1e3))
+				float64(r.Waveform.BandwidthHz)/1e3),
+			"floor "+floorText(r))
 	}
 	if s.deps.Sentinel == nil {
 		tb.row("sentinel", "none")
@@ -70,6 +71,7 @@ func (s *session) relay(ctx context.Context, args []string) error {
 		float64(r.Waveform.FrequencyHz)/1e6, r.Waveform.SpreadingFactor,
 		r.Waveform.BandwidthHz, r.Waveform.CodingRate, r.Waveform.Preamble,
 		r.Waveform.SyncWord, r.Waveform.CRC))
+	tb.row("noise floor", floorText(r))
 	if s.deps.Sentinel != nil {
 		s.relayJournal(ctx, tb, r)
 	}
@@ -135,6 +137,19 @@ func (s *session) radio(args []string) error {
 		}
 	}
 	return s.showTraces("radio " + args[1])
+}
+
+// floorText renders a relay's noise floor: a measurement with its age,
+// or an honest word for its absence.
+func floorText(r RelayInfo) string {
+	if r.NoiseFloor == nil {
+		return "unmeasured"
+	}
+	nf, ok := r.NoiseFloor()
+	if !ok {
+		return "calibrating"
+	}
+	return fmt.Sprintf("%.0f dBm (%s)", nf.DBm, ago(nf.At))
 }
 
 func envelopeText(e radio.Envelope) string {

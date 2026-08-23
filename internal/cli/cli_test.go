@@ -52,6 +52,9 @@ func testDeps(t *testing.T) Deps {
 				SyncWord: 0x12, CRC: true,
 			},
 			State: func() string { return "running" },
+			NoiseFloor: func() (radio.NoiseFloor, bool) {
+				return radio.NoiseFloor{DBm: -104, At: time.Now().Add(-3 * time.Second)}, true
+			},
 		}},
 		Sentinel: sen,
 		Traces: map[string][]config.Trace{
@@ -147,6 +150,20 @@ func TestErrorsAreOneLiners(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("transcript lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestNoiseFloorIsShown(t *testing.T) {
+	deps := testDeps(t)
+	out := run(t, deps, "status", "relay show meshcore-868")
+	if strings.Count(out, "-104 dBm (3s ago)") != 2 {
+		t.Errorf("noise floor missing from status or relay show:\n%s", out)
+	}
+	// Before the first measurement converges, the shell says so.
+	deps.Relays[0].NoiseFloor = func() (radio.NoiseFloor, bool) { return radio.NoiseFloor{}, false }
+	out = run(t, deps, "status")
+	if !strings.Contains(out, "floor calibrating") {
+		t.Errorf("calibrating state hidden:\n%s", out)
 	}
 }
 

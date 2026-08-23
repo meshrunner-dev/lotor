@@ -60,14 +60,26 @@ type Frame struct {
 // not a fault — callers count it and continue.
 var ErrCorrupt = errors.New("radio: corrupt frame")
 
+// NoiseFloor is the channel's ambient level: what the radio hears
+// between frames, when nothing is arriving and nothing transmits.
+type NoiseFloor struct {
+	DBm float64
+	At  time.Time
+}
+
 // Device is an opened radio owned by exactly one relay.
 type Device interface {
 	Envelope() Envelope
 	Configure(w Waveform) error
 	StartReceive() error
 	// Receive blocks for the next frame; corrupt receptions return
-	// an error wrapping ErrCorrupt.
+	// an error wrapping ErrCorrupt. While it waits, the device keeps
+	// the noise floor current — measurement is part of listening.
 	Receive(ctx context.Context) (Frame, error)
+	// NoiseFloor reports the last measured floor; ok is false until
+	// the first measurement converges. Safe to call from any
+	// goroutine — it reads state, it never touches the hardware.
+	NoiseFloor() (NoiseFloor, bool)
 	Close() error
 }
 

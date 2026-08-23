@@ -46,6 +46,16 @@ type FrameCorrupt struct {
 	Err   string
 }
 
+// NoiseFloor is a relay channel's measured ambient level — what the
+// radio hears between frames. Published on meaningful change and on a
+// slow heartbeat, not on every measurement: the live value is always
+// readable from the relay, the bus carries the story.
+type NoiseFloor struct {
+	Relay string
+	At    time.Time
+	DBm   float64
+}
+
 // RelayState is published on every relay lifecycle transition. At is
 // the transition time as the producer saw it: a consumer may dequeue
 // long after — the shutdown drain by design does — and stamping at

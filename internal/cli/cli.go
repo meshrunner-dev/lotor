@@ -39,6 +39,9 @@ type RelayInfo struct {
 	State    func() string
 	// Err reports the cause when State is error; may be nil.
 	Err func() string
+	// NoiseFloor reports the channel's last measured ambient level;
+	// may be nil, and ok stays false until a measurement converges.
+	NoiseFloor func() (radio.NoiseFloor, bool)
 	// Identity is the relay's node public key in hex, empty when none.
 	Identity string
 }

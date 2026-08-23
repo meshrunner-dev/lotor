@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -20,9 +21,10 @@ func init() {
 }
 
 type device struct {
-	r    *sx126x.Radio
-	env  radio.Envelope
-	held []lora.OutputPin
+	r     *sx126x.Radio
+	env   radio.Envelope
+	held  []lora.OutputPin
+	floor floorTracker
 }
 
 func open(cfg map[string]any, log *zap.Logger) (radio.Device, error) {
@@ -120,21 +122,65 @@ func (d *device) Configure(w radio.Waveform) error {
 
 func (d *device) StartReceive() error { return d.r.StartReceive() }
 
+// sampleEvery paces the idle noise-floor sampling. It matches the
+// library's own poll floor, so it doubles as the lost-edge insurance
+// the library's blocking receive provides.
+const sampleEvery = 20 * time.Millisecond
+
+// Receive waits for the next frame, and measures while it waits: the
+// radio has exactly one owning goroutine, so the noise floor is
+// sampled here, between polls, never from outside.
 func (d *device) Receive(ctx context.Context) (radio.Frame, error) {
-	f, err := d.r.Receive(ctx)
-	if err != nil {
-		if errors.Is(err, sx126x.ErrCRC) || errors.Is(err, sx126x.ErrHeader) {
-			return radio.Frame{}, fmt.Errorf("%w: %w", radio.ErrCorrupt, err)
+	tick := time.NewTicker(sampleEvery)
+	defer tick.Stop()
+	edges := d.r.Events()
+	for {
+		f, err := d.r.Poll()
+		if err != nil {
+			if errors.Is(err, sx126x.ErrCRC) || errors.Is(err, sx126x.ErrHeader) {
+				return radio.Frame{}, fmt.Errorf("%w: %w", radio.ErrCorrupt, err)
+			}
+			return radio.Frame{}, err
 		}
-		return radio.Frame{}, err
+		if f != nil {
+			return radio.Frame{
+				Payload: f.Payload,
+				RSSI:    f.RSSI,
+				SNR:     f.SNR,
+				Airtime: f.Airtime,
+				At:      f.At,
+			}, nil
+		}
+		select {
+		case <-ctx.Done():
+			return radio.Frame{}, ctx.Err()
+		case <-edges:
+		case <-tick.C:
+			d.sampleFloor()
+		}
 	}
-	return radio.Frame{
-		Payload: f.Payload,
-		RSSI:    f.RSSI,
-		SNR:     f.SNR,
-		Airtime: f.Airtime,
-		At:      f.At,
-	}, nil
+}
+
+// sampleFloor takes one idle RSSI reading when it is safe to: not
+// while a frame may be arriving — a tripped preamble detector already
+// disqualifies the sample — and only in receive mode, which rules out
+// a future transmit path by the chip's own account of itself.
+func (d *device) sampleFloor() {
+	preamble, header, err := d.r.ReceiveInProgress()
+	if err != nil || preamble || header {
+		return
+	}
+	rssi, err := d.r.RSSI()
+	if err != nil {
+		return // not receiving (ErrNotReceiving covers TX and standby)
+	}
+	d.floor.sample(rssi, time.Now())
+}
+
+// NoiseFloor reports the last measured floor without touching the
+// hardware; any goroutine may ask.
+func (d *device) NoiseFloor() (radio.NoiseFloor, bool) {
+	return d.floor.value()
 }
 
 func (d *device) Close() error {

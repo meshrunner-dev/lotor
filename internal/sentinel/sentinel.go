@@ -156,6 +156,8 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 		})
 	case bus.FrameCorrupt:
 		err = s.store.recordCorrupt(ctx, e.At, e.Relay, e.Err)
+	case bus.NoiseFloor:
+		err = s.store.upsertNoiseFloor(ctx, e.At, e.Relay, e.DBm)
 	case bus.RelayState:
 		err = s.store.insertRelayState(ctx, e.At, e.Relay, e.State, e.Err)
 	default:

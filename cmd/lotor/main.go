@@ -320,20 +320,27 @@ func assemble(name string, rc config.Relay, radioSpec config.Radio,
 	}
 
 	r := relay.New(name, drv, radioCfg, eng, b, log)
-	info := cli.RelayInfo{
-		Name:     name,
-		Protocol: rc.Protocol,
-		Radio:    rc.Radio,
-		Driver:   radioSpec.Driver,
-		Waveform: eng.Waveform(),
-		State:    r.State,
-		Err:      r.Err,
-		Identity: eng.Identity(),
-	}
 	deps.Radios = append(deps.Radios, cli.RadioInfo{
 		Name: rc.Radio, Driver: radioSpec.Driver, Envelope: env, Relay: name,
 	})
-	return r, info, nil
+	return r, relayInfo(name, rc, radioSpec, r, eng), nil
+}
+
+// relayInfo is what the CLI gets to know about an assembled relay.
+func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
+	r *relay.Relay, eng protocol.Engine,
+) cli.RelayInfo {
+	return cli.RelayInfo{
+		Name:       name,
+		Protocol:   rc.Protocol,
+		Radio:      rc.Radio,
+		Driver:     radioSpec.Driver,
+		Waveform:   eng.Waveform(),
+		State:      r.State,
+		Err:        r.Err,
+		NoiseFloor: r.NoiseFloor,
+		Identity:   eng.Identity(),
+	}
 }
 
 // bindEnvelope validates the engine's choices against the board's

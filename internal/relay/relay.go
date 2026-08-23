@@ -43,6 +43,9 @@ type Relay struct {
 	// status holds state and cause as one value: a reader never sees a
 	// fresh state paired with a stale cause, or the reverse.
 	status atomic.Value
+	// noise holds the last radio.NoiseFloor the session's monitor saw;
+	// it outlives the session so the last reading stays consultable.
+	noise atomic.Value
 	// stillborn marks a relay whose configuration failed: it exists to
 	// be visible in the error state, never to retry — a config error
 	// does not heal by waiting.
@@ -181,5 +184,62 @@ func (r *Relay) session(ctx context.Context) (reached bool, err error) {
 		zap.Int("sf", w.SpreadingFactor),
 		zap.Int("bandwidth_hz", w.BandwidthHz),
 	)
+	nctx, stopNoise := context.WithCancel(ctx)
+	defer stopNoise()
+	go r.watchNoise(nctx, dev)
 	return true, r.engine.Run(ctx, dev)
+}
+
+const (
+	// noisePollEvery paces reading the device's floor — a state read,
+	// never a hardware touch.
+	noisePollEvery = 2 * time.Second
+	// noisePublishDelta is the change worth telling the bus about.
+	noisePublishDelta = 1.0 // dBm
+	// noisePublishEvery bounds the silence between publications, so a
+	// perfectly stable floor still leaves a fresh trace.
+	noisePublishEvery = 10 * time.Minute
+)
+
+// watchNoise mirrors the device's noise floor for the session: the
+// latest reading is kept on the relay for anyone to consult, and the
+// bus hears about meaningful changes plus a slow heartbeat — not every
+// measurement, or a stable floor would grind the journal.
+func (r *Relay) watchNoise(ctx context.Context, dev radio.Device) {
+	tick := time.NewTicker(noisePollEvery)
+	defer tick.Stop()
+	var published radio.NoiseFloor
+	var publishedAt time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			nf, ok := dev.NoiseFloor()
+			if !ok {
+				continue
+			}
+			r.noise.Store(nf)
+			moved := abs(nf.DBm-published.DBm) >= noisePublishDelta
+			if publishedAt.IsZero() || moved ||
+				time.Since(publishedAt) >= noisePublishEvery {
+				r.bus.Publish(bus.NoiseFloor{Relay: r.Name, At: nf.At, DBm: nf.DBm})
+				published, publishedAt = nf, time.Now()
+			}
+		}
+	}
+}
+
+// NoiseFloor reports the channel's last measured ambient level; ok is
+// false until the radio's first measurement converges.
+func (r *Relay) NoiseFloor() (radio.NoiseFloor, bool) {
+	nf, ok := r.noise.Load().(radio.NoiseFloor)
+	return nf, ok
+}
+
+func abs(f float64) float64 {
+	if f < 0 {
+		return -f
+	}
+	return f
 }
