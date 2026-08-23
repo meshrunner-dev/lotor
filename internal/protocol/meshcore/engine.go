@@ -123,6 +123,7 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 		case err == nil:
 		case errors.Is(err, radio.ErrCorrupt):
 			e.log.Debug("corrupt reception", zap.Error(err))
+			e.bus.Publish(bus.FrameCorrupt{Relay: e.relay, Err: err.Error()})
 			continue
 		case ctx.Err() != nil:
 			return ctx.Err()

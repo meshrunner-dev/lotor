@@ -37,6 +37,14 @@ type FrameJudged struct {
 	Detail string
 }
 
+// FrameCorrupt is published for receptions that failed integrity
+// checks — RF noise is traffic too, and silence about it would hide a
+// site's health.
+type FrameCorrupt struct {
+	Relay string
+	Err   string
+}
+
 // RelayState is published on every relay lifecycle transition.
 type RelayState struct {
 	Relay string

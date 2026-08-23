@@ -117,8 +117,10 @@ Properties this buys:
   typo is an error at load time, in the driver-parameter spirit of the
   radio library.
 - **Provenance on demand.** A resolved view (CLI/API) shows, key by
-  key, `driver default → profile → override → effective` — config
-  debugging is grep, not archaeology.
+  key, `profile → override → effective` with the winning source named;
+  driver defaults apply beneath these layers, in the driver's own
+  code. Config debugging is grep, not archaeology, and every override
+  in effect is announced at startup.
 
 ### Capabilities vs choices
 
@@ -135,8 +137,9 @@ they live on the radio without stealing the relay's authority:
 - an **explicit** `tx_power_dbm` above the radio's cap is refused,
   never clamped — defaults may be prudent, explicit choices never lie.
 
-Defaults mirror the MeshCore reference firmware (e.g. the forced
-transmit after the CAD-fail budget elapses). Advanced knobs exist for
+Defaults mirror the MeshCore reference firmware — the forced transmit
+after the CAD-fail budget elapses, the 160-entry count-bounded dedup
+ring. Advanced knobs exist for
 site operators with real needs, and a relay running non-stock values
 says so at startup — traceability includes configuration.
 
@@ -162,14 +165,15 @@ says so at startup — traceability includes configuration.
 ## Interfaces
 
 - **Internal event bus** — the spine. Typed envelopes with provenance
-  for every event: frame heard, relayed, dropped, radio state change.
-  Consumers today: the sentinel (journal and live traffic views),
-  metrics, SSE stream, CLI. The bus is what makes the sentinel's
+  for every event: frame heard, judged, corrupt, radio state change.
+  Consumers today: the sentinel's journal and the CLI (watch is the
+  live view). Metrics and the SSE stream arrive with their features
+  and subscribe the same way. The bus is what makes the sentinel's
   optionality free — publishing to zero subscribers costs nothing —
   and what keeps later ambitions cheap (see below).
-- **Web UI** — minimalist first, backed by SSE from the bus. The visual
-  structure for multi-relay realities will iterate; the data feed will
-  not. The whole web server is a build-time option: light builds omit
+- **Web UI** — to come: minimalist first, backed by SSE from the bus.
+  The visual structure for multi-relay realities will iterate; the
+  data feed will not. The whole web server is a build-time option: light builds omit
   it and embed no UI filesystem at all — a headless binary for hosts
   where flash and RAM are counted.
 - **CLI over telnet** for now (SSH considered later).

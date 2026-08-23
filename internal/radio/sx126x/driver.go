@@ -37,7 +37,11 @@ type Settings struct {
 	// transmit later, optional while receive-only.
 	Chip string `yaml:"chip"`
 
-	// Envelope: what the board physically allows.
+	// Envelope: what the board physically allows. Zero means
+	// undeclared at the seam — and, passed through to the driver
+	// library, transmit disabled: the two readings agree for a
+	// receive-only daemon, and a transmit path will require the cap
+	// to be declared.
 	MaxTxPowerDBm    int8     `yaml:"max_tx_power_dbm"`
 	FrequencyRangeHz []uint32 `yaml:"frequency_range"`
 }
