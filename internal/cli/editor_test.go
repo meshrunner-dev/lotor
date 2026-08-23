@@ -75,9 +75,65 @@ func TestDownRestoresTheDraft(t *testing.T) {
 }
 
 func TestCtrlCAbandonsTheLine(t *testing.T) {
+	// Ctrl+C hands the REPL an empty line — the draft dies, the REPL
+	// keeps the prompt, and a watch would stop.
 	got := edit(t, "garbage\x03status\r")
+	if len(got) != 2 || got[0] != "" || got[1] != "status" {
+		t.Fatalf("lines = %q", got)
+	}
+}
+
+func TestLatin1NoiseCannotEatTheEnter(t *testing.T) {
+	// 0xE9 promises two continuations; Enter is not one. The noise
+	// decays to U+FFFD and the line still finishes on this Enter.
+	got := edit(t, "ok\xe9\rquit\r")
+	if len(got) != 2 || got[0] != "ok\uFFFD" || got[1] != "quit" {
+		t.Fatalf("lines = %q", got)
+	}
+}
+
+func TestLoneEscDoesNotEatTheNextKey(t *testing.T) {
+	// An ESC with nothing buffered behind it is a keypress, not a
+	// sequence: it must not block waiting for an intro byte, and the
+	// line already typed still comes through.
+	got := edit(t, "ok\x1b")
+	if len(got) != 1 || got[0] != "ok" {
+		t.Fatalf("lines = %q", got)
+	}
+}
+
+func TestSS3ArrowsWalkHistory(t *testing.T) {
+	// Application cursor mode sends ESC O A for up.
+	got := edit(t, "nodes\r\x1bOA\r")
+	if len(got) != 2 || got[1] != "nodes" {
+		t.Fatalf("lines = %q", got)
+	}
+}
+
+func TestMouseReportIsSwallowedWhole(t *testing.T) {
+	// SGR mouse tracking left on by a crashed program sends
+	// ESC [ < 0 ; 33 ; 21 M — none of it may leak into the line.
+	got := edit(t, "\x1b[<0;33;21Mok\r")
+	if len(got) != 1 || got[0] != "ok" {
+		t.Fatalf("lines = %q", got)
+	}
+}
+
+func TestFinalLineWithoutNewline(t *testing.T) {
+	got := edit(t, "status")
 	if len(got) != 1 || got[0] != "status" {
 		t.Fatalf("lines = %q", got)
+	}
+}
+
+func TestLineBoundIsInBytes(t *testing.T) {
+	// 4-byte emoji: the byte bound trips near maxLineBytes/4 runes,
+	// not at 4× that.
+	flood := strings.Repeat("🦝", maxLineBytes/4+2) + "\r"
+	ed := newEditor(strings.NewReader(flood), &bytes.Buffer{})
+	_, err := ed.readLine()
+	if !errors.Is(err, errLineTooLong) {
+		t.Fatalf("emoji flood: %v", err)
 	}
 }
 

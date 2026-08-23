@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -61,7 +62,13 @@ func ServeListener(ctx context.Context, ln net.Listener, deps Deps) error {
 			ServeEdited(ctx, struct {
 				io.Reader
 				io.Writer
-			}{Reader: &iacStripper{r: conn}, Writer: conn}, deps)
+			}{
+				Reader: &iacStripper{r: conn},
+				// A client that stops reading while a watch floods
+				// must wedge its own session, not the daemon: every
+				// write gets a deadline.
+				Writer: deadlineWriter{conn: conn},
+			}, deps)
 		})
 	}
 }
@@ -77,10 +84,53 @@ const (
 	optSGA   = 3   // suppress go-ahead: character-at-a-time
 )
 
+// writeTimeout bounds one session write; a peer deaf for that long
+// has left.
+const writeTimeout = 30 * time.Second
+
+// deadlineWriter arms a deadline before every write so a stalled
+// client errors its session out instead of parking it forever.
+type deadlineWriter struct {
+	conn net.Conn
+}
+
+func (w deadlineWriter) Write(p []byte) (int, error) {
+	_ = w.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	return w.conn.Write(p)
+}
+
 // StripIAC filters telnet negotiation out of a byte stream — the
 // console client reads the daemon through it, so our own WILL bytes
 // never reach an operator's screen.
 func StripIAC(r io.Reader) io.Reader { return &iacStripper{r: r} }
+
+// EscapeIAC doubles 0xFF data bytes on the way to a telnet peer, as
+// the protocol demands — the console client writes through it.
+func EscapeIAC(w io.Writer) io.Writer { return &iacEscaper{w: w} }
+
+type iacEscaper struct {
+	w io.Writer
+}
+
+func (e *iacEscaper) Write(p []byte) (int, error) {
+	written := 0
+	for len(p) > 0 {
+		i := bytes.IndexByte(p, iacByte)
+		if i < 0 {
+			n, err := e.w.Write(p)
+			return written + n, err
+		}
+		if _, err := e.w.Write(p[:i+1]); err != nil {
+			return written, err
+		}
+		if _, err := e.w.Write([]byte{iacByte}); err != nil {
+			return written, err
+		}
+		written += i + 1
+		p = p[i+1:]
+	}
+	return written, nil
+}
 
 // iacStripper state machine.
 const (

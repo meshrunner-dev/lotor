@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
@@ -48,6 +49,21 @@ func TestQuitClosesTheConnection(t *testing.T) {
 	}
 	if !strings.Contains(string(all), "bye.") {
 		t.Errorf("no goodbye before close:\n%s", all)
+	}
+}
+
+func TestEscapeIACDoublesAndStripRestores(t *testing.T) {
+	var wire bytes.Buffer
+	payload := []byte{'a', 255, 'b', 255, 255, 'c'}
+	if _, err := EscapeIAC(&wire).Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(StripIAC(&wire))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("round trip = %v, want %v", got, payload)
 	}
 }
 

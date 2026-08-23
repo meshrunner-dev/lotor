@@ -300,6 +300,14 @@ func (s *session) watch(ctx context.Context, opts map[string]string) error {
 	if s.deps.Bus == nil {
 		return errors.New("no bus attached")
 	}
+	// The line that stops a watch runs as a command — which could be
+	// another watch, nesting subscriptions without bound. One at a
+	// time.
+	if s.watching {
+		return errors.New("already watching")
+	}
+	s.watching = true
+	defer func() { s.watching = false }()
 	fmt.Fprint(s.out, "watching (enter stops)…\r\n")
 	sub := s.deps.Bus.Subscribe(64)
 	defer sub.Close()

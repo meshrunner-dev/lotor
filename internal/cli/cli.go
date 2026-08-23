@@ -79,6 +79,8 @@ type session struct {
 	// quitting is set when the operator asked to leave from inside a
 	// nested command (a watch stopped by "quit").
 	quitting bool
+	// watching guards against nested watches piling subscriptions.
+	watching bool
 }
 
 // Serve runs the REPL on plain line input — pipes, scripts, tests.

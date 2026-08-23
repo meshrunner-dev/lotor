@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/mattn/go-runewidth"
 )
@@ -30,6 +31,9 @@ type editor struct {
 	// operator a second Enter), and the \n or \x00 a telnet client
 	// appends is swallowed when it arrives, even on the next line.
 	crSeen bool
+	// pending holds the read error once the stream ends, so a final
+	// line without a newline is still delivered before it.
+	pending error
 }
 
 func newEditor(r io.Reader, w io.Writer) *editor {
@@ -43,47 +47,73 @@ var errLineTooLong = errors.New("line too long")
 // editor stays silent until the first keystroke; its repaints redraw
 // the prompt whenever the line itself needs redrawing.
 func (e *editor) readLine() (string, error) {
+	if e.pending != nil {
+		return "", e.pending
+	}
 	e.buf, e.cur, e.walk = e.buf[:0], 0, -1
 	for {
 		c, err := e.in.ReadByte()
 		if err != nil {
+			// A final line without a newline still counts: deliver it
+			// now, the error on the next call.
+			if len(e.buf) > 0 {
+				e.pending = err
+				return e.finishLine()
+			}
 			return "", err
 		}
-		if e.crSeen {
-			e.crSeen = false
-			if c == '\n' || c == 0 {
-				continue // the \r's partner, already handled
-			}
-		}
-		switch {
-		case c == '\r' || c == '\n':
-			e.crSeen = c == '\r'
-			return e.finishLine()
-		case c == 0x04: // Ctrl+D: end of session on an empty line
-			if len(e.buf) == 0 {
-				fmt.Fprint(e.out, "\r\n")
-				return "", io.EOF
-			}
-		case c == 0x1b: // escape sequence
-			if err := e.escape(); err != nil {
-				return "", err
-			}
-		case c < 0x20 || c == 0x7f: // control keys
-			e.control(c)
-		default: // printable byte; multi-byte runes assemble
-			if err := e.insertByte(c); err != nil {
-				return "", err
-			}
+		if done, line, err := e.key(c); done {
+			return line, err
 		}
 	}
 }
 
-// control handles the shell's editing keys.
-func (e *editor) control(c byte) {
+// key applies one keystroke; done reports that the edit is over —
+// a finished line, a failure, or the end of the session.
+func (e *editor) key(c byte) (done bool, line string, err error) {
+	if e.crSeen {
+		e.crSeen = false
+		if c == '\n' || c == 0 {
+			return false, "", nil // the \r's partner, already handled
+		}
+	}
+	switch {
+	case c == '\r' || c == '\n':
+		e.crSeen = c == '\r'
+		line, err = e.finishLine()
+		return true, line, err
+	case c == 0x04: // Ctrl+D: end of session on an empty line
+		if len(e.buf) == 0 {
+			fmt.Fprint(e.out, "\r\n")
+			return true, "", io.EOF
+		}
+	case c == 0x1b: // escape sequence
+		if err := e.escape(); err != nil {
+			return true, "", err
+		}
+	case c < 0x20 || c == 0x7f: // control keys
+		if e.control(c) {
+			line, err = e.finishLine()
+			return true, line, err
+		}
+	default: // printable byte; multi-byte runes assemble
+		if err := e.insertByte(c); err != nil {
+			return true, "", err
+		}
+	}
+	return false, "", nil
+}
+
+// control handles the shell's editing keys. It reports whether the
+// key finished the line — Ctrl+C abandons the draft and hands the
+// REPL an empty line, so the prompt stays the REPL's to print (and an
+// empty line is exactly what stops a watch).
+func (e *editor) control(c byte) (finished bool) {
 	switch c {
 	case 0x03: // Ctrl+C: abandon the line
-		fmt.Fprint(e.out, "^C\r\n> ")
+		fmt.Fprint(e.out, "^C")
 		e.buf, e.cur, e.walk = e.buf[:0], 0, -1
+		return true
 	case 0x7f, 0x08: // backspace
 		e.backspace()
 	case 0x17: // Ctrl+W: kill the word before the cursor
@@ -101,6 +131,7 @@ func (e *editor) control(c byte) {
 		e.cur = len(e.buf)
 		e.render()
 	}
+	return false
 }
 
 // backspace removes the rune before the cursor; at the end of the
@@ -146,19 +177,42 @@ func (e *editor) finishLine() (string, error) {
 	return line, nil
 }
 
-// escape handles CSI arrows; anything else is swallowed unmoved.
+// escape handles the arrow keys — CSI (ESC [ A) and the application
+// mode's SS3 (ESC O A) — and swallows every other sequence whole.
 func (e *editor) escape() error {
+	// A lone ESC keypress arrives alone; a terminal's sequence arrives
+	// as one burst. Nothing buffered behind the ESC means there is no
+	// sequence to read — consuming the NEXT keystroke would eat it.
+	if e.in.Buffered() == 0 {
+		return nil
+	}
+	intro, err := e.in.ReadByte()
+	if err != nil {
+		return err
+	}
+	if intro != '[' && intro != 'O' {
+		return nil
+	}
 	c, err := e.in.ReadByte()
 	if err != nil {
 		return err
 	}
-	if c != '[' {
-		return nil
+	// CSI parameter (0x30-0x3F) and intermediate (0x20-0x2F) bytes run
+	// until a final byte; drain them so mouse reports and private-mode
+	// answers neither edit nor leak into the line.
+	if intro == '[' {
+		for c >= 0x20 && c <= 0x3F {
+			if c, err = e.in.ReadByte(); err != nil {
+				return err
+			}
+		}
 	}
-	c, err = e.in.ReadByte()
-	if err != nil {
-		return err
-	}
+	e.arrow(c)
+	return nil
+}
+
+// arrow applies a sequence's final byte when it names an arrow.
+func (e *editor) arrow(c byte) {
 	switch c {
 	case 'A': // up: older
 		if line, ok := e.hist.at(e.walk + 1); ok {
@@ -189,46 +243,59 @@ func (e *editor) escape() error {
 			e.cur--
 			e.render()
 		}
-	default:
-		// Longer sequences (delete, home…) end with a letter or '~';
-		// drain digits and separators so they neither edit nor leak.
-		for c >= '0' && c <= ';' {
-			if c, err = e.in.ReadByte(); err != nil {
-				return err
-			}
-		}
 	}
-	return nil
 }
 
-// insertByte assembles UTF-8 input byte by byte at the cursor.
+// insertByte assembles UTF-8 input at the cursor, strictly: only
+// genuine continuation bytes join a lead byte, anything else is
+// pushed back for its own turn — line noise or a latin-1 terminal
+// yields U+FFFD instead of swallowing the Enter behind it. The echo
+// therefore carries only whole, valid runes.
 func (e *editor) insertByte(c byte) error {
 	raw := []byte{c}
-	// Continuation bytes of a multi-byte rune follow immediately.
 	for n := runeLen(c) - 1; n > 0; n-- {
 		b, err := e.in.ReadByte()
 		if err != nil {
-			return err
+			break // the partial rune decays to U+FFFD below
+		}
+		if b&0xC0 != 0x80 { // not a continuation: it is its own input
+			_ = e.in.UnreadByte()
+			break
 		}
 		raw = append(raw, b)
 	}
-	if len(e.buf) >= maxLineBytes {
+	r, size := utf8.DecodeRune(raw)
+	if size != len(raw) {
+		r = utf8.RuneError
+	}
+	if e.byteLen()+utf8.RuneLen(r) > maxLineBytes {
 		return errLineTooLong
 	}
-	r := []rune(string(raw))
 	atEnd := e.cur == len(e.buf)
-	e.buf = append(e.buf[:e.cur], append(r, e.buf[e.cur:]...)...)
-	e.cur += len(r)
+	e.buf = append(e.buf[:e.cur], append([]rune{r}, e.buf[e.cur:]...)...)
+	e.cur++
 	if atEnd {
 		// Appending at the end just echoes the keystroke: terminals
 		// stay smooth and piped transcripts stay readable.
-		fmt.Fprint(e.out, string(raw))
+		fmt.Fprint(e.out, string(r))
 	} else {
 		e.render()
 	}
 	return nil
 }
 
+// byteLen is the line's UTF-8 size — the bound is in bytes, the same
+// contract the plain reader enforces.
+func (e *editor) byteLen() int {
+	n := 0
+	for _, r := range e.buf {
+		n += utf8.RuneLen(r)
+	}
+	return n
+}
+
+// runeLen reads a UTF-8 lead byte's promise; invalid leads (stray
+// continuations, 0xF5+) stand alone and decay to U+FFFD.
 func runeLen(c byte) int {
 	switch {
 	case c < 0x80:
@@ -237,7 +304,7 @@ func runeLen(c byte) int {
 		return 2
 	case c&0xF0 == 0xE0:
 		return 3
-	case c&0xF8 == 0xF0:
+	case c&0xF8 == 0xF0 && c <= 0xF4:
 		return 4
 	default:
 		return 1

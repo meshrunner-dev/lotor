@@ -138,7 +138,10 @@ func console(addr string) error {
 	}
 
 	go func() {
-		_, _ = io.Copy(conn, os.Stdin)
+		// Telnet reserves 0xFF: a data byte that high (8-bit meta
+		// keys, latin-1 pastes) must travel doubled, or the daemon's
+		// stripper eats the keystroke behind it.
+		_, _ = io.Copy(cli.EscapeIAC(conn), os.Stdin)
 		if t, ok := conn.(*net.TCPConn); ok {
 			_ = t.CloseWrite() // stdin EOF: let the session finish its goodbye
 		}
