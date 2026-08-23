@@ -13,7 +13,7 @@ import (
 
 func testSentinel(t *testing.T) *Sentinel {
 	t.Helper()
-	s, err := Open(context.Background(), MemoryJournal, time.Hour, bus.New(), zap.NewNop())
+	s, err := Open(context.Background(), MemoryJournal, time.Hour, 0, bus.New(), zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,7 @@ func TestHeardThenJudgedBecomesOneRow(t *testing.T) {
 		Node: "Wanadoo", PubKey: "de1234567890", Detail: "repeater",
 	})
 
-	frames, err := s.RecentFrames(context.Background(), "", 10)
+	frames, err := s.RecentFrames(context.Background(), FrameQuery{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestShortPrefixFindsItsTransaction(t *testing.T) {
 	s.Process(context.Background(), bus.FrameHeard{Relay: "r", Txn: id, At: time.Now()})
 	s.Process(context.Background(), bus.FrameHeard{Relay: "r", Txn: txn.New(), At: time.Now()})
 
-	frames, err := s.RecentFrames(context.Background(), id.Short(), 10)
+	frames, err := s.RecentFrames(context.Background(), FrameQuery{TxnPrefix: id.Short(), Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,10 +74,10 @@ func TestRetentionPrunes(t *testing.T) {
 	s.Process(context.Background(), bus.FrameHeard{Relay: "r", Txn: old, At: time.Now().Add(-2 * time.Hour)})
 	s.Process(context.Background(), bus.FrameHeard{Relay: "r", Txn: fresh, At: time.Now()})
 
-	if err := s.store.prune(context.Background(), time.Now().Add(-time.Hour)); err != nil {
+	if err := s.store.prune(context.Background(), time.Now().Add(-time.Hour), 0); err != nil {
 		t.Fatal(err)
 	}
-	frames, err := s.RecentFrames(context.Background(), "", 10)
+	frames, err := s.RecentFrames(context.Background(), FrameQuery{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,5 +98,97 @@ func TestRelayStatesJournalled(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("relay_states rows = %d", n)
+	}
+}
+
+func TestOrphanJudgementIsRecovered(t *testing.T) {
+	s := testSentinel(t)
+	id := txn.New()
+	// The heard event was dropped by the bus; only the judgement lands.
+	s.Process(context.Background(), bus.FrameJudged{
+		Relay: "meshcore-868", Txn: id,
+		Verdict: "would-relay-flood", Type: "ADVERT", Route: "FLOOD",
+	})
+
+	frames, err := s.RecentFrames(context.Background(), FrameQuery{Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 1 || frames[0].Verdict != "would-relay-flood" ||
+		frames[0].Relay != "meshcore-868" {
+		t.Fatalf("orphan not recovered: %+v", frames)
+	}
+}
+
+func TestRedeliveredHeardPreservesJudgement(t *testing.T) {
+	s := testSentinel(t)
+	id := txn.New()
+	heard := bus.FrameHeard{Relay: "r", Txn: id, At: time.Now(), Bytes: 10}
+	s.Process(context.Background(), heard)
+	s.Process(context.Background(), bus.FrameJudged{
+		Relay: "r", Txn: id, Verdict: "would-relay-flood", Type: "GRP_TXT", Route: "FLOOD",
+	})
+	s.Process(context.Background(), heard) // redelivery must not blank the verdict
+
+	frames, err := s.RecentFrames(context.Background(), FrameQuery{Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 1 || frames[0].Verdict != "would-relay-flood" {
+		t.Fatalf("judgement blanked: %+v", frames)
+	}
+}
+
+func TestChainFindsSiblingsFromADuplicate(t *testing.T) {
+	s := testSentinel(t)
+	root, dupA, dupB := txn.New(), txn.New(), txn.New()
+	for _, ev := range []bus.Event{
+		bus.FrameHeard{Relay: "r", Txn: root, At: time.Now()},
+		bus.FrameJudged{Relay: "r", Txn: root, Verdict: "would-relay-flood"},
+		bus.FrameHeard{Relay: "r", Txn: dupA, At: time.Now()},
+		bus.FrameJudged{Relay: "r", Txn: dupA, Verdict: "duplicate", DuplicateOf: root.Short()},
+		bus.FrameHeard{Relay: "r", Txn: dupB, At: time.Now()},
+		bus.FrameJudged{Relay: "r", Txn: dupB, Verdict: "duplicate", DuplicateOf: root.Short()},
+	} {
+		s.Process(context.Background(), ev)
+	}
+
+	// Asking about one duplicate must surface the root AND the sibling.
+	chain, err := s.Chain(context.Background(), dupA.Short())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, f := range chain {
+		got[f.Txn] = true
+	}
+	for _, want := range []txn.ID{root, dupA, dupB} {
+		if !got[want.String()] {
+			t.Errorf("chain misses %s (have %d members)", want.Short(), len(chain))
+		}
+	}
+}
+
+func TestNodesDirectoryIsAdvertOnly(t *testing.T) {
+	s := testSentinel(t)
+	adv, ctl := txn.New(), txn.New()
+	for _, ev := range []bus.Event{
+		bus.FrameHeard{Relay: "r", Txn: adv, At: time.Now()},
+		bus.FrameJudged{Relay: "r", Txn: adv, Verdict: "would-relay-flood",
+			Type: "ADVERT", Node: "Wanadoo", PubKey: "de247e12757f", Detail: "repeater"},
+		bus.FrameHeard{Relay: "r", Txn: ctl, At: time.Now()},
+		// A hostile or legacy row: a non-advert frame carrying a key.
+		bus.FrameJudged{Relay: "r", Txn: ctl, Verdict: "heard-zero-hop",
+			Type: "CONTROL", PubKey: "attacker00000", Detail: "discovery response"},
+	} {
+		s.Process(context.Background(), ev)
+	}
+
+	nodes, err := s.Nodes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].PubKey != "de247e12757f" || nodes[0].Type != "repeater" {
+		t.Fatalf("directory = %+v", nodes)
 	}
 }

@@ -6,6 +6,7 @@ package sentinel
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.uber.org/zap"
@@ -22,6 +23,7 @@ type Sentinel struct {
 	sub         *bus.Subscription
 	log         *zap.Logger
 	retention   time.Duration
+	maxFrames   int
 	journalPath string
 	reported    uint64
 }
@@ -29,7 +31,7 @@ type Sentinel struct {
 // Open prepares the journal. The path may be MemoryJournal for hosts
 // whose storage dislikes continuous writes.
 func Open(ctx context.Context, journalPath string, retention time.Duration,
-	b *bus.Bus, log *zap.Logger,
+	maxFrames int, b *bus.Bus, log *zap.Logger,
 ) (*Sentinel, error) {
 	st, err := openStore(ctx, journalPath)
 	if err != nil {
@@ -40,14 +42,15 @@ func Open(ctx context.Context, journalPath string, retention time.Duration,
 	// breath, the daemon's opening relay states included.
 	return &Sentinel{
 		store: st, bus: b, sub: b.Subscribe(256),
-		log: log, retention: retention, journalPath: journalPath,
+		log: log, retention: retention, maxFrames: maxFrames,
+		journalPath: journalPath,
 	}, nil
 }
 
-// RecentFrames exposes the journal to future consumers (CLI, web). A
-// txn prefix — the short displayed form — filters to its transaction.
-func (s *Sentinel) RecentFrames(ctx context.Context, txnPrefix string, limit int) ([]Frame, error) {
-	return s.store.RecentFrames(ctx, txnPrefix, limit)
+// RecentFrames exposes the journal to future consumers (CLI, web),
+// filtered in SQL.
+func (s *Sentinel) RecentFrames(ctx context.Context, fq FrameQuery) ([]Frame, error) {
+	return s.store.RecentFrames(ctx, fq)
 }
 
 // Nodes lists the directory the mesh writes about itself.
@@ -140,7 +143,7 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 			Bytes: e.Bytes, RSSI: e.RSSI, SNR: e.SNR, Airtime: e.Airtime,
 		})
 	case bus.FrameJudged:
-		err = s.store.applyJudgement(ctx, e.Txn.String(), Frame{
+		err = s.store.applyJudgement(ctx, e.Txn.String(), e.Relay, Frame{
 			Type: e.Type, Route: e.Route, PathLen: e.PathLen,
 			Verdict: e.Verdict, DuplicateOf: e.DuplicateOf,
 			Node: e.Node, PubKey: e.PubKey, Detail: e.Detail,
@@ -150,13 +153,16 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 	default:
 		return
 	}
-	if err != nil {
+	switch {
+	case errors.Is(err, errJudgementOrphan):
+		s.log.Warn("journal recovered an orphan judgement — its heard event was dropped")
+	case err != nil:
 		s.log.Warn("journal write failed", zap.Error(err))
 	}
 }
 
 func (s *Sentinel) pruneNow(ctx context.Context) {
-	if err := s.store.prune(ctx, time.Now().Add(-s.retention)); err != nil {
+	if err := s.store.prune(ctx, time.Now().Add(-s.retention), s.maxFrames); err != nil {
 		s.log.Warn("journal prune failed", zap.Error(err))
 	}
 }

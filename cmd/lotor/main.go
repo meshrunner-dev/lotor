@@ -189,8 +189,8 @@ func startConsumers(ctx, journalCtx context.Context, f *config.File, deps *cli.D
 	b *bus.Bus, producers, journal *sync.WaitGroup, log *zap.Logger,
 ) error {
 	if f.Sentinel != nil {
-		sent, err := sentinel.Open(ctx, f.Sentinel.Journal, f.Sentinel.Retention, b,
-			log.Named("sentinel"))
+		sent, err := sentinel.Open(ctx, f.Sentinel.Journal, f.Sentinel.Retention,
+			f.Sentinel.MaxFrames, b, log.Named("sentinel"))
 		if err != nil {
 			return fmt.Errorf("sentinel: %w", err)
 		}

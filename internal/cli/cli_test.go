@@ -35,7 +35,7 @@ func run(t *testing.T, deps Deps, commands ...string) string {
 func testDeps(t *testing.T) Deps {
 	t.Helper()
 	b := bus.New()
-	sen, err := sentinel.Open(context.Background(), sentinel.MemoryJournal, time.Hour, b, zap.NewNop())
+	sen, err := sentinel.Open(context.Background(), sentinel.MemoryJournal, time.Hour, 0, b, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}

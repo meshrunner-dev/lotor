@@ -132,10 +132,13 @@ func (s *session) frames(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// The cap keeps one command from loading the whole journal; the
+	// filters run in SQL, so a busy channel cannot starve them.
+	const maxLast = 1000
 	limit := 20
 	if v, ok := opts["last"]; ok {
-		if limit, err = strconv.Atoi(v); err != nil || limit < 1 {
-			return errors.New("--last wants a positive number")
+		if limit, err = strconv.Atoi(v); err != nil || limit < 1 || limit > maxLast {
+			return fmt.Errorf("--last wants 1..%d", maxLast)
 		}
 	}
 	if v, ok := opts[scopeRelay]; ok {
@@ -143,16 +146,21 @@ func (s *session) frames(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	frames, err := sen.RecentFrames(ctx, "", limit*4)
+	frames, err := sen.RecentFrames(ctx, sentinel.FrameQuery{
+		Relay:   opts[scopeRelay],
+		Type:    opts["type"],
+		Verdict: opts["verdict"],
+		Limit:   limit,
+	})
 	if err != nil {
 		return err
 	}
-	frames = filterFrames(frames, opts)
-	if len(frames) > limit {
-		frames = frames[:limit]
-	}
 	if opts["json"] == optOn {
 		return s.printJSON(frames)
+	}
+	if len(frames) == 0 {
+		fmt.Fprint(s.out, "no frames match\r\n")
+		return nil
 	}
 	tb := &table{}
 	for _, f := range slices.Backward(frames) { // oldest first, like a log
@@ -160,23 +168,6 @@ func (s *session) frames(ctx context.Context, args []string) error {
 			fmt.Sprintf("%s /%d", f.Route, f.PathLen), verdictWithChain(f), who(f))
 	}
 	return tb.flush(s.out)
-}
-
-func filterFrames(frames []sentinel.Frame, opts map[string]string) []sentinel.Frame {
-	out := frames[:0]
-	for _, f := range frames {
-		if v, ok := opts[scopeRelay]; ok && f.Relay != v {
-			continue
-		}
-		if v, ok := opts["type"]; ok && f.Type != v {
-			continue
-		}
-		if v, ok := opts["verdict"]; ok && f.Verdict != v {
-			continue
-		}
-		out = append(out, f)
-	}
-	return out
 }
 
 func verdictWithChain(f sentinel.Frame) string {

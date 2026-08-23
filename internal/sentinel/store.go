@@ -3,8 +3,8 @@ package sentinel
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	// Pure-Go SQLite: the daemon cross-compiles with CGO disabled.
@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS frames (
 	detail       TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS frames_at ON frames(at_ms);
+CREATE INDEX IF NOT EXISTS frames_pubkey ON frames(pubkey, at_ms);
+CREATE INDEX IF NOT EXISTS frames_dup ON frames(duplicate_of);
 CREATE TABLE IF NOT EXISTS relay_states (
 	at_ms INTEGER NOT NULL,
 	relay TEXT NOT NULL,
@@ -74,11 +76,14 @@ func openStore(ctx context.Context, path string) (*store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	if path != MemoryJournal {
 		// WAL batches fsyncs — kinder to flash, and crash-safe enough
 		// for an observation archive.
+		// auto_vacuum must precede table creation; on a journal that
+		// predates it, prune keeps working and only page reuse differs.
 		if _, err := db.ExecContext(ctx,
-			"PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"); err != nil {
+			"PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("journal pragmas: %w", err)
 		}
@@ -128,24 +133,51 @@ func migrate(ctx context.Context, db *sql.DB) error {
 }
 
 func (s *store) insertHeard(ctx context.Context, f Frame) error {
+	// The upsert touches only the heard columns: a redelivered
+	// FrameHeard must not blank a judgement already applied.
 	_, err := s.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO frames (txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO frames (txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(txn) DO UPDATE SET
+		   relay = excluded.relay, at_ms = excluded.at_ms, bytes = excluded.bytes,
+		   rssi_dbm = excluded.rssi_dbm, snr_db = excluded.snr_db,
+		   airtime_ms = excluded.airtime_ms`,
 		f.Txn, f.Relay, f.At.UnixMilli(), f.Bytes, f.RSSI, f.SNR,
 		float64(f.Airtime)/float64(time.Millisecond),
 	)
 	return err
 }
 
-func (s *store) applyJudgement(ctx context.Context, txn string, f Frame) error {
-	_, err := s.db.ExecContext(ctx,
+// errJudgementOrphan reports a judgement whose heard row never made
+// the journal (a bus drop between the two events); the row is created
+// from the judgement so the frame is not lost twice.
+var errJudgementOrphan = errors.New("judgement arrived for a frame the journal never heard")
+
+func (s *store) applyJudgement(ctx context.Context, txn string, relay string, f Frame) error {
+	res, err := s.db.ExecContext(ctx,
 		`UPDATE frames SET ptype = ?, route = ?, path_len = ?, verdict = ?, duplicate_of = ?,
 		        node = ?, pubkey = ?, detail = ?
 		 WHERE txn = ?`,
 		f.Type, f.Route, f.PathLen, f.Verdict, f.DuplicateOf,
 		f.Node, f.PubKey, f.Detail, txn,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		// The single writer makes this insert race-free; the heard
+		// columns it cannot know are zeroed, honestly absent.
+		if _, ierr := s.db.ExecContext(ctx,
+			`INSERT INTO frames (txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms,
+			        ptype, route, path_len, verdict, duplicate_of, node, pubkey, detail)
+			 VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			txn, relay, time.Now().UnixMilli(), f.Type, f.Route, f.PathLen,
+			f.Verdict, f.DuplicateOf, f.Node, f.PubKey, f.Detail); ierr != nil {
+			return ierr
+		}
+		return errJudgementOrphan
+	}
+	return nil
 }
 
 func (s *store) insertRelayState(ctx context.Context, at time.Time, relay, state, errText string) error {
@@ -156,29 +188,67 @@ func (s *store) insertRelayState(ctx context.Context, at time.Time, relay, state
 	return err
 }
 
-// prune drops everything older than the cutoff.
-func (s *store) prune(ctx context.Context, before time.Time) error {
+// prune drops everything older than the cutoff and, when maxFrames is
+// set, everything beyond the newest maxFrames rows — the journal is
+// bounded in time always and in size when asked. Freed pages go back
+// to the filesystem where auto_vacuum applies.
+func (s *store) prune(ctx context.Context, before time.Time, maxFrames int) error {
 	cutoff := before.UnixMilli()
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM frames WHERE at_ms < ?`, cutoff); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM relay_states WHERE at_ms < ?`, cutoff)
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM relay_states WHERE at_ms < ?`, cutoff); err != nil {
+		return err
+	}
+	if maxFrames > 0 {
+		if _, err := s.db.ExecContext(ctx,
+			`DELETE FROM frames WHERE txn IN (
+			   SELECT txn FROM frames ORDER BY at_ms DESC LIMIT -1 OFFSET ?)`,
+			maxFrames); err != nil {
+			return err
+		}
+	}
+	_, err := s.db.ExecContext(ctx, `PRAGMA incremental_vacuum;`)
 	return err
 }
 
-// RecentFrames returns the newest frames, newest first. A txn prefix
-// filters — the short displayed form of an id finds its full row.
-func (s *store) RecentFrames(ctx context.Context, txnPrefix string, limit int) ([]Frame, error) {
+// FrameQuery filters RecentFrames; zero values mean "any". The txn
+// prefix — the short displayed form of an id — finds its full rows.
+type FrameQuery struct {
+	TxnPrefix string
+	Relay     string
+	Type      string
+	Verdict   string
+	Limit     int
+}
+
+// RecentFrames returns the newest matching frames, newest first.
+// Filtering happens in SQL: a busy channel cannot starve a filtered
+// view, and the txn prefix is an index range, not a LIKE.
+func (s *store) RecentFrames(ctx context.Context, fq FrameQuery) ([]Frame, error) {
 	q := `SELECT txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms,
 	             ptype, route, path_len, verdict, duplicate_of, node, pubkey, detail
-	      FROM frames`
+	      FROM frames WHERE 1=1`
 	args := []any{}
-	if txnPrefix != "" {
-		q += ` WHERE txn LIKE ?`
-		args = append(args, escapeLike(txnPrefix)+"%")
+	if fq.TxnPrefix != "" {
+		lo, hi := prefixRange(fq.TxnPrefix)
+		q += ` AND txn >= ? AND txn < ?`
+		args = append(args, lo, hi)
+	}
+	if fq.Relay != "" {
+		q += ` AND relay = ?`
+		args = append(args, fq.Relay)
+	}
+	if fq.Type != "" {
+		q += ` AND ptype = ?`
+		args = append(args, fq.Type)
+	}
+	if fq.Verdict != "" {
+		q += ` AND verdict = ?`
+		args = append(args, fq.Verdict)
 	}
 	q += ` ORDER BY at_ms DESC LIMIT ?`
-	args = append(args, limit)
+	args = append(args, fq.Limit)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -217,12 +287,17 @@ type Node struct {
 // heard first. Name and type come from the freshest advert that
 // carried them.
 func (s *store) Nodes(ctx context.Context) ([]Node, error) {
+	// The directory is built from verified adverts only: name and type
+	// come from the freshest ADVERT row, and rows of other types never
+	// contribute a key. The pubkey index carries the subqueries.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT f.pubkey,
-		       (SELECT node   FROM frames n WHERE n.pubkey = f.pubkey AND n.node   != '' ORDER BY n.at_ms DESC LIMIT 1),
-		       (SELECT detail FROM frames n WHERE n.pubkey = f.pubkey AND n.detail != '' ORDER BY n.at_ms DESC LIMIT 1),
+		       (SELECT node FROM frames n WHERE n.pubkey = f.pubkey
+		          AND n.ptype = 'ADVERT' AND n.node != '' ORDER BY n.at_ms DESC LIMIT 1),
+		       (SELECT detail FROM frames n WHERE n.pubkey = f.pubkey
+		          AND n.ptype = 'ADVERT' AND n.detail != '' ORDER BY n.at_ms DESC LIMIT 1),
 		       COUNT(*), MAX(f.at_ms), MAX(f.rssi_dbm)
-		FROM frames f WHERE f.pubkey != ''
+		FROM frames f WHERE f.pubkey != '' AND f.ptype = 'ADVERT'
 		GROUP BY f.pubkey ORDER BY MAX(f.at_ms) DESC`)
 	if err != nil {
 		return nil, err
@@ -244,10 +319,12 @@ func (s *store) Nodes(ctx context.Context) ([]Node, error) {
 	return out, rows.Err()
 }
 
-// Chain returns a transaction's frames and everything linked to it:
-// the original it duplicates, and the duplicates that point at it.
+// Chain returns a transaction's frames and its whole duplicate
+// family: the chain is resolved to its root first — the original
+// every duplicate points at — then the root and all its duplicates
+// are returned, siblings included, whichever member was asked about.
 func (s *store) Chain(ctx context.Context, txnPrefix string) ([]Frame, error) {
-	own, err := s.RecentFrames(ctx, txnPrefix, 16)
+	own, err := s.RecentFrames(ctx, FrameQuery{TxnPrefix: txnPrefix, Limit: 16})
 	if err != nil || len(own) == 0 {
 		return own, err
 	}
@@ -261,21 +338,24 @@ func (s *store) Chain(ctx context.Context, txnPrefix string) ([]Frame, error) {
 			}
 		}
 	}
-	add(own)
 	for _, f := range own {
+		root := f
 		if f.DuplicateOf != "" {
-			orig, err := s.RecentFrames(ctx, f.DuplicateOf, 4)
+			orig, err := s.RecentFrames(ctx, FrameQuery{TxnPrefix: f.DuplicateOf, Limit: 1})
 			if err != nil {
 				return nil, err
 			}
-			add(orig)
+			if len(orig) == 1 {
+				root = orig[0]
+			}
 		}
-		short := f.Txn[:min(len(f.Txn), 12)]
-		dups, err := s.duplicatesOf(ctx, short)
+		add([]Frame{root})
+		dups, err := s.duplicatesOf(ctx, root.Txn[:min(len(root.Txn), 12)])
 		if err != nil {
 			return nil, err
 		}
 		add(dups)
+		add([]Frame{f})
 	}
 	return out, nil
 }
@@ -300,7 +380,7 @@ func (s *store) duplicatesOf(ctx context.Context, short string) ([]Frame, error)
 	}
 	var out []Frame
 	for _, t := range txns {
-		f, err := s.RecentFrames(ctx, t, 1)
+		f, err := s.RecentFrames(ctx, FrameQuery{TxnPrefix: t, Limit: 1})
 		if err != nil {
 			return nil, err
 		}
@@ -339,7 +419,18 @@ func (s *store) FrameCount(ctx context.Context) (int, error) {
 
 func (s *store) Close() error { return s.db.Close() }
 
-func escapeLike(prefix string) string {
-	r := strings.NewReplacer(`%`, `\%`, `_`, `\_`, `\`, `\\`)
-	return r.Replace(prefix)
+// prefixRange turns a string prefix into a half-open range: every
+// string starting with the prefix sorts in [prefix, next), where next
+// is the prefix with its last byte incremented. No wildcards exist,
+// so nothing needs escaping.
+func prefixRange(prefix string) (lo, hi string) {
+	b := []byte(prefix)
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] < 0xFF {
+			b[i]++
+			return prefix, string(b[:i+1])
+		}
+	}
+	// All 0xFF bytes: everything from the prefix on matches.
+	return prefix, "\xff\xff\xff\xff\xff"
 }

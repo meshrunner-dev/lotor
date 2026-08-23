@@ -42,6 +42,9 @@ type Sentinel struct {
 	Journal string `yaml:"journal"`
 	// Retention bounds how far back the journal reaches.
 	Retention time.Duration `yaml:"retention"`
+	// MaxFrames, when set, also bounds the journal in rows — for
+	// hosts where time alone would let a busy mesh outgrow the disk.
+	MaxFrames int `yaml:"max_frames"`
 }
 
 // DefaultRetention keeps the journal for a long default, as an
