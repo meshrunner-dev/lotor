@@ -38,10 +38,12 @@ func newEditor(r io.Reader, w io.Writer) *editor {
 
 var errLineTooLong = errors.New("line too long")
 
-// readLine edits one line to completion, prompt included.
+// readLine edits one line to completion. The REPL owns the prompt —
+// printing it here would race the previous command's output — so the
+// editor stays silent until the first keystroke; its repaints redraw
+// the prompt whenever the line itself needs redrawing.
 func (e *editor) readLine() (string, error) {
 	e.buf, e.cur, e.walk = e.buf[:0], 0, -1
-	fmt.Fprint(e.out, "> ")
 	for {
 		c, err := e.in.ReadByte()
 		if err != nil {

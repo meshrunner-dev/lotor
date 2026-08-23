@@ -121,8 +121,12 @@ func TestAppendingEchoesWithoutRepaint(t *testing.T) {
 	if strings.Contains(out.String(), "\x1b[K") {
 		t.Errorf("plain typing repainted the line: %q", out.String())
 	}
-	if !strings.Contains(out.String(), "> ok") {
+	if !strings.Contains(out.String(), "ok") {
 		t.Errorf("echo incomplete: %q", out.String())
+	}
+	// The REPL owns the prompt; the editor must not race it.
+	if strings.Contains(out.String(), "> ") {
+		t.Errorf("editor printed a prompt of its own: %q", out.String())
 	}
 }
 

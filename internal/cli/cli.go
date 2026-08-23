@@ -87,7 +87,7 @@ func Serve(ctx context.Context, rw io.ReadWriter, deps Deps) {
 	done := make(chan struct{})
 	defer close(done)
 	go readLines(rw, lines, done)
-	repl(ctx, rw, deps, lines, true)
+	repl(ctx, rw, deps, lines)
 }
 
 // ServeEdited runs the REPL behind the character-mode line editor:
@@ -113,19 +113,18 @@ func ServeEdited(ctx context.Context, rw io.ReadWriter, deps Deps) {
 			}
 		}
 	}()
-	repl(ctx, rw, deps, lines, false)
+	repl(ctx, rw, deps, lines)
 }
 
-// repl is the loop both entrances share; the editor prints its own
-// prompt, the plain reader wants one from us.
-func repl(ctx context.Context, out io.Writer, deps Deps, lines <-chan string, prompt bool) {
+// repl is the loop both entrances share. It owns the prompt: printed
+// after the banner and after every command, so it always lands below
+// the output it follows.
+func repl(ctx context.Context, out io.Writer, deps Deps, lines <-chan string) {
 	s := &session{deps: deps, lines: lines, out: out}
 	fmt.Fprintf(s.out, "lotor %s — read-only. \"help\" lists commands, \"quit\" leaves.\r\n",
 		deps.Version)
 	for ctx.Err() == nil {
-		if prompt {
-			fmt.Fprint(s.out, "> ")
-		}
+		fmt.Fprint(s.out, "> ")
 		select {
 		case <-ctx.Done():
 			return
