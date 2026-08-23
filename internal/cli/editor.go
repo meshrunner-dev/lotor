@@ -25,6 +25,11 @@ type editor struct {
 	cur  int
 	walk int    // history position; -1 = editing a fresh line
 	kept string // the fresh line kept aside while walking history
+	// crSeen pairs cr-lf statefully: a \r ends the line at once (a
+	// raw terminal sends nothing after it — waiting would cost the
+	// operator a second Enter), and the \n or \x00 a telnet client
+	// appends is swallowed when it arrives, even on the next line.
+	crSeen bool
 }
 
 func newEditor(r io.Reader, w io.Writer) *editor {
@@ -42,9 +47,16 @@ func (e *editor) readLine() (string, error) {
 		if err != nil {
 			return "", err
 		}
+		if e.crSeen {
+			e.crSeen = false
+			if c == '\n' || c == 0 {
+				continue // the \r's partner, already handled
+			}
+		}
 		switch {
 		case c == '\r' || c == '\n':
-			return e.finishLine(c)
+			e.crSeen = c == '\r'
+			return e.finishLine()
 		case c == 0x03: // Ctrl+C: abandon the line
 			fmt.Fprint(e.out, "^C\r\n> ")
 			e.buf, e.cur, e.walk = e.buf[:0], 0, -1
@@ -54,18 +66,7 @@ func (e *editor) readLine() (string, error) {
 				return "", io.EOF
 			}
 		case c == 0x7f || c == 0x08: // backspace
-			if e.cur > 0 {
-				atEnd := e.cur == len(e.buf)
-				erased := runewidth.RuneWidth(e.buf[e.cur-1])
-				e.buf = append(e.buf[:e.cur-1], e.buf[e.cur:]...)
-				e.cur--
-				if atEnd {
-					// Erase in place: no repaint for the common case.
-					fmt.Fprint(e.out, strings.Repeat("\b \b", erased))
-				} else {
-					e.render()
-				}
-			}
+			e.backspace()
 		case c == 0x1b: // escape sequence
 			if err := e.escape(); err != nil {
 				return "", err
@@ -78,15 +79,25 @@ func (e *editor) readLine() (string, error) {
 	}
 }
 
-// finishLine closes the edit: telnet's cr-lf may arrive as \r\n or
-// \r\x00, so a trailing partner is swallowed without blocking on a
-// lone \r.
-func (e *editor) finishLine(c byte) (string, error) {
-	if c == '\r' {
-		if next, err := e.in.Peek(1); err == nil && (next[0] == '\n' || next[0] == 0) {
-			_, _ = e.in.Discard(1)
-		}
+// backspace removes the rune before the cursor; at the end of the
+// line it erases in place, no repaint for the common case.
+func (e *editor) backspace() {
+	if e.cur == 0 {
+		return
 	}
+	atEnd := e.cur == len(e.buf)
+	erased := runewidth.RuneWidth(e.buf[e.cur-1])
+	e.buf = append(e.buf[:e.cur-1], e.buf[e.cur:]...)
+	e.cur--
+	if atEnd {
+		fmt.Fprint(e.out, strings.Repeat("\b \b", erased))
+	} else {
+		e.render()
+	}
+}
+
+// finishLine closes the edit.
+func (e *editor) finishLine() (string, error) {
 	fmt.Fprint(e.out, "\r\n")
 	line := strings.TrimSpace(string(e.buf))
 	e.hist.add(line)

@@ -125,3 +125,19 @@ func TestAppendingEchoesWithoutRepaint(t *testing.T) {
 		t.Errorf("echo incomplete: %q", out.String())
 	}
 }
+
+func TestEnterVariantsYieldOneLineEach(t *testing.T) {
+	// A raw terminal sends \r alone; telnet clients send \r\n or
+	// \r\x00 — one line per Enter in every dialect, and a lone \r
+	// must not wait for a second keystroke.
+	got := edit(t, "a\rb\r\nc\r\x00d\n")
+	want := []string{"a", "b", "c", "d"}
+	if len(got) != len(want) {
+		t.Fatalf("lines = %q", got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("line %d = %q, want %q", i, got[i], w)
+		}
+	}
+}
