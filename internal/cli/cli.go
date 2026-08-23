@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -27,6 +28,8 @@ const (
 	scopeRadio = "radio"
 	verbShow   = "show"
 	optOn      = "true"
+	cmdFrames  = "frames"
+	cmdQuit    = "quit"
 )
 
 // RelayInfo is what the CLI knows about one relay.
@@ -150,7 +153,7 @@ func (s *session) command(ctx context.Context, line string) {
 	if len(args) == 0 {
 		return
 	}
-	if args[0] == "quit" || args[0] == "exit" {
+	if args[0] == cmdQuit || args[0] == "exit" {
 		fmt.Fprint(s.out, "bye.\r\n")
 		s.quitting = true
 		return
@@ -200,48 +203,100 @@ func readBounded(br *bufio.Reader) (string, error) {
 func (s *session) dispatch(ctx context.Context, args []string) {
 	cmd, rest := args[0], args[1:]
 	var err error
-	switch cmd {
-	case "help":
-		s.help()
-	case "status":
-		err = s.status(ctx)
-	case scopeRelay:
-		err = s.relay(ctx, rest)
-	case scopeRadio:
-		err = s.radio(rest)
-	case "config":
-		err = s.config(rest)
-	case "frames":
-		err = s.frames(ctx, rest)
-	case "txn":
-		err = s.txn(ctx, rest)
-	case "nodes":
-		err = s.nodes(ctx, rest)
-	case "noise":
-		err = s.noise(ctx, rest)
-	case "sentinel":
-		err = s.sentinelStatus(ctx)
-	default:
-		err = fmt.Errorf("unknown command %q — \"help\" lists them", cmd)
+	if slices.Contains(rest, "--help") || slices.Contains(rest, "-h") {
+		// Every command answers --help with its own usage.
+		err = s.helpFor(cmd)
+	} else {
+		err = s.run(ctx, cmd, rest)
 	}
 	if err != nil {
 		fmt.Fprintf(s.out, "error: %s\r\n", err)
 	}
 }
 
-func (s *session) help() {
-	fmt.Fprint(s.out, ""+
-		"status                          daemon overview\r\n"+
-		"relay list | relay show <name>  relays and their detail\r\n"+
-		"radio list | radio show <name>  radios and their envelope\r\n"+
-		"config show relay|radio <name>  effective config with provenance\r\n"+
-		"frames [--last N] [--relay R] [--type T] [--verdict V] [--json]\r\n"+
-		"frames watch [--type T]         live feed (enter stops)\r\n"+
-		"txn <prefix>                    one transaction and its chain\r\n"+
-		"nodes [--json]                  the directory the mesh writes about itself\r\n"+
-		"noise [--relay R] [--last 24h|7d] [--json]  noise-floor history, consolidated\r\n"+
-		"sentinel                        journal status\r\n"+
-		"quit\r\n")
+func (s *session) run(ctx context.Context, cmd string, rest []string) error {
+	switch cmd {
+	case "help":
+		return s.help(rest)
+	case "status":
+		if err := noArgs(cmd, rest); err != nil {
+			return err
+		}
+		return s.status(ctx)
+	case scopeRelay:
+		return s.relay(ctx, rest)
+	case scopeRadio:
+		return s.radio(rest)
+	case "config":
+		return s.config(rest)
+	case cmdFrames:
+		return s.frames(ctx, rest)
+	case "txn":
+		return s.txn(ctx, rest)
+	case "nodes":
+		return s.nodes(ctx, rest)
+	case "noise":
+		return s.noise(ctx, rest)
+	case "sentinel":
+		if err := noArgs(cmd, rest); err != nil {
+			return err
+		}
+		return s.sentinelStatus(ctx)
+	default:
+		return fmt.Errorf("unknown command %q — \"help\" lists them", cmd)
+	}
+}
+
+// noArgs keeps argument-less commands honest: a stray word is a
+// mistake to report, never to swallow.
+func noArgs(cmd string, rest []string) error {
+	if len(rest) > 0 {
+		return fmt.Errorf("%s takes no arguments", cmd)
+	}
+	return nil
+}
+
+// usages holds each command's help lines: help prints them all,
+// helpFor and --help one command's.
+var usages = [][2]string{
+	{"status", "status                          daemon overview"},
+	{"relay", "relay list | relay show <name>  relays and their detail"},
+	{"radio", "radio list | radio show <name>  radios and their envelope"},
+	{"config", "config show relay|radio <name>  effective config with provenance"},
+	{cmdFrames, "frames [--last N] [--relay R] [--type T] [--verdict V] [--json]"},
+	{cmdFrames, "frames watch [--type T]         live feed (enter stops)"},
+	{"txn", "txn <prefix>                    one transaction and its chain"},
+	{"nodes", "nodes [--json]                  the directory the mesh writes about itself"},
+	{"noise", "noise [--relay R] [--last 24h|7d] [--json]  noise-floor history, consolidated"},
+	{"sentinel", "sentinel                        journal status"},
+	{"help", "help [command]                  all commands, or one command's usage"},
+	{cmdQuit, cmdQuit},
+}
+
+func (s *session) help(args []string) error {
+	if len(args) > 0 {
+		return s.helpFor(args[0])
+	}
+	for _, u := range usages {
+		fmt.Fprint(s.out, u[1]+"\r\n")
+	}
+	return nil
+}
+
+// helpFor prints one command's usage; asking about a command that does
+// not exist is the same mistake as running one.
+func (s *session) helpFor(cmd string) error {
+	found := false
+	for _, u := range usages {
+		if u[0] == cmd {
+			fmt.Fprint(s.out, u[1]+"\r\n")
+			found = true
+		}
+	}
+	if !found {
+		return fmt.Errorf("unknown command %q — \"help\" lists them", cmd)
+	}
+	return nil
 }
 
 func (s *session) findRelay(name string) (RelayInfo, error) {

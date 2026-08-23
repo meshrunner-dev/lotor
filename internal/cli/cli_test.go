@@ -99,6 +99,26 @@ func TestStatusAndHelp(t *testing.T) {
 	}
 }
 
+func TestHelpKnowsEachCommand(t *testing.T) {
+	deps := testDeps(t)
+	out := run(t, deps, "noise --help", "help noise", "noise help", "status extra")
+	if strings.Count(out, "noise [--relay R]") != 2 {
+		t.Errorf("per-command help missing:\n%s", out)
+	}
+	if strings.Contains(out, "daemon overview") {
+		t.Errorf("per-command help dumped the full list:\n%s", out)
+	}
+	if !strings.Contains(out, `unknown argument "help"`) {
+		t.Errorf("stray positional swallowed:\n%s", out)
+	}
+	if !strings.Contains(out, "status takes no arguments") {
+		t.Errorf("status accepted stray arguments:\n%s", out)
+	}
+	if bad := run(t, deps, "help nope"); !strings.Contains(bad, `unknown command "nope"`) {
+		t.Errorf("help accepted an unknown command:\n%s", bad)
+	}
+}
+
 func TestConfigShowProvenance(t *testing.T) {
 	out := run(t, testDeps(t), "config show radio slot1")
 	if !strings.Contains(out, "override:rak6421-13300x-slot1") ||

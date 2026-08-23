@@ -199,7 +199,13 @@ func (s *session) frames(ctx context.Context, args []string) error {
 		return err
 	}
 	if len(pos) > 0 && pos[0] == "watch" {
+		if len(pos) > 1 {
+			return fmt.Errorf("unknown argument %q — try frames --help", pos[1])
+		}
 		return s.watch(ctx, opts)
+	}
+	if len(pos) > 0 {
+		return fmt.Errorf("unknown argument %q — try frames --help", pos[0])
 	}
 	sen, err := s.needSentinel()
 	if err != nil {
@@ -289,9 +295,12 @@ func (s *session) txn(ctx context.Context, args []string) error {
 }
 
 func (s *session) nodes(ctx context.Context, args []string) error {
-	_, opts, err := flags(args)
+	pos, opts, err := flags(args)
 	if err != nil {
 		return err
+	}
+	if len(pos) > 0 {
+		return fmt.Errorf("unknown argument %q — try nodes --help", pos[0])
 	}
 	sen, err := s.needSentinel()
 	if err != nil {
@@ -339,9 +348,12 @@ func (s *session) sentinelStatus(ctx context.Context) error {
 // noise shows a relay's noise-floor history: the live value, then the
 // asked window's consolidated buckets, oldest first.
 func (s *session) noise(ctx context.Context, args []string) error {
-	_, opts, err := flags(args)
+	pos, opts, err := flags(args)
 	if err != nil {
 		return err
+	}
+	if len(pos) > 0 {
+		return fmt.Errorf("unknown argument %q — try noise --help", pos[0])
 	}
 	r, err := s.oneRelay(opts[scopeRelay])
 	if err != nil {
