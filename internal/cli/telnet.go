@@ -53,7 +53,12 @@ func ServeListener(ctx context.Context, ln net.Listener, deps Deps) error {
 			hangup := context.AfterFunc(ctx, func() { _ = conn.Close() })
 			defer hangup()
 			defer func() { _ = conn.Close() }()
-			Serve(ctx, struct {
+			// Character-at-a-time with the daemon echoing: real telnet
+			// clients honour it, the console client raw-modes its
+			// terminal, and scripts through pipes simply see their
+			// commands echoed into the transcript.
+			_, _ = conn.Write([]byte{iacByte, iacWill, optEcho, iacByte, iacWill, optSGA})
+			ServeEdited(ctx, struct {
 				io.Reader
 				io.Writer
 			}{Reader: &iacStripper{r: conn}, Writer: conn}, deps)
@@ -61,14 +66,21 @@ func ServeListener(ctx context.Context, ln net.Listener, deps Deps) error {
 	}
 }
 
-// Telnet protocol bytes (RFC 854).
+// Telnet protocol bytes (RFC 854) and the options we negotiate.
 const (
 	iacByte  = 255 // IAC — interpret as command
 	iacWill  = 251 // WILL..DONT carry one option byte
 	iacDont  = 254
 	iacSubBg = 250 // SB — subnegotiation until IAC SE
 	iacSubEn = 240 // SE
+	optEcho  = 1   // the daemon echoes
+	optSGA   = 3   // suppress go-ahead: character-at-a-time
 )
+
+// StripIAC filters telnet negotiation out of a byte stream — the
+// console client reads the daemon through it, so our own WILL bytes
+// never reach an operator's screen.
+func StripIAC(r io.Reader) io.Reader { return &iacStripper{r: r} }
 
 // iacStripper state machine.
 const (

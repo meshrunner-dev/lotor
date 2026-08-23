@@ -16,12 +16,13 @@ tasks:
       - task --list
 
   check:
-    desc: "Full gate: formatting, tidy, lint, race tests, govulncheck"
+    desc: "Full gate: formatting, tidy, lint, race tests, lean build, govulncheck"
     cmds:
       - task: fmt
       - task: tidy
       - task: lint
       - task: test:race
+      - task: build:lean
       - task: vuln
 
   fmt:
@@ -59,6 +60,11 @@ tasks:
     desc: Scan dependencies for known vulnerabilities
     cmds:
       - "{{.GOVULNCHECK}} ./..."
+
+  build:lean:
+    desc: Compile the memory-lean variant (no CLI history, for tight hosts)
+    cmds:
+      - go build -tags lean ./...
 
   build:
     desc: Build the daemon into ./bin

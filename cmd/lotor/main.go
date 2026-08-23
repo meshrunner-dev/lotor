@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+	"golang.org/x/term"
 
 	"meshrunner.dev/pkg/meshcore"
 
@@ -112,9 +113,10 @@ func main() {
 }
 
 // console connects the terminal to a running daemon's CLI — the
-// console-port gesture of network gear — and behaves the way a
-// terminal should: Ctrl+D half-closes and lets the session finish,
-// and the daemon closing (quit) ends the process immediately — no
+// console-port gesture of network gear. On a real terminal it goes
+// raw: every keystroke reaches the daemon's line editor, which owns
+// echo, history and the cursor. Piped input flows line-wise, and the
+// daemon closing (quit) ends the process immediately — no
 // netcat-variant guesswork.
 func console(addr string) error {
 	if addr == "" {
@@ -127,13 +129,21 @@ func console(addr string) error {
 	}
 	defer func() { _ = conn.Close() }()
 
+	if fd := int(os.Stdin.Fd()); term.IsTerminal(fd) {
+		state, err := term.MakeRaw(fd)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = term.Restore(fd, state) }()
+	}
+
 	go func() {
 		_, _ = io.Copy(conn, os.Stdin)
 		if t, ok := conn.(*net.TCPConn); ok {
-			_ = t.CloseWrite() // Ctrl+D: send EOF, keep reading the goodbye
+			_ = t.CloseWrite() // stdin EOF: let the session finish its goodbye
 		}
 	}()
-	_, _ = io.Copy(os.Stdout, conn)
+	_, _ = io.Copy(os.Stdout, cli.StripIAC(conn))
 	return nil
 }
 

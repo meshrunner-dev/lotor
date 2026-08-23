@@ -81,18 +81,51 @@ type session struct {
 	quitting bool
 }
 
-// Serve runs the REPL until the stream ends or the operator quits.
+// Serve runs the REPL on plain line input — pipes, scripts, tests.
 func Serve(ctx context.Context, rw io.ReadWriter, deps Deps) {
 	lines := make(chan string)
 	done := make(chan struct{})
 	defer close(done)
 	go readLines(rw, lines, done)
+	repl(ctx, rw, deps, lines, true)
+}
 
-	s := &session{deps: deps, lines: lines, out: rw}
+// ServeEdited runs the REPL behind the character-mode line editor:
+// history on the arrows, a movable cursor, the daemon echoing. The
+// transport delivers raw keystrokes (the telnet listener negotiates
+// that; the console client sets its terminal raw).
+func ServeEdited(ctx context.Context, rw io.ReadWriter, deps Deps) {
+	lines := make(chan string)
+	done := make(chan struct{})
+	defer close(done)
+	ed := newEditor(rw, rw)
+	go func() {
+		defer close(lines)
+		for {
+			line, err := ed.readLine()
+			if err != nil {
+				return
+			}
+			select {
+			case lines <- line:
+			case <-done:
+				return
+			}
+		}
+	}()
+	repl(ctx, rw, deps, lines, false)
+}
+
+// repl is the loop both entrances share; the editor prints its own
+// prompt, the plain reader wants one from us.
+func repl(ctx context.Context, out io.Writer, deps Deps, lines <-chan string, prompt bool) {
+	s := &session{deps: deps, lines: lines, out: out}
 	fmt.Fprintf(s.out, "lotor %s — read-only. \"help\" lists commands, \"quit\" leaves.\r\n",
 		deps.Version)
 	for ctx.Err() == nil {
-		fmt.Fprint(s.out, "> ")
+		if prompt {
+			fmt.Fprint(s.out, "> ")
+		}
 		select {
 		case <-ctx.Done():
 			return
