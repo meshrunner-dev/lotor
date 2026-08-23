@@ -151,11 +151,14 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 		case err == nil:
 		case errors.Is(err, radio.ErrCorrupt):
 			e.log.Debug("corrupt reception", zap.Error(err))
-			e.bus.Publish(bus.FrameCorrupt{Relay: e.relay, Err: err.Error()})
+			e.bus.Publish(bus.FrameCorrupt{
+				Relay: e.relay, At: time.Now(), Err: err.Error(),
+			})
 			continue
-		case ctx.Err() != nil:
-			return ctx.Err()
 		default:
+			// Returned as-is: a context error means shutdown, anything
+			// else is the driver's fault — replacing it with ctx.Err()
+			// when the two race would mask the fault's cause.
 			return err
 		}
 		e.judge(frame)

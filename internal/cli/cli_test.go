@@ -150,6 +150,26 @@ func TestErrorsAreOneLiners(t *testing.T) {
 	}
 }
 
+func TestWatchValidatesItsRelayFilter(t *testing.T) {
+	// A typo'd --relay must error like the query path does, not stream
+	// nothing forever.
+	deps := testDeps(t)
+	out := run(t, deps, "frames watch --relay meshcor-868")
+	if !strings.Contains(out, `error: no relay "meshcor-868"`) {
+		t.Errorf("watch accepted an unknown relay:\n%s", out)
+	}
+}
+
+func TestNoiseIsVisible(t *testing.T) {
+	deps := testDeps(t)
+	deps.Sentinel.Process(context.Background(), bus.FrameCorrupt{
+		Relay: "meshcore-868", At: time.Now(), Err: "sx126x: crc mismatch"})
+	out := run(t, deps, "sentinel", "relay show meshcore-868")
+	if !strings.Contains(out, "noise") || !strings.Contains(out, "1 corrupt reception") {
+		t.Errorf("corrupt receptions invisible:\n%s", out)
+	}
+}
+
 func TestNoSentinelIsHonest(t *testing.T) {
 	deps := testDeps(t)
 	deps.Sentinel = nil

@@ -7,6 +7,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"time"
 
@@ -37,14 +38,21 @@ type Relay struct {
 	radioCfg map[string]any
 	engine   protocol.Engine
 
-	bus     *bus.Bus
-	log     *zap.Logger
-	state   atomic.Value
-	lastErr atomic.Value
+	bus *bus.Bus
+	log *zap.Logger
+	// status holds state and cause as one value: a reader never sees a
+	// fresh state paired with a stale cause, or the reverse.
+	status atomic.Value
 	// stillborn marks a relay whose configuration failed: it exists to
 	// be visible in the error state, never to retry — a config error
 	// does not heal by waiting.
 	stillborn bool
+}
+
+// lifecycle is the state/cause pair status stores atomically.
+type lifecycle struct {
+	state string
+	cause string
 }
 
 // New assembles a relay from its resolved parts.
@@ -59,8 +67,7 @@ func New(name string, drv radio.Driver, radioCfg map[string]any,
 		bus:      b,
 		log:      log.With(zap.String("relay", name)),
 	}
-	r.state.Store(StateStarting)
-	r.lastErr.Store("")
+	r.status.Store(lifecycle{state: StateStarting})
 	return r
 }
 
@@ -73,40 +80,40 @@ func Stillborn(name string, cause error, b *bus.Bus, log *zap.Logger) *Relay {
 		log:       log.With(zap.String("relay", name)),
 		stillborn: true,
 	}
-	r.state.Store(StateError)
-	r.lastErr.Store(cause.Error())
+	r.status.Store(lifecycle{state: StateError, cause: cause.Error()})
 	return r
 }
 
 // State reports the current lifecycle state.
 func (r *Relay) State() string {
-	s, _ := r.state.Load().(string)
-	return s
+	l, _ := r.status.Load().(lifecycle)
+	return l.state
 }
 
 // Err reports the cause of the current error state, empty otherwise.
 func (r *Relay) Err() string {
-	e, _ := r.lastErr.Load().(string)
-	return e
+	l, _ := r.status.Load().(lifecycle)
+	return l.cause
 }
 
 func (r *Relay) setState(state string, err error) {
-	r.state.Store(state)
-	ev := bus.RelayState{Relay: r.Name, State: state}
+	l := lifecycle{state: state}
 	if err != nil {
-		ev.Err = err.Error()
-		r.lastErr.Store(err.Error())
-	} else {
-		r.lastErr.Store("")
+		l.cause = err.Error()
 	}
-	r.bus.Publish(ev)
+	r.status.Store(l)
+	r.bus.Publish(bus.RelayState{
+		Relay: r.Name, At: time.Now(), State: state, Err: l.cause,
+	})
 }
 
 // Run supervises until the context ends: every failure is logged,
 // published, and retried with capped exponential backoff.
 func (r *Relay) Run(ctx context.Context) {
 	if r.stillborn {
-		r.bus.Publish(bus.RelayState{Relay: r.Name, State: StateError, Err: r.Err()})
+		r.bus.Publish(bus.RelayState{
+			Relay: r.Name, At: time.Now(), State: StateError, Err: r.Err(),
+		})
 		r.log.Error("relay unrunnable, configuration failed", zap.String("cause", r.Err()))
 		<-ctx.Done()
 		return
@@ -115,6 +122,14 @@ func (r *Relay) Run(ctx context.Context) {
 	for {
 		reached, err := r.session(ctx)
 		if ctx.Err() != nil {
+			// Shutdown — but a real fault that raced it still deserves
+			// its error state, or the journal would read a failed
+			// session as a clean exit of a healthy relay.
+			if err != nil && !errors.Is(err, context.Canceled) &&
+				!errors.Is(err, context.DeadlineExceeded) {
+				r.setState(StateError, err)
+				r.log.Error("relay failed during shutdown", zap.Error(err))
+			}
 			return
 		}
 		if reached {

@@ -71,25 +71,44 @@ func (s *session) relay(ctx context.Context, args []string) error {
 		r.Waveform.BandwidthHz, r.Waveform.CodingRate, r.Waveform.Preamble,
 		r.Waveform.SyncWord, r.Waveform.CRC))
 	if s.deps.Sentinel != nil {
-		counts, err := s.deps.Sentinel.VerdictCounts(ctx, r.Name)
-		if err != nil {
-			tb.row("judged", "unavailable: "+err.Error())
-			return tb.flush(s.out)
-		}
-		verdicts := make([]string, 0, len(counts))
-		for v := range counts {
-			verdicts = append(verdicts, v)
-		}
-		sort.Strings(verdicts)
-		var line strings.Builder
-		total := 0
-		for _, v := range verdicts {
-			fmt.Fprintf(&line, "  %d %s", counts[v], v)
-			total += counts[v]
-		}
-		tb.row("judged", fmt.Sprintf("%d frames —%s", total, line.String()))
+		s.relayJournal(ctx, tb, r)
 	}
 	return tb.flush(s.out)
+}
+
+// relayJournal appends relay show's journal-backed rows: judgement
+// totals and the corrupt-reception tally. A sick journal is degraded
+// rows, never a missing section.
+func (s *session) relayJournal(ctx context.Context, tb *table, r RelayInfo) {
+	counts, err := s.deps.Sentinel.VerdictCounts(ctx, r.Name)
+	if err != nil {
+		tb.row("judged", "unavailable: "+err.Error())
+		return
+	}
+	verdicts := make([]string, 0, len(counts))
+	for v := range counts {
+		verdicts = append(verdicts, v)
+	}
+	sort.Strings(verdicts)
+	var line strings.Builder
+	total := 0
+	for _, v := range verdicts {
+		fmt.Fprintf(&line, "  %d %s", counts[v], v)
+		total += counts[v]
+	}
+	tb.row("judged", fmt.Sprintf("%d frames —%s", total, line.String()))
+
+	noise, err := s.deps.Sentinel.Noise(ctx)
+	if err != nil {
+		tb.row("noise", "unavailable: "+err.Error())
+		return
+	}
+	for _, nz := range noise {
+		if nz.Relay == r.Name {
+			tb.row("noise", fmt.Sprintf("%d corrupt receptions — last %s",
+				nz.Count, ago(nz.LastAt)))
+		}
+	}
 }
 
 func (s *session) radio(args []string) error {
@@ -290,6 +309,14 @@ func (s *session) sentinelStatus(ctx context.Context) error {
 		return err
 	}
 	fmt.Fprintf(s.out, "journal %s — %d frames, %s retention\r\n", path, n, retention)
+	noise, err := sen.Noise(ctx)
+	if err != nil {
+		return err
+	}
+	for _, nz := range noise {
+		fmt.Fprintf(s.out, "noise   %s — %d corrupt receptions, last %s: %s\r\n",
+			nz.Relay, nz.Count, ago(nz.LastAt), nz.LastErr)
+	}
 	return nil
 }
 
@@ -299,6 +326,13 @@ func (s *session) sentinelStatus(ctx context.Context) error {
 func (s *session) watch(ctx context.Context, opts map[string]string) error {
 	if s.deps.Bus == nil {
 		return errors.New("no bus attached")
+	}
+	if v, ok := opts[scopeRelay]; ok {
+		// A typo'd relay name must error like it does on the query
+		// path, not filter forever against a name nothing carries.
+		if _, err := s.findRelay(v); err != nil {
+			return err
+		}
 	}
 	// The line that stops a watch runs as a command — which could be
 	// another watch, nesting subscriptions without bound. One at a
@@ -311,6 +345,18 @@ func (s *session) watch(ctx context.Context, opts map[string]string) error {
 	fmt.Fprint(s.out, "watching (enter stops)…\r\n")
 	sub := s.deps.Bus.Subscribe(64)
 	defer sub.Close()
+
+	// The bus counts what a slow terminal loses; the stream owns up to
+	// it, in place, instead of presenting its gaps as radio silence.
+	var reported uint64
+	confess := func() {
+		if d := sub.Dropped(); d > reported {
+			fmt.Fprintf(s.out, "(%d events dropped — this watch fell behind the bus)\r\n",
+				d-reported)
+			reported = d
+		}
+	}
+	defer confess()
 
 	for {
 		select {
@@ -325,19 +371,45 @@ func (s *session) watch(ctx context.Context, opts map[string]string) error {
 			if !ok {
 				return nil
 			}
-			j, isJudged := ev.(bus.FrameJudged)
-			if !isJudged || !watchMatch(j, opts) {
-				continue
+			confess()
+			if err := s.watchEvent(ev, opts); err != nil {
+				return err
 			}
-			if opts["json"] == optOn {
-				if err := s.printJSON(j); err != nil {
-					return err
-				}
-				continue
-			}
-			fmt.Fprintf(s.out, "%s\r\n", watchLine(j))
 		}
 	}
+}
+
+// watchEvent prints one bus event when the watch's filters keep it.
+func (s *session) watchEvent(ev bus.Event, opts map[string]string) error {
+	switch e := ev.(type) {
+	case bus.FrameJudged:
+		if !watchMatch(e, opts) {
+			return nil
+		}
+		if opts["json"] == optOn {
+			return s.printJSON(e)
+		}
+		_, err := fmt.Fprintf(s.out, "%s\r\n", watchLine(e))
+		return err
+	case bus.FrameCorrupt:
+		// Corrupt receptions carry no type and no verdict: a watch
+		// filtered on either asked for judgements only.
+		if _, ok := opts["type"]; ok {
+			return nil
+		}
+		if _, ok := opts["verdict"]; ok {
+			return nil
+		}
+		if v, ok := opts[scopeRelay]; ok && e.Relay != v {
+			return nil
+		}
+		if opts["json"] == optOn {
+			return s.printJSON(e)
+		}
+		_, err := fmt.Fprintf(s.out, "corrupt reception — %s\r\n", e.Err)
+		return err
+	}
+	return nil
 }
 
 func watchMatch(j bus.FrameJudged, opts map[string]string) bool {

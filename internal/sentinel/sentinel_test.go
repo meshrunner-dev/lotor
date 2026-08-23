@@ -88,16 +88,48 @@ func TestRetentionPrunes(t *testing.T) {
 
 func TestRelayStatesJournalled(t *testing.T) {
 	s := testSentinel(t)
-	s.Process(context.Background(), bus.RelayState{Relay: "meshcore-868", State: "error", Err: "radio gone"})
+	// The event's own clock dates the row: the drain consumes long
+	// after the transition, and the archive must not show drain time.
+	at := time.Now().Add(-42 * time.Second)
+	s.Process(context.Background(), bus.RelayState{
+		Relay: "meshcore-868", At: at, State: "error", Err: "radio gone"})
 
 	var n int
+	var atMS int64
 	if err := s.store.db.QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM relay_states WHERE relay = 'meshcore-868' AND state = 'error'`,
-	).Scan(&n); err != nil {
+		`SELECT COUNT(*), MAX(at_ms) FROM relay_states WHERE relay = 'meshcore-868' AND state = 'error'`,
+	).Scan(&n, &atMS); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
 		t.Errorf("relay_states rows = %d", n)
+	}
+	if atMS != at.UnixMilli() {
+		t.Errorf("row dated %d, want the producer's %d", atMS, at.UnixMilli())
+	}
+}
+
+func TestCorruptReceptionsAreTallied(t *testing.T) {
+	s := testSentinel(t)
+	at := time.Now()
+	for range 3 {
+		s.Process(context.Background(), bus.FrameCorrupt{
+			Relay: "meshcore-868", At: at, Err: "crc mismatch"})
+	}
+
+	noise, err := s.Noise(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(noise) != 1 {
+		t.Fatalf("noise rows = %d, want 1", len(noise))
+	}
+	nz := noise[0]
+	if nz.Relay != "meshcore-868" || nz.Count != 3 || nz.LastErr != "crc mismatch" {
+		t.Errorf("noise = %+v", nz)
+	}
+	if nz.LastAt.UnixMilli() != at.UnixMilli() {
+		t.Errorf("noise dated %v, want %v", nz.LastAt, at)
 	}
 }
 

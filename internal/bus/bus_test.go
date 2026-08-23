@@ -27,6 +27,18 @@ func TestFanOutAndDropAccounting(t *testing.T) {
 	}
 }
 
+func TestSubscribeClampsDegenerateBuffers(t *testing.T) {
+	b := New()
+	for _, buffer := range []int{0, -1} {
+		s := b.Subscribe(buffer) // must not panic, must hold one event
+		b.Publish(FrameHeard{Relay: "r"})
+		if got := len(s.C); got != 1 {
+			t.Errorf("Subscribe(%d) buffered %d events, want 1", buffer, got)
+		}
+		s.Close()
+	}
+}
+
 func TestCloseUnregisters(t *testing.T) {
 	b := New()
 	s := b.Subscribe(1)

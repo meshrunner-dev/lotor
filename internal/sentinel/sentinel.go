@@ -71,6 +71,12 @@ func (s *Sentinel) FrameCount(ctx context.Context) (int, error) {
 	return s.store.FrameCount(ctx)
 }
 
+// Noise reports each relay's corrupt receptions — traffic the radio
+// heard but could not decode. A jammed site shows here first.
+func (s *Sentinel) Noise(ctx context.Context) ([]Noise, error) {
+	return s.store.Noise(ctx)
+}
+
 // Journal reports where the archive lives and how long it reaches.
 func (s *Sentinel) Journal() (path string, retention time.Duration) {
 	return s.journalPath, s.retention
@@ -148,8 +154,10 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 			Verdict: e.Verdict, DuplicateOf: e.DuplicateOf,
 			Node: e.Node, PubKey: e.PubKey, Detail: e.Detail,
 		})
+	case bus.FrameCorrupt:
+		err = s.store.recordCorrupt(ctx, e.At, e.Relay, e.Err)
 	case bus.RelayState:
-		err = s.store.insertRelayState(ctx, time.Now(), e.Relay, e.State, e.Err)
+		err = s.store.insertRelayState(ctx, e.At, e.Relay, e.State, e.Err)
 	default:
 		return
 	}

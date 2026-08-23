@@ -43,6 +43,12 @@ CREATE TABLE IF NOT EXISTS relay_states (
 	err   TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS relay_states_at ON relay_states(at_ms);
+CREATE TABLE IF NOT EXISTS noise (
+	relay      TEXT PRIMARY KEY,
+	count      INTEGER NOT NULL DEFAULT 0,
+	last_at_ms INTEGER NOT NULL,
+	last_err   TEXT NOT NULL DEFAULT ''
+);
 `
 
 // Frame is one journalled reception, judgement included once it lands.
@@ -178,6 +184,49 @@ func (s *store) applyJudgement(ctx context.Context, txn string, relay string, f 
 		return errJudgementOrphan
 	}
 	return nil
+}
+
+// recordCorrupt counts a corrupt reception. One aggregate row per
+// relay: a noise storm publishes thousands of these, and the archive's
+// job is to make the storm visible, not to spend the journal on it.
+func (s *store) recordCorrupt(ctx context.Context, at time.Time, relay, errText string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO noise (relay, count, last_at_ms, last_err) VALUES (?, 1, ?, ?)
+		 ON CONFLICT(relay) DO UPDATE SET
+		   count = count + 1, last_at_ms = excluded.last_at_ms,
+		   last_err = excluded.last_err`,
+		relay, at.UnixMilli(), errText,
+	)
+	return err
+}
+
+// Noise is one relay's corrupt-reception tally.
+type Noise struct {
+	Relay   string
+	Count   int
+	LastAt  time.Time
+	LastErr string
+}
+
+// Noise lists each relay's tally, most recently noisy first.
+func (s *store) Noise(ctx context.Context) ([]Noise, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT relay, count, last_at_ms, last_err FROM noise ORDER BY last_at_ms DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Noise
+	for rows.Next() {
+		var n Noise
+		var lastMS int64
+		if err := rows.Scan(&n.Relay, &n.Count, &lastMS, &n.LastErr); err != nil {
+			return nil, err
+		}
+		n.LastAt = time.UnixMilli(lastMS)
+		out = append(out, n)
+	}
+	return out, rows.Err()
 }
 
 func (s *store) insertRelayState(ctx context.Context, at time.Time, relay, state, errText string) error {

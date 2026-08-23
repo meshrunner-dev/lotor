@@ -42,12 +42,17 @@ type FrameJudged struct {
 // site's health.
 type FrameCorrupt struct {
 	Relay string
+	At    time.Time
 	Err   string
 }
 
-// RelayState is published on every relay lifecycle transition.
+// RelayState is published on every relay lifecycle transition. At is
+// the transition time as the producer saw it: a consumer may dequeue
+// long after — the shutdown drain by design does — and stamping at
+// consumption would mis-date the archive.
 type RelayState struct {
 	Relay string
+	At    time.Time
 	State string
 	Err   string
 }

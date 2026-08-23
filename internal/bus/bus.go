@@ -35,8 +35,12 @@ func New() *Bus {
 }
 
 // Subscribe registers a subscriber with the given channel capacity.
+// Capacities below 1 are raised to 1: an unbuffered subscription only
+// receives when its consumer is already parked in a receive, which in
+// practice loses nearly everything — a degenerate mode nothing should
+// mean, and a negative capacity would panic in the daemon's spine.
 func (b *Bus) Subscribe(buffer int) *Subscription {
-	c := make(chan Event, buffer)
+	c := make(chan Event, max(1, buffer))
 	s := &Subscription{C: c, c: c, bus: b}
 	b.mu.Lock()
 	b.subs[s] = struct{}{}
@@ -46,6 +50,13 @@ func (b *Bus) Subscribe(buffer int) *Subscription {
 
 // Publish delivers the event to every subscriber that has room, and
 // counts a drop for each one that does not.
+//
+// Ordering contract: events published from one goroutine reach each
+// subscriber in publish order — minus the dropped ones, so a consumer
+// may see gaps but never reordering from a single producer. Consumers
+// that correlate events (the journal pairs a frame's heard and judged)
+// rely on their producer publishing both from the same goroutine.
+// Across producers, and across subscribers, no order is promised.
 func (b *Bus) Publish(ev Event) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
