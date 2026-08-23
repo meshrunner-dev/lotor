@@ -58,17 +58,40 @@ type Sentinel struct {
 // observation archive should.
 const DefaultRetention = 30 * 24 * time.Hour
 
-// CLI configures the line-based operator interface. Absent means no
-// listener at all, the same optionality rule as the sentinel.
+// CLI configures the line-based operator interface. The block's
+// absence disables the network listener — the optionality rule — but
+// not the local console socket, which is a base function with its own
+// opt-out below.
 type CLI struct {
 	// Listen is the TCP address; loopback by default — the transport
-	// is plaintext and v1 is read-only.
+	// is plaintext, authenticates nothing, and grants read-only.
 	Listen string `yaml:"listen"`
+	// Socket is the local admin console's unix socket path. The OS's
+	// file permissions are its whole authentication: whoever may open
+	// it is admin. Unset means the default path; explicitly empty
+	// disables it.
+	Socket *string `yaml:"socket"`
 }
 
 // DefaultCLIListen is where the CLI listens when the block is present
 // but silent on the address.
 const DefaultCLIListen = "127.0.0.1:2323"
+
+// DefaultConsoleSocket is where the local admin console listens.
+const DefaultConsoleSocket = "/run/lotor/console.sock"
+
+// ConsoleSocket resolves the local console's socket path; empty means
+// disabled. The default holds even without a cli block — the local
+// console is a base function, the network listener is the opt-in.
+// explicit reports whether the configuration chose the path itself: a
+// host that cannot serve the default degrades with a warning, but an
+// explicit path is a promise the daemon must keep or fail.
+func (f *File) ConsoleSocket() (path string, explicit bool) {
+	if f.CLI == nil || f.CLI.Socket == nil {
+		return DefaultConsoleSocket, false
+	}
+	return *f.CLI.Socket, true
+}
 
 // File is the top-level configuration.
 type File struct {

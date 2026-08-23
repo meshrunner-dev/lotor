@@ -176,7 +176,14 @@ says so at startup — traceability includes configuration.
   data feed will not. The whole web server is a build-time option: light builds omit
   it and embed no UI filesystem at all — a headless binary for hosts
   where flash and RAM are counted.
-- **CLI over telnet** for now (SSH considered later).
+- **CLI over telnet** for now (SSH considered later), plus an always-on
+  local console over a unix socket. Privilege follows the transport:
+  the socket is **admin** because the OS's file permissions already
+  proved privileged access; network transports **authenticate** — SSH
+  when it comes, and today's unauthenticated telnet is read-only.
+  Read-only and admin are indistinguishable while no command writes;
+  the distinction exists so the first admin command lands on a
+  contract, not a retrofit.
 
 ## Build profiles
 

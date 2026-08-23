@@ -225,3 +225,26 @@ func TestCatalogCannotHijackCustom(t *testing.T) {
 		t.Error("a preset named custom was accepted")
 	}
 }
+
+func TestConsoleSocketResolution(t *testing.T) {
+	// No cli block: the local console is a base function, on by default.
+	f := &File{}
+	if path, explicit := f.ConsoleSocket(); path != DefaultConsoleSocket || explicit {
+		t.Errorf("absent block resolves to %q explicit=%v", path, explicit)
+	}
+	// A bare block keeps the default too.
+	f.CLI = &CLI{}
+	if path, _ := f.ConsoleSocket(); path != DefaultConsoleSocket {
+		t.Errorf("bare block resolves to %q", path)
+	}
+	// Explicitly empty disables; a set path is a kept promise.
+	off, custom := "", "/tmp/x.sock"
+	f.CLI.Socket = &off
+	if path, explicit := f.ConsoleSocket(); path != "" || !explicit {
+		t.Errorf("empty socket resolves to %q explicit=%v", path, explicit)
+	}
+	f.CLI.Socket = &custom
+	if path, explicit := f.ConsoleSocket(); path != custom || !explicit {
+		t.Errorf("custom socket resolves to %q explicit=%v", path, explicit)
+	}
+}

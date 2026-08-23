@@ -123,6 +123,17 @@ func TestHelpKnowsEachCommand(t *testing.T) {
 	}
 }
 
+func TestBannerNamesThePrivilege(t *testing.T) {
+	deps := testDeps(t)
+	if out := run(t, deps, "status"); !strings.Contains(out, "read-only console") {
+		t.Errorf("default privilege should read as read-only:\n%s", out)
+	}
+	deps.Privilege = Admin
+	if out := run(t, deps, "status"); !strings.Contains(out, "admin console") {
+		t.Errorf("admin session not announced:\n%s", out)
+	}
+}
+
 func TestCommandTableIsCoherent(t *testing.T) {
 	// The table is the single source of truth; every entry must be
 	// runnable and answer --help, aliases included.

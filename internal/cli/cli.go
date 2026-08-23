@@ -33,6 +33,20 @@ const (
 	cmdQuit    = "quit"
 )
 
+// Privilege is what a session may do; the transport determines it.
+// The local socket is admin because the OS already proved privileged
+// access with its file permissions; network transports authenticate —
+// and today's telnet is read-only. The two are indistinguishable for
+// now: no command writes yet. The distinction is plumbed so the first
+// admin command lands on a contract, not a retrofit.
+type Privilege string
+
+// The privilege levels sessions run at.
+const (
+	ReadOnly Privilege = "read-only"
+	Admin    Privilege = "admin"
+)
+
 // RelayInfo is what the CLI knows about one relay.
 type RelayInfo struct {
 	Name     string
@@ -67,6 +81,9 @@ type Deps struct {
 	Radios   []RadioInfo
 	Sentinel *sentinel.Sentinel
 	Bus      *bus.Bus
+	// Privilege is the session's rights, set per listener by the
+	// transport; empty reads as ReadOnly.
+	Privilege Privilege
 	// Traces holds the resolved-config provenance recorded at
 	// assembly, keyed "radio <name>" and "relay <name>".
 	Traces map[string][]config.Trace
@@ -130,7 +147,7 @@ func ServeEdited(ctx context.Context, rw io.ReadWriter, deps Deps) {
 // the output it follows.
 func repl(ctx context.Context, out io.Writer, deps Deps, lines <-chan string) {
 	s := &session{deps: deps, lines: lines, out: out}
-	banner(s.out, deps.Version)
+	banner(s.out, deps.Version, deps.Privilege)
 	for ctx.Err() == nil {
 		fmt.Fprint(s.out, "> ")
 		select {

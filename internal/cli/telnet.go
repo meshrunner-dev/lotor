@@ -57,8 +57,11 @@ func ServeListener(ctx context.Context, ln net.Listener, deps Deps) error {
 			// Character-at-a-time with the daemon echoing: real telnet
 			// clients honour it, the console client raw-modes its
 			// terminal, and scripts through pipes simply see their
-			// commands echoed into the transcript.
-			_, _ = conn.Write([]byte{iacByte, iacWill, optEcho, iacByte, iacWill, optSGA})
+			// commands echoed into the transcript. The local socket
+			// carries no telnet peer — nothing to negotiate with.
+			if _, unix := conn.(*net.UnixConn); !unix {
+				_, _ = conn.Write([]byte{iacByte, iacWill, optEcho, iacByte, iacWill, optSGA})
+			}
 			ServeEdited(ctx, struct {
 				io.Reader
 				io.Writer

@@ -119,11 +119,21 @@ func main() {
 // daemon closing (quit) ends the process immediately — no
 // netcat-variant guesswork.
 func console(addr string) error {
-	if addr == "" {
-		addr = config.DefaultCLIListen
+	network := "tcp"
+	switch {
+	case addr == "":
+		// The local admin socket first — the OS's permissions are the
+		// authentication; a daemon without one falls back to telnet.
+		if _, err := os.Stat(config.DefaultConsoleSocket); err == nil {
+			network, addr = "unix", config.DefaultConsoleSocket
+		} else {
+			addr = config.DefaultCLIListen
+		}
+	case strings.Contains(addr, "/"):
+		network = "unix"
 	}
 	var d net.Dialer
-	conn, err := d.DialContext(context.Background(), "tcp", addr)
+	conn, err := d.DialContext(context.Background(), network, addr)
 	if err != nil {
 		return err
 	}
@@ -142,7 +152,7 @@ func console(addr string) error {
 		// keys, latin-1 pastes) must travel doubled, or the daemon's
 		// stripper eats the keystroke behind it.
 		_, _ = io.Copy(cli.EscapeIAC(conn), os.Stdin)
-		if t, ok := conn.(*net.TCPConn); ok {
+		if t, ok := conn.(interface{ CloseWrite() error }); ok {
 			_ = t.CloseWrite() // stdin EOF: let the session finish its goodbye
 		}
 	}()
@@ -257,13 +267,65 @@ func startConsumers(ctx, journalCtx context.Context, f *config.File, deps *cli.D
 	if f.CLI != nil {
 		addr := f.CLI.Listen
 		d := *deps
+		d.Privilege = cli.ReadOnly
 		producers.Go(func() {
 			if err := cli.ServeTelnet(ctx, addr, d, log.Named("cli")); err != nil {
 				log.Error("cli listener failed", zap.Error(err))
 			}
 		})
 	}
+	return startConsole(ctx, f, deps, producers, log)
+}
+
+// startConsole opens the local admin console socket: the OS's file
+// permissions authenticate, so whoever may open it is admin.
+func startConsole(ctx context.Context, f *config.File, deps *cli.Deps,
+	producers *sync.WaitGroup, log *zap.Logger,
+) error {
+	path, explicit := f.ConsoleSocket()
+	if path == "" {
+		return nil
+	}
+	ln, err := listenConsole(ctx, path)
+	if err != nil {
+		// A host that cannot serve the always-on default (unwritable
+		// /run) degrades loudly; an explicit path is a promise.
+		if explicit {
+			return fmt.Errorf("console socket: %w", err)
+		}
+		log.Warn("console socket unavailable", zap.String("socket", path), zap.Error(err))
+		return nil
+	}
+	log.Info("console listening", zap.String("socket", path))
+	d := *deps
+	d.Privilege = cli.Admin
+	producers.Go(func() {
+		if err := cli.ServeListener(ctx, ln, d); err != nil {
+			log.Error("console listener failed", zap.Error(err))
+		}
+	})
 	return nil
+}
+
+// listenConsole binds the unix socket, permissions first: the mode is
+// the console's whole authentication.
+func listenConsole(ctx context.Context, path string) (net.Listener, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, err
+	}
+	// The instance lock guarantees no live daemon shares this config:
+	// whatever socket sits at the path is a previous life's leftover.
+	_ = os.Remove(path)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = ln.Close()
+		return nil, err
+	}
+	return ln, nil
 }
 
 // assemble resolves one relay's layered configurations — hardware
