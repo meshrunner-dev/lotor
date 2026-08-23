@@ -256,21 +256,46 @@ func noArgs(cmd string, rest []string) error {
 	return nil
 }
 
-// usages holds each command's help lines: help prints them all,
-// helpFor and --help one command's.
-var usages = [][2]string{
-	{"status", "status                          daemon overview"},
-	{"relay", "relay list | relay show <name>  relays and their detail"},
-	{"radio", "radio list | radio show <name>  radios and their envelope"},
-	{"config", "config show relay|radio <name>  effective config with provenance"},
-	{cmdFrames, "frames [--last N] [--relay R] [--type T] [--verdict V] [--json]"},
-	{cmdFrames, "frames watch [--type T]         live feed (enter stops)"},
-	{"txn", "txn <prefix>                    one transaction and its chain"},
-	{"nodes", "nodes [--json]                  the directory the mesh writes about itself"},
-	{"noise", "noise [--relay R] [--last 24h|7d] [--json]  noise-floor history, consolidated"},
-	{"sentinel", "sentinel                        journal status"},
-	{"help", "help [command]                  all commands, or one command's usage"},
-	{cmdQuit, cmdQuit},
+// usage is one command's help: the terse lines the listing shows —
+// positional shapes and purpose, no flags — and the full forms that
+// `help <command>` and --help detail.
+type usage struct {
+	cmd     string
+	summary []string
+	full    []string
+}
+
+var usages = []usage{
+	{cmd: "status", summary: []string{
+		"status                          daemon overview"}},
+	{cmd: scopeRelay, summary: []string{
+		"relay list | relay show <name>  relays and their detail"}},
+	{cmd: scopeRadio, summary: []string{
+		"radio list | radio show <name>  radios and their envelope"}},
+	{cmd: "config", summary: []string{
+		"config show relay|radio <name>  effective config with provenance"}},
+	{cmd: cmdFrames,
+		summary: []string{
+			"frames                          journalled receptions",
+			"frames watch                    live feed (enter stops)"},
+		full: []string{
+			"frames [--last N] [--relay R] [--type T] [--verdict V] [--json]",
+			"frames watch [--relay R] [--type T] [--verdict V] [--json]"}},
+	{cmd: "txn", summary: []string{
+		"txn <prefix>                    one transaction and its chain"}},
+	{cmd: "nodes",
+		summary: []string{
+			"nodes                           the directory the mesh writes about itself"},
+		full: []string{"nodes [--json]"}},
+	{cmd: "noise",
+		summary: []string{
+			"noise                           noise-floor history, consolidated"},
+		full: []string{"noise [--relay R] [--last 24h|7d] [--json]"}},
+	{cmd: "sentinel", summary: []string{
+		"sentinel                        journal status"}},
+	{cmd: "help", summary: []string{
+		"help [command]                  all commands, or one command's usage"}},
+	{cmd: cmdQuit, summary: []string{cmdQuit}},
 }
 
 func (s *session) help(args []string) error {
@@ -278,25 +303,30 @@ func (s *session) help(args []string) error {
 		return s.helpFor(args[0])
 	}
 	for _, u := range usages {
-		fmt.Fprint(s.out, u[1]+"\r\n")
+		for _, l := range u.summary {
+			fmt.Fprint(s.out, l+"\r\n")
+		}
 	}
 	return nil
 }
 
-// helpFor prints one command's usage; asking about a command that does
-// not exist is the same mistake as running one.
+// helpFor prints one command's full usage; asking about a command that
+// does not exist is the same mistake as running one.
 func (s *session) helpFor(cmd string) error {
-	found := false
 	for _, u := range usages {
-		if u[0] == cmd {
-			fmt.Fprint(s.out, u[1]+"\r\n")
-			found = true
+		if u.cmd != cmd {
+			continue
 		}
+		lines := u.full
+		if len(lines) == 0 {
+			lines = u.summary
+		}
+		for _, l := range lines {
+			fmt.Fprint(s.out, l+"\r\n")
+		}
+		return nil
 	}
-	if !found {
-		return fmt.Errorf("unknown command %q — \"help\" lists them", cmd)
-	}
-	return nil
+	return fmt.Errorf("unknown command %q — \"help\" lists them", cmd)
 }
 
 func (s *session) findRelay(name string) (RelayInfo, error) {

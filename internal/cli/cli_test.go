@@ -92,10 +92,14 @@ func seed(t *testing.T, deps Deps) (orig, dup txn.ID) {
 func TestStatusAndHelp(t *testing.T) {
 	out := run(t, testDeps(t), "status", "help")
 	for _, want := range []string{"lotor test", "meshcore-868", "running", "869.618 MHz",
-		"journalling", "config show"} {
+		"journalling", "config show", "frames watch"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("transcript lacks %q:\n%s", want, out)
 		}
+	}
+	// The listing is a table of contents: flags live in --help.
+	if strings.Contains(out, "--") {
+		t.Errorf("top-level help leaks flags:\n%s", out)
 	}
 }
 
