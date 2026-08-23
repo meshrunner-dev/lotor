@@ -129,8 +129,7 @@ func ServeEdited(ctx context.Context, rw io.ReadWriter, deps Deps) {
 // the output it follows.
 func repl(ctx context.Context, out io.Writer, deps Deps, lines <-chan string) {
 	s := &session{deps: deps, lines: lines, out: out}
-	fmt.Fprintf(s.out, "lotor %s — read-only. \"help\" lists commands, \"quit\" leaves.\r\n",
-		deps.Version)
+	banner(s.out, deps.Version)
 	for ctx.Err() == nil {
 		fmt.Fprint(s.out, "> ")
 		select {
