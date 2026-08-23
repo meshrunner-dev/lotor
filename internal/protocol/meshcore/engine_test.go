@@ -68,7 +68,7 @@ func drainJudged(t *testing.T, sub *bus.Subscription) []bus.FrameJudged {
 func TestVerdicts(t *testing.T) {
 	e, sub := testEngine(t)
 
-	e.judge(frame(floodAdvert))
+	e.judge(frame(floodAdvert)) // raw bytes: no valid signature
 	e.judge(frame(zeroHopCtl))
 	e.judge(frame(directPath))
 	e.judge(frame(transportFlood))
@@ -77,8 +77,8 @@ func TestVerdicts(t *testing.T) {
 
 	judged := drainJudged(t, sub)
 	want := []string{
-		"would-relay-flood", "heard-zero-hop", "would-relay-direct",
-		"would-relay-flood", "would-relay-direct", "malformed",
+		"would-drop-invalid-advert", "heard-zero-hop", "direct-not-addressed",
+		"would-relay-flood", "direct-not-addressed", "malformed",
 	}
 	if len(judged) != len(want) {
 		t.Fatalf("judged %d frames, want %d", len(judged), len(want))
@@ -113,9 +113,10 @@ func TestSeenTableExpires(t *testing.T) {
 	e, sub := testEngine(t)
 	e.seen = newSeenTable(time.Millisecond, 8)
 
-	e.judge(frame(floodAdvert))
+	grpTxt := []byte{0x01 | 0x05<<2, 0x00, 0xDD, 0xEE}
+	e.judge(frame(grpTxt))
 	time.Sleep(5 * time.Millisecond)
-	e.judge(frame(floodAdvert))
+	e.judge(frame(grpTxt))
 
 	judged := drainJudged(t, sub)
 	if judged[1].Verdict != "would-relay-flood" {

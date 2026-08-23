@@ -57,11 +57,10 @@ func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (p
 	if p.FrequencyHz == 0 {
 		return nil, errors.New("meshcore params: frequency_hz is required")
 	}
-	if p.DedupTTL == 0 {
-		p.DedupTTL = 60 * time.Second
-	}
+	// Zero values give the reference's dedup: a fixed 160-entry ring,
+	// no time bound. dedup_ttl adds an operator time bound on top.
 	if p.DedupEntries == 0 {
-		p.DedupEntries = 512
+		p.DedupEntries = referenceCapacity
 	}
 	return &engine{
 		relay: relayName,
@@ -109,55 +108,42 @@ func (e *engine) judge(frame radio.Frame) {
 
 	pkt, err := meshcore.ParsePacket(frame.Payload)
 	if err != nil {
-		log.Info("frame judged", zap.String("verdict", "malformed"), zap.Error(err))
-		e.bus.Publish(bus.FrameJudged{Relay: e.relay, Txn: id, Verdict: "malformed"})
+		log.Info("frame judged", zap.String("verdict", verdictMalformed), zap.Error(err))
+		e.bus.Publish(bus.FrameJudged{Relay: e.relay, Txn: id, Verdict: verdictMalformed})
 		return
 	}
+	// PathLen is the hop count the path descriptor declares, not its
+	// byte length: hashes are 1-4 bytes wide.
+	hops := pkt.PathHashCount()
 	log = log.With(
 		zap.Stringer("type", pkt.PayloadType()),
 		zap.Stringer("route", pkt.Route()),
-		zap.Int("path_len", len(pkt.Path)),
+		zap.Int("hops", hops),
 	)
 
 	judged := bus.FrameJudged{
 		Relay: e.relay, Txn: id,
 		Type:    pkt.PayloadType().String(),
 		Route:   pkt.Route().String(),
-		PathLen: len(pkt.Path),
+		PathLen: hops,
 	}
-	log = log.With(describe(pkt, &judged)...)
+	fields, advertOK := describe(pkt, &judged)
+	log = log.With(fields...)
 	if first, dup := e.seen.witness(pkt.Hash(), id, frame.At); dup {
 		log.Info("frame judged",
-			zap.String("verdict", "duplicate"),
+			zap.String("verdict", verdictDuplicate),
 			zap.String("duplicate_of", first.Short()),
 		)
-		judged.Verdict, judged.DuplicateOf = "duplicate", first.Short()
+		judged.Verdict, judged.DuplicateOf = verdictDuplicate, first.Short()
 		e.bus.Publish(judged)
 		return
 	}
 
-	judged.Verdict = e.verdict(pkt)
-	log.Info("frame judged", zap.String("verdict", judged.Verdict))
-	e.bus.Publish(judged)
-}
-
-// verdict states what a transmitting relay would do with the packet.
-// The vocabulary is the dry run's contract: when transmit arrives,
-// each "would-…" becomes an action with the same name.
-func (e *engine) verdict(pkt *meshcore.Packet) string {
-	// Transport variants are their base route with transport codes on
-	// top; the library's IsRoute* predicates carry the reference
-	// semantics, so the verdict never re-derives them.
-	switch {
-	case pkt.IsRouteFlood():
-		return "would-relay-flood"
-	case pkt.IsRouteDirect():
-		if len(pkt.Path) == 0 {
-			// Zero-hop: addressed to whoever hears it, never relayed.
-			return "heard-zero-hop"
-		}
-		return "would-relay-direct"
-	default:
-		return "ignored"
+	verdict, why := e.verdict(pkt, advertOK)
+	judged.Verdict = verdict
+	if why != "" && judged.Detail == "" {
+		judged.Detail = why
 	}
+	log.Info("frame judged", zap.String("verdict", verdict), zap.String("why", why))
+	e.bus.Publish(judged)
 }
