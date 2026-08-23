@@ -115,11 +115,43 @@ func TestHelpKnowsEachCommand(t *testing.T) {
 	if !strings.Contains(out, `unknown argument "help"`) {
 		t.Errorf("stray positional swallowed:\n%s", out)
 	}
-	if !strings.Contains(out, "status takes no arguments") {
+	if !strings.Contains(out, `unknown argument "extra" — try status --help`) {
 		t.Errorf("status accepted stray arguments:\n%s", out)
 	}
 	if bad := run(t, deps, "help nope"); !strings.Contains(bad, `unknown command "nope"`) {
 		t.Errorf("help accepted an unknown command:\n%s", bad)
+	}
+}
+
+func TestCommandTableIsCoherent(t *testing.T) {
+	// The table is the single source of truth; every entry must be
+	// runnable and answer --help, aliases included.
+	deps := testDeps(t)
+	for _, c := range commands {
+		if c.run == nil {
+			t.Errorf("command %q has no implementation", c.name)
+		}
+		if len(c.forms) == 0 {
+			t.Errorf("command %q has no help forms", c.name)
+		}
+		out := run(t, deps, c.name+" --help")
+		if strings.Contains(out, "error:") || !strings.Contains(out, c.name) {
+			t.Errorf("%s --help misbehaves:\n%s", c.name, out)
+		}
+	}
+}
+
+func TestPerCommandFlagsAreEnforced(t *testing.T) {
+	// The flag grammar is per command now: a flag another command owns
+	// is an error here, never silently swallowed.
+	out := run(t, testDeps(t), "nodes --last 5", "noise --type ADVERT", "exit")
+	if !strings.Contains(out, "unknown flag --last — try nodes --help") ||
+		!strings.Contains(out, "unknown flag --type — try noise --help") {
+		t.Errorf("foreign flags swallowed:\n%s", out)
+	}
+	// exit is quit's alias, table-driven like everything else.
+	if !strings.Contains(out, "bye.") {
+		t.Errorf("exit alias broken:\n%s", out)
 	}
 }
 

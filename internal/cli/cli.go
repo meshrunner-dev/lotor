@@ -28,6 +28,7 @@ const (
 	scopeRadio = "radio"
 	verbShow   = "show"
 	optOn      = "true"
+	optJSON    = "json"
 	cmdFrames  = "frames"
 	cmdQuit    = "quit"
 )
@@ -146,18 +147,11 @@ func repl(ctx context.Context, out io.Writer, deps Deps, lines <-chan string) {
 	}
 }
 
-// command runs one line; it reports quit through s.quitting.
+// command runs one line; quit reports itself through s.quitting.
 func (s *session) command(ctx context.Context, line string) {
-	args := splitArgs(line)
-	if len(args) == 0 {
-		return
+	if args := splitArgs(line); len(args) > 0 {
+		s.dispatch(ctx, args)
 	}
-	if args[0] == cmdQuit || args[0] == "exit" {
-		fmt.Fprint(s.out, "bye.\r\n")
-		s.quitting = true
-		return
-	}
-	s.dispatch(ctx, args)
 }
 
 // readLines feeds trimmed lines until EOF, an oversized line, or the
@@ -199,133 +193,26 @@ func readBounded(br *bufio.Reader) (string, error) {
 	}
 }
 
+// dispatch is pure mechanics: everything it enforces — the command
+// set, flag admissibility, positional arity, both help levels — comes
+// from the commands table.
 func (s *session) dispatch(ctx context.Context, args []string) {
-	cmd, rest := args[0], args[1:]
+	name, rest := args[0], args[1:]
 	var err error
-	if slices.Contains(rest, "--help") || slices.Contains(rest, "-h") {
-		// Every command answers --help with its own usage.
-		err = s.helpFor(cmd)
-	} else {
-		err = s.run(ctx, cmd, rest)
+	switch c := lookup(name); {
+	case c == nil:
+		err = unknownCommand(name)
+	case slices.Contains(rest, "--help") || slices.Contains(rest, "-h"):
+		err = s.helpFor(name)
+	default:
+		var in input
+		if in, err = c.parse(rest); err == nil {
+			err = c.run(s, ctx, in)
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(s.out, "error: %s\r\n", err)
 	}
-}
-
-func (s *session) run(ctx context.Context, cmd string, rest []string) error {
-	switch cmd {
-	case "help":
-		return s.help(rest)
-	case "status":
-		if err := noArgs(cmd, rest); err != nil {
-			return err
-		}
-		return s.status(ctx)
-	case scopeRelay:
-		return s.relay(ctx, rest)
-	case scopeRadio:
-		return s.radio(rest)
-	case "config":
-		return s.config(rest)
-	case cmdFrames:
-		return s.frames(ctx, rest)
-	case "txn":
-		return s.txn(ctx, rest)
-	case "nodes":
-		return s.nodes(ctx, rest)
-	case "noise":
-		return s.noise(ctx, rest)
-	case "sentinel":
-		if err := noArgs(cmd, rest); err != nil {
-			return err
-		}
-		return s.sentinelStatus(ctx)
-	default:
-		return fmt.Errorf("unknown command %q — \"help\" lists them", cmd)
-	}
-}
-
-// noArgs keeps argument-less commands honest: a stray word is a
-// mistake to report, never to swallow.
-func noArgs(cmd string, rest []string) error {
-	if len(rest) > 0 {
-		return fmt.Errorf("%s takes no arguments", cmd)
-	}
-	return nil
-}
-
-// usage is one command's help: the terse lines the listing shows —
-// positional shapes and purpose, no flags — and the full forms that
-// `help <command>` and --help detail.
-type usage struct {
-	cmd     string
-	summary []string
-	full    []string
-}
-
-var usages = []usage{
-	{cmd: "status", summary: []string{
-		"status                          daemon overview"}},
-	{cmd: scopeRelay, summary: []string{
-		"relay list | relay show <name>  relays and their detail"}},
-	{cmd: scopeRadio, summary: []string{
-		"radio list | radio show <name>  radios and their envelope"}},
-	{cmd: "config", summary: []string{
-		"config show relay|radio <name>  effective config with provenance"}},
-	{cmd: cmdFrames,
-		summary: []string{
-			"frames                          journalled receptions",
-			"frames watch                    live feed (enter stops)"},
-		full: []string{
-			"frames [--last N] [--relay R] [--type T] [--verdict V] [--json]",
-			"frames watch [--relay R] [--type T] [--verdict V] [--json]"}},
-	{cmd: "txn", summary: []string{
-		"txn <prefix>                    one transaction and its chain"}},
-	{cmd: "nodes",
-		summary: []string{
-			"nodes                           the directory the mesh writes about itself"},
-		full: []string{"nodes [--json]"}},
-	{cmd: "noise",
-		summary: []string{
-			"noise                           noise-floor history, consolidated"},
-		full: []string{"noise [--relay R] [--last 24h|7d] [--json]"}},
-	{cmd: "sentinel", summary: []string{
-		"sentinel                        journal status"}},
-	{cmd: "help", summary: []string{
-		"help [command]                  all commands, or one command's usage"}},
-	{cmd: cmdQuit, summary: []string{cmdQuit}},
-}
-
-func (s *session) help(args []string) error {
-	if len(args) > 0 {
-		return s.helpFor(args[0])
-	}
-	for _, u := range usages {
-		for _, l := range u.summary {
-			fmt.Fprint(s.out, l+"\r\n")
-		}
-	}
-	return nil
-}
-
-// helpFor prints one command's full usage; asking about a command that
-// does not exist is the same mistake as running one.
-func (s *session) helpFor(cmd string) error {
-	for _, u := range usages {
-		if u.cmd != cmd {
-			continue
-		}
-		lines := u.full
-		if len(lines) == 0 {
-			lines = u.summary
-		}
-		for _, l := range lines {
-			fmt.Fprint(s.out, l+"\r\n")
-		}
-		return nil
-	}
-	return fmt.Errorf("unknown command %q — \"help\" lists them", cmd)
 }
 
 func (s *session) findRelay(name string) (RelayInfo, error) {
@@ -345,32 +232,6 @@ func (s *session) needSentinel() (*sentinel.Sentinel, error) {
 		return nil, errors.New("no sentinel configured — the journal commands need one")
 	}
 	return s.deps.Sentinel, nil
-}
-
-// flags splits trailing --key value / --key options from positionals.
-func flags(args []string) (pos []string, opts map[string]string, err error) {
-	opts = map[string]string{}
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if !strings.HasPrefix(a, "--") {
-			pos = append(pos, a)
-			continue
-		}
-		key := strings.TrimPrefix(a, "--")
-		switch key {
-		case "json":
-			opts[key] = optOn
-		case "last", scopeRelay, "type", "verdict":
-			if i+1 >= len(args) {
-				return nil, nil, fmt.Errorf("--%s wants a value", key)
-			}
-			i++
-			opts[key] = args[i]
-		default:
-			return nil, nil, fmt.Errorf("unknown flag --%s", key)
-		}
-	}
-	return pos, opts, nil
 }
 
 // splitArgs tokenises a command line, honouring double quotes so

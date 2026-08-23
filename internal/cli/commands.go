@@ -16,7 +16,7 @@ import (
 	"meshrunner.dev/lotor/internal/sentinel"
 )
 
-func (s *session) status(ctx context.Context) error {
+func (s *session) status(ctx context.Context, _ input) error {
 	tb := &table{}
 	tb.row("daemon", "up "+uptime(s.deps.Started), "lotor "+s.deps.Version)
 	for _, r := range s.deps.Relays {
@@ -41,7 +41,8 @@ func (s *session) status(ctx context.Context) error {
 	return tb.flush(s.out)
 }
 
-func (s *session) relay(ctx context.Context, args []string) error {
+func (s *session) relay(ctx context.Context, in input) error {
+	args := in.pos
 	if len(args) == 0 || args[0] == "list" {
 		tb := &table{}
 		for _, r := range s.deps.Relays {
@@ -114,7 +115,8 @@ func (s *session) relayJournal(ctx context.Context, tb *table, r RelayInfo) {
 	}
 }
 
-func (s *session) radio(args []string) error {
+func (s *session) radio(_ context.Context, in input) error {
+	args := in.pos
 	if len(args) == 0 || args[0] == "list" {
 		tb := &table{}
 		for _, r := range s.deps.Radios {
@@ -168,7 +170,8 @@ func envelopeText(e radio.Envelope) string {
 	return strings.Join(parts, ", ")
 }
 
-func (s *session) config(args []string) error {
+func (s *session) config(_ context.Context, in input) error {
+	args := in.pos
 	if len(args) < 3 || args[0] != verbShow || (args[1] != scopeRelay && args[1] != scopeRadio) {
 		return errors.New("usage: config show relay|radio <name>")
 	}
@@ -193,19 +196,13 @@ func (s *session) showTraces(key string) error {
 	return tb.flush(s.out)
 }
 
-func (s *session) frames(ctx context.Context, args []string) error {
-	pos, opts, err := flags(args)
-	if err != nil {
-		return err
-	}
-	if len(pos) > 0 && pos[0] == "watch" {
-		if len(pos) > 1 {
-			return fmt.Errorf("unknown argument %q — try frames --help", pos[1])
+func (s *session) frames(ctx context.Context, in input) error {
+	pos, opts := in.pos, in.opts
+	if len(pos) > 0 {
+		if pos[0] != "watch" {
+			return fmt.Errorf("unknown argument %q — try frames --help", pos[0])
 		}
 		return s.watch(ctx, opts)
-	}
-	if len(pos) > 0 {
-		return fmt.Errorf("unknown argument %q — try frames --help", pos[0])
 	}
 	sen, err := s.needSentinel()
 	if err != nil {
@@ -234,7 +231,7 @@ func (s *session) frames(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if opts["json"] == optOn {
+	if opts[optJSON] == optOn {
 		return s.printJSON(frames)
 	}
 	if len(frames) == 0 {
@@ -267,7 +264,8 @@ func who(f sentinel.Frame) string {
 	}
 }
 
-func (s *session) txn(ctx context.Context, args []string) error {
+func (s *session) txn(ctx context.Context, in input) error {
+	args := in.pos
 	if len(args) != 1 {
 		return errors.New("usage: txn <prefix>")
 	}
@@ -294,14 +292,8 @@ func (s *session) txn(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (s *session) nodes(ctx context.Context, args []string) error {
-	pos, opts, err := flags(args)
-	if err != nil {
-		return err
-	}
-	if len(pos) > 0 {
-		return fmt.Errorf("unknown argument %q — try nodes --help", pos[0])
-	}
+func (s *session) nodes(ctx context.Context, in input) error {
+	opts := in.opts
 	sen, err := s.needSentinel()
 	if err != nil {
 		return err
@@ -310,7 +302,7 @@ func (s *session) nodes(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if opts["json"] == optOn {
+	if opts[optJSON] == optOn {
 		return s.printJSON(nodes)
 	}
 	tb := &table{}
@@ -323,7 +315,7 @@ func (s *session) nodes(ctx context.Context, args []string) error {
 	return tb.flush(s.out)
 }
 
-func (s *session) sentinelStatus(ctx context.Context) error {
+func (s *session) sentinelStatus(ctx context.Context, _ input) error {
 	sen, err := s.needSentinel()
 	if err != nil {
 		return err
@@ -347,14 +339,8 @@ func (s *session) sentinelStatus(ctx context.Context) error {
 
 // noise shows a relay's noise-floor history: the live value, then the
 // asked window's consolidated buckets, oldest first.
-func (s *session) noise(ctx context.Context, args []string) error {
-	pos, opts, err := flags(args)
-	if err != nil {
-		return err
-	}
-	if len(pos) > 0 {
-		return fmt.Errorf("unknown argument %q — try noise --help", pos[0])
-	}
+func (s *session) noise(ctx context.Context, in input) error {
+	opts := in.opts
 	name := opts[scopeRelay]
 	if name == "" {
 		if len(s.deps.Relays) != 1 {
@@ -380,7 +366,7 @@ func (s *session) noise(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if opts["json"] == optOn {
+	if opts[optJSON] == optOn {
 		return s.printJSON(buckets)
 	}
 	current := "archived — relay not running"
@@ -526,7 +512,7 @@ func (s *session) watchEvent(ev bus.Event, opts map[string]string) error {
 		if !watchMatch(e, opts) {
 			return nil
 		}
-		if opts["json"] == optOn {
+		if opts[optJSON] == optOn {
 			return s.printJSON(e)
 		}
 		_, err := fmt.Fprintf(s.out, "%s\r\n", watchLine(e))
@@ -543,7 +529,7 @@ func (s *session) watchEvent(ev bus.Event, opts map[string]string) error {
 		if v, ok := opts[scopeRelay]; ok && e.Relay != v {
 			return nil
 		}
-		if opts["json"] == optOn {
+		if opts[optJSON] == optOn {
 			return s.printJSON(e)
 		}
 		_, err := fmt.Fprintf(s.out, "corrupt reception — %s\r\n", e.Err)
