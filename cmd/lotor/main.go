@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -129,23 +130,13 @@ func run(configPath, logLevel string) error {
 	}
 
 	b := bus.New()
-	started := time.Now()
-	relays := make([]*relay.Relay, 0, len(f.Relays))
 	deps := cli.Deps{
 		Version: version,
-		Started: started,
+		Started: time.Now(),
 		Bus:     b,
 		Traces:  map[string][]config.Trace{},
 	}
-	for name, rc := range f.Relays {
-		r, info, err := assemble(name, rc, f.Radios[rc.Radio], b, log, deps.Traces)
-		if err != nil {
-			return fmt.Errorf("relay %q: %w", name, err)
-		}
-		relays = append(relays, r)
-		deps.Relays = append(deps.Relays, info)
-	}
-	sort.Slice(deps.Relays, func(i, j int) bool { return deps.Relays[i].Name < deps.Relays[j].Name })
+	relays := buildRelays(f, b, log, &deps)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -182,6 +173,30 @@ func acquireInstanceLock(configPath string) (func(), error) {
 	return single.Acquire(context.Background(), "lotor", abs)
 }
 
+// buildRelays assembles every configured relay. A broken one is a
+// visible casualty, never a dead daemon: it exists, in the error
+// state, with its cause.
+func buildRelays(f *config.File, b *bus.Bus, log *zap.Logger, deps *cli.Deps) []*relay.Relay {
+	relays := make([]*relay.Relay, 0, len(f.Relays))
+	for name, rc := range f.Relays {
+		r, info, err := assemble(name, rc, f.Radios[rc.Radio], b, log, deps)
+		if err != nil {
+			log.Error("relay configuration failed",
+				zap.String("relay", name), zap.Error(err))
+			r = relay.Stillborn(name, err, b, log)
+			info = cli.RelayInfo{
+				Name: name, Protocol: rc.Protocol, Radio: rc.Radio,
+				State: r.State, Err: r.Err,
+			}
+		}
+		relays = append(relays, r)
+		deps.Relays = append(deps.Relays, info)
+	}
+	sort.Slice(deps.Relays, func(i, j int) bool { return deps.Relays[i].Name < deps.Relays[j].Name })
+	sort.Slice(deps.Radios, func(i, j int) bool { return deps.Radios[i].Name < deps.Radios[j].Name })
+	return relays
+}
+
 // startConsumers brings up the optional bus consumers — sentinel and
 // CLI — that the configuration asked for. The sentinel runs on its
 // own context so it drains after every publisher has stopped.
@@ -214,10 +229,11 @@ func startConsumers(ctx, journalCtx context.Context, f *config.File, deps *cli.D
 
 // assemble resolves one relay's layered configurations — hardware
 // against the driver's presets, waveform against the protocol's —
-// and logs every resolved key with its provenance, so a running
-// config is always explainable from the log alone.
+// validates every override scope and the envelope at load time, and
+// logs every resolved key with its provenance, so a running config is
+// always explainable from the log alone.
 func assemble(name string, rc config.Relay, radioSpec config.Radio,
-	b *bus.Bus, log *zap.Logger, traces map[string][]config.Trace,
+	b *bus.Bus, log *zap.Logger, deps *cli.Deps,
 ) (*relay.Relay, cli.RelayInfo, error) {
 	none := cli.RelayInfo{}
 	drv, err := radio.Lookup(radioSpec.Driver)
@@ -237,23 +253,33 @@ func assemble(name string, rc config.Relay, radioSpec config.Radio,
 	if err != nil {
 		return nil, none, err
 	}
-	traces["radio "+rc.Radio] = radioTraces
-	traces["relay "+name] = relayTraces
+	deps.Traces["radio "+rc.Radio] = radioTraces
+	deps.Traces["relay "+name] = relayTraces
+
+	// Every override scope is checked, not just the selected one: a
+	// typo under tomorrow's profile fails today.
+	if err := checkScopes(radioSpec.Layered, drv.Presets,
+		func(cfg map[string]any) error { _, e := drv.Inspect(cfg); return e }); err != nil {
+		return nil, none, fmt.Errorf("radio %q: %w", rc.Radio, err)
+	}
+	if err := checkScopes(rc.Layered, builder.Presets, builder.Check); err != nil {
+		return nil, none, err
+	}
 
 	rlog := log.With(zap.String("relay", name))
-	for _, t := range radioTraces {
-		rlog.Debug("radio config", zap.String("key", t.Key),
-			zap.Any("value", t.Value), zap.String("source", t.Source))
-	}
-	for _, t := range relayTraces {
-		rlog.Debug("relay config", zap.String("key", t.Key),
-			zap.Any("value", t.Value), zap.String("source", t.Source))
-	}
+	logTraces(rlog, "radio config", radioTraces)
+	logTraces(rlog, "relay config", relayTraces)
+	announceOverrides(rlog, radioTraces, relayTraces)
 
 	eng, err := builder.Build(name, relayCfg, b, rlog)
 	if err != nil {
 		return nil, none, err
 	}
+	env, err := bindEnvelope(drv, radioCfg, eng)
+	if err != nil {
+		return nil, none, fmt.Errorf("radio %q: %w", rc.Radio, err)
+	}
+
 	r := relay.New(name, drv, radioCfg, eng, b, log)
 	info := cli.RelayInfo{
 		Name:     name,
@@ -262,8 +288,76 @@ func assemble(name string, rc config.Relay, radioSpec config.Radio,
 		Driver:   radioSpec.Driver,
 		Waveform: eng.Waveform(),
 		State:    r.State,
+		Err:      r.Err,
 	}
+	deps.Radios = append(deps.Radios, cli.RadioInfo{
+		Name: rc.Radio, Driver: radioSpec.Driver, Envelope: env, Relay: name,
+	})
 	return r, info, nil
+}
+
+// bindEnvelope validates the engine's choices against the board's
+// envelope at load: a waveform or an explicit power the board cannot
+// serve is a configuration error, not a runtime surprise.
+func bindEnvelope(drv radio.Driver, radioCfg map[string]any,
+	eng protocol.Engine,
+) (radio.Envelope, error) {
+	env, err := drv.Inspect(radioCfg)
+	if err != nil {
+		return env, err
+	}
+	if err := env.Allows(eng.Waveform()); err != nil {
+		return env, err
+	}
+	if dbm, explicit := eng.TxPower(); explicit && env.MaxTxPowerDBm != 0 && dbm > env.MaxTxPowerDBm {
+		return env, fmt.Errorf("tx_power_dbm %d exceeds the radio's %d dBm cap — refusing, not clamping",
+			dbm, env.MaxTxPowerDBm)
+	}
+	return env, nil
+}
+
+// checkScopes dry-runs every override scope through a validator.
+func checkScopes(l config.Layered, presets map[string]map[string]any,
+	check func(map[string]any) error,
+) error {
+	if check == nil {
+		return nil
+	}
+	for scope := range l.Overrides {
+		alt := config.Layered{Profile: scope, Overrides: l.Overrides}
+		cfg, _, err := alt.Resolve(presets)
+		if err != nil {
+			return err
+		}
+		if err := check(cfg); err != nil {
+			return fmt.Errorf("override scope %q: %w", scope, err)
+		}
+	}
+	return nil
+}
+
+func logTraces(log *zap.Logger, msg string, traces []config.Trace) {
+	for _, t := range traces {
+		log.Debug(msg, zap.String("key", t.Key),
+			zap.Any("value", t.Value), zap.String("source", t.Source))
+	}
+}
+
+// announceOverrides names non-stock values at INFO on every start:
+// a relay running off the beaten path says so where operators look.
+func announceOverrides(log *zap.Logger, traceSets ...[]config.Trace) {
+	var keys []string
+	for _, ts := range traceSets {
+		for _, t := range ts {
+			if strings.HasPrefix(t.Source, "override:") {
+				keys = append(keys, t.Key)
+			}
+		}
+	}
+	if len(keys) > 0 {
+		sort.Strings(keys)
+		log.Info("relay runs non-stock values", zap.Strings("overridden", keys))
+	}
 }
 
 func newLogger(level string) (*zap.Logger, error) {

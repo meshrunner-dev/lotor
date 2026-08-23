@@ -39,6 +39,9 @@ func (l Layered) Resolve(catalog map[string]map[string]any) (map[string]any, []T
 	if profile == "" {
 		profile = CustomProfile
 	}
+	if _, hijack := catalog[CustomProfile]; hijack {
+		return nil, nil, fmt.Errorf("catalog reserves the %q profile as the empty base", CustomProfile)
+	}
 	base, ok := catalog[profile]
 	if !ok && profile != CustomProfile {
 		return nil, nil, fmt.Errorf("unknown profile %q (known: %s)", profile, knownProfiles(catalog))

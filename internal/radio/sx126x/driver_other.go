@@ -11,7 +11,7 @@ import (
 )
 
 func init() {
-	radio.Register("sx126x-spi", radio.Driver{Open: open, Presets: Presets()})
+	radio.Register("sx126x-spi", radio.Driver{Open: open, Inspect: Inspect, Presets: Presets()})
 }
 
 func open(cfg map[string]any, _ *zap.Logger) (radio.Device, error) {

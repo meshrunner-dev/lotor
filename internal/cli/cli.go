@@ -37,6 +37,16 @@ type RelayInfo struct {
 	Driver   string
 	Waveform radio.Waveform
 	State    func() string
+	// Err reports the cause when State is error; may be nil.
+	Err func() string
+}
+
+// RadioInfo is what the CLI knows about one radio attachment.
+type RadioInfo struct {
+	Name     string
+	Driver   string
+	Envelope radio.Envelope
+	Relay    string
 }
 
 // Deps is everything the commands may consult. Sentinel may be nil —
@@ -45,6 +55,7 @@ type Deps struct {
 	Version  string
 	Started  time.Time
 	Relays   []RelayInfo
+	Radios   []RadioInfo
 	Sentinel *sentinel.Sentinel
 	Bus      *bus.Bus
 	// Traces holds the resolved-config provenance recorded at
@@ -96,7 +107,7 @@ func Serve(ctx context.Context, rw io.ReadWriter, deps Deps) {
 
 // command runs one line; it reports quit through s.quitting.
 func (s *session) command(ctx context.Context, line string) {
-	args := strings.Fields(line)
+	args := splitArgs(line)
 	if len(args) == 0 {
 		return
 	}
@@ -221,7 +232,7 @@ func flags(args []string) (pos []string, opts map[string]string, err error) {
 		}
 		key := strings.TrimPrefix(a, "--")
 		switch key {
-		case "json", "watch":
+		case "json":
 			opts[key] = optOn
 		case "last", scopeRelay, "type", "verdict":
 			if i+1 >= len(args) {
@@ -234,6 +245,33 @@ func flags(args []string) (pos []string, opts map[string]string, err error) {
 		}
 	}
 	return pos, opts, nil
+}
+
+// splitArgs tokenises a command line, honouring double quotes so
+// arguments may carry spaces — the mesh's names do.
+func splitArgs(line string) []string {
+	var args []string
+	var cur strings.Builder
+	inQuote, has := false, false
+	for _, r := range line {
+		switch {
+		case r == '"':
+			inQuote = !inQuote
+			has = true
+		case !inQuote && (r == ' ' || r == '\t'):
+			if has || cur.Len() > 0 {
+				args = append(args, cur.String())
+				cur.Reset()
+				has = false
+			}
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if has || cur.Len() > 0 {
+		args = append(args, cur.String())
+	}
+	return args
 }
 
 func ago(t time.Time) string {

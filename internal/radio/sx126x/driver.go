@@ -62,6 +62,16 @@ func settingsFrom(cfg map[string]any) (Settings, error) {
 	return s, nil
 }
 
+// Inspect is the driver's config dry run: strict decode plus the
+// board's envelope, no hardware touched.
+func Inspect(cfg map[string]any) (radio.Envelope, error) {
+	s, err := settingsFrom(cfg)
+	if err != nil {
+		return radio.Envelope{}, err
+	}
+	return s.envelope(), nil
+}
+
 func (s Settings) envelope() radio.Envelope {
 	e := radio.Envelope{MaxTxPowerDBm: s.MaxTxPowerDBm}
 	if len(s.FrequencyRangeHz) == 2 {

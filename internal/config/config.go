@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -83,6 +84,21 @@ func Load(path string) (*File, error) {
 	if err := dec.Decode(&f); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	// Only one document is read; a second one would be silently
+	// dropped, so its presence is an error, not a surprise.
+	if err := dec.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%s: multiple YAML documents — everything after '---' would be ignored", path)
+	}
+	// A bare `cli:` or `sentinel:` key decodes to a nil pointer, the
+	// same as absence — but the operator wrote it expecting something.
+	var presence map[string]any
+	_ = yaml.Unmarshal(raw, &presence)
+	if _, ok := presence["cli"]; ok && f.CLI == nil {
+		f.CLI = &CLI{} // bare cli: means "with defaults"
+	}
+	if _, ok := presence["sentinel"]; ok && f.Sentinel == nil {
+		return nil, fmt.Errorf(`%s: sentinel: block is empty — set journal: (":memory:" for RAM-only) or remove it`, path)
+	}
 	if err := f.validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -121,12 +137,26 @@ func (f *File) validate() error {
 		f.CLI.Listen = DefaultCLIListen
 	}
 	if f.Sentinel != nil {
-		if f.Sentinel.Journal == "" {
-			return errors.New(`sentinel: journal path is required (":memory:" for RAM-only)`)
-		}
-		if f.Sentinel.Retention == 0 {
-			f.Sentinel.Retention = DefaultRetention
-		}
+		return f.Sentinel.validate()
+	}
+	return nil
+}
+
+func (s *Sentinel) validate() error {
+	if s.Journal == "" {
+		return errors.New(`sentinel: journal path is required (":memory:" for RAM-only)`)
+	}
+	if s.Retention < 0 {
+		return fmt.Errorf("sentinel: negative retention %s", s.Retention)
+	}
+	if s.Retention > 0 && s.Retention < time.Minute {
+		return fmt.Errorf("sentinel: retention %s would wipe the journal at every prune", s.Retention)
+	}
+	if s.Retention == 0 {
+		s.Retention = DefaultRetention
+	}
+	if s.MaxFrames < 0 {
+		return fmt.Errorf("sentinel: negative max_frames %d", s.MaxFrames)
 	}
 	return nil
 }

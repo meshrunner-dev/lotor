@@ -37,9 +37,14 @@ type Relay struct {
 	radioCfg map[string]any
 	engine   protocol.Engine
 
-	bus   *bus.Bus
-	log   *zap.Logger
-	state atomic.Value
+	bus     *bus.Bus
+	log     *zap.Logger
+	state   atomic.Value
+	lastErr atomic.Value
+	// stillborn marks a relay whose configuration failed: it exists to
+	// be visible in the error state, never to retry — a config error
+	// does not heal by waiting.
+	stillborn bool
 }
 
 // New assembles a relay from its resolved parts.
@@ -55,6 +60,21 @@ func New(name string, drv radio.Driver, radioCfg map[string]any,
 		log:      log.With(zap.String("relay", name)),
 	}
 	r.state.Store(StateStarting)
+	r.lastErr.Store("")
+	return r
+}
+
+// Stillborn builds a relay pinned in the error state, so a broken
+// configuration is a visible casualty instead of a dead daemon.
+func Stillborn(name string, cause error, b *bus.Bus, log *zap.Logger) *Relay {
+	r := &Relay{
+		Name:      name,
+		bus:       b,
+		log:       log.With(zap.String("relay", name)),
+		stillborn: true,
+	}
+	r.state.Store(StateError)
+	r.lastErr.Store(cause.Error())
 	return r
 }
 
@@ -64,11 +84,20 @@ func (r *Relay) State() string {
 	return s
 }
 
+// Err reports the cause of the current error state, empty otherwise.
+func (r *Relay) Err() string {
+	e, _ := r.lastErr.Load().(string)
+	return e
+}
+
 func (r *Relay) setState(state string, err error) {
 	r.state.Store(state)
 	ev := bus.RelayState{Relay: r.Name, State: state}
 	if err != nil {
 		ev.Err = err.Error()
+		r.lastErr.Store(err.Error())
+	} else {
+		r.lastErr.Store("")
 	}
 	r.bus.Publish(ev)
 }
@@ -76,6 +105,12 @@ func (r *Relay) setState(state string, err error) {
 // Run supervises until the context ends: every failure is logged,
 // published, and retried with capped exponential backoff.
 func (r *Relay) Run(ctx context.Context) {
+	if r.stillborn {
+		r.bus.Publish(bus.RelayState{Relay: r.Name, State: StateError, Err: r.Err()})
+		r.log.Error("relay unrunnable, configuration failed", zap.String("cause", r.Err()))
+		<-ctx.Done()
+		return
+	}
 	backoff := backoffFirst
 	for {
 		reached, err := r.session(ctx)

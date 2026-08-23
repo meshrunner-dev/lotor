@@ -164,6 +164,22 @@ func TestNoSentinelIsHonest(t *testing.T) {
 	}
 }
 
+func TestSplitArgsHonoursQuotes(t *testing.T) {
+	got := splitArgs(`node "FR91 🦝 Wanadoo" --json`)
+	want := []string{"node", "FR91 🦝 Wanadoo", "--json"}
+	if len(got) != len(want) {
+		t.Fatalf("splitArgs = %q", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("arg %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if got := splitArgs(`say ""`); len(got) != 2 || got[1] != "" {
+		t.Errorf("empty quoted arg = %q", got)
+	}
+}
+
 func TestIACStripper(t *testing.T) {
 	// telnet client opening: IAC DO(253) opt, IAC SB(250)…IAC SE(240),
 	// escaped 0xFF, then a command line.

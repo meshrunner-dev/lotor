@@ -22,14 +22,22 @@ type Engine interface {
 	// configuration; the relay validates it against the radio's
 	// envelope before the engine runs.
 	Waveform() radio.Waveform
+	// TxPower is the configured transmit power choice; explicit is
+	// false for "auto". Validated against the radio's cap at load,
+	// applied when a transmit path exists.
+	TxPower() (dbm int8, explicit bool)
 	// Run consumes the device until the context ends or the device
 	// fails. The device arrives configured and receiving.
 	Run(ctx context.Context, dev radio.Device) error
 }
 
-// Builder turns a resolved relay configuration into an engine.
+// Builder turns a resolved relay configuration into an engine. Check
+// validates a configuration without building — the config loader runs
+// it over every override scope, so a typo under a profile that is not
+// selected today still fails today.
 type Builder struct {
 	Build   func(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (Engine, error)
+	Check   func(cfg map[string]any) error
 	Presets map[string]map[string]any
 }
 

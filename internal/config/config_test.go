@@ -157,3 +157,71 @@ relays:
 		}
 	}
 }
+
+func TestBareBlocksAreNotSilent(t *testing.T) {
+	// A bare cli: key means "with defaults", never "nothing".
+	withCLI := `
+radios:
+  slot1: {driver: sx126x-spi}
+relays:
+  mesh: {protocol: meshcore, radio: slot1}
+cli:
+`
+	f, err := Load(writeConfig(t, withCLI))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.CLI == nil || f.CLI.Listen != DefaultCLIListen {
+		t.Errorf("bare cli: block gave %+v", f.CLI)
+	}
+	// A bare sentinel: key cannot guess a journal path: loud error.
+	withSentinel := `
+radios:
+  slot1: {driver: sx126x-spi}
+relays:
+  mesh: {protocol: meshcore, radio: slot1}
+sentinel:
+`
+	if _, err := Load(writeConfig(t, withSentinel)); err == nil ||
+		!strings.Contains(err.Error(), "journal") {
+		t.Errorf("bare sentinel: block: %v", err)
+	}
+}
+
+func TestMultipleDocumentsAreRefused(t *testing.T) {
+	body := `
+radios:
+  slot1: {driver: sx126x-spi}
+relays:
+  mesh: {protocol: meshcore, radio: slot1}
+---
+radios: {}
+`
+	if _, err := Load(writeConfig(t, body)); err == nil ||
+		!strings.Contains(err.Error(), "documents") {
+		t.Errorf("second document: %v", err)
+	}
+}
+
+func TestTinyRetentionIsRefused(t *testing.T) {
+	body := `
+radios:
+  slot1: {driver: sx126x-spi}
+relays:
+  mesh: {protocol: meshcore, radio: slot1}
+sentinel:
+  journal: ":memory:"
+  retention: 5s
+`
+	if _, err := Load(writeConfig(t, body)); err == nil {
+		t.Error("5s retention accepted — every prune would wipe the journal")
+	}
+}
+
+func TestCatalogCannotHijackCustom(t *testing.T) {
+	l := Layered{Profile: "custom"}
+	_, _, err := l.Resolve(map[string]map[string]any{"custom": {"spi": "hijacked"}})
+	if err == nil {
+		t.Error("a preset named custom was accepted")
+	}
+}

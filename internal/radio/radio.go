@@ -72,9 +72,12 @@ type Device interface {
 }
 
 // Driver opens devices from a resolved configuration and publishes
-// the hardware presets its boards are known by.
+// the hardware presets its boards are known by. Inspect validates a
+// configuration and reports its envelope without touching hardware —
+// the config loader's dry run, usable on any platform.
 type Driver struct {
 	Open    func(cfg map[string]any, log *zap.Logger) (Device, error)
+	Inspect func(cfg map[string]any) (Envelope, error)
 	Presets map[string]map[string]any
 }
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 
 	"meshrunner.dev/pkg/meshcore"
 
@@ -23,7 +24,7 @@ import (
 )
 
 func init() {
-	protocol.Register("meshcore", protocol.Builder{Build: build, Presets: presets})
+	protocol.Register("meshcore", protocol.Builder{Build: build, Check: check, Presets: presets})
 }
 
 // params is the relay-side configuration: the waveform choice plus
@@ -31,14 +32,34 @@ func init() {
 type params struct {
 	radio.Waveform `yaml:",inline"`
 
-	// TxPowerDBm is parsed and envelope-checked now so configs are
-	// validated early, even though the engine cannot transmit yet.
-	TxPowerDBm *int8 `yaml:"tx_power_dbm"`
+	// TxPowerDBm is validated against the radio's envelope at load
+	// even though the engine cannot transmit yet; "auto" (the default)
+	// resolves to the radio's cap when transmit exists.
+	TxPowerDBm txPower `yaml:"tx_power_dbm"`
 
 	// DedupTTL bounds how long a packet hash suppresses its copies.
 	DedupTTL time.Duration `yaml:"dedup_ttl"`
 	// DedupEntries bounds the seen table's size.
 	DedupEntries int `yaml:"dedup_entries"`
+}
+
+// txPower is either "auto" or an explicit dBm figure.
+type txPower struct {
+	explicit bool
+	dbm      int8
+}
+
+func (t *txPower) UnmarshalYAML(node *yaml.Node) error {
+	if node.Value == "auto" || node.Value == "" {
+		*t = txPower{}
+		return nil
+	}
+	var dbm int8
+	if err := node.Decode(&dbm); err != nil {
+		return fmt.Errorf(`tx_power_dbm wants "auto" or a dBm figure: %w`, err)
+	}
+	*t = txPower{explicit: true, dbm: dbm}
+	return nil
 }
 
 type engine struct {
@@ -49,13 +70,28 @@ type engine struct {
 	seen  *seenTable
 }
 
-func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (protocol.Engine, error) {
+// paramsFrom is the strict decode both build and the config checker
+// share.
+func paramsFrom(cfg map[string]any) (params, error) {
 	p, err := config.Decode[params](cfg)
 	if err != nil {
-		return nil, fmt.Errorf("meshcore params: %w", err)
+		return p, fmt.Errorf("meshcore params: %w", err)
 	}
 	if p.FrequencyHz == 0 {
-		return nil, errors.New("meshcore params: frequency_hz is required")
+		return p, errors.New("meshcore params: frequency_hz is required")
+	}
+	return p, nil
+}
+
+func check(cfg map[string]any) error {
+	_, err := paramsFrom(cfg)
+	return err
+}
+
+func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (protocol.Engine, error) {
+	p, err := paramsFrom(cfg)
+	if err != nil {
+		return nil, err
 	}
 	// Zero values give the reference's dedup: a fixed 160-entry ring,
 	// no time bound. dedup_ttl adds an operator time bound on top.
@@ -72,6 +108,12 @@ func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (p
 }
 
 func (e *engine) Waveform() radio.Waveform { return e.p.Waveform }
+
+// TxPower reports the configured transmit power choice; explicit is
+// false for "auto", which resolves against the radio's cap.
+func (e *engine) TxPower() (dbm int8, explicit bool) {
+	return e.p.TxPowerDBm.dbm, e.p.TxPowerDBm.explicit
+}
 
 func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 	e.log.Info("dry run: judging frames, transmitting nothing")

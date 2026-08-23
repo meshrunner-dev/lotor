@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/sentinel"
 )
 
@@ -23,16 +24,17 @@ func (s *session) status(ctx context.Context) error {
 				float64(r.Waveform.FrequencyHz)/1e6, r.Waveform.SpreadingFactor,
 				float64(r.Waveform.BandwidthHz)/1e3))
 	}
-	if s.deps.Sentinel != nil {
-		path, retention := s.deps.Sentinel.Journal()
-		n, err := s.deps.Sentinel.FrameCount(ctx)
-		if err != nil {
-			return err
-		}
-		tb.row("sentinel", "journalling", path,
-			fmt.Sprintf("%d frames", n), fmt.Sprintf("%s retention", retention))
-	} else {
+	if s.deps.Sentinel == nil {
 		tb.row("sentinel", "none")
+	} else {
+		path, retention := s.deps.Sentinel.Journal()
+		if n, err := s.deps.Sentinel.FrameCount(ctx); err != nil {
+			// A sick journal is one degraded row, never a blank view.
+			tb.row("sentinel", "error", err.Error())
+		} else {
+			tb.row("sentinel", "journalling", path,
+				fmt.Sprintf("%d frames", n), fmt.Sprintf("%s retention", retention))
+		}
 	}
 	return tb.flush(s.out)
 }
@@ -54,6 +56,11 @@ func (s *session) relay(ctx context.Context, args []string) error {
 	}
 	tb := &table{}
 	tb.row("state", r.State())
+	if r.Err != nil {
+		if cause := r.Err(); cause != "" {
+			tb.row("cause", cause)
+		}
+	}
 	tb.row("protocol", r.Protocol)
 	tb.row("radio", fmt.Sprintf("%s (%s)", r.Radio, r.Driver))
 	tb.row("waveform", fmt.Sprintf("%.3f MHz  sf%d  bw %d  cr 4/%d  preamble %d  sync 0x%02x  crc %v",
@@ -63,7 +70,8 @@ func (s *session) relay(ctx context.Context, args []string) error {
 	if s.deps.Sentinel != nil {
 		counts, err := s.deps.Sentinel.VerdictCounts(ctx, r.Name)
 		if err != nil {
-			return err
+			tb.row("judged", "unavailable: "+err.Error())
+			return tb.flush(s.out)
 		}
 		verdicts := make([]string, 0, len(counts))
 		for v := range counts {
@@ -84,15 +92,42 @@ func (s *session) relay(ctx context.Context, args []string) error {
 func (s *session) radio(args []string) error {
 	if len(args) == 0 || args[0] == "list" {
 		tb := &table{}
-		for _, r := range s.deps.Relays {
-			tb.row(r.Radio, r.Driver, "relay "+r.Name)
+		for _, r := range s.deps.Radios {
+			tb.row(r.Name, r.Driver, envelopeText(r.Envelope), "relay "+r.Relay)
 		}
 		return tb.flush(s.out)
 	}
 	if args[0] != verbShow || len(args) < 2 {
 		return errors.New("usage: radio list | radio show <name>")
 	}
+	for _, r := range s.deps.Radios {
+		if r.Name == args[1] {
+			tb := &table{}
+			tb.row("driver", r.Driver)
+			tb.row("envelope", envelopeText(r.Envelope))
+			tb.row("relay", r.Relay)
+			if err := tb.flush(s.out); err != nil {
+				return err
+			}
+			break
+		}
+	}
 	return s.showTraces("radio " + args[1])
+}
+
+func envelopeText(e radio.Envelope) string {
+	parts := []string{}
+	if e.MaxTxPowerDBm != 0 {
+		parts = append(parts, fmt.Sprintf("max %d dBm", e.MaxTxPowerDBm))
+	}
+	if e.FreqRangeLowHz != 0 || e.FreqRangeHiHz != 0 {
+		parts = append(parts, fmt.Sprintf("%.0f-%.0f MHz",
+			float64(e.FreqRangeLowHz)/1e6, float64(e.FreqRangeHiHz)/1e6))
+	}
+	if len(parts) == 0 {
+		return "envelope undeclared"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (s *session) config(args []string) error {
@@ -280,27 +315,53 @@ func (s *session) watch(ctx context.Context, opts map[string]string) error {
 				return nil
 			}
 			j, isJudged := ev.(bus.FrameJudged)
-			if !isJudged {
+			if !isJudged || !watchMatch(j, opts) {
 				continue
 			}
-			if v, ok := opts["type"]; ok && j.Type != v {
+			if opts["json"] == optOn {
+				if err := s.printJSON(j); err != nil {
+					return err
+				}
 				continue
 			}
-			line := fmt.Sprintf("%s %s /%d  %s", j.Type, j.Route, j.PathLen, j.Verdict)
-			if j.DuplicateOf != "" {
-				line += " → " + j.DuplicateOf
-			}
-			if j.Node != "" {
-				line += fmt.Sprintf("  %s (%s)", quoted(j.Node), j.Detail)
-			} else if j.Detail != "" {
-				line += "  " + j.Detail
-			}
-			fmt.Fprintf(s.out, "%s\r\n", line)
+			fmt.Fprintf(s.out, "%s\r\n", watchLine(j))
 		}
 	}
 }
 
+func watchMatch(j bus.FrameJudged, opts map[string]string) bool {
+	if v, ok := opts["type"]; ok && j.Type != v {
+		return false
+	}
+	if v, ok := opts[scopeRelay]; ok && j.Relay != v {
+		return false
+	}
+	if v, ok := opts["verdict"]; ok && j.Verdict != v {
+		return false
+	}
+	return true
+}
+
+func watchLine(j bus.FrameJudged) string {
+	line := fmt.Sprintf("%s  %s %s /%d  %s",
+		j.Txn.Short(), j.Type, j.Route, j.PathLen, j.Verdict)
+	if j.DuplicateOf != "" {
+		line += " → " + j.DuplicateOf
+	}
+	switch {
+	case j.Node != "":
+		line += fmt.Sprintf("  %s (%s)", quoted(j.Node), j.Detail)
+	case j.Detail != "":
+		line += "  " + j.Detail
+	}
+	return line
+}
+
 func (s *session) printJSON(v any) error {
-	enc := json.NewEncoder(s.out)
-	return enc.Encode(v)
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(s.out, "%s\r\n", raw)
+	return err
 }
