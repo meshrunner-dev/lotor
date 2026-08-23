@@ -43,11 +43,13 @@ type params struct {
 	// DedupEntries bounds the seen table's size.
 	DedupEntries int `yaml:"dedup_entries"`
 
-	// IdentityFile persists this relay's node identity (a hex seed,
-	// created on first run). Without one the relay hears everything
-	// but is addressed by nothing: direct judgement stays honest and
-	// incomplete.
-	IdentityFile string `yaml:"identity_file"`
+	// Identity is this relay's node key material, inline and in hex:
+	// a 32-byte seed, a 64-byte expanded private key (the reference
+	// CLI's prv.key form, for migrating an existing node), or the
+	// 96-byte key pair. `lotor identity new` mints a fresh one.
+	// Without one the relay hears everything but is addressed by
+	// nothing: direct judgement stays honest and incomplete.
+	Identity string `yaml:"identity"`
 }
 
 // txPower is either "auto" or an explicit dBm figure.
@@ -107,8 +109,8 @@ func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (p
 		p.DedupEntries = referenceCapacity
 	}
 	var id *meshcore.LocalIdentity
-	if p.IdentityFile != "" {
-		if id, err = loadOrCreateIdentity(p.IdentityFile, log); err != nil {
+	if p.Identity != "" {
+		if id, err = identityFromConfig(p.Identity); err != nil {
 			return nil, err
 		}
 		log.Info("node identity",

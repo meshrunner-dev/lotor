@@ -3,29 +3,62 @@ package meshcore
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"path/filepath"
+	"encoding/hex"
 	"testing"
 	"time"
-
-	"go.uber.org/zap"
 
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/bus"
 )
 
-func TestIdentityPersistsAcrossLoads(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "node.id")
-	first, err := loadOrCreateIdentity(path, zap.NewNop())
+func TestIdentityFormats(t *testing.T) {
+	ref, err := meshcore.NewLocalIdentity(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := loadOrCreateIdentity(path, zap.NewNop())
+	prv := ref.PrvKey()
+
+	// The reference CLI's prv.key form: 64-byte expanded key, public
+	// key derived — the migration path from an existing node.
+	fromPrv, err := identityFromConfig(hex.EncodeToString(prv))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.PubKey != second.PubKey {
-		t.Fatal("reloaded identity differs — the node changed its name overnight")
+	if fromPrv.PubKey != ref.PubKey {
+		t.Fatal("prv.key import derived a different node")
+	}
+
+	// The 96-byte pair, and its rejection when the halves disagree.
+	pair := hex.EncodeToString(append(append([]byte{}, prv...), ref.PubKey[:]...))
+	if _, err := identityFromConfig(pair); err != nil {
+		t.Fatalf("key pair refused: %v", err)
+	}
+	other, _ := meshcore.NewLocalIdentity(rand.Reader)
+	bad := hex.EncodeToString(append(append([]byte{}, prv...), other.PubKey[:]...))
+	if _, err := identityFromConfig(bad); err == nil {
+		t.Fatal("mismatched key pair accepted")
+	}
+
+	// A seed round-trips deterministically.
+	seed := "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+	a, err := identityFromConfig(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := identityFromConfig(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.PubKey != b.PubKey {
+		t.Fatal("seed expansion is not deterministic")
+	}
+
+	// Garbage is loud.
+	for _, junk := range []string{"zz", "abcd", hex.EncodeToString(make([]byte, 48))} {
+		if _, err := identityFromConfig(junk); err == nil {
+			t.Errorf("accepted %q", junk)
+		}
 	}
 }
 

@@ -34,7 +34,8 @@ relays:
     overrides:
       eu-868-narrow:
         # Waveform comes from the preset; engine knobs are patchable.
-        # The identity file holds this relay's node keys (a hex seed,
-        # created on first run — guard it: it IS the node). Without
-        # one the relay hears everything but is addressed by nothing.
-        identity_file: /var/lib/lotor/meshcore-868.id
+        # The identity is this node's private key, inline: a seed from
+        # `lotor identity new`, or the 64-byte prv.key hex of an
+        # existing node to migrate it here. Guard this file: whoever
+        # reads the key IS the node.
+        # identity: <hex>

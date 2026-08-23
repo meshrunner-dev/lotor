@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"net"
@@ -20,6 +21,8 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+
+	"meshrunner.dev/pkg/meshcore"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -43,10 +46,33 @@ const version = "0.1.0-dev"
 // commandLine is the Kong grammar. Bare `lotor` prints this help and
 // does nothing else — running the daemon is an explicit choice.
 type commandLine struct {
-	Run     runCmd           `cmd:""                              help:"Run the relay daemon in the foreground (what the systemd unit does)."`
-	Console consoleCmd       `cmd:""                              help:"Open the console of a running daemon."`
-	Attach  consoleCmd       `cmd:""                              help:"Alias of console."                                                    hidden:""`
-	Version kong.VersionFlag `help:"Print the version and leave."`
+	Run      runCmd           `cmd:""                              help:"Run the relay daemon in the foreground (what the systemd unit does)."`
+	Console  consoleCmd       `cmd:""                              help:"Open the console of a running daemon."`
+	Attach   consoleCmd       `cmd:""                              help:"Alias of console."                                                    hidden:""`
+	Identity identityCmd      `cmd:""                              help:"Node identity tools."`
+	Version  kong.VersionFlag `help:"Print the version and leave."`
+}
+
+type identityCmd struct {
+	New identityNewCmd `cmd:"" help:"Mint a fresh node identity to paste into the configuration."`
+}
+
+type identityNewCmd struct{}
+
+// Run mints a seed and shows what to paste: the identity line for the
+// relay's config, and the public key the mesh will know the node by.
+func (c *identityNewCmd) Run() error {
+	seed := make([]byte, meshcore.SeedSize)
+	if _, err := rand.Read(seed); err != nil {
+		return err
+	}
+	id, err := meshcore.LocalIdentityFromSeed(seed)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("identity: %x   # the private key — guard this line\n", seed)
+	fmt.Printf("pubkey:   %x\n", id.PubKey[:])
+	return nil
 }
 
 type runCmd struct {
