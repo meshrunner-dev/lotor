@@ -11,8 +11,10 @@ func TestFloorConvergesOnFirstBatch(t *testing.T) {
 	if _, ok := tr.value(); ok {
 		t.Fatal("floor known before any sample")
 	}
-	for range floorSamples {
-		tr.sample(-105, now)
+	for i := range floorSamples {
+		if got := tr.sample(-105, now); got != (i == floorSamples-1) {
+			t.Fatalf("sample %d reported converged = %v", i, got)
+		}
 	}
 	nf, ok := tr.value()
 	if !ok || nf.DBm != -105 {

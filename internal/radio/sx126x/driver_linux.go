@@ -25,6 +25,7 @@ type device struct {
 	env   radio.Envelope
 	held  []lora.OutputPin
 	floor floorTracker
+	log   *zap.Logger
 }
 
 func open(cfg map[string]any, log *zap.Logger) (radio.Device, error) {
@@ -67,7 +68,7 @@ func open(cfg map[string]any, log *zap.Logger) (radio.Device, error) {
 		return nil, err
 	}
 	log.Info("radio open", zap.String("driver", "sx126x-spi"), zap.String("spi", s.SPI))
-	return &device{r: r, env: s.envelope(), held: held}, nil
+	return &device{r: r, env: s.envelope(), held: held, log: log}, nil
 }
 
 // attach opens the bus and every pin, releasing what it opened on any
@@ -174,7 +175,10 @@ func (d *device) sampleFloor() {
 	if err != nil {
 		return // not receiving (ErrNotReceiving covers TX and standby)
 	}
-	d.floor.sample(rssi, time.Now())
+	if d.floor.sample(rssi, time.Now()) {
+		nf, _ := d.floor.value()
+		d.log.Debug("noise floor measured", zap.Float64("floor_dbm", nf.DBm))
+	}
 }
 
 // NoiseFloor reports the last measured floor without touching the

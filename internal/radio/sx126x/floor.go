@@ -35,24 +35,26 @@ type floorTracker struct {
 }
 
 // sample feeds one idle RSSI reading; the caller has already
-// established that nothing is arriving and the radio is receiving.
-func (t *floorTracker) sample(rssi float64, now time.Time) {
+// established that nothing is arriving and the radio is receiving. It
+// reports whether this sample completed a batch — a fresh floor.
+func (t *floorTracker) sample(rssi float64, now time.Time) (converged bool) {
 	if t.n == 0 && now.Before(t.rest) {
-		return
+		return false
 	}
 	if nf, ok := t.value(); ok && rssi >= nf.DBm+floorGateDB {
-		return
+		return false
 	}
 	t.sum += rssi
 	t.n++
 	if t.n < floorSamples {
-		return
+		return false
 	}
 	t.floor.Store(radio.NoiseFloor{
 		DBm: max(t.sum/floorSamples, floorClampDBm), At: now,
 	})
 	t.sum, t.n = 0, 0
 	t.rest = now.Add(floorRestEvery)
+	return true
 }
 
 // value reports the last published floor; ok is false until the first
