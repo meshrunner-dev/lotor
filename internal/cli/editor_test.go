@@ -145,3 +145,27 @@ func TestEnterVariantsYieldOneLineEach(t *testing.T) {
 		}
 	}
 }
+
+func TestShellKillsAndMotions(t *testing.T) {
+	// Ctrl+W eats the last word (and its separator), shell-style.
+	got := edit(t, "frames --last 5\x17\x1750\r")
+	if len(got) != 1 || got[0] != "frames 50" {
+		t.Fatalf("ctrl+w = %q", got)
+	}
+	// Ctrl+U wipes to the start; what follows is the whole line.
+	got = edit(t, "garbage\x15status\r")
+	if len(got) != 1 || got[0] != "status" {
+		t.Fatalf("ctrl+u = %q", got)
+	}
+	// Ctrl+A jumps home (insert lands at the front), Ctrl+E back to
+	// the end (append resumes there).
+	got = edit(t, "odes\x01n\x05\r")
+	if len(got) != 1 || got[0] != "nodes" {
+		t.Fatalf("ctrl+a/e = %q", got)
+	}
+	// Ctrl+W mid-line only eats what precedes the cursor.
+	got = edit(t, "aa bb\x1b[D\x1b[D\x17cc\r")
+	if len(got) != 1 || got[0] != "ccbb" {
+		t.Fatalf("ctrl+w mid-line = %q", got)
+	}
+}

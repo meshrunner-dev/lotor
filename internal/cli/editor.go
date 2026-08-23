@@ -59,25 +59,47 @@ func (e *editor) readLine() (string, error) {
 		case c == '\r' || c == '\n':
 			e.crSeen = c == '\r'
 			return e.finishLine()
-		case c == 0x03: // Ctrl+C: abandon the line
-			fmt.Fprint(e.out, "^C\r\n> ")
-			e.buf, e.cur, e.walk = e.buf[:0], 0, -1
 		case c == 0x04: // Ctrl+D: end of session on an empty line
 			if len(e.buf) == 0 {
 				fmt.Fprint(e.out, "\r\n")
 				return "", io.EOF
 			}
-		case c == 0x7f || c == 0x08: // backspace
-			e.backspace()
 		case c == 0x1b: // escape sequence
 			if err := e.escape(); err != nil {
 				return "", err
 			}
-		case c >= 0x20: // printable byte; multi-byte runes assemble
+		case c < 0x20 || c == 0x7f: // control keys
+			e.control(c)
+		default: // printable byte; multi-byte runes assemble
 			if err := e.insertByte(c); err != nil {
 				return "", err
 			}
 		}
+	}
+}
+
+// control handles the shell's editing keys.
+func (e *editor) control(c byte) {
+	switch c {
+	case 0x03: // Ctrl+C: abandon the line
+		fmt.Fprint(e.out, "^C\r\n> ")
+		e.buf, e.cur, e.walk = e.buf[:0], 0, -1
+	case 0x7f, 0x08: // backspace
+		e.backspace()
+	case 0x17: // Ctrl+W: kill the word before the cursor
+		e.killWord()
+	case 0x15: // Ctrl+U: kill to the start of the line
+		if e.cur > 0 {
+			e.buf = append(e.buf[:0], e.buf[e.cur:]...)
+			e.cur = 0
+			e.render()
+		}
+	case 0x01: // Ctrl+A: start of line
+		e.cur = 0
+		e.render()
+	case 0x05: // Ctrl+E: end of line
+		e.cur = len(e.buf)
+		e.render()
 	}
 }
 
@@ -96,6 +118,24 @@ func (e *editor) backspace() {
 	} else {
 		e.render()
 	}
+}
+
+// killWord removes the word before the cursor, shell-style: trailing
+// spaces first, then the word itself.
+func (e *editor) killWord() {
+	if e.cur == 0 {
+		return
+	}
+	i := e.cur
+	for i > 0 && e.buf[i-1] == ' ' {
+		i--
+	}
+	for i > 0 && e.buf[i-1] != ' ' {
+		i--
+	}
+	e.buf = append(e.buf[:i], e.buf[e.cur:]...)
+	e.cur = i
+	e.render()
 }
 
 // finishLine closes the edit.
