@@ -39,6 +39,8 @@ type RelayInfo struct {
 	State    func() string
 	// Err reports the cause when State is error; may be nil.
 	Err func() string
+	// Identity is the relay's node public key in hex, empty when none.
+	Identity string
 }
 
 // RadioInfo is what the CLI knows about one radio attachment.

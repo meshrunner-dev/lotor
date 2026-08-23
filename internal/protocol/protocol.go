@@ -26,6 +26,9 @@ type Engine interface {
 	// false for "auto". Validated against the radio's cap at load,
 	// applied when a transmit path exists.
 	TxPower() (dbm int8, explicit bool)
+	// Identity is this relay's node public key in hex, empty when the
+	// relay has none configured.
+	Identity() string
 	// Run consumes the device until the context ends or the device
 	// fails. The device arrives configured and receiving.
 	Run(ctx context.Context, dev radio.Device) error

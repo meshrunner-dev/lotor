@@ -289,6 +289,7 @@ func assemble(name string, rc config.Relay, radioSpec config.Radio,
 		Waveform: eng.Waveform(),
 		State:    r.State,
 		Err:      r.Err,
+		Identity: eng.Identity(),
 	}
 	deps.Radios = append(deps.Radios, cli.RadioInfo{
 		Name: rc.Radio, Driver: radioSpec.Driver, Envelope: env, Relay: name,

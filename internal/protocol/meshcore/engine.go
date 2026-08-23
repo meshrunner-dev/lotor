@@ -7,6 +7,7 @@ package meshcore
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -41,6 +42,12 @@ type params struct {
 	DedupTTL time.Duration `yaml:"dedup_ttl"`
 	// DedupEntries bounds the seen table's size.
 	DedupEntries int `yaml:"dedup_entries"`
+
+	// IdentityFile persists this relay's node identity (a hex seed,
+	// created on first run). Without one the relay hears everything
+	// but is addressed by nothing: direct judgement stays honest and
+	// incomplete.
+	IdentityFile string `yaml:"identity_file"`
 }
 
 // txPower is either "auto" or an explicit dBm figure.
@@ -65,6 +72,7 @@ func (t *txPower) UnmarshalYAML(node *yaml.Node) error {
 type engine struct {
 	relay string
 	p     params
+	id    *meshcore.LocalIdentity // nil when no identity is configured
 	bus   *bus.Bus
 	log   *zap.Logger
 	seen  *seenTable
@@ -98,9 +106,18 @@ func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (p
 	if p.DedupEntries == 0 {
 		p.DedupEntries = referenceCapacity
 	}
+	var id *meshcore.LocalIdentity
+	if p.IdentityFile != "" {
+		if id, err = loadOrCreateIdentity(p.IdentityFile, log); err != nil {
+			return nil, err
+		}
+		log.Info("node identity",
+			zap.String("pubkey", hex.EncodeToString(id.PubKey[:])[:keyPrefixLen]))
+	}
 	return &engine{
 		relay: relayName,
 		p:     p,
+		id:    id,
 		bus:   b,
 		log:   log,
 		seen:  newSeenTable(p.DedupTTL, p.DedupEntries),
@@ -113,6 +130,15 @@ func (e *engine) Waveform() radio.Waveform { return e.p.Waveform }
 // false for "auto", which resolves against the radio's cap.
 func (e *engine) TxPower() (dbm int8, explicit bool) {
 	return e.p.TxPowerDBm.dbm, e.p.TxPowerDBm.explicit
+}
+
+// Identity reports this relay's public key, empty when none is
+// configured.
+func (e *engine) Identity() string {
+	if e.id == nil {
+		return ""
+	}
+	return hex.EncodeToString(e.id.PubKey[:])
 }
 
 func (e *engine) Run(ctx context.Context, dev radio.Device) error {
@@ -170,7 +196,7 @@ func (e *engine) judge(frame radio.Frame) {
 		Route:   pkt.Route().String(),
 		PathLen: hops,
 	}
-	fields, advertOK := describe(pkt, &judged)
+	fields, advertOK, selfAdvert := describe(pkt, &judged, e.id)
 	log = log.With(fields...)
 	if first, dup := e.seen.witness(pkt.Hash(), id, frame.At); dup {
 		log.Info("frame judged",
@@ -182,7 +208,7 @@ func (e *engine) judge(frame radio.Frame) {
 		return
 	}
 
-	verdict, why := e.verdict(pkt, advertOK)
+	verdict, why := e.verdict(pkt, advertOK, selfAdvert)
 	judged.Verdict = verdict
 	if why != "" && judged.Detail == "" {
 		judged.Detail = why

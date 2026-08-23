@@ -33,5 +33,8 @@ relays:
     profile: eu-868-narrow
     overrides:
       eu-868-narrow:
-        # Waveform comes from the preset; engine knobs are patchable:
-        # dedup_ttl: 60s
+        # Waveform comes from the preset; engine knobs are patchable.
+        # The identity file holds this relay's node keys (a hex seed,
+        # created on first run — guard it: it IS the node). Without
+        # one the relay hears everything but is addressed by nothing.
+        identity_file: /var/lib/lotor/meshcore-868.id

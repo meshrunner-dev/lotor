@@ -20,16 +20,18 @@ const keyPrefixLen = 12
 // describe decodes what a frame says when its payload speaks an open
 // format — adverts and discovery — and annotates the judgement with
 // it. It returns advertOK: false only when the payload is an ADVERT
-// whose signature fails to verify, so the verdict can drop it the way
-// the reference does. Encrypted payloads stay opaque by design.
-func describe(pkt *meshcore.Packet, judged *bus.FrameJudged) (fields []zap.Field, advertOK bool) {
+// whose signature fails to verify, and selfAdvert when the advert is
+// this relay's own echo. Encrypted payloads stay opaque by design.
+func describe(pkt *meshcore.Packet, judged *bus.FrameJudged,
+	self *meshcore.LocalIdentity,
+) (fields []zap.Field, advertOK, selfAdvert bool) {
 	switch pkt.PayloadType() {
 	case meshcore.PayloadTypeAdvert:
-		return describeAdvert(pkt, judged)
+		return describeAdvert(pkt, judged, self)
 	case meshcore.PayloadTypeControl:
-		return describeControl(pkt, judged), true
+		return describeControl(pkt, judged), true, false
 	default:
-		return nil, true
+		return nil, true, false
 	}
 }
 
@@ -37,15 +39,21 @@ func describe(pkt *meshcore.Packet, judged *bus.FrameJudged) (fields []zap.Field
 // signature, as the reference does before trusting a word of it. Only
 // a verified advert populates the identity fields (node, pubkey) that
 // feed the sentinel's directory.
-func describeAdvert(pkt *meshcore.Packet, judged *bus.FrameJudged) (fields []zap.Field, advertOK bool) {
+func describeAdvert(pkt *meshcore.Packet, judged *bus.FrameJudged,
+	self *meshcore.LocalIdentity,
+) (fields []zap.Field, advertOK, selfAdvert bool) {
 	adv, err := meshcore.ParseAdvert(pkt.Payload)
 	switch {
 	case errors.Is(err, meshcore.ErrBadSignature):
 		judged.Detail = "advert signature invalid"
-		return []zap.Field{zap.String("advert", "signature-invalid")}, false
+		return []zap.Field{zap.String("advert", "signature-invalid")}, false, false
 	case err != nil:
 		judged.Detail = "advert malformed"
-		return []zap.Field{zap.String("advert", "malformed")}, false
+		return []zap.Field{zap.String("advert", "malformed")}, false, false
+	}
+	if self != nil && adv.Identity.PubKey == self.PubKey {
+		judged.Detail = "our own advert echoing back"
+		return []zap.Field{zap.String("advert", "self")}, true, true
 	}
 
 	judged.PubKey = hex.EncodeToString(adv.Identity.PubKey[:])[:keyPrefixLen]
@@ -58,7 +66,7 @@ func describeAdvert(pkt *meshcore.Packet, judged *bus.FrameJudged) (fields []zap
 			zap.String("node_type", judged.Detail),
 		)
 	}
-	return fields, true
+	return fields, true, false
 }
 
 func describeControl(pkt *meshcore.Packet, judged *bus.FrameJudged) []zap.Field {

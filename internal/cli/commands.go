@@ -62,6 +62,9 @@ func (s *session) relay(ctx context.Context, args []string) error {
 		}
 	}
 	tb.row("protocol", r.Protocol)
+	if r.Identity != "" {
+		tb.row("identity", r.Identity[:min(12, len(r.Identity))])
+	}
 	tb.row("radio", fmt.Sprintf("%s (%s)", r.Radio, r.Driver))
 	tb.row("waveform", fmt.Sprintf("%.3f MHz  sf%d  bw %d  cr 4/%d  preamble %d  sync 0x%02x  crc %v",
 		float64(r.Waveform.FrequencyHz)/1e6, r.Waveform.SpreadingFactor,
