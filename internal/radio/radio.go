@@ -70,6 +70,16 @@ type ChipStats struct {
 	HeaderErrors uint16
 }
 
+// TxReport is one completed transmission, as the duty ledger records
+// it: when, how long, and the power the chip was actually programmed
+// for — independent of caller bookkeeping.
+type TxReport struct {
+	At       time.Time
+	Airtime  time.Duration
+	Duration time.Duration
+	PowerDBm int8
+}
+
 // ErrCorrupt marks a reception that failed integrity checks: traffic,
 // not a fault — callers count it and continue.
 var ErrCorrupt = errors.New("radio: corrupt frame")
@@ -108,6 +118,12 @@ type Device interface {
 	// refreshed periodically by the receive loop; ok is false until
 	// the first read. Same calling rules as NoiseFloor.
 	ChipStats() (ChipStats, bool)
+	// Transmit keys the radio: it belongs to the owning goroutine,
+	// exactly like Receive, and returns once the frame is on the air.
+	// The gates deciding whether keying is allowed at all — dry,
+	// shadow, on-air — live above this seam; a Device transmits when
+	// told to.
+	Transmit(ctx context.Context, payload []byte, powerDBm int8) (TxReport, error)
 	Close() error
 }
 

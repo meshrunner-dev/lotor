@@ -52,6 +52,9 @@ type Relay struct {
 	// path to the journal. Off, the measurement still runs and the
 	// latest value stays readable here, in RAM only.
 	noiseHistory bool
+	// txMode is the transmit gate this relay was assembled with:
+	// dry, shadow or on-air. The pipeline honours it; the CLI shows it.
+	txMode string
 	// stillborn marks a relay whose configuration failed: it exists to
 	// be visible in the error state, never to retry — a config error
 	// does not heal by waiting.
@@ -66,9 +69,10 @@ type lifecycle struct {
 
 // New assembles a relay from its resolved parts. noiseHistory decides
 // whether the floor reaches the bus (and so the journal); nil takes
-// the build's default.
+// the build's default. txMode is the transmit gate the configuration
+// resolved — dry when empty.
 func New(name string, drv radio.Driver, radioCfg map[string]any,
-	eng protocol.Engine, b *bus.Bus, log *zap.Logger, noiseHistory *bool,
+	eng protocol.Engine, b *bus.Bus, log *zap.Logger, noiseHistory *bool, txMode string,
 ) *Relay {
 	r := &Relay{
 		Name:         name,
@@ -78,6 +82,10 @@ func New(name string, drv radio.Driver, radioCfg map[string]any,
 		bus:          b,
 		log:          log.With(zap.String("relay", name)),
 		noiseHistory: NoiseHistoryDefault,
+		txMode:       txMode,
+	}
+	if txMode == "" {
+		r.txMode = "dry"
 	}
 	if noiseHistory != nil {
 		r.noiseHistory = *noiseHistory
@@ -85,6 +93,9 @@ func New(name string, drv radio.Driver, radioCfg map[string]any,
 	r.status.Store(lifecycle{state: StateStarting})
 	return r
 }
+
+// TXMode reports the transmit gate this relay runs behind.
+func (r *Relay) TXMode() string { return r.txMode }
 
 // Stillborn builds a relay pinned in the error state, so a broken
 // configuration is a visible casualty instead of a dead daemon.

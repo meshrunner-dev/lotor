@@ -62,6 +62,9 @@ type RelayInfo struct {
 	NoiseFloor func() (radio.NoiseFloor, bool)
 	// ChipStats reports the radio's own reception counters; may be nil.
 	ChipStats func() (radio.ChipStats, bool)
+	// TXMode is the transmit gate the relay runs behind: dry, shadow
+	// or on-air; empty reads as dry.
+	TXMode string
 	// Identity is the relay's node public key in hex, empty when none.
 	Identity string
 }

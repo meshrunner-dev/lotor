@@ -248,6 +248,21 @@ func (d *device) restPhase(ctx context.Context, until time.Duration, rechecked *
 	return nil
 }
 
+// Transmit keys the radio from the owning goroutine; the library
+// hands the chip back to reception on every path out.
+func (d *device) Transmit(ctx context.Context, payload []byte, powerDBm int8) (radio.TxReport, error) {
+	res, err := d.r.Transmit(ctx, payload, powerDBm)
+	if err != nil {
+		return radio.TxReport{}, err
+	}
+	return radio.TxReport{
+		At:       res.At,
+		Airtime:  res.Airtime,
+		Duration: res.Duration,
+		PowerDBm: res.PowerDBm,
+	}, nil
+}
+
 // statsEvery paces the chip-counter refresh: diagnostics, not a feed.
 const statsEvery = time.Minute
 

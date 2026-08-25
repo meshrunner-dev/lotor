@@ -12,7 +12,7 @@ import (
 func TestNoiseHistoryConfigOverridesTheBuildDefault(t *testing.T) {
 	b := bus.New()
 	mk := func(choice *bool) *Relay {
-		return New("r", radio.Driver{}, nil, nil, b, zap.NewNop(), choice)
+		return New("r", radio.Driver{}, nil, nil, b, zap.NewNop(), choice, "")
 	}
 	if got := mk(nil).noiseHistory; got != NoiseHistoryDefault {
 		t.Errorf("unset noise_history = %v, want the build default %v", got, NoiseHistoryDefault)

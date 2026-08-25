@@ -24,7 +24,7 @@ func (s *session) status(ctx context.Context, _ input) error {
 			fmt.Sprintf("%.3f MHz sf%d bw%.1fk",
 				float64(r.Waveform.FrequencyHz)/1e6, r.Waveform.SpreadingFactor,
 				float64(r.Waveform.BandwidthHz)/1e3),
-			"floor "+floorText(r))
+			"floor "+floorText(r), "tx "+txModeText(r))
 	}
 	if s.deps.Sentinel == nil {
 		tb.row("sentinel", "none")
@@ -74,6 +74,7 @@ func (s *session) relay(ctx context.Context, in input) error {
 		r.Waveform.BandwidthHz, r.Waveform.CodingRate, r.Waveform.Preamble,
 		r.Waveform.SyncWord, r.Waveform.CRC))
 	tb.row("noise floor", floorText(r))
+	tb.row("tx mode", txModeText(r))
 	if r.ChipStats != nil {
 		if cs, ok := r.ChipStats(); ok {
 			// The chip's own tally — an independent second opinion on
@@ -148,6 +149,14 @@ func (s *session) radio(_ context.Context, in input) error {
 		}
 	}
 	return s.showTraces("radio " + args[1])
+}
+
+// txModeText resolves a relay's gate for display; empty is dry.
+func txModeText(r RelayInfo) string {
+	if r.TXMode == "" {
+		return "dry"
+	}
+	return r.TXMode
 }
 
 // floorText renders a relay's noise floor: the median, how far above

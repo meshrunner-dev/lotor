@@ -248,3 +248,19 @@ func TestConsoleSocketResolution(t *testing.T) {
 		t.Errorf("custom socket resolves to %q explicit=%v", path, explicit)
 	}
 }
+
+func TestTXBlockNormalizes(t *testing.T) {
+	tx := &TX{}
+	if err := tx.Normalize(); err != nil || tx.Mode != TXDry || tx.LBTExhausted != "transmit" {
+		t.Fatalf("defaults = %+v, %v", tx, err)
+	}
+	if err := (&TX{Mode: "hot"}).Normalize(); err == nil {
+		t.Error("unknown mode accepted")
+	}
+	if err := (&TX{LBTExhausted: "retry"}).Normalize(); err == nil {
+		t.Error("unknown lbt_exhausted accepted")
+	}
+	if (&Relay{}).TXMode() != TXDry {
+		t.Error("absent block should read dry")
+	}
+}

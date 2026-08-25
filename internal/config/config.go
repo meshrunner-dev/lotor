@@ -38,6 +38,57 @@ type Relay struct {
 	// measurement itself always runs — off just keeps the latest value
 	// in RAM only.
 	NoiseHistory *bool `yaml:"noise_history"`
+	// TX gates and tunes the transmit path; absent means dry — the
+	// receive-only posture.
+	TX *TX `yaml:"tx"`
+}
+
+// The transmit gate ladder: dry runs the judgement alone, shadow runs
+// the whole pipeline and journals the emissions it would have made,
+// on-air keys the radio.
+const (
+	TXDry    = "dry"
+	TXShadow = "shadow"
+	TXOnAir  = "on-air"
+)
+
+// TX configures a relay's transmit gate and channel politeness.
+type TX struct {
+	// Mode is the gate: dry (default), shadow, or on-air.
+	Mode string `yaml:"mode"`
+	// LBTThresholdDB, above the measured noise floor, marks the
+	// channel busy before keying. Zero — the default — disables the
+	// RSSI check; field experience rates it unreliable.
+	LBTThresholdDB float64 `yaml:"lbt_threshold_db"`
+	// LBTExhausted decides what happens when the channel stays busy
+	// past the bounded wait: "transmit" (default — the mesh's
+	// convention) or "drop", counted and visible.
+	LBTExhausted string `yaml:"lbt_exhausted"`
+}
+
+// Normalize fills the TX defaults and rejects unknown enum values.
+func (t *TX) Normalize() error {
+	if t.Mode == "" {
+		t.Mode = TXDry
+	}
+	if t.Mode != TXDry && t.Mode != TXShadow && t.Mode != TXOnAir {
+		return fmt.Errorf("tx: mode %q — want dry, shadow or on-air", t.Mode)
+	}
+	if t.LBTExhausted == "" {
+		t.LBTExhausted = "transmit"
+	}
+	if t.LBTExhausted != "transmit" && t.LBTExhausted != "drop" {
+		return fmt.Errorf("tx: lbt_exhausted %q — want transmit or drop", t.LBTExhausted)
+	}
+	return nil
+}
+
+// TXMode resolves the relay's gate, absent block included.
+func (r *Relay) TXMode() string {
+	if r.TX == nil {
+		return TXDry
+	}
+	return r.TX.Mode
 }
 
 // Sentinel configures the observation and archival instantiation.
@@ -142,6 +193,11 @@ func (f *File) validate() error {
 	for name, r := range f.Relays {
 		if r.Protocol == "" {
 			return fmt.Errorf("relay %q: protocol is required", name)
+		}
+		if r.TX != nil {
+			if err := r.TX.Normalize(); err != nil {
+				return fmt.Errorf("relay %q: %w", name, err)
+			}
 		}
 		if r.Radio == "" {
 			return fmt.Errorf("relay %q: radio is required", name)

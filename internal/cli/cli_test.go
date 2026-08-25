@@ -351,3 +351,15 @@ func TestIACStripper(t *testing.T) {
 		t.Errorf("stripped = %q", got)
 	}
 }
+
+func TestTXModeIsShown(t *testing.T) {
+	deps := testDeps(t)
+	if out := run(t, deps, "status"); !strings.Contains(out, "tx dry") {
+		t.Errorf("dry gate hidden:\n%s", out)
+	}
+	deps.Relays[0].TXMode = "shadow"
+	if out := run(t, deps, "relay show meshcore-868"); !strings.Contains(out, "tx mode") ||
+		!strings.Contains(out, "shadow") {
+		t.Errorf("shadow gate hidden:\n%s", out)
+	}
+}

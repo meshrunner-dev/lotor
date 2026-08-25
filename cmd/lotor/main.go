@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -381,7 +382,11 @@ func assemble(name string, rc config.Relay, radioSpec config.Radio,
 		return nil, none, fmt.Errorf("radio %q: %w", rc.Radio, err)
 	}
 
-	r := relay.New(name, drv, radioCfg, eng, b, log, rc.NoiseHistory)
+	txMode, err := resolveTXMode(rc, env, eng)
+	if err != nil {
+		return nil, none, err
+	}
+	r := relay.New(name, drv, radioCfg, eng, b, log, rc.NoiseHistory, txMode)
 	deps.Radios = append(deps.Radios, cli.RadioInfo{
 		Name: rc.Radio, Driver: radioSpec.Driver, Envelope: env, Relay: name,
 	})
@@ -402,8 +407,31 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		Err:        r.Err,
 		NoiseFloor: r.NoiseFloor,
 		ChipStats:  r.ChipStats,
+		TXMode:     r.TXMode(),
 		Identity:   eng.Identity(),
 	}
+}
+
+// resolveTXMode enforces the transmit gate locks at assembly: shadow
+// and on-air need a power the pipeline can honestly account for —
+// "auto" resolves against the board's declared ceiling — and on-air
+// additionally refuses to exist without that ceiling. A violation is
+// a stillborn relay, never a silent dry.
+func resolveTXMode(rc config.Relay, env radio.Envelope, eng protocol.Engine) (string, error) {
+	mode := rc.TXMode()
+	if mode == config.TXDry {
+		return mode, nil
+	}
+	if env.MaxTxPowerDBm == 0 {
+		if mode == config.TXOnAir {
+			return "", errors.New("tx: on-air requires the radio's max_tx_power_dbm declared")
+		}
+		if _, explicit := eng.TxPower(); !explicit {
+			return "", fmt.Errorf(
+				"tx: mode %s with tx_power_dbm auto needs the radio's max_tx_power_dbm declared", mode)
+		}
+	}
+	return mode, nil
 }
 
 // bindEnvelope validates the engine's choices against the board's
