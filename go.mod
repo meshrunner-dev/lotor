@@ -8,7 +8,7 @@ require (
 	go.uber.org/zap v1.28.0
 	golang.org/x/term v0.45.0
 	gopkg.in/yaml.v3 v3.0.1
-	meshrunner.dev/pkg/lora v0.3.0
+	meshrunner.dev/pkg/lora v0.4.0
 	meshrunner.dev/pkg/meshcore v1.1.0
 	modernc.org/sqlite v1.57.0
 )
