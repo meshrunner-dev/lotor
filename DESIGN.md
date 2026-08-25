@@ -201,6 +201,69 @@ Archiving gates exist because disk writes are a budget, like the
 sentinel itself: a gate closed keeps the live value in RAM, nothing
 else. Measurement never gates — knowing the channel is not optional.
 
+## The transmit path — designed, staged
+
+Decided 2026-08-26; built in stages behind visible gates. Nothing here
+contradicts the receive-only present: every stage below `on-air` emits
+nothing.
+
+**Gates.** Per relay, a `tx:` block with three modes: `dry` (absent =
+default; today's behaviour), `shadow` (the whole pipeline runs — LBT,
+queue, duty accounting — and the emission that *would* have happened is
+journalled with its exact instant, airtime and power, but the radio is
+never keyed), `on-air`. The mode shows in `status`; changing it is
+journalled. `on-air` refuses to start without a declared radio power
+cap and a resolved `tx_power_dbm` — a misconfigured transmitter is a
+stillborn relay, never a silent one.
+
+**Channel politeness (LBT).** Before keying: an RSSI check against the
+measured floor (`lbt_threshold_db` above the p50; disabled by default —
+field experience says the check is unreliable, and disabled is also
+the reference's default) then a hardware CAD scan, cheapest first.
+Never while a reception is in progress. On a busy verdict, randomized
+~200 ms retries bounded to ~4 s total; exhausted, the frame is sent
+anyway — the mesh's convention — unless the site chose
+`lbt_exhausted: drop`, in which case the drop is counted and visible.
+
+**Queue.** The reference's shape exactly: one bounded queue of
+`(priority, not-before)` entries served by priority once due. Two
+priorities: direct traffic and ACKs ahead, flood relays behind. The
+flood desynchronisation delay — the reference's SNR-score formula, so
+well-heard repeaters yield to badly-heard ones — is simply the entry's
+`not-before`. A full queue refuses the newcomer with a counted drop;
+nothing is evicted silently. One standing constraint: nothing slow may
+sit between collecting a frame and the transmit that answers it.
+
+**Duty cycle.** Every emission, real or shadow, leaves a ledger row in
+the journal: instant, airtime, frequency, applied power, type, and the
+transaction it relays. Enforcement is a sliding one-hour window whose
+percentage comes from the band preset, overridable. At saturation,
+candidates wait in the same priority order until a deadline, then drop,
+counted. The cap is never exceeded, for anyone. The gauge shows in
+`status`; a `tx_duty` series joins the metrics tiers.
+
+**What is sent.** v1 turns the existing verdicts into actions:
+`would-relay-flood` retransmits with our hash appended to the path,
+`would-relay-direct` and the trace family likewise. No originated
+traffic except the adverts a repeater owes the mesh:
+`advert_flood_interval` (hours; default 48h, active when on-air) and
+`advert_local_interval` (minutes; zero-hop, default 0 = off). On-air
+admin responses — the stats the telemetry already gathers — come
+later, as their own protocol work.
+
+**Traceability.** `FrameSent` carries the origin transaction, instant,
+airtime and applied power; `TxDropped` carries its reason (queue,
+duty, channel when drop is chosen). The journal links them, and `txn`
+shows the full life: heard → judged → sent. Shadow entries are marked
+as such — they are the audit trail that earns `on-air`.
+
+**Validation ladder.** Shadow on the production band first: days of
+journalled decisions, audited against what the mesh's real repeaters
+did. Then on-air on a test channel at minimal power with a witness
+node: reception, path append, mutual dedup, ledger accuracy. Then
+on-air on the band with zero-hop adverts only. Relaying on the
+production band is the operator's decision, not a default.
+
 ## Later — designed for, not built
 
 None of this exists, and nothing above may contradict it:
