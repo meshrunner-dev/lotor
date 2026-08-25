@@ -62,8 +62,8 @@ gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
 gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
-meshrunner.dev/pkg/lora v0.4.1 h1:oI2q7w/Dml0dmsxL3ys5gTG9RsbWC9BVvwmx51vJfkA=
-meshrunner.dev/pkg/lora v0.4.1/go.mod h1:s8x4AIgI5XAR4zCJO7rGHPP+u3aqMmWfn/yq/nGxChw=
+meshrunner.dev/pkg/lora v0.5.0 h1:Q0ent+pPhV+ogjzZhaRYem+2pVmVa41qsqjhctGECrs=
+meshrunner.dev/pkg/lora v0.5.0/go.mod h1:s8x4AIgI5XAR4zCJO7rGHPP+u3aqMmWfn/yq/nGxChw=
 meshrunner.dev/pkg/meshcore v1.1.0 h1:TUOsmnGKagEilhucQB6sZHX74OiIabkTfMIj+CN/wIw=
 meshrunner.dev/pkg/meshcore v1.1.0/go.mod h1:xBbgpP4/Vxd9oG6pODScyWMImA9QRY/HgHP2iRVNcnM=
 modernc.org/cc/v4 v4.29.1 h1:MKgdCV3WykTSPqpVrnxdEDS0HEd2FHpKZDzxzU5LyeI=
