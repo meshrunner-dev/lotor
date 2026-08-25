@@ -22,11 +22,19 @@ func init() {
 }
 
 type device struct {
-	r     *sx126x.Radio
-	env   radio.Envelope
-	held  []lora.OutputPin
+	r    *sx126x.Radio
+	env  radio.Envelope
+	held []lora.OutputPin
+	// dio1 is kept for its level: the line stays high while an IRQ is
+	// latched, so reading it before a sleep catches any transition the
+	// edge path missed — a GPIO read, never the SPI bus.
+	dio1  lora.InterruptPin
 	floor floorTracker
 	log   *zap.Logger
+	// watchdog optionally bounds a transition degraded while asleep in
+	// the rest phase; nil channel — the default — never fires.
+	wdTicker *time.Ticker
+	watchdog <-chan time.Time
 	// stats caches the chip's counters, refreshed by the receive loop
 	// so readers never touch the single-owner hardware.
 	stats     atomic.Value
@@ -73,7 +81,12 @@ func open(cfg map[string]any, log *zap.Logger) (radio.Device, error) {
 		return nil, err
 	}
 	log.Info("radio open", zap.String("driver", "sx126x-spi"), zap.String("spi", s.SPI))
-	return &device{r: r, env: s.envelope(), held: held, log: log}, nil
+	d := &device{r: r, env: s.envelope(), held: held, dio1: pins.DIO1, log: log}
+	if s.DIO1Watchdog > 0 {
+		d.wdTicker = time.NewTicker(s.DIO1Watchdog)
+		d.watchdog = d.wdTicker.C
+	}
+	return d, nil
 }
 
 // attach opens the bus and every pin, releasing what it opened on any
@@ -128,17 +141,23 @@ func (d *device) Configure(w radio.Waveform) error {
 
 func (d *device) StartReceive() error { return d.r.StartReceive() }
 
-// sampleEvery paces the idle noise-floor sampling. It matches the
-// library's own poll floor, so it doubles as the lost-edge insurance
-// the library's blocking receive provides.
+// sampleEvery paces the noise-floor sampling while a batch collects.
 const sampleEvery = 20 * time.Millisecond
 
 // Receive waits for the next frame, and measures while it waits: the
 // radio has exactly one owning goroutine, so the noise floor is
 // sampled here, between polls, never from outside.
+//
+// The wait is bi-modal, following the tracker's own state. While a
+// batch collects (~1.3 s of every cycle), a 20 ms tick paces the
+// sampling. While the tracker rests, the wait is purely edge-driven —
+// no wake-ups at all — behind a DIO1 level check that catches any
+// transition the edge path missed, plus the optional board watchdog.
 func (d *device) Receive(ctx context.Context) (radio.Frame, error) {
 	tick := time.NewTicker(sampleEvery)
 	defer tick.Stop()
+	ticking := true
+	rechecked := false
 	edges := d.r.Events()
 	for {
 		f, err := d.r.Poll()
@@ -149,25 +168,84 @@ func (d *device) Receive(ctx context.Context) (radio.Frame, error) {
 			return radio.Frame{}, err
 		}
 		if f != nil {
-			return radio.Frame{
-				Payload:    f.Payload,
-				RSSI:       f.RSSI,
-				SNR:        f.SNR,
-				SignalRSSI: f.SignalRSSI,
-				FreqErrHz:  f.FreqErr,
-				Airtime:    f.Airtime,
-				At:         f.At,
-			}, nil
+			return mapFrame(f), nil
 		}
-		select {
-		case <-ctx.Done():
-			return radio.Frame{}, ctx.Err()
-		case <-edges:
-		case <-tick.C:
-			d.sampleFloor()
-			d.refreshStats()
+		now := time.Now()
+		if d.floor.collecting(now) {
+			rechecked = false
+			err = d.collectPhase(ctx, edges, tick, &ticking)
+		} else {
+			if ticking {
+				tick.Stop() // frames wake us by edge; no clock at rest
+				ticking = false
+			}
+			err = d.restPhase(ctx, d.floor.restLeft(now), &rechecked)
+		}
+		if err != nil {
+			return radio.Frame{}, err
 		}
 	}
+}
+
+func mapFrame(f *sx126x.RxFrame) radio.Frame {
+	return radio.Frame{
+		Payload:    f.Payload,
+		RSSI:       f.RSSI,
+		SNR:        f.SNR,
+		SignalRSSI: f.SignalRSSI,
+		FreqErrHz:  f.FreqErr,
+		Airtime:    f.Airtime,
+		At:         f.At,
+	}
+}
+
+// collectPhase paces one sampling tick while a batch collects.
+func (d *device) collectPhase(ctx context.Context, edges <-chan struct{},
+	tick *time.Ticker, ticking *bool,
+) error {
+	if !*ticking {
+		tick.Reset(sampleEvery)
+		*ticking = true
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-edges:
+	case <-tick.C:
+		d.sampleFloor()
+		d.refreshStats()
+	}
+	return nil
+}
+
+// restPhase parks the loop between batches. The DIO1 level is read
+// before sleeping — the level outlives any missed transition, so high
+// means an IRQ latched since Poll and the caller must look again;
+// rechecked guards a line stuck high from spinning on the bus. Then a
+// pure edge sleep, bounded by the rest deadline and the optional
+// board watchdog.
+func (d *device) restPhase(ctx context.Context, until time.Duration, rechecked *bool) error {
+	if !*rechecked {
+		high, err := d.dio1.Get()
+		if err != nil {
+			return err
+		}
+		if high {
+			*rechecked = true
+			return nil // look again
+		}
+	}
+	*rechecked = false
+	timer := time.NewTimer(until)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-d.r.Events():
+	case <-timer.C:
+	case <-d.watchdog:
+	}
+	return nil
 }
 
 // statsEvery paces the chip-counter refresh: diagnostics, not a feed.
@@ -202,6 +280,9 @@ func (d *device) ChipStats() (radio.ChipStats, bool) {
 // disqualifies the sample — and only in receive mode, which rules out
 // a future transmit path by the chip's own account of itself.
 func (d *device) sampleFloor() {
+	if !d.floor.collecting(time.Now()) {
+		return // resting: the bus stays untouched
+	}
 	preamble, header, err := d.r.ReceiveInProgress()
 	if err != nil || preamble || header {
 		return
@@ -226,6 +307,9 @@ func (d *device) NoiseFloor() (radio.NoiseFloor, bool) {
 func (d *device) NoiseStarved() uint64 { return d.floor.starvedCount() }
 
 func (d *device) Close() error {
+	if d.wdTicker != nil {
+		d.wdTicker.Stop()
+	}
 	err := d.r.Close()
 	for _, h := range d.held {
 		_ = h.Close()

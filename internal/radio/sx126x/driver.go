@@ -7,6 +7,7 @@ package sx126x
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/radio"
@@ -36,6 +37,14 @@ type Settings struct {
 	// Chip names the exact part (sx1261/sx1262/sx1268); required for
 	// transmit later, optional while receive-only.
 	Chip string `yaml:"chip"`
+
+	// DIO1Watchdog optionally re-polls the chip while the receive loop
+	// sleeps between noise-floor batches. Off by default: the DIO1
+	// level check already catches every event that happened before the
+	// sleep, so this only insures a DIO1 transition degraded
+	// electrically while asleep — a board-wiring doubt, which is why
+	// the knob lives here, next to the pin it guards.
+	DIO1Watchdog time.Duration `yaml:"dio1_watchdog"`
 
 	// Envelope: what the board physically allows. Zero means
 	// undeclared at the seam — and, passed through to the driver

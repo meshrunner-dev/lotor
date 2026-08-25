@@ -66,6 +66,31 @@ func TestFloorAbandonsStaleBatches(t *testing.T) {
 	}
 }
 
+func TestFloorPhasesFollowTheTracker(t *testing.T) {
+	// The receive loop's two phases derive from tracker state: a fresh
+	// tracker collects, a completed batch rests until its deadline.
+	tr := &floorTracker{}
+	now := time.Now()
+	if !tr.collecting(now) {
+		t.Fatal("a fresh tracker must want samples")
+	}
+	feed(tr, now, -105, floorSamples)
+	if tr.collecting(now.Add(time.Millisecond)) {
+		t.Fatal("a completed batch must rest")
+	}
+	if left := tr.restLeft(now); left <= 0 || left > floorRestEvery {
+		t.Fatalf("restLeft = %v, want within (0, %v]", left, floorRestEvery)
+	}
+	if !tr.collecting(now.Add(floorRestEvery)) {
+		t.Fatal("the rest elapsed: sampling must resume")
+	}
+	// A partial batch keeps collecting even inside the rest window.
+	feed(tr, now.Add(floorRestEvery), -105, 1)
+	if !tr.collecting(now.Add(floorRestEvery)) {
+		t.Fatal("a partial batch must keep collecting")
+	}
+}
+
 func TestFloorGateRejectsTraffic(t *testing.T) {
 	// Once a floor is known, a strong carrier the preamble detector
 	// missed must not enter the batch at all.

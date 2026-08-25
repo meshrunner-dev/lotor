@@ -92,6 +92,18 @@ func (t *floorTracker) value() (radio.NoiseFloor, bool) {
 // starvedCount reports how many batches were abandoned, cumulatively.
 func (t *floorTracker) starvedCount() uint64 { return t.starved.Load() }
 
+// collecting reports whether the tracker wants samples now: a batch in
+// progress, or the rest between batches elapsed. The receive loop's
+// two phases — sampling ticks versus pure edge sleep — follow this.
+func (t *floorTracker) collecting(now time.Time) bool {
+	return len(t.samples) > 0 || !now.Before(t.rest)
+}
+
+// restLeft is how long until sampling resumes.
+func (t *floorTracker) restLeft(now time.Time) time.Duration {
+	return t.rest.Sub(now)
+}
+
 // percentile reads the p-th percentile off sorted samples, by the
 // nearest-rank method.
 func percentile(sorted []float64, p float64) float64 {
