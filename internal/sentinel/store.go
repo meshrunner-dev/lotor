@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS frames (
 	rssi_dbm     REAL NOT NULL,
 	snr_db       REAL NOT NULL,
 	airtime_ms   REAL NOT NULL,
+	signal_dbm   REAL NOT NULL DEFAULT 0,
+	freq_err_hz  REAL NOT NULL DEFAULT 0,
 	ptype        TEXT NOT NULL DEFAULT '',
 	route        TEXT NOT NULL DEFAULT '',
 	path_len     INTEGER NOT NULL DEFAULT 0,
@@ -92,6 +94,8 @@ type Frame struct {
 	Bytes       int
 	RSSI        float64
 	SNR         float64
+	SignalRSSI  float64
+	FreqErrHz   float64
 	Airtime     time.Duration
 	Type        string
 	Route       string
@@ -175,14 +179,15 @@ func (s *store) insertHeard(ctx context.Context, f Frame) error {
 	// The upsert touches only the heard columns: a redelivered
 	// FrameHeard must not blank a judgement already applied.
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO frames (txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO frames (txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms, signal_dbm, freq_err_hz)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(txn) DO UPDATE SET
 		   relay = excluded.relay, at_ms = excluded.at_ms, bytes = excluded.bytes,
 		   rssi_dbm = excluded.rssi_dbm, snr_db = excluded.snr_db,
-		   airtime_ms = excluded.airtime_ms`,
+		   airtime_ms = excluded.airtime_ms, signal_dbm = excluded.signal_dbm,
+		   freq_err_hz = excluded.freq_err_hz`,
 		f.Txn, f.Relay, f.At.UnixMilli(), f.Bytes, f.RSSI, f.SNR,
-		float64(f.Airtime)/float64(time.Millisecond),
+		float64(f.Airtime)/float64(time.Millisecond), f.SignalRSSI, f.FreqErrHz,
 	)
 	return err
 }
@@ -440,7 +445,7 @@ type FrameQuery struct {
 // Filtering happens in SQL: a busy channel cannot starve a filtered
 // view, and the txn prefix is an index range, not a LIKE.
 func (s *store) RecentFrames(ctx context.Context, fq FrameQuery) ([]Frame, error) {
-	q := `SELECT txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms,
+	q := `SELECT txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms, signal_dbm, freq_err_hz,
 	             ptype, route, path_len, verdict, duplicate_of, node, pubkey, detail
 	      FROM frames WHERE 1=1`
 	args := []any{}
@@ -476,7 +481,8 @@ func (s *store) RecentFrames(ctx context.Context, fq FrameQuery) ([]Frame, error
 		var atMS int64
 		var airtimeMS float64
 		if err := rows.Scan(&f.Txn, &f.Relay, &atMS, &f.Bytes, &f.RSSI, &f.SNR,
-			&airtimeMS, &f.Type, &f.Route, &f.PathLen, &f.Verdict, &f.DuplicateOf,
+			&airtimeMS, &f.SignalRSSI, &f.FreqErrHz,
+			&f.Type, &f.Route, &f.PathLen, &f.Verdict, &f.DuplicateOf,
 			&f.Node, &f.PubKey, &f.Detail); err != nil {
 			return nil, err
 		}
@@ -495,6 +501,9 @@ type Node struct {
 	Heard    int
 	LastAt   time.Time
 	BestRSSI float64
+	// DriftHz averages the carrier offset of the node's frames whose
+	// reception measured one: its crystal's health, in hertz.
+	DriftHz float64
 }
 
 // Nodes lists every advertising node ever journalled, most recently
@@ -510,7 +519,8 @@ func (s *store) Nodes(ctx context.Context) ([]Node, error) {
 		          AND n.ptype = 'ADVERT' AND n.node != '' ORDER BY n.at_ms DESC LIMIT 1),
 		       (SELECT detail FROM frames n WHERE n.pubkey = f.pubkey
 		          AND n.ptype = 'ADVERT' AND n.detail != '' ORDER BY n.at_ms DESC LIMIT 1),
-		       COUNT(*), MAX(f.at_ms), MAX(f.rssi_dbm)
+		       COUNT(*), MAX(f.at_ms), MAX(f.rssi_dbm),
+	       AVG(CASE WHEN f.freq_err_hz != 0 THEN f.freq_err_hz END)
 		FROM frames f WHERE f.pubkey != '' AND f.ptype = 'ADVERT'
 		GROUP BY f.pubkey ORDER BY MAX(f.at_ms) DESC`)
 	if err != nil {
@@ -522,11 +532,13 @@ func (s *store) Nodes(ctx context.Context) ([]Node, error) {
 	for rows.Next() {
 		var n Node
 		var name, typ sql.NullString
+		var drift sql.NullFloat64
 		var lastMS int64
-		if err := rows.Scan(&n.PubKey, &name, &typ, &n.Heard, &lastMS, &n.BestRSSI); err != nil {
+		if err := rows.Scan(&n.PubKey, &name, &typ, &n.Heard, &lastMS, &n.BestRSSI, &drift); err != nil {
 			return nil, err
 		}
 		n.Name, n.Type = name.String, typ.String
+		n.DriftHz = drift.Float64
 		n.LastAt = time.UnixMilli(lastMS)
 		out = append(out, n)
 	}

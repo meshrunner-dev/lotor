@@ -170,7 +170,9 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 	case bus.FrameHeard:
 		err = s.store.insertHeard(ctx, Frame{
 			Txn: e.Txn.String(), Relay: e.Relay, At: e.At,
-			Bytes: e.Bytes, RSSI: e.RSSI, SNR: e.SNR, Airtime: e.Airtime,
+			Bytes: e.Bytes, RSSI: e.RSSI, SNR: e.SNR,
+			SignalRSSI: e.SignalRSSI, FreqErrHz: e.FreqErrHz,
+			Airtime: e.Airtime,
 		})
 	case bus.FrameJudged:
 		err = s.store.applyJudgement(ctx, e.Txn.String(), e.Relay, Frame{

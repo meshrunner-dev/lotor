@@ -46,6 +46,8 @@ type Relay struct {
 	// noise holds the last radio.NoiseFloor the session's monitor saw;
 	// it outlives the session so the last reading stays consultable.
 	noise atomic.Value
+	// chipStats mirrors the radio's own counters the same way.
+	chipStats atomic.Value
 	// noiseHistory gates publishing the floor to the bus — the write
 	// path to the journal. Off, the measurement still runs and the
 	// latest value stays readable here, in RAM only.
@@ -237,6 +239,9 @@ func (r *Relay) watchNoise(ctx context.Context, dev radio.Device) {
 				}
 				starved = cur
 			}
+			if cs, ok := dev.ChipStats(); ok {
+				r.chipStats.Store(cs)
+			}
 			nf, ok := dev.NoiseFloor()
 			if !ok {
 				continue
@@ -265,6 +270,13 @@ func (r *Relay) watchNoise(ctx context.Context, dev radio.Device) {
 func (r *Relay) NoiseFloor() (radio.NoiseFloor, bool) {
 	nf, ok := r.noise.Load().(radio.NoiseFloor)
 	return nf, ok
+}
+
+// ChipStats reports the radio's own reception counters, mirrored by
+// the session's monitor; ok is false until the first read.
+func (r *Relay) ChipStats() (radio.ChipStats, bool) {
+	s, ok := r.chipStats.Load().(radio.ChipStats)
+	return s, ok
 }
 
 func abs(f float64) float64 {

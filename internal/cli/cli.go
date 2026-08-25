@@ -60,6 +60,8 @@ type RelayInfo struct {
 	// NoiseFloor reports the channel's last measured ambient level;
 	// may be nil, and ok stays false until a measurement converges.
 	NoiseFloor func() (radio.NoiseFloor, bool)
+	// ChipStats reports the radio's own reception counters; may be nil.
+	ChipStats func() (radio.ChipStats, bool)
 	// Identity is the relay's node public key in hex, empty when none.
 	Identity string
 }

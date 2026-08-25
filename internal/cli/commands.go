@@ -74,6 +74,14 @@ func (s *session) relay(ctx context.Context, in input) error {
 		r.Waveform.BandwidthHz, r.Waveform.CodingRate, r.Waveform.Preamble,
 		r.Waveform.SyncWord, r.Waveform.CRC))
 	tb.row("noise floor", floorText(r))
+	if r.ChipStats != nil {
+		if cs, ok := r.ChipStats(); ok {
+			// The chip's own tally — an independent second opinion on
+			// the journal's counts.
+			tb.row("chip stats", fmt.Sprintf("rx %d  crc-err %d  header-err %d",
+				cs.Received, cs.CRCErrors, cs.HeaderErrors))
+		}
+	}
 	if s.deps.Sentinel != nil {
 		s.relayJournal(ctx, tb, r)
 	}
@@ -281,8 +289,9 @@ func (s *session) txn(ctx context.Context, in input) error {
 		return fmt.Errorf("no transaction matching %q", args[0])
 	}
 	for _, f := range chain {
-		fmt.Fprintf(s.out, "%s  heard %s  %d B  %.0f dBm  snr %.1f  airtime %s\r\n",
-			f.Txn[:12], f.At.Format("15:04:05"), f.Bytes, f.RSSI, f.SNR, f.Airtime)
+		fmt.Fprintf(s.out, "%s  heard %s  %d B  %.0f dBm  snr %.1f  signal %.0f dBm  Δf %+.0f Hz  airtime %s\r\n",
+			f.Txn[:12], f.At.Format("15:04:05"), f.Bytes, f.RSSI, f.SNR,
+			f.SignalRSSI, f.FreqErrHz, f.Airtime)
 		fmt.Fprintf(s.out, "  %s %s path_len %d — %s", f.Type, f.Route, f.PathLen, verdictWithChain(f))
 		if w := who(f); w != "" {
 			fmt.Fprintf(s.out, " — %s", w)
@@ -306,11 +315,15 @@ func (s *session) nodes(ctx context.Context, in input) error {
 		return s.printJSON(nodes)
 	}
 	tb := &table{}
-	tb.row("name", "type", "pubkey", "heard", "last", "best rssi")
+	tb.row("name", "type", "pubkey", "heard", "last", "best rssi", "drift")
 	for _, n := range nodes {
+		drift := "—"
+		if n.DriftHz != 0 {
+			drift = fmt.Sprintf("%+.0f Hz", n.DriftHz)
+		}
 		tb.row(quoted(n.Name), n.Type, n.PubKey,
 			fmt.Sprintf("%d×", n.Heard), ago(n.LastAt),
-			fmt.Sprintf("%.0f dBm", n.BestRSSI))
+			fmt.Sprintf("%.0f dBm", n.BestRSSI), drift)
 	}
 	return tb.flush(s.out)
 }

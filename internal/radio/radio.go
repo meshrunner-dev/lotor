@@ -52,8 +52,22 @@ type Frame struct {
 	Payload []byte
 	RSSI    float64
 	SNR     float64
-	Airtime time.Duration
-	At      time.Time
+	// SignalRSSI is the despread signal's own power — meaningful below
+	// the noise floor, where RSSI mostly measures the noise.
+	SignalRSSI float64
+	// FreqErrHz is the sender's carrier offset as the demodulator saw
+	// it: a node drifting here frame after frame has a failing crystal.
+	FreqErrHz float64
+	Airtime   time.Duration
+	At        time.Time
+}
+
+// ChipStats are the transceiver's own reception counters — an
+// independent second opinion on the daemon's tallies.
+type ChipStats struct {
+	Received     uint16
+	CRCErrors    uint16
+	HeaderErrors uint16
 }
 
 // ErrCorrupt marks a reception that failed integrity checks: traffic,
@@ -90,6 +104,10 @@ type Device interface {
 	// channel left too few idle gaps to observe within a batch's age
 	// bound. Cumulative; same calling rules as NoiseFloor.
 	NoiseStarved() uint64
+	// ChipStats reports the transceiver's own reception counters,
+	// refreshed periodically by the receive loop; ok is false until
+	// the first read. Same calling rules as NoiseFloor.
+	ChipStats() (ChipStats, bool)
 	Close() error
 }
 

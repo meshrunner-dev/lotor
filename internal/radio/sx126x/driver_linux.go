@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -26,6 +27,10 @@ type device struct {
 	held  []lora.OutputPin
 	floor floorTracker
 	log   *zap.Logger
+	// stats caches the chip's counters, refreshed by the receive loop
+	// so readers never touch the single-owner hardware.
+	stats     atomic.Value
+	statsRead time.Time
 }
 
 func open(cfg map[string]any, log *zap.Logger) (radio.Device, error) {
@@ -145,11 +150,13 @@ func (d *device) Receive(ctx context.Context) (radio.Frame, error) {
 		}
 		if f != nil {
 			return radio.Frame{
-				Payload: f.Payload,
-				RSSI:    f.RSSI,
-				SNR:     f.SNR,
-				Airtime: f.Airtime,
-				At:      f.At,
+				Payload:    f.Payload,
+				RSSI:       f.RSSI,
+				SNR:        f.SNR,
+				SignalRSSI: f.SignalRSSI,
+				FreqErrHz:  f.FreqErr,
+				Airtime:    f.Airtime,
+				At:         f.At,
 			}, nil
 		}
 		select {
@@ -158,8 +165,36 @@ func (d *device) Receive(ctx context.Context) (radio.Frame, error) {
 		case <-edges:
 		case <-tick.C:
 			d.sampleFloor()
+			d.refreshStats()
 		}
 	}
+}
+
+// statsEvery paces the chip-counter refresh: diagnostics, not a feed.
+const statsEvery = time.Minute
+
+// refreshStats caches the chip's own counters once a minute, from the
+// owning goroutine — readers get the cache, never the bus.
+func (d *device) refreshStats() {
+	if time.Since(d.statsRead) < statsEvery {
+		return
+	}
+	d.statsRead = time.Now()
+	s, err := d.r.Stats()
+	if err != nil {
+		return // Poll will surface a bus that is truly sick
+	}
+	d.stats.Store(radio.ChipStats{
+		Received:     s.Received,
+		CRCErrors:    s.CRCErrors,
+		HeaderErrors: s.HeaderErrors,
+	})
+}
+
+// ChipStats reports the cached counters; any goroutine may ask.
+func (d *device) ChipStats() (radio.ChipStats, bool) {
+	s, ok := d.stats.Load().(radio.ChipStats)
+	return s, ok
 }
 
 // sampleFloor takes one idle RSSI reading when it is safe to: not

@@ -28,7 +28,8 @@ func TestHeardThenJudgedBecomesOneRow(t *testing.T) {
 
 	s.Process(context.Background(), bus.FrameHeard{
 		Relay: "meshcore-868", Txn: id, At: at,
-		Bytes: 132, RSSI: -69, SNR: 8.5, Airtime: 1295 * time.Millisecond,
+		Bytes: 132, RSSI: -69, SNR: 8.5, SignalRSSI: -74, FreqErrHz: 112,
+		Airtime: 1295 * time.Millisecond,
 	})
 	s.Process(context.Background(), bus.FrameJudged{
 		Relay: "meshcore-868", Txn: id,
@@ -46,7 +47,7 @@ func TestHeardThenJudgedBecomesOneRow(t *testing.T) {
 	f := frames[0]
 	if f.Txn != id.String() || f.Verdict != "would-relay-flood" ||
 		f.Type != "ADVERT" || f.Route != "FLOOD" || f.PathLen != 6 ||
-		f.Bytes != 132 || f.RSSI != -69 ||
+		f.Bytes != 132 || f.RSSI != -69 || f.SignalRSSI != -74 || f.FreqErrHz != 112 ||
 		f.Node != "Wanadoo" || f.PubKey != "de1234567890" || f.Detail != "repeater" {
 		t.Errorf("row = %+v", f)
 	}

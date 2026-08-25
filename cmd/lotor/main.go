@@ -401,6 +401,7 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		State:      r.State,
 		Err:        r.Err,
 		NoiseFloor: r.NoiseFloor,
+		ChipStats:  r.ChipStats,
 		Identity:   eng.Identity(),
 	}
 }

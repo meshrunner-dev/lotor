@@ -9,13 +9,19 @@ import (
 // FrameHeard is published for every frame a relay's radio delivers,
 // before any protocol judgement.
 type FrameHeard struct {
-	Relay   string
-	Txn     txn.ID
-	At      time.Time
-	Bytes   int
-	RSSI    float64
-	SNR     float64
-	Airtime time.Duration
+	Relay string
+	Txn   txn.ID
+	At    time.Time
+	Bytes int
+	RSSI  float64
+	SNR   float64
+	// SignalRSSI is the despread signal's own power; below the noise
+	// floor the plain RSSI mostly measures the noise.
+	SignalRSSI float64
+	// FreqErrHz is the sender's carrier offset — a per-node crystal
+	// health signal once averaged over its frames.
+	FreqErrHz float64
+	Airtime   time.Duration
 }
 
 // FrameJudged is the protocol engine's verdict on a heard frame.

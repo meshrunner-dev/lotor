@@ -172,11 +172,14 @@ func (e *engine) judge(frame radio.Frame) {
 		zap.Int("bytes", len(frame.Payload)),
 		zap.Float64("rssi_dbm", frame.RSSI),
 		zap.Float64("snr_db", frame.SNR),
+		zap.Float64("signal_rssi_dbm", frame.SignalRSSI),
+		zap.Float64("freq_err_hz", frame.FreqErrHz),
 		zap.Duration("airtime", frame.Airtime),
 	)
 	e.bus.Publish(bus.FrameHeard{
 		Relay: e.relay, Txn: id, At: frame.At,
 		Bytes: len(frame.Payload), RSSI: frame.RSSI, SNR: frame.SNR,
+		SignalRSSI: frame.SignalRSSI, FreqErrHz: frame.FreqErrHz,
 		Airtime: frame.Airtime,
 	})
 
