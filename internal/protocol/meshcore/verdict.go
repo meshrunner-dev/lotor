@@ -17,6 +17,7 @@ const (
 	verdictDropFloodType = "would-drop-flood-type"      // the reference never re-floods this payload type
 	verdictDropBadAdvert = "would-drop-invalid-advert"  // flood advert whose signature fails
 	verdictDropPathFull  = "would-drop-flood-path-full" // appending our hash would exceed the path
+	verdictDropFloodHops = "would-drop-flood-hops"      // the flood travelled past its hop limit
 	verdictDropLoop      = "would-drop-flood-loop"      // our hash already rides the path: we relayed this already
 	verdictSelfAdvert    = "self-advert"                // our own advert echoing back
 	verdictZeroHop       = "heard-zero-hop"             // direct, empty path: addressed to whoever hears it
@@ -32,6 +33,33 @@ const (
 
 // maxPathBytes is the reference's path capacity (MAX_PATH_SIZE).
 const maxPathBytes = 64
+
+// Flood hop limits, the reference repeater's active defaults
+// (flood_max, flood_max_advert). A flood that already carries this
+// many hashes is not forwarded again: adverts stop far earlier than
+// traffic, because every node emits them and the mesh would otherwise
+// drown in stale announcements. The reference's third knob,
+// flood_max_unscoped, distinguishes plain from transport-scoped
+// floods; both ship at the same value and this engine has no scoping
+// concept, so it is folded into referenceFloodMaxHops.
+const (
+	referenceFloodMaxHops       = 64
+	referenceFloodMaxAdvertHops = 8
+)
+
+// floodHopCaps resolves the configured limits, falling back to the
+// reference defaults — an unconfigured engine judges like the
+// reference rather than dropping everything.
+func (e *engine) floodHopCaps() (maxHops, maxAdvertHops int) {
+	maxHops, maxAdvertHops = e.p.FloodMaxHops, e.p.FloodMaxAdvertHops
+	if maxHops <= 0 {
+		maxHops = referenceFloodMaxHops
+	}
+	if maxAdvertHops <= 0 {
+		maxAdvertHops = referenceFloodMaxAdvertHops
+	}
+	return maxHops, maxAdvertHops
+}
 
 // floodRoutable holds the payload types Mesh::onRecvPacket hands to
 // routeRecvPacket. RAW_CUSTOM, MULTIPART, TRACE and CONTROL are
@@ -90,6 +118,17 @@ func (e *engine) floodVerdict(pkt *meshcore.Packet, advertOK bool) (string, stri
 	}
 	if (pkt.PathHashCount()+1)*pkt.PathHashSize() > maxPathBytes {
 		return verdictDropPathFull, ""
+	}
+	// The distance gate the reference applies through
+	// allowPacketForward → isFloodHopLimitExceeded, in the same place:
+	// after the capacity check, before the loop scan.
+	hops := pkt.PathHashCount()
+	maxHops, maxAdvertHops := e.floodHopCaps()
+	if hops >= maxHops {
+		return verdictDropFloodHops, fmt.Sprintf("%d hops, limit %d", hops, maxHops)
+	}
+	if t == meshcore.PayloadTypeAdvert && hops >= maxAdvertHops {
+		return verdictDropFloodHops, fmt.Sprintf("%d advert hops, limit %d", hops, maxAdvertHops)
 	}
 	// The repeater's loop gate: our hash already in the path means we
 	// relayed this packet once — flooding it again would orbit.

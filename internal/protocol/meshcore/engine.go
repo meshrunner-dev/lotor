@@ -43,6 +43,13 @@ type params struct {
 	// DedupEntries bounds the seen table's size.
 	DedupEntries int `yaml:"dedup_entries"`
 
+	// FloodMaxHops and FloodMaxAdvertHops bound how far a flood is
+	// carried onward: a packet already holding this many path hashes
+	// is not re-flooded. Zero takes the reference repeater's defaults
+	// (64, and 8 for adverts).
+	FloodMaxHops       int `yaml:"flood_max_hops"`
+	FloodMaxAdvertHops int `yaml:"flood_max_advert_hops"`
+
 	// DutyCyclePct is the band's regulatory ceiling on airtime, in
 	// percent per sliding hour; zero leaves emission unbudgeted. Band
 	// presets carry the lawful figure.

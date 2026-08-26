@@ -308,3 +308,115 @@ func TestDutyDropsWhatCannotWait(t *testing.T) {
 		}
 	}
 }
+
+// traceToUs builds a direct TRACE whose next target hop is this
+// engine: tag, auth, flags(1-byte hashes), then our hash.
+func traceToUs(t *testing.T, e *engine) radio.Frame {
+	t.Helper()
+	pkt, err := meshcore.BuildTrace(0x2A2A2A2A, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt.Header = meshcore.MakeHeader(meshcore.RouteDirect,
+		meshcore.PayloadTypeTrace, meshcore.PayloadVer1)
+	pkt.Payload = append(pkt.Payload, e.id.PubKey[0])
+	raw, err := pkt.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return radio.Frame{Payload: raw, At: time.Now(), SNR: 8, RSSI: -80}
+}
+
+func TestTraceWalksOnWithOurSNR(t *testing.T) {
+	// The reference retransmits a trace whose next target hop matches,
+	// appending its SNR reading to the walked path.
+	e, dev, sub, _ := txRig(t, "on-air")
+	runEngine(t, e, dev)
+	dev.frames <- traceToUs(t, e)
+
+	sent := awaitSent(t, sub)
+	if sent.Kind != "relay-trace" {
+		t.Fatalf("sent = %+v, want relay-trace", sent)
+	}
+	raw := <-dev.sent
+	pkt, err := meshcore.ParsePacket(raw)
+	if err != nil {
+		t.Fatalf("relayed trace does not parse: %v", err)
+	}
+	if len(pkt.Path) != 1 || pkt.Path[0] != byte(int8(8*4)) {
+		t.Fatalf("walked path = % X, want one SNR byte of 32", pkt.Path)
+	}
+}
+
+func TestFloodHopLimitsFollowTheReference(t *testing.T) {
+	// The reference stops adverts at 8 hops and everything else at 64
+	// (flood_max_advert, flood_max); past either, the packet is not
+	// forwarded.
+	e, _, _, peer := txRig(t, "shadow")
+	// A path of hashes that can never be ours, so the loop scan stays out.
+	fill := func(pkt *meshcore.Packet, hops int) {
+		pkt.Path = make([]byte, hops)
+		for i := range pkt.Path {
+			pkt.Path[i] = ^e.id.PubKey[0]
+		}
+		pkt.SetPathHashSizeAndCount(1, hops)
+	}
+	advert := func(hops int) *meshcore.Packet {
+		pkt, err := meshcore.BuildAdvert(peer, time.Now(), &meshcore.AdvertData{Name: "p"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fill(pkt, hops)
+		return pkt
+	}
+	if v, _ := e.floodVerdict(advert(7), true); v != verdictRelayFlood {
+		t.Errorf("advert at 7 hops = %q, want a relay", v)
+	}
+	if v, why := e.floodVerdict(advert(8), true); v != verdictDropFloodHops {
+		t.Errorf("advert at 8 hops = %q (%s), want the advert limit to stop it", v, why)
+	}
+
+	txt, err := meshcore.BuildDatagram(meshcore.PayloadTypeTxtMsg,
+		[]byte{0x01}, []byte{0x02}, make([]byte, 32), []byte("hi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fill(txt, 8)
+	if v, _ := e.floodVerdict(txt, false); v != verdictRelayFlood {
+		t.Errorf("text at 8 hops = %q, want a relay — only adverts stop that early", v)
+	}
+	// The reference's 64-hop ceiling is a belt: the 6-bit path count
+	// saturates at 63 and the capacity check binds first, so it can
+	// never fire. A site that lowers the limit is what actually bites.
+	e.p.FloodMaxHops = 10
+	fill(txt, 10)
+	if v, _ := e.floodVerdict(txt, false); v != verdictDropFloodHops {
+		t.Errorf("text at 10 hops = %q under a limit of 10, want it stopped", v)
+	}
+	fill(txt, 9)
+	if v, _ := e.floodVerdict(txt, false); v != verdictRelayFlood {
+		t.Errorf("text at 9 hops = %q under a limit of 10, want a relay", v)
+	}
+}
+
+func TestAdvertClocksAreSeededOnce(t *testing.T) {
+	// The engine outlives a radio session: a bouncing radio must not
+	// re-seed the clocks, or a 48 h advert becomes one per session.
+	// The clocks are pure engine state: no radio, no bus needed.
+	e := &engine{p: params{
+		AdvertFloodInterval: 48 * time.Hour,
+		AdvertLocalInterval: time.Hour,
+	}}
+
+	start := time.Now()
+	e.scheduleAdverts(start)
+	flood, local := e.nextFloodAdvert, e.nextLocalAdvert
+	if flood.IsZero() || local.IsZero() {
+		t.Fatal("first scheduling left a clock unset")
+	}
+	e.scheduleAdverts(start.Add(10 * time.Minute)) // a session restart
+	if !e.nextFloodAdvert.Equal(flood) || !e.nextLocalAdvert.Equal(local) {
+		t.Fatalf("a session restart moved the clocks: flood %v→%v, local %v→%v",
+			flood, e.nextFloodAdvert, local, e.nextLocalAdvert)
+	}
+}

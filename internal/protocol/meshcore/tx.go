@@ -166,9 +166,10 @@ func (e *engine) relayFor(dev radio.Device, pkt *meshcore.Packet, verdict string
 			return
 		}
 		e.enqueue(dev, &cp, "relay-direct", origin, prioDirect, directDelayFactor)
-	case verdictTraceTransit:
-		// The trace transit appends our SNR reading — quarter-dB, one
-		// raw byte — to the walked path (Mesh::onRecvPacket).
+	case verdictRelayTrace:
+		// A trace whose next target hop is us walks on: our SNR
+		// reading — quarter-dB, one raw byte — joins the walked path
+		// (Mesh::onRecvPacket).
 		grown := make([]byte, 0, len(cp.Path)+1)
 		grown = append(grown, cp.Path...)
 		grown = append(grown, byte(int8(snr*4)))
@@ -205,13 +206,18 @@ func (e *engine) txWait(now time.Time) (time.Duration, bool) {
 	return m, true
 }
 
-// scheduleAdverts starts the advert clocks when the pipeline comes up.
+// scheduleAdverts seeds the advert clocks the first time the pipeline
+// comes up. The clocks live on the engine, which outlives a radio
+// session: re-seeding them on every Run would turn a 48 h flood
+// advert into one per session — and a relay whose radio flaps every
+// few minutes would announce itself that often, or, restarting faster
+// than the settling delay, never announce itself at all.
 func (e *engine) scheduleAdverts(now time.Time) {
-	if e.p.AdvertFloodInterval > 0 {
+	if e.p.AdvertFloodInterval > 0 && e.nextFloodAdvert.IsZero() {
 		e.nextFloodAdvert = now.Add(advertFirstMin +
 			rand.N(advertFirstMax-advertFirstMin)) //nolint:gosec // settling jitter, not security
 	}
-	if e.p.AdvertLocalInterval > 0 {
+	if e.p.AdvertLocalInterval > 0 && e.nextLocalAdvert.IsZero() {
 		e.nextLocalAdvert = now.Add(e.p.AdvertLocalInterval)
 	}
 }
