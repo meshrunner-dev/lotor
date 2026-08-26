@@ -711,3 +711,46 @@ func TestRadioFaultCountsTheLostEmission(t *testing.T) {
 		}
 	}
 }
+
+func TestOperatorAdvertWakesTheReceiver(t *testing.T) {
+	// The order must not wait for the next scheduled duty: it closes
+	// the receive window and is served now. The rig's clocks are 16 s
+	// away, the test's patience 2 s — a prompt emission proves the wake.
+	e, dev, sub, _ := txRig(t, "on-air")
+	runEngine(t, e, dev)
+	time.Sleep(50 * time.Millisecond) // let Run park in Receive
+
+	if err := e.RequestAdvert(false); err != nil {
+		t.Fatal(err)
+	}
+	sent := awaitSent(t, sub)
+	if sent.Kind != "advert-local" {
+		t.Fatalf("sent = %+v, want advert-local", sent)
+	}
+	raw := <-dev.sent
+	pkt, err := meshcore.ParsePacket(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pkt.IsRouteDirect() || pkt.PathHashCount() != 0 {
+		t.Fatal("the operator's default advert must be zero-hop")
+	}
+
+	if err := e.RequestAdvert(true); err != nil {
+		t.Fatal(err)
+	}
+	sent = awaitSent(t, sub)
+	if sent.Kind != "advert-flood" {
+		t.Fatalf("sent = %+v, want advert-flood", sent)
+	}
+	if pkt, err = meshcore.ParsePacket(<-dev.sent); err != nil || !pkt.IsRouteFlood() {
+		t.Fatalf("flood advert route = %v (%v)", pkt.Route(), err)
+	}
+}
+
+func TestOperatorAdvertNeedsALiveGate(t *testing.T) {
+	e := &engine{} // dry: never armed
+	if err := e.RequestAdvert(false); err == nil {
+		t.Fatal("a dry engine accepted an emission order")
+	}
+}

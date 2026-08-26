@@ -405,19 +405,30 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 	r *relay.Relay, eng protocol.Engine,
 ) cli.RelayInfo {
 	return cli.RelayInfo{
-		Name:       name,
-		Protocol:   rc.Protocol,
-		Radio:      rc.Radio,
-		Driver:     radioSpec.Driver,
-		Waveform:   eng.Waveform(),
-		State:      r.State,
-		Err:        r.Err,
-		NoiseFloor: r.NoiseFloor,
-		ChipStats:  r.ChipStats,
-		TXMode:     r.TXMode(),
-		Duty:       dutyOf(eng),
-		Identity:   eng.Identity(),
+		Name:          name,
+		Protocol:      rc.Protocol,
+		Radio:         rc.Radio,
+		Driver:        radioSpec.Driver,
+		Waveform:      eng.Waveform(),
+		State:         r.State,
+		Err:           r.Err,
+		NoiseFloor:    r.NoiseFloor,
+		ChipStats:     r.ChipStats,
+		TXMode:        r.TXMode(),
+		Duty:          dutyOf(eng),
+		TriggerAdvert: advertTrigger(eng),
+		Identity:      eng.Identity(),
 	}
+}
+
+// advertTrigger exposes an engine's operator-advert order when it has
+// a transmit pipeline; nil otherwise.
+func advertTrigger(eng protocol.Engine) func(bool) error {
+	a, ok := eng.(interface{ RequestAdvert(flood bool) error })
+	if !ok {
+		return nil
+	}
+	return a.RequestAdvert
 }
 
 // dutyOf exposes an engine's duty gauge when it has one.

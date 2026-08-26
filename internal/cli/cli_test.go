@@ -407,3 +407,38 @@ func TestNodesAdmitsAnUnmeasuredRSSI(t *testing.T) {
 		t.Errorf("an unmeasured RSSI is rendered as 0 dBm:\n%s", out)
 	}
 }
+
+func TestAdvertCommandIsAdminAndForwards(t *testing.T) {
+	deps := testDeps(t)
+	var got []bool
+	deps.Relays[0].TriggerAdvert = func(flood bool) error {
+		got = append(got, flood)
+		return nil
+	}
+
+	// The transport decides: read-only sessions may not key the radio.
+	if out := run(t, deps, "advert"); !strings.Contains(out, "admin command") {
+		t.Fatalf("read-only session was allowed to emit:\n%s", out)
+	}
+	if len(got) != 0 {
+		t.Fatal("the refusal still reached the engine")
+	}
+
+	deps.Privilege = Admin
+	out := run(t, deps, "advert", "advert flood", "advert nope")
+	if !strings.Contains(out, "zero-hop advert queued") ||
+		!strings.Contains(out, "flood advert queued") {
+		t.Errorf("confirmations missing:\n%s", out)
+	}
+	if !strings.Contains(out, `unknown argument "nope"`) {
+		t.Errorf("a stray argument was swallowed:\n%s", out)
+	}
+	if len(got) != 2 || got[0] != false || got[1] != true {
+		t.Fatalf("engine saw %v, want [false true]", got)
+	}
+
+	deps.Relays[0].TriggerAdvert = nil
+	if out := run(t, deps, "advert"); !strings.Contains(out, "gate is dry") {
+		t.Errorf("a dry relay should refuse with its reason:\n%s", out)
+	}
+}

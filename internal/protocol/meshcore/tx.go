@@ -133,6 +133,7 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 	e.policy = p
 	e.queue = &txQueue{depth: p.QueueDepth}
 	e.discoverLimit = rateLimiter{max: discoverLimitMax, window: discoverLimitWindow}
+	e.advertAsk = make(chan string, 1)
 	// What "changed since" means for us: this process's pipeline came
 	// up — the durable equivalent of the reference's mod timestamp.
 	e.discoverySince = time.Now()
@@ -311,10 +312,60 @@ func (e *engine) dueAdverts(dev radio.Device, now time.Time) {
 		if !e.nextLocalAdvert.IsZero() {
 			e.windLocalAdvert(now)
 		}
-		e.advert(dev, now, "advert-flood", prioFlood, false)
+		e.advert(dev, now, "advert-flood", false)
 	case !e.nextLocalAdvert.IsZero() && !now.Before(e.nextLocalAdvert):
 		e.windLocalAdvert(now)
-		e.advert(dev, now, "advert-local", prioFlood, true)
+		e.advert(dev, now, "advert-local", true)
+	}
+}
+
+// RequestAdvert queues one operator-triggered announcement: zero-hop
+// by default, routable when flood. Safe from any goroutine. It has no
+// limiter of its own — an explicit operator order answers to the duty
+// budget alone, like every emission.
+func (e *engine) RequestAdvert(flood bool) error {
+	if !e.txEnabled() {
+		return errors.New("the transmit gate is dry — nothing may be sent")
+	}
+	if time.Now().Before(clockEpoch) {
+		return errors.New("wall clock implausible — neighbours keep the newest advert timestamp, " +
+			"and this one would poison ours")
+	}
+	kind := "advert-local"
+	if flood {
+		kind = "advert-flood"
+	}
+	select {
+	case e.advertAsk <- kind:
+	default:
+		return errors.New("an advert is already pending")
+	}
+	e.wakeMu.Lock()
+	if e.wakeRx != nil {
+		e.wakeRx() // close the receive window: serve the order now
+	}
+	e.wakeMu.Unlock()
+	return nil
+}
+
+// drainAdvertAsk serves an operator-triggered announcement. The
+// clocks wind as if the scheduler itself had fired: the mesh just
+// heard from us, and a scheduled advert moments later would be a
+// byte-identical duplicate a neighbour would dedup away.
+func (e *engine) drainAdvertAsk(dev radio.Device, now time.Time) {
+	select {
+	case kind := <-e.advertAsk:
+		if kind == "advert-flood" {
+			if e.p.AdvertFloodInterval > 0 {
+				e.nextFloodAdvert = now.Add(e.p.AdvertFloodInterval)
+			}
+			e.windLocalAdvert(now)
+			e.advert(dev, now, kind, false)
+			return
+		}
+		e.windLocalAdvert(now)
+		e.advert(dev, now, kind, true)
+	default:
 	}
 }
 
@@ -337,7 +388,7 @@ func (e *engine) advertDue(now time.Time) bool {
 // advert builds this node's signed announcement. Local adverts are
 // zero-hop: direct route, empty path — the form the band rules allow
 // first. Our own hash is witnessed so the echo judges as a duplicate.
-func (e *engine) advert(dev radio.Device, now time.Time, kind string, priority int, local bool) {
+func (e *engine) advert(dev radio.Device, now time.Time, kind string, local bool) {
 	pkt, err := meshcore.BuildAdvert(e.id, now, &meshcore.AdvertData{
 		Type: meshcore.AdvTypeRepeater,
 		Name: e.p.NodeName,
@@ -352,7 +403,7 @@ func (e *engine) advert(dev radio.Device, now time.Time, kind string, priority i
 	}
 	id := txn.New()
 	e.seen.witness(pkt.Hash(), id, now)
-	e.enqueue(dev, pkt, kind, id, priority, 0)
+	e.enqueue(dev, pkt, kind, id, prioFlood, 0)
 }
 
 // lbtOutcome is what the channel assessment decided about one entry.
@@ -370,6 +421,7 @@ const (
 // contract as reception — but a radio busy receiving is not a fault:
 // the entry goes back in the queue and the loop collects the frame.
 func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
+	e.drainAdvertAsk(dev, time.Now())
 	e.dueAdverts(dev, time.Now())
 	entry, ok := e.queue.pop(time.Now())
 	if !ok {

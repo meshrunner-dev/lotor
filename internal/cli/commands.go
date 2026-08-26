@@ -379,6 +379,46 @@ func (s *session) printSent(sent []sentinel.Sent) {
 	}
 }
 
+// advert queues one operator announcement: the reference CLI's
+// gesture — zero-hop by default, "flood" to address the mesh.
+func (s *session) advert(_ context.Context, in input) error {
+	flood := false
+	if len(in.pos) == 1 {
+		if in.pos[0] != "flood" {
+			return fmt.Errorf("unknown argument %q — try advert --help", in.pos[0])
+		}
+		flood = true
+	}
+	r, err := s.oneRelay(in.opts[scopeRelay])
+	if err != nil {
+		return err
+	}
+	if r.TriggerAdvert == nil {
+		return fmt.Errorf("relay %q has no transmit pipeline — its gate is dry", r.Name)
+	}
+	if err := r.TriggerAdvert(flood); err != nil {
+		return err
+	}
+	kind := "zero-hop advert"
+	if flood {
+		kind = "flood advert"
+	}
+	fmt.Fprintf(s.out, "%s queued on %q — the duty budget has the last word\r\n", kind, r.Name)
+	return nil
+}
+
+// oneRelay resolves a command's target: the named relay, or the only
+// one there is.
+func (s *session) oneRelay(name string) (RelayInfo, error) {
+	if name != "" {
+		return s.findRelay(name)
+	}
+	if len(s.deps.Relays) == 1 {
+		return s.deps.Relays[0], nil
+	}
+	return RelayInfo{}, errors.New("several relays — say which with --relay")
+}
+
 func (s *session) nodes(ctx context.Context, in input) error {
 	opts := in.opts
 	sen, err := s.needSentinel()

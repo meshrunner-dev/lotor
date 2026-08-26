@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -118,6 +119,13 @@ type engine struct {
 	discoverLimit   rateLimiter
 	discoverySince  time.Time
 	clockWarned     bool
+
+	// advertAsk carries operator-triggered announcements into the
+	// pipeline's goroutine; wakeRx interrupts a blocked Receive so the
+	// order is served now, not at the next scheduled duty.
+	advertAsk chan string
+	wakeMu    sync.Mutex
+	wakeRx    context.CancelFunc
 }
 
 // paramsFrom is the strict decode both build and the config checker
@@ -231,8 +239,11 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 			e.bus.Publish(bus.FrameCorrupt{
 				Relay: e.relay, At: time.Now(), Err: err.Error(),
 			})
-		case errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil:
-			// The receive window closed: the pipeline's turn.
+		case (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) &&
+			ctx.Err() == nil:
+			// The receive window closed — by its deadline, or by an
+			// operator order waking the receiver; while the parent
+			// lives, nobody else holds that cancel. The pipeline's turn.
 			if err := e.txPhase(ctx, dev); err != nil {
 				return err
 			}
@@ -246,14 +257,28 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 }
 
 // receiveWindow bounds one Receive call by the pipeline's next duty.
+// The window is always cancellable when the pipeline runs, and its
+// cancel is registered so an operator order can close it early; an
+// order that landed while no window was open is caught by the pending
+// check here, on the way into the next one.
 func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.CancelFunc) {
 	if !e.txEnabled() {
 		return ctx, func() {}
 	}
-	if wait, ok := e.txWait(time.Now()); ok {
-		return context.WithDeadline(ctx, time.Now().Add(wait))
+	var rctx context.Context
+	var cancel context.CancelFunc
+	switch wait, ok := e.txWait(time.Now()); {
+	case len(e.advertAsk) > 0:
+		rctx, cancel = context.WithDeadline(ctx, time.Now())
+	case ok:
+		rctx, cancel = context.WithDeadline(ctx, time.Now().Add(wait))
+	default:
+		rctx, cancel = context.WithCancel(ctx)
 	}
-	return ctx, func() {}
+	e.wakeMu.Lock()
+	e.wakeRx = cancel
+	e.wakeMu.Unlock()
+	return rctx, cancel
 }
 
 func (e *engine) judge(dev radio.Device, frame radio.Frame) {

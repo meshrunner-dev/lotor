@@ -65,6 +65,9 @@ type RelayInfo struct {
 	// TXMode is the transmit gate the relay runs behind: dry, shadow
 	// or on-air; empty reads as dry.
 	TXMode string
+	// TriggerAdvert queues one operator announcement (flood or
+	// zero-hop); nil when the engine has no transmit pipeline.
+	TriggerAdvert func(flood bool) error
 	// Duty reports the sliding-hour airtime spent against the band's
 	// budget; may be nil, ok false when unbudgeted or not transmitting.
 	Duty func() (used, budget time.Duration, ok bool)
@@ -229,6 +232,8 @@ func (s *session) dispatch(ctx context.Context, args []string) {
 		err = unknownCommand(name)
 	case slices.Contains(rest, "--help") || slices.Contains(rest, "-h"):
 		err = s.helpFor(name)
+	case c.admin && s.deps.Privilege != Admin:
+		err = fmt.Errorf("%s is an admin command — use the local console socket", name)
 	default:
 		var in input
 		if in, err = c.parse(rest); err == nil {

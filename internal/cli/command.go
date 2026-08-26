@@ -38,7 +38,10 @@ type command struct {
 	// their meaning stays the command's business.
 	flags  []flagSpec
 	maxPos int
-	run    func(*session, context.Context, input) error
+	// admin commands act on the daemon — they need the local console
+	// socket, whose file permissions are the authentication.
+	admin bool
+	run   func(*session, context.Context, input) error
 }
 
 // input is a parsed command line: positional words and flag values,
@@ -90,6 +93,20 @@ func daemonCommands() []*command {
 			forms:  []form{{"config show relay|radio <name>", "effective config with provenance"}},
 			maxPos: 3,
 			run:    (*session).config,
+		},
+		{
+			name: "advert",
+			forms: []form{
+				{"advert [flood]", "announce this node now: zero-hop, or flood the mesh"},
+			},
+			detail: []string{
+				"advert [flood] [--relay R]",
+				"admin only; no limiter of its own — the duty budget has the last word",
+			},
+			flags:  []flagSpec{{name: scopeRelay, valued: true}},
+			maxPos: 1,
+			admin:  true,
+			run:    (*session).advert,
 		},
 	}
 }
