@@ -34,10 +34,12 @@ const (
 	lbtRetryNominal = 200 * time.Millisecond
 	lbtMaxWait      = 4 * time.Second
 
-	// The first flood advert waits out a short random settling delay,
-	// so a site rebooting a fleet does not open with a chorus.
-	advertFirstMin = 30 * time.Second
-	advertFirstMax = 60 * time.Second
+	// bootAdvertDelay paces the boot announcement: one zero-hop advert
+	// shortly after the pipeline comes up, the reference's exact
+	// gesture (its main sends one 16 s after boot, unconditionally).
+	// A reboot is news to the direct neighbourhood, never to the whole
+	// mesh: the first flood advert waits out its full interval.
+	bootAdvertDelay = 16 * time.Second
 
 	// clockRetry is how long the advert clocks defer while the wall
 	// clock is implausible.
@@ -258,17 +260,23 @@ func (e *engine) txWait(now time.Time) (time.Duration, bool) {
 
 // scheduleAdverts seeds the advert clocks the first time the pipeline
 // comes up. The clocks live on the engine, which outlives a radio
-// session: re-seeding them on every Run would turn a 48 h flood
-// advert into one per session — and a relay whose radio flaps every
-// few minutes would announce itself that often, or, restarting faster
-// than the settling delay, never announce itself at all.
+// session: re-seeding them on every Run would turn a 47 h flood
+// advert into one per session.
+//
+// The local clock always seeds — the boot announcement goes out even
+// when recurring local adverts are disabled, the reference's
+// unconditional gesture — and the flood clock waits its whole
+// interval: rebooting is not a reason to address the entire mesh.
 func (e *engine) scheduleAdverts(now time.Time) {
 	if e.p.AdvertFloodInterval > 0 && e.nextFloodAdvert.IsZero() {
-		e.nextFloodAdvert = now.Add(advertFirstMin +
-			rand.N(advertFirstMax-advertFirstMin)) //nolint:gosec // settling jitter, not security
+		e.nextFloodAdvert = now.Add(e.p.AdvertFloodInterval)
 	}
-	if e.p.AdvertLocalInterval > 0 && e.nextLocalAdvert.IsZero() {
-		e.nextLocalAdvert = now.Add(e.p.AdvertLocalInterval)
+	if e.nextLocalAdvert.IsZero() {
+		first := bootAdvertDelay
+		if e.p.AdvertLocalInterval > 0 && e.p.AdvertLocalInterval < first {
+			first = e.p.AdvertLocalInterval
+		}
+		e.nextLocalAdvert = now.Add(first)
 	}
 }
 
@@ -301,12 +309,22 @@ func (e *engine) dueAdverts(dev radio.Device, now time.Time) {
 		// a duplicate and never re-flood it. The reference winds both
 		// clocks for the same reason (MyMesh: "so they don't overlap").
 		if !e.nextLocalAdvert.IsZero() {
-			e.nextLocalAdvert = now.Add(e.p.AdvertLocalInterval)
+			e.windLocalAdvert(now)
 		}
 		e.advert(dev, now, "advert-flood", prioFlood, false)
 	case !e.nextLocalAdvert.IsZero() && !now.Before(e.nextLocalAdvert):
-		e.nextLocalAdvert = now.Add(e.p.AdvertLocalInterval)
+		e.windLocalAdvert(now)
 		e.advert(dev, now, "advert-local", prioFlood, true)
+	}
+}
+
+// windLocalAdvert schedules the next local advert, or stops the clock
+// when the boot announcement was the only one asked for.
+func (e *engine) windLocalAdvert(now time.Time) {
+	if e.p.AdvertLocalInterval > 0 {
+		e.nextLocalAdvert = now.Add(e.p.AdvertLocalInterval)
+	} else {
+		e.nextLocalAdvert = time.Time{}
 	}
 }
 

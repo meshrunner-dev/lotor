@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"testing"
 	"time"
 
@@ -419,6 +420,58 @@ func TestFloodHopLimitsFollowTheReference(t *testing.T) {
 	fill(txt, 9)
 	if v, _ := e.floodVerdict(txt, false); v != verdictRelayFlood {
 		t.Errorf("text at 9 hops = %q under a limit of 10, want a relay", v)
+	}
+}
+
+func TestAdvertSeedingFollowsTheReference(t *testing.T) {
+	// A reboot is news to the direct neighbourhood, never to the mesh:
+	// the boot announcement is zero-hop and prompt, the first flood
+	// waits its whole interval — and the boot advert goes out even
+	// when recurring local adverts are disabled.
+	now := time.Now()
+	e := &engine{p: params{
+		AdvertFloodInterval: 47 * time.Hour,
+		AdvertLocalInterval: -1, // recurring local adverts off
+	}}
+	e.scheduleAdverts(now)
+	if want := now.Add(47 * time.Hour); !e.nextFloodAdvert.Equal(want) {
+		t.Errorf("first flood at %v, want the full interval %v", e.nextFloodAdvert, want)
+	}
+	if want := now.Add(bootAdvertDelay); !e.nextLocalAdvert.Equal(want) {
+		t.Errorf("boot advert at %v, want %v even with local adverts off", e.nextLocalAdvert, want)
+	}
+	// After the boot announcement, a disabled local clock stops.
+	e.windLocalAdvert(now.Add(bootAdvertDelay))
+	if !e.nextLocalAdvert.IsZero() {
+		t.Error("the one-shot boot advert re-armed a disabled clock")
+	}
+}
+
+func TestAdvertIntervalsKeepTheReferenceRanges(t *testing.T) {
+	// The reference CLI refuses local outside 60..240 minutes and
+	// flood outside 3..168 hours; so does the config.
+	withBase := func(m map[string]any) map[string]any {
+		cfg := map[string]any{"frequency_hz": 869_618_000}
+		maps.Copy(cfg, m)
+		return cfg
+	}
+	for _, bad := range []map[string]any{
+		{"advert_local_interval": "30m"},
+		{"advert_local_interval": "5h"},
+		{"advert_flood_interval": "1h"},
+		{"advert_flood_interval": "200h"},
+	} {
+		if _, err := paramsFrom(withBase(bad)); err == nil {
+			t.Errorf("%v accepted — outside the reference's range", bad)
+		}
+	}
+	for _, good := range []map[string]any{
+		{"advert_local_interval": "2h", "advert_flood_interval": "47h"},
+		{"advert_local_interval": "-1s", "advert_flood_interval": "-1s"},
+	} {
+		if _, err := paramsFrom(withBase(good)); err != nil {
+			t.Errorf("%v refused: %v", good, err)
+		}
 	}
 }
 
