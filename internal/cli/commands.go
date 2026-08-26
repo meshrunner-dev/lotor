@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -405,6 +406,29 @@ func (s *session) advert(_ context.Context, in input) error {
 	}
 	fmt.Fprintf(s.out, "%s queued on %q — the duty budget has the last word\r\n", kind, r.Name)
 	return nil
+}
+
+// neighbours renders the direct neighbourhood: who we hear with no
+// relay in between, at what SNR, and how long ago.
+func (s *session) neighbours(_ context.Context, in input) error {
+	r, err := s.oneRelay(in.opts[scopeRelay])
+	if err != nil {
+		return err
+	}
+	if r.Neighbours == nil {
+		return fmt.Errorf("relay %q keeps no neighbourhood — its gate is dry", r.Name)
+	}
+	rows := r.Neighbours()
+	if len(rows) == 0 {
+		fmt.Fprint(s.out, "nobody heard directly yet\r\n")
+		return nil
+	}
+	tb := &table{}
+	for _, n := range rows {
+		tb.row(hex.EncodeToString(n.PubKey[:6]),
+			fmt.Sprintf("snr %+.2f dB", n.SNR), ago(n.Heard))
+	}
+	return tb.flush(s.out)
 }
 
 // oneRelay resolves a command's target: the named relay, or the only

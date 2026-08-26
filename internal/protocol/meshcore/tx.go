@@ -54,6 +54,9 @@ const (
 // or, worse, plant a timestamp the real clock must later climb over.
 var clockEpoch = time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
 
+// reasonRateLimited names every limiter refusal in the drop tally.
+const reasonRateLimited = "rate-limited"
+
 // Priorities, the reference's ladder: routed traffic and zero-hop
 // sends go first (0); flood relays carry their hop count after the
 // append — closer sources beat distant ones; a node's own flood
@@ -61,6 +64,7 @@ var clockEpoch = time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
 // the back (5). Lower serves first, ties by earliest schedule.
 const (
 	prioDirect      = 0
+	prioPathReturn  = 2
 	prioFloodAdvert = 3
 	prioTrace       = 5
 )
@@ -156,6 +160,10 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 	}
 	e.duty = dl
 	e.anonLimit = rateLimiter{max: anonLimitMax, window: anonLimitWindow}
+	e.loginLimit = rateLimiter{max: loginLimitMax, window: loginLimitWindow}
+	e.acl = newACL()
+	e.neighbours = newNeighbourTable()
+	e.started = time.Now()
 	e.advertAsk = make(chan string, 1)
 	// What "changed since" means for us: this process's pipeline came
 	// up — the durable equivalent of the reference's mod timestamp.
@@ -255,6 +263,8 @@ func (e *engine) relayFor(dev radio.Device, pkt *meshcore.Packet, verdict string
 		e.respondDiscover(dev, pkt, origin, snr)
 	case verdictAnon:
 		e.respondAnon(dev, pkt, origin)
+	case verdictPeerReq:
+		e.respondRequest(pkt, origin)
 	case verdictRelayTrace:
 		// A trace whose next target hop is us walks on: our SNR
 		// reading — quarter-dB, one raw byte — joins the walked path
@@ -574,6 +584,10 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 		return err
 	}
 	e.duty.record(sent.At, sent.Airtime)
+	if !sent.Shadow {
+		// The radio's own tally: paper never counts here.
+		e.stats.countSent(entry.pkt.IsRouteFlood(), sent.Airtime)
+	}
 	log.Info("frame sent", zap.Bool("shadow", sent.Shadow),
 		zap.Duration("airtime", sent.Airtime), zap.Int8("power_dbm", sent.PowerDBm))
 	e.bus.Publish(sent)

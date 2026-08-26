@@ -48,6 +48,13 @@ const (
 	Admin    Privilege = "admin"
 )
 
+// Neighbour is one directly-heard repeater, as the console shows it.
+type Neighbour struct {
+	PubKey [32]byte
+	SNR    float64
+	Heard  time.Time
+}
+
 // RelayInfo is what the CLI knows about one relay.
 type RelayInfo struct {
 	Name     string
@@ -69,6 +76,9 @@ type RelayInfo struct {
 	// TriggerAdvert queues one operator announcement (flood or
 	// zero-hop); nil when the engine has no transmit pipeline.
 	TriggerAdvert func(flood bool) error
+	// Neighbours lists the direct neighbourhood — repeaters heard with
+	// no relay in between; nil when the engine keeps none.
+	Neighbours func() []Neighbour
 	// Duty reports the sliding-hour airtime spent against the band's
 	// budget; may be nil, ok false when unbudgeted or not transmitting.
 	Duty func() (used, budget time.Duration, ok bool)

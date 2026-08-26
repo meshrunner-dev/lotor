@@ -75,6 +75,12 @@ type params struct {
 	// announces no position.
 	NodeLat float64 `yaml:"node_lat"`
 	NodeLon float64 `yaml:"node_lon"`
+	// GuestPassword opens read-only guest sessions over RF: status,
+	// base telemetry, the neighbourhood, the owner line. Empty — the
+	// default — means no guests at all. There is deliberately no admin
+	// password: the local console socket is the administration
+	// surface, and this daemon never grants admin to the radio.
+	GuestPassword string `yaml:"guest_password"`
 	// OwnerInfo rides the anonymous owner reply after the name — the
 	// reference's free-text field for "who runs this node"; optional.
 	OwnerInfo string `yaml:"owner_info"`
@@ -129,8 +135,16 @@ type engine struct {
 	nextLocalAdvert time.Time
 	discoverLimit   rateLimiter
 	anonLimit       rateLimiter
+	loginLimit      rateLimiter
 	discoverySince  time.Time
 	clockWarned     bool
+	acl             *acl
+	neighbours      *neighbourTable
+	stats           Stats
+	started         time.Time
+	// floor reads the radio's measured noise floor for the status
+	// reply; wired at Run, nil until then.
+	floor func() (radio.NoiseFloor, bool)
 
 	// advertAsk carries operator-triggered announcements into the
 	// pipeline's goroutine; wakeRx interrupts a blocked Receive so the
@@ -221,6 +235,7 @@ func (e *engine) Identity() string {
 }
 
 func (e *engine) Run(ctx context.Context, dev radio.Device) error {
+	e.floor = dev.NoiseFloor
 	if e.txEnabled() {
 		// A previous session's queue holds frames the mesh has moved on
 		// from: the backoff alone outlived their usefulness.
@@ -244,6 +259,7 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 		case err == nil:
 			e.judge(dev, frame)
 		case errors.Is(err, radio.ErrCorrupt):
+			e.stats.countCorrupt()
 			e.log.Debug("corrupt reception", zap.Error(err))
 			e.bus.Publish(bus.FrameCorrupt{
 				Relay: e.relay, At: time.Now(), Err: err.Error(),
@@ -290,7 +306,36 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 	return rctx, cancel
 }
 
-func (e *engine) judge(dev radio.Device, frame radio.Frame) {
+// observe feeds the neighbour table: the repeaters we hear with no
+// relay in between — a zero-hop advert, or their answer to a scan.
+// The SNR recorded is ours: how well WE hear THEM.
+func (e *engine) observe(pkt *meshcore.Packet, frame radio.Frame, advertOK, selfAdvert bool) {
+	if e.neighbours == nil || pkt.PathHashCount() != 0 {
+		return
+	}
+	switch pkt.PayloadType() {
+	case meshcore.PayloadTypeAdvert:
+		if !advertOK || selfAdvert {
+			return
+		}
+		if adv, err := meshcore.ParseAdvert(pkt.Payload); err == nil &&
+			adv.Data.Type == meshcore.AdvTypeRepeater {
+			e.neighbours.put(adv.Identity.PubKey, frame.SNR, frame.At)
+		}
+	case meshcore.PayloadTypeControl:
+		if resp, err := meshcore.ParseDiscoverResp(pkt); err == nil &&
+			resp.NodeType == meshcore.AdvTypeRepeater && len(resp.PubKey) == meshcore.PubKeySize {
+			var key [32]byte
+			copy(key[:], resp.PubKey)
+			e.neighbours.put(key, frame.SNR, frame.At)
+		}
+	default: // other zero-hop traffic names nobody reliably
+	}
+}
+
+// heard logs and publishes one reception, returning the transaction
+// that names it from here on.
+func (e *engine) heard(frame radio.Frame) (txn.ID, *zap.Logger) {
 	id := txn.New()
 	log := e.log.With(zap.String("txn", id.Short()))
 	log.Info("frame heard",
@@ -307,7 +352,11 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 		SignalRSSI: frame.SignalRSSI, FreqErrHz: frame.FreqErrHz,
 		Airtime: frame.Airtime,
 	})
+	return id, log
+}
 
+func (e *engine) judge(dev radio.Device, frame radio.Frame) {
+	id, log := e.heard(frame)
 	pkt, err := meshcore.ParsePacket(frame.Payload)
 	if err != nil {
 		log.Info("frame judged", zap.String("verdict", verdictMalformed), zap.Error(err))
@@ -331,7 +380,9 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 	}
 	fields, advertOK, selfAdvert := describe(pkt, &judged, e.id)
 	log = log.With(fields...)
+	e.observe(pkt, frame, advertOK, selfAdvert)
 	if first, dup := e.seen.witness(pkt.Hash(), id, frame.At); dup {
+		e.stats.countHeard(pkt, frame.RSSI, frame.SNR, frame.Airtime, true)
 		log.Info("frame judged",
 			zap.String("verdict", verdictDuplicate),
 			zap.String("duplicate_of", first.Short()),
@@ -341,6 +392,7 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 		return
 	}
 
+	e.stats.countHeard(pkt, frame.RSSI, frame.SNR, frame.Airtime, false)
 	verdict, why := e.verdict(pkt, advertOK, selfAdvert)
 	judged.Verdict = verdict
 	if why != "" && judged.Detail == "" {

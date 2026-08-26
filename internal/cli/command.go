@@ -95,6 +95,13 @@ func daemonCommands() []*command {
 			run:    (*session).config,
 		},
 		{
+			name:   "neighbours",
+			forms:  []form{{"neighbours", "repeaters heard with no relay in between"}},
+			detail: []string{"neighbours [--relay R]"},
+			flags:  []flagSpec{{name: scopeRelay, valued: true}},
+			run:    (*session).neighbours,
+		},
+		{
 			name: "advert",
 			forms: []form{
 				{"advert [flood]", "announce this node now: zero-hop, or flood the mesh"},

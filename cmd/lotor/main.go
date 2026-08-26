@@ -37,7 +37,7 @@ import (
 	"meshrunner.dev/lotor/internal/sentinel"
 	"meshrunner.dev/lotor/internal/single"
 
-	_ "meshrunner.dev/lotor/internal/protocol/meshcore"
+	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 	_ "meshrunner.dev/lotor/internal/radio/sx126x"
 )
 
@@ -161,6 +161,7 @@ func console(addr string) error {
 }
 
 func run(configPath, logLevel string) error {
+	enginemc.Version = "lotor " + version
 	log, err := newLogger(logLevel)
 	if err != nil {
 		return err
@@ -417,7 +418,28 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		TXMode:        r.TXMode(),
 		Duty:          dutyOf(eng),
 		TriggerAdvert: advertTrigger(eng),
+		Neighbours:    neighboursOf(eng),
 		Identity:      eng.Identity(),
+	}
+}
+
+// neighboursOf exposes an engine's direct neighbourhood when it keeps
+// one, converted to the console's own row type.
+func neighboursOf(eng protocol.Engine) func() []cli.Neighbour {
+	n, ok := eng.(interface{ Neighbours() []enginemc.Neighbour })
+	if !ok {
+		return nil
+	}
+	return func() []cli.Neighbour {
+		rows := n.Neighbours()
+		if rows == nil {
+			return nil
+		}
+		out := make([]cli.Neighbour, len(rows))
+		for i, r := range rows {
+			out[i] = cli.Neighbour{PubKey: r.PubKey, SNR: r.SNR, Heard: r.Heard}
+		}
+		return out
 	}
 }
 

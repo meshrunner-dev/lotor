@@ -73,7 +73,7 @@ func (e *engine) anonVerdict(pkt *meshcore.Packet) (verdict, why string, handled
 	case t == anonReqTypeBasic:
 		return verdictAnon, "clock request", true
 	case t == 0 || t >= ' ':
-		return verdictAnon, "login attempt — no admin over RF here", true
+		return verdictAnon, "login request", true
 	default:
 		return verdictAnon, "unknown anonymous request", true
 	}
@@ -112,8 +112,15 @@ func (e *engine) respondAnon(dev radio.Device, pkt *meshcore.Packet, origin txn.
 	if plain == nil {
 		return
 	}
+	if t := plain[4]; t == 0 || t >= ' ' {
+		// A password: the login path, which the reference accepts by
+		// flood as well as direct — a stranger logging in from across
+		// the mesh has no path to us yet.
+		e.respondLogin(pkt, sender, secret, plain, origin)
+		return
+	}
 	if !pkt.IsRouteDirect() {
-		return // the reference gates every anonymous answer on direct
+		return // the reference gates every other anonymous answer on direct
 	}
 	// What each question gets. The clock prefix below is common to all
 	// three; owner adds the name, regions the comma-joined list the
@@ -143,7 +150,7 @@ func (e *engine) respondAnon(dev radio.Device, pkt *meshcore.Packet, origin txn.
 	if !e.anonLimit.allow(time.Now()) {
 		e.log.Debug("anonymous reply rate-limited", zap.String("txn", origin.Short()))
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Txn: origin, At: time.Now(), Reason: "rate-limited",
+			Relay: e.relay, Txn: origin, At: time.Now(), Reason: reasonRateLimited,
 		})
 		return
 	}
