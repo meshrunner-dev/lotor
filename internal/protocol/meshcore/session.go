@@ -81,8 +81,10 @@ const (
 // questions this one is served whatever the inbound route — a
 // companion that has not found a path yet floods it.
 func (e *engine) respondLogin(pkt *meshcore.Packet, senderPub, secret, plain []byte, origin txn.ID) {
-	if e.p.GuestPassword == "" {
-		return // no credential configured: the door does not exist
+	// Named permissively or not at all: an access mode nobody resolved
+	// is a door nobody opened.
+	if e.p.GuestAccess != guestPassword && e.p.GuestAccess != guestOpen {
+		return
 	}
 	// Charged before the password is even read: a limiter that only
 	// sees successes bounds the honest client and lets the guesser
@@ -111,7 +113,8 @@ func (e *engine) respondLogin(pkt *meshcore.Packet, senderPub, secret, plain []b
 	switch {
 	case password == "" && c != nil:
 		// A blank password re-checks an existing session.
-	case subtle.ConstantTimeCompare([]byte(password), []byte(e.p.GuestPassword)) == 1:
+	case e.p.GuestAccess == guestOpen ||
+		subtle.ConstantTimeCompare([]byte(password), []byte(e.p.GuestPassword)) == 1:
 		if c == nil {
 			c = &client{perms: permGuest}
 			copy(c.pubKey[:], senderPub)

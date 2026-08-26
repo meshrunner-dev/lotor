@@ -97,7 +97,7 @@ func openReply(t *testing.T, raw, secret []byte) (uint32, []byte) {
 
 func TestGuestLoginAndStatus(t *testing.T) {
 	e, dev, sub, peer := txRig(t, "on-air")
-	e.p.GuestPassword = "raccoon"
+	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
 	runEngine(t, e, dev)
 
 	frame, secret := login(t, e.id, peer, nowTS(100), "raccoon", false)
@@ -135,7 +135,7 @@ func TestGuestLoginAndStatus(t *testing.T) {
 
 func TestWrongPasswordIsSilence(t *testing.T) {
 	e, _, _, peer := txRig(t, "on-air")
-	e.p.GuestPassword = "raccoon"
+	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
 	e.queue.depth = 8
 	for i, pw := range []string{"admin", "wrong", ""} {
 		frame, _ := login(t, e.id, peer, nowTS(uint32(200+i)), pw, false)
@@ -155,7 +155,7 @@ func TestFloodLoginEarnsAPathReturn(t *testing.T) {
 	// the reply is a PATH return that both teaches it and carries the
 	// answer, flooded back.
 	e, dev, sub, peer := txRig(t, "on-air")
-	e.p.GuestPassword = "raccoon"
+	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
 	runEngine(t, e, dev)
 
 	frame, secret := login(t, e.id, peer, nowTS(300), "raccoon", true)
@@ -189,7 +189,7 @@ func TestFloodLoginEarnsAPathReturn(t *testing.T) {
 
 func TestNeighboursAnswerListsWhoWeHear(t *testing.T) {
 	e, dev, sub, peer := txRig(t, "on-air")
-	e.p.GuestPassword = "raccoon"
+	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
 	var third [32]byte
 	third[0] = 0xAB
 	e.neighbours.put(third, 9.25, time.Now().Add(-90*time.Second))
@@ -269,7 +269,7 @@ func TestEveryLoginAttemptCostsAToken(t *testing.T) {
 	// A limiter that only sees successes bounds the honest client and
 	// lets the guesser run free.
 	e, _, _, peer := txRig(t, "shadow")
-	e.p.GuestPassword = "open-sesame"
+	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "open-sesame"
 	e.queue.depth = 16
 
 	for i := range loginLimitMax {
@@ -299,7 +299,7 @@ func TestOneSessionCannotFloodTheMesh(t *testing.T) {
 	// Every authenticated answer floods, so a guest polling in a loop
 	// would spend the whole mesh's airtime. Its own budget bounds it.
 	e, dev, sub, peer := txRig(t, "shadow")
-	e.p.GuestPassword = "raccoon"
+	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
 	e.queue.depth = 64
 	runEngine(t, e, dev)
 
@@ -341,7 +341,7 @@ func TestKeepAliveKeepsTheSessionAlive(t *testing.T) {
 	// A companion that sends a keep-alive instead of polling must not
 	// be the one retired first.
 	e, _, _, peer := txRig(t, "shadow")
-	e.p.GuestPassword = "raccoon"
+	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
 	frame, _ := login(t, e.id, peer, nowTS(700), "raccoon", false)
 	pkt, err := meshcore.ParsePacket(frame.Payload)
 	if err != nil {
@@ -379,5 +379,69 @@ func TestIdleSessionsRetire(t *testing.T) {
 	}
 	if got := a.matching(0xAB); len(got) != 0 {
 		t.Fatalf("%d idle sessions still matched", len(got))
+	}
+}
+
+func TestGuestAccessModes(t *testing.T) {
+	// Blocked by default; a password is enough to mean "password";
+	// an open door has to be named, and cannot also carry a credential.
+	for _, c := range []struct {
+		access, password, want string
+		refused                bool
+	}{
+		{"", "", guestBlocked, false},
+		{"", "hunter2", guestPassword, false},
+		{guestBlocked, "", guestBlocked, false},
+		{guestOpen, "", guestOpen, false},
+		{guestPassword, "hunter2", guestPassword, false},
+		{guestBlocked, "hunter2", "", true},
+		{guestOpen, "hunter2", "", true},
+		{guestPassword, "", "", true},
+		{"maybe", "", "", true},
+	} {
+		p := params{GuestAccess: c.access, GuestPassword: c.password}
+		err := normalizeGuest(&p)
+		if c.refused {
+			if err == nil {
+				t.Errorf("access %q with password %q was accepted", c.access, c.password)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("access %q with password %q refused: %v", c.access, c.password, err)
+		} else if p.GuestAccess != c.want {
+			t.Errorf("access %q resolved to %q, want %q", c.access, p.GuestAccess, c.want)
+		}
+	}
+}
+
+func TestOpenGuestNeedsNoPassword(t *testing.T) {
+	e, dev, sub, peer := txRig(t, "shadow")
+	e.p.GuestAccess = guestOpen
+	runEngine(t, e, dev)
+
+	frame, _ := login(t, e.id, peer, nowTS(900), "", false)
+	dev.frames <- frame
+	if sent := awaitSent(t, sub); sent.Kind != "login-resp" {
+		t.Fatalf("sent = %+v, want an open door to answer", sent)
+	}
+	if e.acl.get(peer.PubKey[:]) == nil {
+		t.Fatal("the open login left no session")
+	}
+}
+
+func TestBlockedGuestAnswersNobody(t *testing.T) {
+	e, dev, sub, peer := txRig(t, "shadow")
+	e.p.GuestAccess = guestBlocked
+	runEngine(t, e, dev)
+	frame, _ := login(t, e.id, peer, nowTS(950), "", false)
+	dev.frames <- frame
+
+	select {
+	case ev := <-sub.C:
+		if s, ok := ev.(bus.FrameSent); ok {
+			t.Fatalf("a blocked door answered: %+v", s)
+		}
+	case <-time.After(500 * time.Millisecond):
 	}
 }

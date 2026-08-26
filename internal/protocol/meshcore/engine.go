@@ -75,11 +75,14 @@ type params struct {
 	// announces no position.
 	NodeLat float64 `yaml:"node_lat"`
 	NodeLon float64 `yaml:"node_lon"`
-	// GuestPassword opens read-only guest sessions over RF: status,
-	// base telemetry, the neighbourhood, the owner line. Empty — the
-	// default — means no guests at all. There is deliberately no admin
-	// password: the local console socket is the administration
-	// surface, and this daemon never grants admin to the radio.
+	// GuestAccess decides whether a stranger may open a read-only
+	// session at all — status, telemetry, the neighbourhood, nothing
+	// that changes anything. Blocked by default: a repeater owes the
+	// mesh its relaying, not its confidences. Setting a password is
+	// enough to mean "password"; opening the door to anyone needs the
+	// word said out loud.
+	GuestAccess string `yaml:"guest_access"`
+	// GuestPassword is the credential when GuestAccess asks for one.
 	GuestPassword string `yaml:"guest_password"`
 	// OwnerInfo rides the anonymous owner reply after the name — the
 	// reference's free-text field for "who runs this node"; optional.
@@ -165,6 +168,9 @@ func paramsFrom(cfg map[string]any) (params, error) {
 	// The reference's operator ranges: outside them, its CLI refuses
 	// the setting — so does the config, or a site would run a cadence
 	// no reference node would.
+	if err := normalizeGuest(&p); err != nil {
+		return p, err
+	}
 	// The reference's own field sizes (char[32] / char[120]); past
 	// them an owner answer no longer fits a packet and the node goes
 	// quiet on a question it should serve.
@@ -183,6 +189,47 @@ func paramsFrom(cfg map[string]any) (params, error) {
 			"meshcore params: advert_flood_interval %s — the reference accepts 3..168 hours; negative disables", v)
 	}
 	return p, nil
+}
+
+// How a stranger may open a session.
+const (
+	guestBlocked  = "blocked"  // nobody may; the default
+	guestPassword = "password" // whoever knows guest_password may
+	guestOpen     = "open"     // anyone may, with no credential at all
+)
+
+// normalizeGuest resolves the access mode and refuses the two ways of
+// asking for contradictory things. A password on its own means the
+// obvious; an open door has to be named, because it is the one choice
+// nobody makes by accident.
+func normalizeGuest(p *params) error {
+	switch p.GuestAccess {
+	case "":
+		p.GuestAccess = guestBlocked
+		if p.GuestPassword != "" {
+			p.GuestAccess = guestPassword
+		}
+	case guestBlocked:
+		if p.GuestPassword != "" {
+			return errors.New(
+				"meshcore params: guest_access is blocked but guest_password is set — " +
+					"say password to use it, or drop it")
+		}
+	case guestPassword:
+		if p.GuestPassword == "" {
+			return errors.New("meshcore params: guest_access password needs guest_password")
+		}
+	case guestOpen:
+		if p.GuestPassword != "" {
+			return errors.New(
+				"meshcore params: guest_access is open but guest_password is set — " +
+					"open asks for no credential")
+		}
+	default:
+		return fmt.Errorf(
+			"meshcore params: guest_access %q — want blocked, password or open", p.GuestAccess)
+	}
+	return nil
 }
 
 func check(cfg map[string]any) error {
