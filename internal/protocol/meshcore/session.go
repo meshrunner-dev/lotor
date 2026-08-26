@@ -55,6 +55,21 @@ const (
 	// session makes room for a new one.
 	maxClients = 32
 
+	// A logged-in guest gets its own budget. The reference needs none
+	// — it answers along a stored out-path, straight back to the one
+	// who asked — but this engine has no out-path to store yet, so
+	// every answer floods, and one companion polling in a loop would
+	// spend the whole mesh's airtime. Generous enough for a status
+	// page and a neighbourhood query in the same breath.
+	sessionLimitMax    = 6
+	sessionLimitWindow = time.Minute
+
+	// sessionIdle retires a session nobody has used. The secret it
+	// holds is derived from two long-term keys, so nothing is lost by
+	// deriving it again — and a table of live credentials should not
+	// outlive the conversations that made it.
+	sessionIdle = time.Hour
+
 	// Login attempts are bounded on their own — separate from the
 	// anonymous questions, so a password guesser cannot starve the
 	// name lookups, and slower than the reference, which bounds them
@@ -76,6 +91,8 @@ type client struct {
 	// signed: anything at or before it is a replay.
 	lastTimestamp uint32
 	lastActive    time.Time
+	// asks bounds what this session may make us emit.
+	asks rateLimiter
 }
 
 // isAdmin reports the role; always false here, kept because the wire
@@ -113,13 +130,28 @@ func (a *acl) put(c *client) {
 	a.by[c.pubKey] = c
 }
 
-// get returns a session by full public key.
+// get returns a live session by full public key; one nobody has used
+// within sessionIdle is retired rather than returned.
 func (a *acl) get(pubKey []byte) *client {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var k [meshcore.PubKeySize]byte
 	copy(k[:], pubKey)
-	return a.by[k]
+	return a.live(k)
+}
+
+// live returns the session under k, dropping it when it has gone
+// quiet. The caller holds mu.
+func (a *acl) live(k [meshcore.PubKeySize]byte) *client {
+	c, ok := a.by[k]
+	if !ok {
+		return nil
+	}
+	if time.Since(c.lastActive) > sessionIdle {
+		delete(a.by, k)
+		return nil
+	}
+	return c
 }
 
 // matching returns every session whose key starts with the given hash
@@ -129,8 +161,11 @@ func (a *acl) matching(hash byte) []*client {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var out []*client
-	for k, c := range a.by {
-		if k[0] == hash {
+	for k := range a.by {
+		if k[0] != hash {
+			continue
+		}
+		if c := a.live(k); c != nil {
 			out = append(out, c)
 		}
 	}
@@ -185,12 +220,29 @@ func (e *engine) respondLogin(pkt *meshcore.Packet, senderPub, secret, plain []b
 		e.log.Warn("login replay refused", zap.String("txn", origin.Short()))
 		return
 	}
+	// Built before the session moves: a failure here would otherwise
+	// leave the client logged in at a timestamp it never heard back
+	// from, and its retry refused as a replay.
+	body, err := loginReply(c)
+	if err != nil {
+		e.log.Warn("login reply abandoned", zap.Error(err))
+		return
+	}
+
 	c.lastTimestamp, c.lastActive = ts, time.Now()
+	c.asks = rateLimiter{max: sessionLimitMax, window: sessionLimitWindow}
 	e.acl.put(c)
 
-	// The reply the reference composes: our clock, the verdict, a
-	// legacy keep-alive hint, the role, the permissions, a random blob
-	// for hash uniqueness, and the reply level we answer at.
+	e.log.Info("guest logged in", zap.String("txn", origin.Short()),
+		zap.String("pubkey", shortKey(c.pubKey[:])))
+	e.replyToClient(pkt, c, body, "login-resp", origin)
+}
+
+// loginReply composes what the reference sends back: our clock, the
+// verdict, its legacy keep-alive hint, the role, the permissions, a
+// random blob so two logins never hash alike, and the reply level we
+// answer at.
+func loginReply(c *client) ([]byte, error) {
 	body := make([]byte, 13)
 	binary.LittleEndian.PutUint32(body, uint32(time.Now().Unix()))
 	body[4] = respLoginOK
@@ -200,13 +252,10 @@ func (e *engine) respondLogin(pkt *meshcore.Packet, senderPub, secret, plain []b
 	}
 	body[7] = c.perms
 	if _, err := rand.Read(body[8:12]); err != nil {
-		return
+		return nil, err
 	}
 	body[12] = firmwareVerLevel
-
-	e.log.Info("guest logged in", zap.String("txn", origin.Short()),
-		zap.String("pubkey", shortKey(c.pubKey[:])))
-	e.replyToClient(pkt, c, body, "login-resp", origin)
+	return body, nil
 }
 
 // reqVerdict judges an authenticated request: ours to read only when a
@@ -244,11 +293,22 @@ func (e *engine) respondRequest(pkt *meshcore.Packet, origin txn.ID) {
 		e.log.Warn("request replay refused", zap.String("txn", origin.Short()))
 		return
 	}
-	body, answered := e.answerRequest(plain[4:])
-	if !answered {
-		return // a question this node does not serve
+	// A live session still costs the mesh something: every answer
+	// floods. Charged before the answer is built, like every other
+	// limiter here.
+	if !c.asks.allow(time.Now()) {
+		e.log.Debug("session rate-limited", zap.String("txn", origin.Short()))
+		e.dropRateLimited(origin)
+		return
 	}
+	body, answered := e.answerRequest(plain[4:])
+	// A question we do not answer still proves the client is there:
+	// the keep-alive exists for exactly that, and retiring the
+	// companion that sends one instead of polling would be perverse.
 	c.lastTimestamp, c.lastActive = ts, time.Now()
+	if !answered {
+		return // nothing to say, but the session lives on
+	}
 
 	// Every response is tagged with the asker's own timestamp, so a
 	// companion can match answers to questions.

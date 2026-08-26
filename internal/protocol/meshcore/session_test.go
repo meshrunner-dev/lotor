@@ -294,3 +294,92 @@ func TestEveryLoginAttemptCostsAToken(t *testing.T) {
 		t.Fatalf("%d replies past the exhausted window — guessing is unbounded", n)
 	}
 }
+
+func TestOneSessionCannotFloodTheMesh(t *testing.T) {
+	// Every authenticated answer floods, so a guest polling in a loop
+	// would spend the whole mesh's airtime. Its own budget bounds it.
+	e, dev, sub, peer := txRig(t, "shadow")
+	e.p.GuestPassword = "raccoon"
+	e.queue.depth = 64
+	runEngine(t, e, dev)
+
+	frame, _ := login(t, e.id, peer, nowTS(600), "raccoon", false)
+	dev.frames <- frame
+	if sent := awaitSent(t, sub); sent.Kind != "login-resp" {
+		t.Fatalf("sent = %+v", sent)
+	}
+	for i := range sessionLimitMax + 3 {
+		dev.frames <- request(t, e.id, peer, nowTS(uint32(601+i)),
+			[]byte{reqTypeGetStatus, 0, 0, 0, 0})
+	}
+
+	answers, refused := 0, 0
+	deadline := time.After(3 * time.Second)
+	for answers+refused < sessionLimitMax+3 {
+		select {
+		case ev := <-sub.C:
+			switch v := ev.(type) {
+			case bus.FrameSent:
+				if v.Kind == "req-resp" {
+					answers++
+				}
+			case bus.TxDropped:
+				if v.Reason == "rate-limited" {
+					refused++
+				}
+			}
+		case <-deadline:
+			t.Fatalf("%d answered, %d refused — the rest never resolved", answers, refused)
+		}
+	}
+	if answers != sessionLimitMax || refused != 3 {
+		t.Fatalf("%d answers and %d refusals, want %d and 3", answers, refused, sessionLimitMax)
+	}
+}
+
+func TestKeepAliveKeepsTheSessionAlive(t *testing.T) {
+	// A companion that sends a keep-alive instead of polling must not
+	// be the one retired first.
+	e, dev, _, peer := txRig(t, "shadow")
+	e.p.GuestPassword = "raccoon"
+	frame, _ := login(t, e.id, peer, nowTS(700), "raccoon", false)
+	pkt, err := meshcore.ParsePacket(frame.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender, secret, plain := e.openAnon(pkt)
+	e.respondLogin(pkt, sender, secret, plain, txn.New())
+
+	c := e.acl.get(peer.PubKey[:])
+	if c == nil {
+		t.Fatal("login left no session")
+	}
+	c.lastActive = time.Now().Add(-30 * time.Minute)
+
+	req, err := meshcore.ParsePacket(request(t, e.id, peer, nowTS(701),
+		[]byte{reqTypeKeepAlive, 0, 0, 0, 0}).Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.respondRequest(req, txn.New())
+
+	if again := e.acl.get(peer.PubKey[:]); again == nil {
+		t.Fatal("the session was retired")
+	} else if time.Since(again.lastActive) > time.Minute {
+		t.Fatalf("keep-alive left lastActive at %v — it keeps nothing alive", again.lastActive)
+	}
+	_ = dev
+}
+
+func TestIdleSessionsRetire(t *testing.T) {
+	a := newACL()
+	var key [meshcore.PubKeySize]byte
+	key[0] = 0xAB
+	a.put(&client{pubKey: key, lastActive: time.Now().Add(-2 * sessionIdle)})
+	if a.get(key[:]) != nil {
+		t.Fatal("an idle session answered as live")
+	}
+	if got := a.matching(0xAB); len(got) != 0 {
+		t.Fatalf("%d idle sessions still matched", len(got))
+	}
+}
