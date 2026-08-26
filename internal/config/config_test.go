@@ -264,3 +264,9 @@ func TestTXBlockNormalizes(t *testing.T) {
 		t.Error("absent block should read dry")
 	}
 }
+
+func TestTXRejectsANegativeThreshold(t *testing.T) {
+	if err := (&TX{LBTThresholdDB: -6}).Normalize(); err == nil {
+		t.Error("a negative lbt_threshold_db silently disables the RSSI stage")
+	}
+}

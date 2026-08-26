@@ -31,8 +31,12 @@ const (
 	verdictDuplicate     = "duplicate"
 )
 
-// maxPathBytes is the reference's path capacity (MAX_PATH_SIZE).
-const maxPathBytes = 64
+// maxPathBytes is the reference's path capacity (MAX_PATH_SIZE), and
+// maxPathHashes the most the 6-bit count field can name.
+const (
+	maxPathBytes  = 64
+	maxPathHashes = 63
+)
 
 // Flood hop limits, the reference repeater's active defaults
 // (flood_max, flood_max_advert). A flood that already carries this
@@ -116,7 +120,10 @@ func (e *engine) floodVerdict(pkt *meshcore.Packet, advertOK bool) (string, stri
 	if t == meshcore.PayloadTypeAdvert && !advertOK {
 		return verdictDropBadAdvert, ""
 	}
-	if (pkt.PathHashCount()+1)*pkt.PathHashSize() > maxPathBytes {
+	// Both halves of what appending our hash requires: the bytes must
+	// fit, and the count must stay inside its 6-bit field. Judging on
+	// the byte length alone promised a relay the append would refuse.
+	if next := pkt.PathHashCount() + 1; next > maxPathHashes || next*pkt.PathHashSize() > maxPathBytes {
 		return verdictDropPathFull, ""
 	}
 	// The distance gate the reference applies through

@@ -71,11 +71,32 @@ func Open(ctx context.Context, journalPath string, retention time.Duration,
 	// Subscribing here — not in Run — means the journal misses nothing
 	// published between construction and the consumer goroutine's first
 	// breath, the daemon's opening relay states included.
-	return &Sentinel{
+	sen := &Sentinel{
 		store: st, bus: b, sub: b.Subscribe(256),
 		log: log, retention: retention, maxFrames: maxFrames,
 		journalPath: journalPath,
-	}, nil
+	}
+	sen.seedTxWindows(ctx)
+	return sen, nil
+}
+
+// seedTxWindows resumes each relay's sliding-hour airtime from the
+// journal. The window is RAM state, but the hour it describes already
+// happened and the ledger remembers it: starting empty would carve a
+// false trough into the archived series at every restart.
+func (s *Sentinel) seedTxWindows(ctx context.Context) {
+	rows, err := s.store.TxSince(ctx, time.Now().Add(-time.Hour))
+	if err != nil {
+		s.log.Warn("could not resume the transmit airtime window", zap.Error(err))
+		return
+	}
+	s.txWindows = map[string][]txStamp{}
+	for _, r := range rows {
+		s.txWindows[r.Relay] = append(s.txWindows[r.Relay], txStamp{at: r.At, air: r.Airtime})
+	}
+	if len(rows) > 0 {
+		s.log.Info("transmit airtime window resumed", zap.Int("emissions", len(rows)))
+	}
 }
 
 // RecentFrames exposes the journal to future consumers (CLI, web),
@@ -130,6 +151,12 @@ func (s *Sentinel) NoiseSpreadHistory(ctx context.Context, relay string, since t
 // channel was too busy for the floor to be measured at all.
 func (s *Sentinel) NoiseStarvedHistory(ctx context.Context, relay string, since time.Time) ([]MetricBucket, error) {
 	return s.store.MetricHistory(ctx, "noise_starved", relay, since)
+}
+
+// TxAirtimeHistory returns a relay's consolidated transmit airtime:
+// how many seconds of the sliding hour each bucket was spending.
+func (s *Sentinel) TxAirtimeHistory(ctx context.Context, relay string, since time.Time) ([]MetricBucket, error) {
+	return s.store.MetricHistory(ctx, "tx_airtime", relay, since)
 }
 
 // SentFor lists the emissions answering one transaction, oldest first.

@@ -249,6 +249,9 @@ func (s *session) frames(ctx context.Context, in input) error {
 		if pos[0] != "watch" {
 			return fmt.Errorf("unknown argument %q — try frames --help", pos[0])
 		}
+		if _, ok := opts["last"]; ok {
+			return errors.New("--last is for the journal, not the live feed — try frames --help")
+		}
 		return s.watch(ctx, opts)
 	}
 	sen, err := s.needSentinel()
@@ -325,7 +328,10 @@ func (s *session) txn(ctx context.Context, in input) error {
 		return err
 	}
 	if len(chain) == 0 {
-		return fmt.Errorf("no transaction matching %q", args[0])
+		// Nothing was heard under this id — but the daemon's own
+		// adverts are emissions with no reception behind them, and an
+		// operator reading one in a log line must be able to look it up.
+		return s.originatedTxn(ctx, sen, args[0])
 	}
 	for _, f := range chain {
 		fmt.Fprintf(s.out, "%s  heard %s  %d B  %.0f dBm  snr %.1f  signal %.0f dBm  Δf %+.0f Hz  airtime %s\r\n",
@@ -341,16 +347,36 @@ func (s *session) txn(ctx context.Context, in input) error {
 		if err != nil {
 			return err
 		}
-		for _, t := range sent {
-			shadow := ""
-			if t.Shadow {
-				shadow = "  (shadow)"
-			}
-			fmt.Fprintf(s.out, "  sent %s  %s  airtime %s  %d dBm%s\r\n",
-				t.At.Format("15:04:05"), t.Kind, t.Airtime, t.PowerDBm, shadow)
-		}
+		s.printSent(sent)
 	}
 	return nil
+}
+
+// originatedTxn renders a transaction the daemon started itself, or
+// reports that nothing anywhere carries the prefix.
+func (s *session) originatedTxn(ctx context.Context, sen *sentinel.Sentinel, prefix string) error {
+	sent, err := sen.SentFor(ctx, prefix)
+	if err != nil {
+		return err
+	}
+	if len(sent) == 0 {
+		return fmt.Errorf("no transaction matching %q", prefix)
+	}
+	fmt.Fprint(s.out, "originated — no reception behind it\r\n")
+	s.printSent(sent)
+	return nil
+}
+
+// printSent renders a transaction's emissions.
+func (s *session) printSent(sent []sentinel.Sent) {
+	for _, t := range sent {
+		shadow := ""
+		if t.Shadow {
+			shadow = "  (shadow)"
+		}
+		fmt.Fprintf(s.out, "  sent %s  %s  %s  airtime %s  %d dBm%s\r\n",
+			t.At.Format("15:04:05"), t.Relay, t.Kind, t.Airtime, t.PowerDBm, shadow)
+	}
 }
 
 func (s *session) nodes(ctx context.Context, in input) error {
@@ -373,9 +399,12 @@ func (s *session) nodes(ctx context.Context, in input) error {
 		if n.DriftHz != 0 {
 			drift = fmt.Sprintf("%+.0f Hz", n.DriftHz)
 		}
+		best := "—"
+		if n.HasRSSI {
+			best = fmt.Sprintf("%.0f dBm", n.BestRSSI)
+		}
 		tb.row(quoted(n.Name), n.Type, n.PubKey,
-			fmt.Sprintf("%d×", n.Heard), ago(n.LastAt),
-			fmt.Sprintf("%.0f dBm", n.BestRSSI), drift)
+			fmt.Sprintf("%d×", n.Heard), ago(n.LastAt), best, drift)
 	}
 	return tb.flush(s.out)
 }

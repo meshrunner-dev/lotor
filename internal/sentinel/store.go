@@ -589,6 +589,9 @@ type Node struct {
 	Heard    int
 	LastAt   time.Time
 	BestRSSI float64
+	// HasRSSI is false when every row for this node came from a
+	// judgement whose reception was lost: there is no measurement.
+	HasRSSI bool
 	// DriftHz averages the carrier offset of the node's frames whose
 	// reception measured one: its crystal's health, in hertz.
 	DriftHz float64
@@ -607,7 +610,8 @@ func (s *store) Nodes(ctx context.Context) ([]Node, error) {
 		          AND n.ptype = 'ADVERT' AND n.node != '' ORDER BY n.at_ms DESC LIMIT 1),
 		       (SELECT detail FROM frames n WHERE n.pubkey = f.pubkey
 		          AND n.ptype = 'ADVERT' AND n.detail != '' ORDER BY n.at_ms DESC LIMIT 1),
-		       COUNT(*), MAX(f.at_ms), MAX(f.rssi_dbm),
+		       COUNT(*), MAX(f.at_ms),
+		       MAX(CASE WHEN f.rssi_dbm != 0 THEN f.rssi_dbm END),
 	       AVG(CASE WHEN f.freq_err_hz != 0 THEN f.freq_err_hz END)
 		FROM frames f WHERE f.pubkey != '' AND f.ptype = 'ADVERT'
 		GROUP BY f.pubkey ORDER BY MAX(f.at_ms) DESC`)
@@ -620,12 +624,15 @@ func (s *store) Nodes(ctx context.Context) ([]Node, error) {
 	for rows.Next() {
 		var n Node
 		var name, typ sql.NullString
-		var drift sql.NullFloat64
+		var best, drift sql.NullFloat64
 		var lastMS int64
-		if err := rows.Scan(&n.PubKey, &name, &typ, &n.Heard, &lastMS, &n.BestRSSI, &drift); err != nil {
+		if err := rows.Scan(&n.PubKey, &name, &typ, &n.Heard, &lastMS, &best, &drift); err != nil {
 			return nil, err
 		}
 		n.Name, n.Type = name.String, typ.String
+		// A row recovered from a judgement alone carries no reception
+		// quality; 0 dBm would read as a hundred decibels too good.
+		n.BestRSSI, n.HasRSSI = best.Float64, best.Valid
 		n.DriftHz = drift.Float64
 		n.LastAt = time.UnixMilli(lastMS)
 		out = append(out, n)
@@ -736,6 +743,8 @@ func (s *store) Relays(ctx context.Context) ([]string, error) {
 		UNION SELECT relay FROM metrics_raw
 		UNION SELECT relay FROM metrics_hourly
 		UNION SELECT relay FROM metrics_daily
+		UNION SELECT relay FROM tx
+		UNION SELECT relay FROM tx_drops
 		ORDER BY relay`)
 	if err != nil {
 		return nil, err
@@ -799,11 +808,40 @@ func (s *store) insertSent(ctx context.Context, at time.Time, relay, txn, kind s
 	return err
 }
 
-// SentFor lists the emissions answering one transaction, oldest first.
+// SentFor lists the emissions of one transaction, oldest first. The
+// argument is a prefix — the short form an operator reads in a log
+// line addresses its rows, exactly as it does for receptions, and a
+// full id is simply a prefix of itself.
 func (s *store) SentFor(ctx context.Context, txn string) ([]Sent, error) {
+	lo, hi := prefixRange(txn)
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT at_ms, relay, kind, airtime_ms, power_dbm, shadow
-		 FROM tx WHERE txn = ? ORDER BY at_ms`, txn)
+		 FROM tx WHERE txn >= ? AND txn < ? ORDER BY at_ms`, lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Sent
+	for rows.Next() {
+		var t Sent
+		var atMS int64
+		var airMS float64
+		if err := rows.Scan(&atMS, &t.Relay, &t.Kind, &airMS, &t.PowerDBm, &t.Shadow); err != nil {
+			return nil, err
+		}
+		t.At = time.UnixMilli(atMS)
+		t.Airtime = time.Duration(airMS * float64(time.Millisecond))
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// TxSince lists emissions since an instant, oldest first — what the
+// airtime window needs to resume where a restart left it.
+func (s *store) TxSince(ctx context.Context, since time.Time) ([]Sent, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT at_ms, relay, kind, airtime_ms, power_dbm, shadow
+		 FROM tx WHERE at_ms >= ? ORDER BY at_ms`, since.UnixMilli())
 	if err != nil {
 		return nil, err
 	}

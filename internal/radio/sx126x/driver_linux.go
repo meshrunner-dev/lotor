@@ -289,8 +289,12 @@ func (d *device) restPhase(ctx context.Context, until time.Duration, rechecked *
 // Transmit keys the radio from the owning goroutine; the library
 // hands the chip back to reception on every path out.
 func (d *device) Transmit(ctx context.Context, payload []byte, powerDBm int8) (radio.TxReport, error) {
+	// A result alongside an error means the frame reached the air and
+	// the trouble came after — a hand-back that failed on the bus. The
+	// caller needs both: the airtime was radiated and must be charged
+	// whatever happens to the session next.
 	res, err := d.r.Transmit(ctx, payload, powerDBm)
-	if err != nil {
+	if res == nil {
 		return radio.TxReport{}, receptionPending(err)
 	}
 	return radio.TxReport{
@@ -298,7 +302,7 @@ func (d *device) Transmit(ctx context.Context, payload []byte, powerDBm int8) (r
 		Airtime:  res.Airtime,
 		Duration: res.Duration,
 		PowerDBm: res.PowerDBm,
-	}, nil
+	}, receptionPending(err)
 }
 
 // statsEvery paces the chip-counter refresh: diagnostics, not a feed.

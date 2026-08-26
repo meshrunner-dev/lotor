@@ -530,3 +530,97 @@ func TestArmRefusesAnUnbudgetedBand(t *testing.T) {
 		t.Fatalf("a band declaring no limit should arm: %v", err)
 	}
 }
+
+func TestSaturatedPathIsJudgedFull(t *testing.T) {
+	// 63 one-byte hashes fill the count field: appending ours is
+	// impossible, so the judgement must say so rather than promise a
+	// relay the transform would refuse.
+	e, _, _, peer := txRig(t, "shadow")
+	pkt, err := meshcore.BuildAdvert(peer, time.Now(), &meshcore.AdvertData{Name: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt.Path = make([]byte, maxPathHashes)
+	pkt.SetPathHashSizeAndCount(1, maxPathHashes)
+	if v, _ := e.floodVerdict(pkt, true); v != verdictDropPathFull {
+		t.Fatalf("verdict = %q, want %q", v, verdictDropPathFull)
+	}
+}
+
+func TestAbandonedRelayIsCounted(t *testing.T) {
+	// A transform that refuses still owes the audit trail a refusal.
+	e, dev, sub, peer := txRig(t, "shadow")
+	pkt, err := meshcore.BuildAdvert(peer, time.Now(), &meshcore.AdvertData{Name: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt.Path = make([]byte, maxPathHashes)
+	pkt.SetPathHashSizeAndCount(1, maxPathHashes)
+	e.relayFor(dev, pkt, verdictRelayFlood, txn.New(), 8)
+
+	select {
+	case ev := <-sub.C:
+		d, ok := ev.(bus.TxDropped)
+		if !ok || d.Reason != "malformed" {
+			t.Fatalf("event = %+v, want a malformed drop", ev)
+		}
+		if d.Txn.Short() == (txn.ID{}).Short() {
+			t.Error("the drop does not name its reception")
+		}
+	default:
+		t.Fatal("the refusal was silent")
+	}
+}
+
+func TestAcksAreRelayedWithoutJitter(t *testing.T) {
+	// The reference forwards ACKs with no delay: they are what a
+	// sender is timing out on.
+	e, dev, _, _ := txRig(t, "shadow")
+	ack, err := meshcore.BuildAck([]byte{1, 2, 3, 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack.Header = meshcore.MakeHeader(meshcore.RouteDirect,
+		meshcore.PayloadTypeAck, meshcore.PayloadVer1)
+	ack.Path = []byte{e.id.PubKey[0], 0x77}
+	ack.SetPathHashSizeAndCount(1, 2)
+	before := time.Now()
+	e.relayFor(dev, ack, verdictRelayDirect, txn.New(), 8)
+
+	if len(e.queue.entries) != 1 {
+		t.Fatalf("%d entries queued", len(e.queue.entries))
+	}
+	if e.queue.entries[0].notBefore.After(before.Add(time.Millisecond)) {
+		t.Fatalf("the ACK waits %v — the reference sends it at once",
+			e.queue.entries[0].notBefore.Sub(before))
+	}
+}
+
+func TestAdvertsNeverShareAPass(t *testing.T) {
+	// Two adverts built in the same second are byte-identical, so a
+	// neighbour would dedup one away: the clocks must not collide.
+	e, dev, _, _ := txRig(t, "on-air")
+	e.p.AdvertFloodInterval = 48 * time.Hour
+	e.p.AdvertLocalInterval = time.Hour
+	now := time.Now()
+	e.nextFloodAdvert, e.nextLocalAdvert = now, now
+
+	e.dueAdverts(dev, now)
+	if len(e.queue.entries) != 1 {
+		t.Fatalf("%d adverts queued in one pass, want 1", len(e.queue.entries))
+	}
+	if !e.nextLocalAdvert.After(now) {
+		t.Error("the local clock was not wound on with the flood's")
+	}
+}
+
+func TestDutyGaugeDecaysWhenIdle(t *testing.T) {
+	// The gauge is read from operator sessions long after the last
+	// emission: it must report the sliding hour as it stands, not as
+	// the last transmission left it.
+	d := &dutyLedger{budget: time.Hour}
+	d.record(time.Now().Add(-90*time.Minute), 30*time.Second)
+	if used := d.usage(time.Now()); used != 0 {
+		t.Fatalf("usage = %v after the hour passed, want 0", used)
+	}
+}

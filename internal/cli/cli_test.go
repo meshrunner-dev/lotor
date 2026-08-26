@@ -363,3 +363,47 @@ func TestTXModeIsShown(t *testing.T) {
 		t.Errorf("shadow gate hidden:\n%s", out)
 	}
 }
+
+func TestOriginatedEmissionIsAddressable(t *testing.T) {
+	// An advert has no reception behind it; the operator still reads
+	// its txn in a log line and must be able to look it up.
+	deps := testDeps(t)
+	id := txn.New()
+	deps.Sentinel.Process(context.Background(), bus.FrameSent{
+		Relay: "meshcore-868", Txn: id, At: time.Now(), Kind: "advert-flood",
+		Airtime: 1164 * time.Millisecond, PowerDBm: -5, Shadow: true,
+	})
+	out := run(t, deps, "txn "+id.Short())
+	if !strings.Contains(out, "originated") || !strings.Contains(out, "advert-flood") ||
+		!strings.Contains(out, "(shadow)") {
+		t.Errorf("originated emission unreachable:\n%s", out)
+	}
+	if bad := run(t, deps, "txn ffffffff"); !strings.Contains(bad, "no transaction matching") {
+		t.Errorf("an unknown prefix should still say so:\n%s", bad)
+	}
+}
+
+func TestWatchRefusesTheJournalFlag(t *testing.T) {
+	out := run(t, testDeps(t), "frames watch --last 5")
+	if !strings.Contains(out, "--last is for the journal") {
+		t.Errorf("--last swallowed by the live feed:\n%s", out)
+	}
+}
+
+func TestNodesAdmitsAnUnmeasuredRSSI(t *testing.T) {
+	// A node known only through a judgement whose reception was lost
+	// has no signal measurement: 0 dBm would read a hundred decibels
+	// too good.
+	deps := testDeps(t)
+	deps.Sentinel.Process(context.Background(), bus.FrameJudged{
+		Relay: "meshcore-868", Txn: txn.New(), Verdict: "would-relay-flood",
+		Type: "ADVERT", Route: "FLOOD", Node: "Ghost", PubKey: "aabbccddeeff",
+	})
+	out := run(t, deps, "nodes")
+	if !strings.Contains(out, "Ghost") {
+		t.Fatalf("directory lost the node:\n%s", out)
+	}
+	if strings.Contains(out, "0 dBm") {
+		t.Errorf("an unmeasured RSSI is rendered as 0 dBm:\n%s", out)
+	}
+}

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -162,16 +162,23 @@ func (e *engine) relayFor(dev radio.Device, pkt *meshcore.Packet, verdict string
 	switch verdict {
 	case verdictRelayFlood:
 		if err := cp.AppendPathHash(e.selfHash(cp.PathHashSize())); err != nil {
-			e.log.Warn("flood relay path append failed", zap.Error(err))
+			e.abandon(origin, "malformed", "flood relay path append failed", err)
 			return
 		}
 		e.enqueue(dev, &cp, "relay-flood", origin, prioFlood, floodDelayFactor)
 	case verdictRelayDirect:
 		if _, err := cp.ConsumeNextHop(); err != nil {
-			e.log.Warn("direct relay hop consume failed", zap.Error(err))
+			e.abandon(origin, "malformed", "direct relay hop consume failed", err)
 			return
 		}
-		e.enqueue(dev, &cp, "relay-direct", origin, prioDirect, directDelayFactor)
+		// The reference forwards ACKs with no delay at all: they are
+		// the confirmation a sender is timing out on, and every hop's
+		// jitter is latency it pays (Mesh::routeDirectRecvAcks).
+		jitter := directDelayFactor
+		if cp.PayloadType() == meshcore.PayloadTypeAck {
+			jitter = 0
+		}
+		e.enqueue(dev, &cp, "relay-direct", origin, prioDirect, jitter)
 	case verdictRelayTrace:
 		// A trace whose next target hop is us walks on: our SNR
 		// reading — quarter-dB, one raw byte — joins the walked path
@@ -183,6 +190,16 @@ func (e *engine) relayFor(dev radio.Device, pkt *meshcore.Packet, verdict string
 		cp.PathLen++ // TRACE paths count raw bytes, no size bits
 		e.enqueue(dev, &cp, "relay-trace", origin, prioDirect, directDelayFactor)
 	}
+}
+
+// abandon reports an emission the pipeline gave up on before it ever
+// reached the queue: the audit trail must show the refusal, not a
+// judgement that quietly led nowhere.
+func (e *engine) abandon(origin txn.ID, reason, msg string, err error) {
+	e.log.Warn(msg, zap.String("txn", origin.Short()), zap.Error(err))
+	e.bus.Publish(bus.TxDropped{
+		Relay: e.relay, Txn: origin, At: time.Now(), Reason: reason,
+	})
 }
 
 // selfHash is this node's path identity at the packet's hash size.
@@ -231,11 +248,19 @@ func (e *engine) scheduleAdverts(now time.Time) {
 // dueAdverts builds and enqueues any advert whose clock has struck,
 // and winds that clock forward.
 func (e *engine) dueAdverts(dev radio.Device, now time.Time) {
-	if !e.nextFloodAdvert.IsZero() && !now.Before(e.nextFloodAdvert) {
+	switch {
+	case !e.nextFloodAdvert.IsZero() && !now.Before(e.nextFloodAdvert):
 		e.nextFloodAdvert = now.Add(e.p.AdvertFloodInterval)
+		// Both adverts in one pass would carry the same second in
+		// their timestamp, hence the same packet hash: a neighbour
+		// hearing the zero-hop copy first would judge the routable one
+		// a duplicate and never re-flood it. The reference winds both
+		// clocks for the same reason (MyMesh: "so they don't overlap").
+		if !e.nextLocalAdvert.IsZero() {
+			e.nextLocalAdvert = now.Add(e.p.AdvertLocalInterval)
+		}
 		e.advert(dev, now, "advert-flood", prioFlood, false)
-	}
-	if !e.nextLocalAdvert.IsZero() && !now.Before(e.nextLocalAdvert) {
+	case !e.nextLocalAdvert.IsZero() && !now.Before(e.nextLocalAdvert):
 		e.nextLocalAdvert = now.Add(e.p.AdvertLocalInterval)
 		e.advert(dev, now, "advert-local", prioFlood, true)
 	}
@@ -286,7 +311,7 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 		return nil
 	}
 	log := e.log.With(zap.String("txn", entry.origin.Short()), zap.String("kind", entry.kind))
-	outcome, err := e.clearChannel(ctx, dev, log)
+	outcome, err := e.clearChannel(ctx, dev, log, entry.origin)
 	switch {
 	case err != nil:
 		return err
@@ -310,23 +335,43 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	}
 	if sent.Shadow {
 		sent.At, sent.Airtime = time.Now(), dev.Airtime(len(raw))
-	} else {
-		report, err := e.key(ctx, dev, raw)
-		if errors.Is(err, radio.ErrBusyReceiving) {
-			// A frame landed between the assessment and the keying.
-			e.requeue(entry)
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		sent.At, sent.Airtime, sent.PowerDBm = report.At, report.Airtime, report.PowerDBm
+	} else if requeued, err := e.keyAndFill(ctx, dev, raw, entry, &sent, log); requeued || err != nil {
+		return err
 	}
 	e.duty.record(sent.At, sent.Airtime)
 	log.Info("frame sent", zap.Bool("shadow", sent.Shadow),
 		zap.Duration("airtime", sent.Airtime), zap.Int8("power_dbm", sent.PowerDBm))
 	e.bus.Publish(sent)
 	return nil
+}
+
+// keyAndFill keys the radio and fills the emission's own account of
+// itself. requeued reports that the entry went back in the queue —
+// the caller is done either way.
+//
+// An error alongside a real airtime means the frame reached the air
+// and the trouble came after: charge and journal it before the
+// session goes down, or the ledger loses airtime the regulator would
+// still count.
+func (e *engine) keyAndFill(ctx context.Context, dev radio.Device, raw []byte,
+	entry txEntry, sent *bus.FrameSent, log *zap.Logger,
+) (requeued bool, err error) {
+	report, err := e.key(ctx, dev, raw)
+	if errors.Is(err, radio.ErrBusyReceiving) {
+		e.requeue(entry) // a frame landed between assessment and keying
+		return true, nil
+	}
+	sent.At, sent.Airtime, sent.PowerDBm = report.At, report.Airtime, report.PowerDBm
+	if err == nil {
+		return false, nil
+	}
+	if report.Airtime > 0 {
+		e.duty.record(report.At, report.Airtime)
+		e.bus.Publish(*sent)
+		log.Warn("frame sent, then the radio faulted",
+			zap.Duration("airtime", report.Airtime), zap.Error(err))
+	}
+	return false, err
 }
 
 // key transmits under a deadline of its own. Once the radio is
@@ -356,7 +401,9 @@ func (e *engine) requeue(entry txEntry) {
 // busy, then the site's exhausted policy — transmit anyway (the
 // mesh's convention) or a counted drop. A refusal because the radio
 // is receiving ends the wait early: the frame in hand comes first.
-func (e *engine) clearChannel(ctx context.Context, dev radio.Device, log *zap.Logger) (lbtOutcome, error) {
+func (e *engine) clearChannel(ctx context.Context, dev radio.Device, log *zap.Logger,
+	origin txn.ID,
+) (lbtOutcome, error) {
 	deadline := time.Now().Add(lbtMaxWait)
 	for {
 		busy, err := dev.AssessChannel(ctx, e.policy.LBTThresholdDB)
@@ -372,7 +419,7 @@ func (e *engine) clearChannel(ctx context.Context, dev radio.Device, log *zap.Lo
 			if e.policy.LBTExhausted == "drop" {
 				log.Warn("channel busy past the LBT bound, dropping")
 				e.bus.Publish(bus.TxDropped{
-					Relay: e.relay, At: time.Now(), Reason: "lbt",
+					Relay: e.relay, Txn: origin, At: time.Now(), Reason: "lbt",
 				})
 				return lbtDrop, nil
 			}
@@ -416,15 +463,17 @@ type dutyStamp struct {
 
 // dutyLedger enforces the band's airtime budget over a sliding hour.
 // Shadow emissions are recorded like real ones — the audit must show
-// what on-air would have cost. Owned by the engine's goroutine; the
-// used total is mirrored atomically for display.
+// what on-air would have cost. The engine's goroutine writes it and
+// operator sessions read it, so the window is held under a mutex:
+// a mirror refreshed only on the write path would report a burst's
+// usage long after the hour that held it had passed.
 type dutyLedger struct {
+	mu     sync.Mutex
 	budget time.Duration // per sliding hour; zero = unbudgeted
 	window []dutyStamp
-	used   atomic.Int64 // ns, the display mirror
 }
 
-// prune drops stamps older than the window and refreshes the mirror.
+// prune drops stamps older than the window; the caller holds mu.
 func (d *dutyLedger) prune(now time.Time) time.Duration {
 	cut := now.Add(-time.Hour)
 	i := 0
@@ -436,14 +485,23 @@ func (d *dutyLedger) prune(now time.Time) time.Duration {
 	for _, s := range d.window {
 		sum += s.air
 	}
-	d.used.Store(int64(sum))
 	return sum
+}
+
+// usage is the sliding hour's spent airtime as of now, pruned first
+// so an idle relay reports what it is actually using: nothing.
+func (d *dutyLedger) usage(now time.Time) time.Duration {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.prune(now)
 }
 
 // admit answers whether an emission of the given airtime fits the
 // budget now; when it does not, freeAt is the earliest instant enough
 // window expires — and never reports an airtime no budget ever fits.
 func (d *dutyLedger) admit(now time.Time, air time.Duration) (ok bool, freeAt time.Time, never bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.budget <= 0 {
 		return true, time.Time{}, false
 	}
@@ -469,8 +527,10 @@ func (d *dutyLedger) admit(now time.Time, air time.Duration) (ok bool, freeAt ti
 
 // record spends airtime from the budget.
 func (d *dutyLedger) record(now time.Time, air time.Duration) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.window = append(d.window, dutyStamp{at: now, air: air})
-	d.used.Store(int64(d.prune(now)))
+	d.prune(now)
 }
 
 // Duty reports the sliding-hour airtime spent and the budget; ok is
@@ -480,7 +540,7 @@ func (e *engine) Duty() (used, budget time.Duration, ok bool) {
 	if !e.txEnabled() || e.duty == nil || e.duty.budget <= 0 {
 		return 0, 0, false
 	}
-	return time.Duration(e.duty.used.Load()), e.duty.budget, true
+	return e.duty.usage(time.Now()), e.duty.budget, true
 }
 
 // admitDuty applies the budget to one popped entry: requeued for the

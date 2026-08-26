@@ -84,6 +84,11 @@ func (t *TX) Normalize() error {
 	if t.LBTExhausted != "transmit" && t.LBTExhausted != "drop" {
 		return fmt.Errorf("tx: lbt_exhausted %q — want transmit or drop", t.LBTExhausted)
 	}
+	if t.LBTThresholdDB < 0 {
+		return fmt.Errorf(
+			"tx: lbt_threshold_db %g — want 0 to disable the RSSI stage, or a positive margin above the noise floor",
+			t.LBTThresholdDB)
+	}
 	if t.QueueDepth == 0 {
 		t.QueueDepth = 8
 	}

@@ -237,6 +237,10 @@ func buildRelays(f *config.File, b *bus.Bus, log *zap.Logger, deps *cli.Deps) []
 			info = cli.RelayInfo{
 				Name: name, Protocol: rc.Protocol, Radio: rc.Radio,
 				State: r.State, Err: r.Err,
+				// The configured intent survives the failure: an
+				// operator reading "tx dry" next to an error would
+				// think the relay was meant to stay silent.
+				TXMode: rc.TXMode(),
 			}
 		}
 		relays = append(relays, r)
