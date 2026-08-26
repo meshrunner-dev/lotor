@@ -137,6 +137,7 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 	e.policy = p
 	e.queue = &txQueue{depth: p.QueueDepth}
 	e.discoverLimit = rateLimiter{max: discoverLimitMax, window: discoverLimitWindow}
+	e.anonLimit = rateLimiter{max: anonLimitMax, window: anonLimitWindow}
 	e.advertAsk = make(chan string, 1)
 	// What "changed since" means for us: this process's pipeline came
 	// up — the durable equivalent of the reference's mod timestamp.
@@ -180,6 +181,14 @@ func (e *engine) enqueue(dev radio.Device, pkt *meshcore.Packet, kind string,
 		span := max(time.Duration(5*jitterFactor*float64(air)), time.Millisecond)
 		delay = rand.N(span) //nolint:gosec // desync jitter, not security
 	}
+	e.enqueueAfter(pkt, kind, origin, priority, delay)
+}
+
+// enqueueAfter schedules one emission a fixed delay out, publishing
+// the drop when the queue refuses.
+func (e *engine) enqueueAfter(pkt *meshcore.Packet, kind string, origin txn.ID,
+	priority int, delay time.Duration,
+) {
 	entry := txEntry{
 		pkt: pkt, kind: kind, origin: origin,
 		priority: priority, notBefore: time.Now().Add(delay),
@@ -222,6 +231,8 @@ func (e *engine) relayFor(dev radio.Device, pkt *meshcore.Packet, verdict string
 		e.enqueue(dev, &cp, "relay-direct", origin, prioDirect, jitter)
 	case verdictDiscover:
 		e.respondDiscover(dev, pkt, origin, snr)
+	case verdictAnon:
+		e.respondAnon(dev, pkt, origin)
 	case verdictRelayTrace:
 		// A trace whose next target hop is us walks on: our SNR
 		// reading — quarter-dB, one raw byte — joins the walked path

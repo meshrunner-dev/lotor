@@ -70,6 +70,9 @@ type params struct {
 	// choice, one boot announcement goes out shortly after the
 	// pipeline comes up, as the reference's does.
 	AdvertLocalInterval time.Duration `yaml:"advert_local_interval"`
+	// OwnerInfo rides the anonymous owner reply after the name — the
+	// reference's free-text field for "who runs this node"; optional.
+	OwnerInfo string `yaml:"owner_info"`
 	// NodeName is the name adverts carry — what the mesh's directories
 	// and every companion screen will call this node. There is no
 	// default: a config slug is an implementation detail, not a name,
@@ -120,6 +123,7 @@ type engine struct {
 	nextFloodAdvert time.Time
 	nextLocalAdvert time.Time
 	discoverLimit   rateLimiter
+	anonLimit       rateLimiter
 	discoverySince  time.Time
 	clockWarned     bool
 

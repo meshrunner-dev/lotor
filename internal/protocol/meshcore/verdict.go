@@ -23,6 +23,7 @@ const (
 	verdictZeroHop       = "heard-zero-hop"             // direct, empty path: addressed to whoever hears it
 	verdictNotAddressed  = "direct-not-addressed"       // the path's next hop is not us (or no identity exists)
 	verdictDiscover      = "discover-request"           // a zero-hop neighbourhood scan asking who hears it
+	verdictAnon          = "anon-request"               // an ephemeral-keyed question addressed to our key
 	verdictTraceTransit  = "trace-transit"              // trace walking its target path, next hop unjudgeable
 	verdictTraceNotUs    = "trace-not-addressed"        // trace walking its target path, next hop is not us
 	verdictTraceArrived  = "trace-arrived"              // trace consumed its whole target path
@@ -88,6 +89,14 @@ var floodRoutable = map[meshcore.PayloadType]bool{
 func (e *engine) verdict(pkt *meshcore.Packet, advertOK, selfAdvert bool) (string, string) {
 	if pkt.PayloadVer() > meshcore.PayloadVer1 {
 		return verdictBadVersion, ""
+	}
+	// An anonymous request is examined before any routing: the
+	// reference decrypts first and forwards only what it could not
+	// read (Mesh::onRecvPacket, ANON_REQ).
+	if pkt.PayloadType() == meshcore.PayloadTypeAnonReq {
+		if v, why, handled := e.anonVerdict(pkt); handled {
+			return v, why
+		}
 	}
 	switch {
 	case selfAdvert:
