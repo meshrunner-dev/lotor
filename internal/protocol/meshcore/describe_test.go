@@ -97,7 +97,7 @@ func TestDiscoveryRequestIsDescribed(t *testing.T) {
 		!strings.Contains(j.Detail, "repeaters") {
 		t.Errorf("detail = %q", j.Detail)
 	}
-	if j.Verdict != "heard-zero-hop" {
-		t.Errorf("verdict = %q", j.Verdict)
+	if j.Verdict != verdictDiscover {
+		t.Errorf("verdict = %q — a scan deserves its own verdict now", j.Verdict)
 	}
 }

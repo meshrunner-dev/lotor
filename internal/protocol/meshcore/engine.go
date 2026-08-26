@@ -57,10 +57,12 @@ type params struct {
 
 	// AdvertFloodInterval paces the routable self-announcement a
 	// repeater owes the mesh's directories; applied only when the
-	// transmit pipeline runs, 48h when unset.
+	// transmit pipeline runs. 48h when unset; negative disables it.
 	AdvertFloodInterval time.Duration `yaml:"advert_flood_interval"`
-	// AdvertLocalInterval paces the zero-hop announcement — the form
-	// band rules allow first; zero (the default) disables it.
+	// AdvertLocalInterval paces the zero-hop announcement — the signed
+	// packet that carries the node's name, and what makes a repeater
+	// discoverable to whoever merely listens. The reference announces
+	// every two minutes; unset follows it, negative disables.
 	AdvertLocalInterval time.Duration `yaml:"advert_local_interval"`
 	// NodeName is the name adverts carry; the relay's name by default.
 	NodeName string `yaml:"node_name"`
@@ -108,6 +110,9 @@ type engine struct {
 	duty            *dutyLedger
 	nextFloodAdvert time.Time
 	nextLocalAdvert time.Time
+	discoverLimit   rateLimiter
+	discoverySince  time.Time
+	clockWarned     bool
 }
 
 // paramsFrom is the strict decode both build and the config checker
@@ -140,6 +145,9 @@ func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (p
 	}
 	if p.AdvertFloodInterval == 0 {
 		p.AdvertFloodInterval = 48 * time.Hour
+	}
+	if p.AdvertLocalInterval == 0 {
+		p.AdvertLocalInterval = 2 * time.Minute
 	}
 	if p.NodeName == "" {
 		p.NodeName = relayName

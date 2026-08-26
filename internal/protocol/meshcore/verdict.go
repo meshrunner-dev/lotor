@@ -22,6 +22,7 @@ const (
 	verdictSelfAdvert    = "self-advert"                // our own advert echoing back
 	verdictZeroHop       = "heard-zero-hop"             // direct, empty path: addressed to whoever hears it
 	verdictNotAddressed  = "direct-not-addressed"       // the path's next hop is not us (or no identity exists)
+	verdictDiscover      = "discover-request"           // a zero-hop neighbourhood scan asking who hears it
 	verdictTraceTransit  = "trace-transit"              // trace walking its target path, next hop unjudgeable
 	verdictTraceNotUs    = "trace-not-addressed"        // trace walking its target path, next hop is not us
 	verdictTraceArrived  = "trace-arrived"              // trace consumed its whole target path
@@ -97,6 +98,9 @@ func (e *engine) verdict(pkt *meshcore.Packet, advertOK, selfAdvert bool) (strin
 	case pkt.IsRouteDirect():
 		if pkt.PayloadType() == meshcore.PayloadTypeTrace {
 			return e.traceVerdict(pkt)
+		}
+		if pkt.PayloadType() == meshcore.PayloadTypeControl {
+			return e.controlVerdict(pkt)
 		}
 		if pkt.PathHashCount() == 0 {
 			return verdictZeroHop, ""

@@ -38,7 +38,18 @@ const (
 	// so a site rebooting a fleet does not open with a chorus.
 	advertFirstMin = 30 * time.Second
 	advertFirstMax = 60 * time.Second
+
+	// clockRetry is how long the advert clocks defer while the wall
+	// clock is implausible.
+	clockRetry = time.Minute
 )
+
+// clockEpoch bounds plausibility: an advert stamps the wall clock into
+// a signed payload, and neighbours keep only the newest timestamp per
+// node — so announcing from a host that has not found the network yet
+// (a Pi without an RTC boots into the past) would waste the emission
+// or, worse, plant a timestamp the real clock must later climb over.
+var clockEpoch = time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
 
 // Priorities: direct traffic answers someone and goes first.
 const (
@@ -119,6 +130,10 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 	}
 	e.policy = p
 	e.queue = &txQueue{depth: p.QueueDepth}
+	e.discoverLimit = rateLimiter{max: discoverLimitMax, window: discoverLimitWindow}
+	// What "changed since" means for us: this process's pipeline came
+	// up — the durable equivalent of the reference's mod timestamp.
+	e.discoverySince = time.Now()
 	e.duty = &dutyLedger{budget: time.Duration(float64(time.Hour) * e.p.DutyCyclePct / 100)}
 	return nil
 }
@@ -179,6 +194,8 @@ func (e *engine) relayFor(dev radio.Device, pkt *meshcore.Packet, verdict string
 			jitter = 0
 		}
 		e.enqueue(dev, &cp, "relay-direct", origin, prioDirect, jitter)
+	case verdictDiscover:
+		e.respondDiscover(dev, pkt, origin, snr)
 	case verdictRelayTrace:
 		// A trace whose next target hop is us walks on: our SNR
 		// reading — quarter-dB, one raw byte — joins the walked path
@@ -258,6 +275,23 @@ func (e *engine) scheduleAdverts(now time.Time) {
 // dueAdverts builds and enqueues any advert whose clock has struck,
 // and winds that clock forward.
 func (e *engine) dueAdverts(dev radio.Device, now time.Time) {
+	if e.advertDue(now) && now.Before(clockEpoch) {
+		// The host has not found the network yet: hold the
+		// announcements, try again shortly. Everything else — relays,
+		// discovery answers — carries no wall time and flows normally.
+		if !e.clockWarned {
+			e.log.Warn("wall clock implausible, holding adverts",
+				zap.Time("clock", now), zap.Duration("retry", clockRetry))
+			e.clockWarned = true
+		}
+		if !e.nextFloodAdvert.IsZero() && !now.Before(e.nextFloodAdvert) {
+			e.nextFloodAdvert = now.Add(clockRetry)
+		}
+		if !e.nextLocalAdvert.IsZero() && !now.Before(e.nextLocalAdvert) {
+			e.nextLocalAdvert = now.Add(clockRetry)
+		}
+		return
+	}
 	switch {
 	case !e.nextFloodAdvert.IsZero() && !now.Before(e.nextFloodAdvert):
 		e.nextFloodAdvert = now.Add(e.p.AdvertFloodInterval)
@@ -274,6 +308,12 @@ func (e *engine) dueAdverts(dev radio.Device, now time.Time) {
 		e.nextLocalAdvert = now.Add(e.p.AdvertLocalInterval)
 		e.advert(dev, now, "advert-local", prioFlood, true)
 	}
+}
+
+// advertDue reports whether either advert clock has struck.
+func (e *engine) advertDue(now time.Time) bool {
+	return (!e.nextFloodAdvert.IsZero() && !now.Before(e.nextFloodAdvert)) ||
+		(!e.nextLocalAdvert.IsZero() && !now.Before(e.nextLocalAdvert))
 }
 
 // advert builds this node's signed announcement. Local adverts are
