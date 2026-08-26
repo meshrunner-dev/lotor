@@ -235,7 +235,10 @@ func (e *engine) respondLogin(pkt *meshcore.Packet, senderPub, secret, plain []b
 
 	e.log.Info("guest logged in", zap.String("txn", origin.Short()),
 		zap.String("pubkey", shortKey(c.pubKey[:])))
-	e.replyToClient(pkt, c, body, "login-resp", origin)
+	e.reply(pkt, answer{
+		destHash: c.pubKey[:meshcore.PathHashSize], secret: c.secret,
+		tag: binary.LittleEndian.Uint32(body[:4]), body: body[4:], kind: "login-resp",
+	}, origin)
 }
 
 // loginReply composes what the reference sends back: our clock, the
@@ -315,8 +318,10 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 
 	// Every response is tagged with the asker's own timestamp, so a
 	// companion can match answers to questions.
-	reply := binary.LittleEndian.AppendUint32(nil, ts)
-	e.replyToClient(pkt, c, append(reply, body...), "req-resp", origin)
+	e.reply(pkt, answer{
+		destHash: c.pubKey[:meshcore.PathHashSize], secret: c.secret,
+		tag: ts, body: body, kind: "req-resp",
+	}, origin)
 }
 
 // answerRequest builds the body of an authenticated answer. answered
@@ -433,49 +438,6 @@ func (e *engine) neighboursBody(args []byte) []byte {
 	out := binary.LittleEndian.AppendUint16(nil, uint16(len(all)))
 	out = binary.LittleEndian.AppendUint16(out, uint16(returned))
 	return append(out, rows...)
-}
-
-// replyToClient routes one answer back the way the reference chooses:
-// a flooded question earns a path return — telling the asker how to
-// reach us directly next time, with the answer riding along — and a
-// direct question is answered direct when a path is known, flooded
-// when none is.
-func (e *engine) replyToClient(inbound *meshcore.Packet, c *client, body []byte, kind string, origin txn.ID) {
-	destHash := c.pubKey[:meshcore.PathHashSize]
-	srcHash := e.id.PubKey[:meshcore.PathHashSize]
-
-	if inbound.IsRouteFlood() {
-		path, err := meshcore.BuildPathReturn(destHash, srcHash, c.secret,
-			inbound.PathLen, inbound.Path, byte(meshcore.PayloadTypeResponse), body)
-		if err != nil {
-			e.log.Warn("path return build failed", zap.Error(err))
-			return
-		}
-		// The reply propagates with the hash width the asker's mesh
-		// uses, as every reference reply does: a narrower one collides
-		// more often for repeaters extending it.
-		path.SetPathHashSizeAndCount(inbound.PathHashSize(), 0)
-		e.enqueueAfter(path, kind, origin, prioPathReturn, serverResponseDelay)
-		return
-	}
-
-	resp, err := meshcore.BuildResponse(destHash, srcHash, c.secret,
-		binary.LittleEndian.Uint32(body[:4]), body[4:])
-	if err != nil {
-		e.log.Warn("response build failed", zap.Error(err))
-		return
-	}
-	// A direct question arrives with its path already spent — every
-	// hop consumed its own entry on the way — so an empty path says
-	// nothing about how far the asker is. Adjacent or five hops out,
-	// they look identical here, and the only route that reaches both
-	// is a flood. The reference makes the same call, and buys its way
-	// out of it by remembering an out-path per client, which this
-	// engine does not learn yet.
-	resp.Header = meshcore.MakeHeader(meshcore.RouteFlood,
-		meshcore.PayloadTypeResponse, meshcore.PayloadVer1)
-	resp.SetPathHashSizeAndCount(inbound.PathHashSize(), 0)
-	e.enqueueAfter(resp, kind, origin, prioFloodReply, serverResponseDelay)
 }
 
 // cString reads up to the terminator, the form every password and name

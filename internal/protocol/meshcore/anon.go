@@ -153,21 +153,16 @@ func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 
 	// The reply the reference composes: the asker's timestamp echoed
 	// as a tag, our clock for an easy sync, then the answer's text.
-	ts := binary.LittleEndian.Uint32(plain[0:4])
-	reply := binary.LittleEndian.AppendUint32(nil, uint32(time.Now().Unix()))
-	reply = append(reply, []byte(text)...)
-	resp, err := meshcore.BuildResponse(
-		sender[:meshcore.PathHashSize], e.id.PubKey[:meshcore.PathHashSize],
-		secret, ts, reply)
-	if err != nil {
-		e.log.Warn("anonymous reply build failed", zap.Error(err))
-		return
-	}
-	resp.Header = meshcore.MakeHeader(meshcore.RouteDirect,
-		meshcore.PayloadTypeResponse, meshcore.PayloadVer1)
-	if len(path) > 0 {
-		resp.Path = path
-		resp.PathLen = pathLen
-	}
-	e.enqueueAfter(resp, "anon-resp", origin, prioDirect, serverResponseDelay)
+	body := binary.LittleEndian.AppendUint32(nil, uint32(time.Now().Unix()))
+	body = append(body, []byte(text)...)
+	e.reply(pkt, answer{
+		destHash: sender[:meshcore.PathHashSize],
+		secret:   secret,
+		tag:      binary.LittleEndian.Uint32(plain[0:4]),
+		body:     body,
+		supplied: true,
+		pathLen:  pathLen,
+		path:     path,
+		kind:     "anon-resp",
+	}, origin)
 }
