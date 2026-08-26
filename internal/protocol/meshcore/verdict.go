@@ -19,6 +19,7 @@ const (
 	verdictDropPathFull  = "would-drop-flood-path-full" // appending our hash would exceed the path
 	verdictDropFloodHops = "would-drop-flood-hops"      // the flood travelled past its hop limit
 	verdictDropLoop      = "would-drop-flood-loop"      // our hash already rides the path: we relayed this already
+	verdictDropScoped    = "would-drop-flood-scoped"    // transport-scoped flood, and no scoping exists here
 	verdictSelfAdvert    = "self-advert"                // our own advert echoing back
 	verdictZeroHop       = "heard-zero-hop"             // direct, empty path: addressed to whoever hears it
 	verdictNotAddressed  = "direct-not-addressed"       // the path's next hop is not us (or no identity exists)
@@ -126,6 +127,12 @@ func (e *engine) verdict(pkt *meshcore.Packet, advertOK, selfAdvert bool) (strin
 }
 
 func (e *engine) floodVerdict(pkt *meshcore.Packet, advertOK bool) (string, string) {
+	// The reference refuses to forward a scoped flood whose transport
+	// code it does not know (allowPacketForward: "unknown transport
+	// code"); with no region map at all, that is every one of them.
+	if pkt.Route() == meshcore.RouteTransportFlood {
+		return verdictDropScoped, "no transport scoping here"
+	}
 	t := pkt.PayloadType()
 	if !floodRoutable[t] {
 		return verdictDropFloodType, ""

@@ -389,6 +389,7 @@ func assemble(name string, rc config.Relay, radioSpec config.Radio,
 	if err != nil {
 		return nil, none, err
 	}
+	seedDuty(&policy, name, deps)
 	if err := armEngine(rc.Protocol, policy, eng); err != nil {
 		return nil, none, err
 	}
@@ -439,6 +440,23 @@ func dutyOf(eng protocol.Engine) func() (time.Duration, time.Duration, bool) {
 		return nil
 	}
 	return d.Duty
+}
+
+// seedDuty hands the new ledger the journal's memory of the sliding
+// hour, when a journal runs at all: the budget must not restart with
+// the process, or a crash-loop would launder it. Best effort — a sick
+// journal degrades to an empty hour, never to a dead relay.
+func seedDuty(policy *protocol.TXPolicy, relay string, deps *cli.Deps) {
+	if policy.Mode == config.TXDry || deps.Sentinel == nil {
+		return
+	}
+	rows, err := deps.Sentinel.SpentAirtime(context.Background(), relay)
+	if err != nil {
+		return
+	}
+	for _, r := range rows {
+		policy.Spent = append(policy.Spent, protocol.Spent{At: r.At, Airtime: r.Airtime})
+	}
 }
 
 // armEngine hands a non-dry policy to the engine's pipeline; an

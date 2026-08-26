@@ -78,7 +78,7 @@ func TestVerdicts(t *testing.T) {
 	judged := drainJudged(t, sub)
 	want := []string{
 		"would-drop-invalid-advert", "heard-zero-hop", "direct-not-addressed",
-		"would-relay-flood", "direct-not-addressed", "malformed",
+		"would-drop-flood-scoped", "direct-not-addressed", "malformed",
 	}
 	if len(judged) != len(want) {
 		t.Fatalf("judged %d frames, want %d", len(judged), len(want))

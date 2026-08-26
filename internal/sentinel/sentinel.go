@@ -153,6 +153,22 @@ func (s *Sentinel) NoiseStarvedHistory(ctx context.Context, relay string, since 
 	return s.store.MetricHistory(ctx, "noise_starved", relay, since)
 }
 
+// SpentAirtime lists one relay's emissions of the sliding hour —
+// what a restarting duty ledger must still count.
+func (s *Sentinel) SpentAirtime(ctx context.Context, relay string) ([]Sent, error) {
+	rows, err := s.store.TxSince(ctx, time.Now().Add(-time.Hour))
+	if err != nil {
+		return nil, err
+	}
+	out := rows[:0]
+	for _, r := range rows {
+		if r.Relay == relay {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
 // TxAirtimeHistory returns a relay's consolidated transmit airtime:
 // how many seconds of the sliding hour each bucket was spending.
 func (s *Sentinel) TxAirtimeHistory(ctx context.Context, relay string, since time.Time) ([]MetricBucket, error) {

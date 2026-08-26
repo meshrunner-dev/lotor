@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"time"
 
@@ -53,10 +54,15 @@ const (
 // or, worse, plant a timestamp the real clock must later climb over.
 var clockEpoch = time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
 
-// Priorities: direct traffic answers someone and goes first.
+// Priorities, the reference's ladder: routed traffic and zero-hop
+// sends go first (0); flood relays carry their hop count after the
+// append — closer sources beat distant ones; a node's own flood
+// adverts are deliberately de-prioritised (3); trace transits sit at
+// the back (5). Lower serves first, ties by earliest schedule.
 const (
-	prioDirect = 0
-	prioFlood  = 1
+	prioDirect      = 0
+	prioFloodAdvert = 3
+	prioTrace       = 5
 )
 
 // txEntry is one scheduled emission.
@@ -137,12 +143,23 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 	e.policy = p
 	e.queue = &txQueue{depth: p.QueueDepth}
 	e.discoverLimit = rateLimiter{max: discoverLimitMax, window: discoverLimitWindow}
+	// The sliding hour did not restart with the process: what the
+	// journal remembers being spent is spent, or a crash-loop could
+	// launder the budget.
+	dl := &dutyLedger{budget: time.Duration(float64(time.Hour) * e.p.DutyCyclePct / 100)}
+	// The window prunes as a time-ordered prefix: feed it in order,
+	// whatever order the journal rows arrived in.
+	spent := slices.Clone(p.Spent)
+	slices.SortFunc(spent, func(a, b protocol.Spent) int { return a.At.Compare(b.At) })
+	for _, sp := range spent {
+		dl.record(sp.At, sp.Airtime)
+	}
+	e.duty = dl
 	e.anonLimit = rateLimiter{max: anonLimitMax, window: anonLimitWindow}
 	e.advertAsk = make(chan string, 1)
 	// What "changed since" means for us: this process's pipeline came
 	// up — the durable equivalent of the reference's mod timestamp.
 	e.discoverySince = time.Now()
-	e.duty = &dutyLedger{budget: time.Duration(float64(time.Hour) * e.p.DutyCyclePct / 100)}
 	return nil
 }
 
@@ -215,8 +232,13 @@ func (e *engine) relayFor(dev radio.Device, pkt *meshcore.Packet, verdict string
 			e.abandon(origin, "malformed", "flood relay path append failed", err)
 			return
 		}
-		e.enqueue(dev, &cp, "relay-flood", origin, prioFlood, floodDelayFactor)
+		// Priority = distance: the hop count with our hash appended.
+		e.enqueue(dev, &cp, "relay-flood", origin, cp.PathHashCount(), floodDelayFactor)
 	case verdictRelayDirect:
+		if cp.PayloadType() == meshcore.PayloadTypeMultipart {
+			e.forwardMultipart(&cp, origin)
+			return
+		}
 		if _, err := cp.ConsumeNextHop(); err != nil {
 			e.abandon(origin, "malformed", "direct relay hop consume failed", err)
 			return
@@ -242,7 +264,7 @@ func (e *engine) relayFor(dev radio.Device, pkt *meshcore.Packet, verdict string
 		grown = append(grown, byte(int8(snr*4)))
 		cp.Path = grown
 		cp.PathLen++ // TRACE paths count raw bytes, no size bits
-		e.enqueue(dev, &cp, "relay-trace", origin, prioDirect, directDelayFactor)
+		e.enqueue(dev, &cp, "relay-trace", origin, prioTrace, directDelayFactor)
 	}
 }
 
@@ -264,6 +286,48 @@ func (e *engine) dropOnFault(ctx context.Context, origin txn.ID, err error) {
 		return
 	}
 	e.abandon(origin, "tx-failed", "emission lost to a radio fault", err)
+}
+
+// forwardMultipart unwraps a direct MULTIPART into the plain ACK it
+// wraps and forwards that instead — the reference's
+// forwardMultipartDirect. A sender emitting redundant ACK copies
+// stamps each with a different remaining-count nibble, so the copies
+// all hash differently; deduplicating on the unwrapped form collapses
+// them to one forward instead of N. The forward waits out the rest of
+// the burst — (remaining+1) × 300 ms, the copies' own spacing — and no
+// extra copies of our own are added (the reference's extra-ACK count
+// ships at zero).
+func (e *engine) forwardMultipart(cp *meshcore.Packet, origin txn.ID) {
+	if len(cp.Payload) < 5 || meshcore.PayloadType(cp.Payload[0]&0x0F) != meshcore.PayloadTypeAck {
+		e.abandon(origin, "malformed", "multipart wraps no ack", nil)
+		return
+	}
+	remaining := int(cp.Payload[0] >> 4)
+	// Dedup on the unwrapped shape, exactly as the reference hashes it:
+	// the multipart header over the stripped payload.
+	stripped := *cp
+	stripped.Payload = cp.Payload[1:]
+	if _, dup := e.seen.witness(stripped.Hash(), origin, time.Now()); dup {
+		e.bus.Publish(bus.TxDropped{
+			Relay: e.relay, Txn: origin, At: time.Now(), Reason: "duplicate",
+		})
+		return
+	}
+	if _, err := cp.ConsumeNextHop(); err != nil {
+		e.abandon(origin, "malformed", "multipart hop consume failed", err)
+		return
+	}
+	ack, err := meshcore.BuildAck(cp.Payload[1:5])
+	if err != nil {
+		e.abandon(origin, "malformed", "multipart ack rebuild failed", err)
+		return
+	}
+	ack.Header = meshcore.MakeHeader(meshcore.RouteDirect,
+		meshcore.PayloadTypeAck, meshcore.PayloadVer1)
+	ack.Path = append([]byte(nil), cp.Path...)
+	ack.PathLen = cp.PathLen
+	e.enqueueAfter(ack, "relay-ack", origin, prioDirect,
+		time.Duration(remaining+1)*300*time.Millisecond)
 }
 
 // selfHash is this node's path identity at the packet's hash size.
@@ -423,10 +487,16 @@ func (e *engine) advertDue(now time.Time) bool {
 // zero-hop: direct route, empty path — the form the band rules allow
 // first. Our own hash is witnessed so the echo judges as a duplicate.
 func (e *engine) advert(dev radio.Device, now time.Time, kind string, local bool) {
-	pkt, err := meshcore.BuildAdvert(e.id, now, &meshcore.AdvertData{
+	data := &meshcore.AdvertData{
 		Type: meshcore.AdvTypeRepeater,
 		Name: e.p.NodeName,
-	})
+	}
+	if e.p.NodeLat != 0 || e.p.NodeLon != 0 {
+		data.HasLoc = true
+		data.LatE6 = int32(e.p.NodeLat * 1e6)
+		data.LonE6 = int32(e.p.NodeLon * 1e6)
+	}
+	pkt, err := meshcore.BuildAdvert(e.id, now, data)
 	if err != nil {
 		e.log.Warn("advert build failed", zap.Error(err))
 		return
@@ -437,7 +507,11 @@ func (e *engine) advert(dev radio.Device, now time.Time, kind string, local bool
 	}
 	id := txn.New()
 	e.seen.witness(pkt.Hash(), id, now)
-	e.enqueue(dev, pkt, kind, id, prioFlood, 0)
+	prio := prioFloodAdvert
+	if local {
+		prio = prioDirect // zero-hop sends go out at the front
+	}
+	e.enqueue(dev, pkt, kind, id, prio, 0)
 }
 
 // lbtOutcome is what the channel assessment decided about one entry.

@@ -249,7 +249,7 @@ func (s *session) frames(ctx context.Context, in input) error {
 		if pos[0] != "watch" {
 			return fmt.Errorf("unknown argument %q — try frames --help", pos[0])
 		}
-		if _, ok := opts["last"]; ok {
+		if _, ok := opts[optLast]; ok {
 			return errors.New("--last is for the journal, not the live feed — try frames --help")
 		}
 		return s.watch(ctx, opts)
@@ -262,7 +262,7 @@ func (s *session) frames(ctx context.Context, in input) error {
 	// filters run in SQL, so a busy channel cannot starve them.
 	const maxLast = 1000
 	limit := 20
-	if v, ok := opts["last"]; ok {
+	if v, ok := opts[optLast]; ok {
 		if limit, err = strconv.Atoi(v); err != nil || limit < 1 || limit > maxLast {
 			return fmt.Errorf("--last wants 1..%d", maxLast)
 		}
@@ -473,6 +473,58 @@ func (s *session) sentinelStatus(ctx context.Context, _ input) error {
 
 // noise shows a relay's noise-floor history: the live value, then the
 // asked window's consolidated buckets, oldest first.
+// tx renders the transmit-airtime history: the sliding hour's spent
+// seconds, one point per emission, consolidated through the tiers.
+func (s *session) tx(ctx context.Context, in input) error {
+	opts := in.opts
+	name := opts[scopeRelay]
+	if name == "" {
+		if len(s.deps.Relays) != 1 {
+			return errors.New("--relay is needed when several relays run")
+		}
+		name = s.deps.Relays[0].Name
+	}
+	live, err := s.relayFilter(ctx, name)
+	if err != nil {
+		return err
+	}
+	span := 24 * time.Hour
+	if v, ok := opts[optLast]; ok {
+		if span, err = parseSpan(v); err != nil {
+			return err
+		}
+	}
+	sen, err := s.needSentinel()
+	if err != nil {
+		return err
+	}
+	buckets, err := sen.TxAirtimeHistory(ctx, name, time.Now().Add(-span))
+	if err != nil {
+		return err
+	}
+	if opts[optJSON] == optOn {
+		return s.printJSON(struct{ Airtime []sentinel.MetricBucket }{buckets})
+	}
+	current := "archived — relay not running"
+	if live {
+		if r, err := s.findRelay(name); err == nil {
+			current = txModeText(r) + dutyText(r)
+		}
+	}
+	fmt.Fprintf(s.out, "current  %s\r\n", current)
+	if len(buckets) == 0 {
+		fmt.Fprint(s.out, "no emissions journalled yet\r\n")
+		return nil
+	}
+	tb := &table{}
+	for _, b := range buckets {
+		tb.row(b.At.Format("02/01 15:04"),
+			fmt.Sprintf("min %.1f s", b.Min), fmt.Sprintf("avg %.1f s", b.Avg),
+			fmt.Sprintf("max %.1f s", b.Max), fmt.Sprintf("%d×", b.N))
+	}
+	return tb.flush(s.out)
+}
+
 func (s *session) noise(ctx context.Context, in input) error {
 	opts := in.opts
 	name := opts[scopeRelay]
@@ -487,7 +539,7 @@ func (s *session) noise(ctx context.Context, in input) error {
 		return err
 	}
 	span := 24 * time.Hour
-	if v, ok := opts["last"]; ok {
+	if v, ok := opts[optLast]; ok {
 		if span, err = parseSpan(v); err != nil {
 			return err
 		}

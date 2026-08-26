@@ -125,7 +125,7 @@ func journalCommands() []*command {
 				"frames watch [--relay R] [--type T] [--verdict V] [--json]",
 			},
 			flags: []flagSpec{
-				{name: "last", valued: true}, {name: scopeRelay, valued: true},
+				{name: optLast, valued: true}, {name: scopeRelay, valued: true},
 				{name: "type", valued: true}, {name: "verdict", valued: true},
 				{name: optJSON},
 			},
@@ -146,11 +146,21 @@ func journalCommands() []*command {
 			run:    (*session).nodes,
 		},
 		{
+			name:   "tx",
+			forms:  []form{{"tx", "transmit-airtime history, consolidated"}},
+			detail: []string{"tx [--relay R] [--last 24h|7d] [--json]"},
+			flags: []flagSpec{
+				{name: scopeRelay, valued: true}, {name: optLast, valued: true},
+				{name: optJSON},
+			},
+			run: (*session).tx,
+		},
+		{
 			name:   "noise",
 			forms:  []form{{"noise", "noise-floor history, consolidated"}},
 			detail: []string{"noise [--relay R] [--last 24h|7d] [--json]"},
 			flags: []flagSpec{
-				{name: scopeRelay, valued: true}, {name: "last", valued: true},
+				{name: scopeRelay, valued: true}, {name: optLast, valued: true},
 				{name: optJSON},
 			},
 			run: (*session).noise,

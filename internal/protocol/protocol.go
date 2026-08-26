@@ -5,6 +5,8 @@
 package protocol
 
 import (
+	"time"
+
 	"context"
 	"fmt"
 	"sort"
@@ -44,6 +46,16 @@ type TXPolicy struct {
 	LBTExhausted   string // transmit or drop
 	QueueDepth     int
 	PowerDBm       int8
+	// Spent seeds the duty ledger with the journal's memory of the
+	// last hour; empty when no journal runs — best effort, by design.
+	Spent []Spent
+}
+
+// Spent is one past emission the duty ledger must still count: the
+// sliding hour does not restart with the process.
+type Spent struct {
+	At      time.Time
+	Airtime time.Duration
 }
 
 // Armer is the optional capability of engines that own a transmit

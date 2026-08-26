@@ -229,7 +229,7 @@ func TestQueueRefusesTheOverflow(t *testing.T) {
 	// No engine loop: enqueue directly, depth is 2.
 	for range 3 {
 		pkt, _ := meshcore.BuildAdvert(peer, time.Now(), &meshcore.AdvertData{Name: "p"})
-		e.enqueue(dev, pkt, "relay-flood", txn.New(), prioFlood, 0)
+		e.enqueue(dev, pkt, "relay-flood", txn.New(), 1, 0)
 	}
 	deadline := time.After(time.Second)
 	for {
@@ -274,7 +274,7 @@ func TestLocalAdvertIsZeroHop(t *testing.T) {
 func TestDirectPriorityBeatsFlood(t *testing.T) {
 	q := &txQueue{depth: 8}
 	now := time.Now()
-	q.push(txEntry{kind: "relay-flood", priority: prioFlood, notBefore: now.Add(-2 * time.Second)})
+	q.push(txEntry{kind: "relay-flood", priority: 1, notBefore: now.Add(-2 * time.Second)})
 	q.push(txEntry{kind: "relay-direct", priority: prioDirect, notBefore: now.Add(-time.Second)})
 	e, ok := q.pop(now)
 	if !ok || e.kind != "relay-direct" {
@@ -524,7 +524,7 @@ func TestSessionRestartClearsTheQueue(t *testing.T) {
 			t.Fatal(err)
 		}
 		e.queue.push(txEntry{pkt: pkt, kind: "relay-flood", origin: txn.New(),
-			priority: prioFlood, notBefore: time.Now().Add(time.Hour)})
+			priority: 1, notBefore: time.Now().Add(time.Hour)})
 	}
 	runEngine(t, e, dev) // Run clears what the previous session left
 
@@ -794,4 +794,149 @@ func TestArmRefusesANamelessNode(t *testing.T) {
 	if err := e.Arm(protocol.TXPolicy{Mode: "shadow", QueueDepth: 2}); err == nil {
 		t.Fatal("armed without a node_name")
 	}
+}
+
+func TestPrioritiesFollowTheReferenceLadder(t *testing.T) {
+	// Routed traffic first (0), flood relays by distance (hop count
+	// after append), own flood adverts held back (3), traces last (5).
+	e, dev, _, peer := txRig(t, "shadow")
+	e.queue.depth = 16
+
+	pkt, err := meshcore.BuildAdvert(peer, time.Now(), &meshcore.AdvertData{Name: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt.Path = []byte{^e.id.PubKey[0], ^e.id.PubKey[0]}
+	pkt.SetPathHashSizeAndCount(1, 2)
+	e.relayFor(dev, pkt, verdictRelayFlood, txn.New(), 8)
+
+	e.advert(dev, time.Now(), "advert-flood", false)
+	e.advert(dev, time.Now(), "advert-local", true)
+	e.relayFor(dev, traceMustParse(t, e), verdictRelayTrace, txn.New(), 8)
+
+	got := map[string]int{}
+	for _, entry := range e.queue.entries {
+		got[entry.kind] = entry.priority
+	}
+	want := map[string]int{
+		"relay-flood": 3, "advert-flood": 3, "advert-local": 0, "relay-trace": 5,
+	}
+	for kind, prio := range want {
+		if got[kind] != prio {
+			t.Errorf("%s priority = %d, want %d", kind, got[kind], prio)
+		}
+	}
+}
+
+// traceMustParse builds a trace whose next target hop is us.
+func traceMustParse(t *testing.T, e *engine) *meshcore.Packet {
+	t.Helper()
+	raw := traceToUs(t, e)
+	pkt, err := meshcore.ParsePacket(raw.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pkt
+}
+
+func TestScopedFloodIsNotRelayed(t *testing.T) {
+	// The reference refuses a scoped flood whose transport code it
+	// does not know; with no region map, that is all of them.
+	e, _, _, peer := txRig(t, "shadow")
+	pkt, err := meshcore.BuildAdvert(peer, time.Now(), &meshcore.AdvertData{Name: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt.Header = meshcore.MakeHeader(meshcore.RouteTransportFlood,
+		meshcore.PayloadTypeAdvert, meshcore.PayloadVer1)
+	if v, _ := e.floodVerdict(pkt, true); v != verdictDropScoped {
+		t.Fatalf("verdict = %q, want %q", v, verdictDropScoped)
+	}
+}
+
+func TestDutySeedSurvivesTheRestart(t *testing.T) {
+	// The journal's memory of the sliding hour reaches the new ledger:
+	// a crash-loop must not launder the budget.
+	seed := make([]byte, meshcore.SeedSize)
+	seed[0] = 7
+	id, err := meshcore.LocalIdentityFromSeed(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &engine{id: id, p: params{NodeName: "test", DutyCyclePct: 10}}
+	spent := []protocol.Spent{
+		{At: time.Now().Add(-30 * time.Minute), Airtime: 30 * time.Second},
+		{At: time.Now().Add(-90 * time.Minute), Airtime: 99 * time.Second}, // expired
+	}
+	if err := e.Arm(protocol.TXPolicy{Mode: "shadow", QueueDepth: 2, Spent: spent}); err != nil {
+		t.Fatal(err)
+	}
+	used, _, ok := e.Duty()
+	if !ok || used != 30*time.Second {
+		t.Fatalf("seeded usage = %v (%v), want the unexpired 30 s", used, ok)
+	}
+}
+
+func TestAdvertCarriesThePosition(t *testing.T) {
+	e, dev, _, _ := txRig(t, "shadow")
+	e.p.NodeLat, e.p.NodeLon = 48.8584, 2.2945
+	e.advert(dev, time.Now(), "advert-local", true)
+	adv, err := meshcore.ParseAdvert(e.queue.entries[0].pkt.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lat, lon := adv.Data.Lat(), adv.Data.Lon(); lat < 48.85 || lat > 48.86 || lon < 2.29 || lon > 2.30 {
+		t.Fatalf("position = %f,%f", lat, lon)
+	}
+}
+
+func TestMultipartUnwrapsToOneAck(t *testing.T) {
+	// N redundant copies hash differently by their remaining nibble;
+	// the unwrapped form collapses them to one forwarded plain ACK.
+	e, dev, sub, _ := txRig(t, "on-air")
+	e.queue.depth = 8
+	build := func(remaining byte) *meshcore.Packet {
+		pkt := &meshcore.Packet{
+			Header: meshcore.MakeHeader(meshcore.RouteDirect,
+				meshcore.PayloadTypeMultipart, meshcore.PayloadVer1),
+			Payload: append([]byte{remaining<<4 | byte(meshcore.PayloadTypeAck)},
+				0xDE, 0xAD, 0xBE, 0xEF),
+			Path: []byte{e.id.PubKey[0], 0x77},
+		}
+		pkt.SetPathHashSizeAndCount(1, 2)
+		return pkt
+	}
+	e.forwardMultipart(build(1), txn.New())
+	e.forwardMultipart(build(0), txn.New()) // second copy of the same ACK
+
+	if n := len(e.queue.entries); n != 1 {
+		t.Fatalf("%d forwards queued, want the copies collapsed to 1", n)
+	}
+	entry := e.queue.entries[0]
+	if entry.kind != "relay-ack" || entry.priority != prioDirect {
+		t.Fatalf("entry = %+v", entry)
+	}
+	if wait := time.Until(entry.notBefore); wait < 500*time.Millisecond || wait > 700*time.Millisecond {
+		t.Fatalf("forward waits %v, want ~(1+1)×300ms", wait)
+	}
+	ack := entry.pkt
+	if ack.PayloadType() != meshcore.PayloadTypeAck || !ack.IsRouteDirect() ||
+		ack.PathHashCount() != 1 || ack.Path[0] != 0x77 {
+		t.Fatalf("forwarded ack = %+v", ack)
+	}
+	drop := false
+	for done := false; !done; {
+		select {
+		case ev := <-sub.C:
+			if d, ok := ev.(bus.TxDropped); ok && d.Reason == "duplicate" {
+				drop = true
+			}
+		default:
+			done = true
+		}
+	}
+	if !drop {
+		t.Error("the collapsed copy left no duplicate witness")
+	}
+	_ = dev
 }
