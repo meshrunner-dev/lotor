@@ -257,3 +257,54 @@ func TestDirectPriorityBeatsFlood(t *testing.T) {
 		t.Fatalf("popped %v, want the direct entry first", e.kind)
 	}
 }
+
+func TestDutyLedgerAdmitsAndFrees(t *testing.T) {
+	d := &dutyLedger{budget: 10 * time.Millisecond}
+	now := time.Now()
+	d.record(now, 8*time.Millisecond)
+
+	if ok, _, _ := d.admit(now, 2*time.Millisecond); !ok {
+		t.Fatal("2ms should fit an 8/10 window")
+	}
+	ok, freeAt, never := d.admit(now, 5*time.Millisecond)
+	if ok || never {
+		t.Fatalf("5ms must wait, not pass (%v) nor die (%v)", ok, never)
+	}
+	if want := now.Add(time.Hour); !freeAt.Equal(want) {
+		t.Fatalf("freeAt = %v, want the 8ms stamp's expiry %v", freeAt, want)
+	}
+	if ok, _, _ := d.admit(now.Add(time.Hour+time.Second), 5*time.Millisecond); !ok {
+		t.Fatal("the window expired; 5ms should fit again")
+	}
+	if _, _, never := d.admit(now, 11*time.Millisecond); !never {
+		t.Fatal("an airtime above the whole budget can never fit")
+	}
+	if used, _, _ := d.admit(now, time.Millisecond); !used {
+		t.Fatal("unbudgeted check sanity")
+	}
+}
+
+func TestDutyDropsWhatCannotWait(t *testing.T) {
+	e, dev, sub, peer := txRig(t, "shadow")
+	e.duty = &dutyLedger{budget: time.Microsecond} // any frame exceeds it
+	runEngine(t, e, dev)
+	dev.frames <- peerAdvert(t, peer, time.Now())
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-sub.C:
+			if d, ok := ev.(bus.TxDropped); ok {
+				if d.Reason != "duty" {
+					t.Fatalf("dropped for %q, want duty", d.Reason)
+				}
+				return
+			}
+			if fs, ok := ev.(bus.FrameSent); ok {
+				t.Fatalf("sent past the budget: %+v", fs)
+			}
+		case <-deadline:
+			t.Fatal("no duty drop on the bus")
+		}
+	}
+}

@@ -12,5 +12,8 @@ var presets = map[string]map[string]any{
 		"preamble":         32,
 		"sync_word":        0x12,
 		"crc":              true,
+		// The 869.4–869.65 MHz sub-band's regulatory ceiling: the duty
+		// enforcement's budget, per sliding hour.
+		"duty_cycle_pct": 10.0,
 	},
 }

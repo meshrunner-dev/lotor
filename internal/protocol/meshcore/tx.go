@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/rand/v2"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -112,6 +113,7 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 	}
 	e.policy = p
 	e.queue = &txQueue{depth: p.QueueDepth}
+	e.duty = &dutyLedger{budget: time.Duration(float64(time.Hour) * e.p.DutyCyclePct / 100)}
 	return nil
 }
 
@@ -258,6 +260,9 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	if !ok {
 		return nil
 	}
+	if !e.admitDuty(dev, entry) {
+		return nil
+	}
 	log := e.log.With(zap.String("txn", entry.origin.Short()), zap.String("kind", entry.kind))
 	if proceed, err := e.clearChannel(ctx, dev, log); err != nil || !proceed {
 		return err
@@ -280,6 +285,7 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 		}
 		sent.At, sent.Airtime, sent.PowerDBm = report.At, report.Airtime, report.PowerDBm
 	}
+	e.duty.record(sent.At, sent.Airtime)
 	log.Info("frame sent", zap.Bool("shadow", sent.Shadow),
 		zap.Duration("airtime", sent.Airtime), zap.Int8("power_dbm", sent.PowerDBm))
 	e.bus.Publish(sent)
@@ -317,4 +323,111 @@ func (e *engine) clearChannel(ctx context.Context, dev radio.Device, log *zap.Lo
 		case <-time.After(retry):
 		}
 	}
+}
+
+// dutyMaxWait bounds how long an emission may wait for the duty budget
+// to free before it is dropped: past this, the frame is stale news.
+const dutyMaxWait = 10 * time.Minute
+
+// dutyStamp is one emission the sliding window remembers.
+type dutyStamp struct {
+	at  time.Time
+	air time.Duration
+}
+
+// dutyLedger enforces the band's airtime budget over a sliding hour.
+// Shadow emissions are recorded like real ones — the audit must show
+// what on-air would have cost. Owned by the engine's goroutine; the
+// used total is mirrored atomically for display.
+type dutyLedger struct {
+	budget time.Duration // per sliding hour; zero = unbudgeted
+	window []dutyStamp
+	used   atomic.Int64 // ns, the display mirror
+}
+
+// prune drops stamps older than the window and refreshes the mirror.
+func (d *dutyLedger) prune(now time.Time) time.Duration {
+	cut := now.Add(-time.Hour)
+	i := 0
+	for i < len(d.window) && d.window[i].at.Before(cut) {
+		i++
+	}
+	d.window = d.window[i:]
+	var sum time.Duration
+	for _, s := range d.window {
+		sum += s.air
+	}
+	d.used.Store(int64(sum))
+	return sum
+}
+
+// admit answers whether an emission of the given airtime fits the
+// budget now; when it does not, freeAt is the earliest instant enough
+// window expires — and never reports an airtime no budget ever fits.
+func (d *dutyLedger) admit(now time.Time, air time.Duration) (ok bool, freeAt time.Time, never bool) {
+	if d.budget <= 0 {
+		return true, time.Time{}, false
+	}
+	if air > d.budget {
+		return false, time.Time{}, true
+	}
+	used := d.prune(now)
+	if used+air <= d.budget {
+		return true, time.Time{}, false
+	}
+	// Walk the oldest stamps: each expiry frees its airtime an hour
+	// after it was spent.
+	need := used + air - d.budget
+	var freed time.Duration
+	for _, s := range d.window {
+		freed += s.air
+		if freed >= need {
+			return false, s.at.Add(time.Hour), false
+		}
+	}
+	return false, now.Add(time.Hour), false
+}
+
+// record spends airtime from the budget.
+func (d *dutyLedger) record(now time.Time, air time.Duration) {
+	d.window = append(d.window, dutyStamp{at: now, air: air})
+	d.used.Store(int64(d.prune(now)))
+}
+
+// Duty reports the sliding-hour airtime spent and the budget; ok is
+// false when the pipeline is off or the band unbudgeted. Any
+// goroutine.
+func (e *engine) Duty() (used, budget time.Duration, ok bool) {
+	if !e.txEnabled() || e.duty == nil || e.duty.budget <= 0 {
+		return 0, 0, false
+	}
+	return time.Duration(e.duty.used.Load()), e.duty.budget, true
+}
+
+// admitDuty applies the budget to one popped entry: requeued for the
+// budget's freeing when that is near, dropped when it is not.
+func (e *engine) admitDuty(dev radio.Device, entry txEntry) bool {
+	if e.duty.budget <= 0 {
+		return true
+	}
+	raw := entry.pkt.RawLength()
+	ok, freeAt, never := e.duty.admit(time.Now(), dev.Airtime(raw))
+	if ok {
+		return true
+	}
+	if never || time.Until(freeAt) > dutyMaxWait {
+		e.log.Warn("duty budget refuses the emission, dropping",
+			zap.String("kind", entry.kind), zap.String("txn", entry.origin.Short()))
+		e.bus.Publish(bus.TxDropped{
+			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: "duty",
+		})
+		return false
+	}
+	entry.notBefore = freeAt
+	if !e.queue.push(entry) {
+		e.bus.Publish(bus.TxDropped{
+			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: "duty",
+		})
+	}
+	return false
 }

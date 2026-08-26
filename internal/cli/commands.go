@@ -24,7 +24,7 @@ func (s *session) status(ctx context.Context, _ input) error {
 			fmt.Sprintf("%.3f MHz sf%d bw%.1fk",
 				float64(r.Waveform.FrequencyHz)/1e6, r.Waveform.SpreadingFactor,
 				float64(r.Waveform.BandwidthHz)/1e3),
-			"floor "+floorText(r), "tx "+txModeText(r))
+			"floor "+floorText(r), "tx "+txModeText(r)+dutyText(r))
 	}
 	if s.deps.Sentinel == nil {
 		tb.row("sentinel", "none")
@@ -75,6 +75,12 @@ func (s *session) relay(ctx context.Context, in input) error {
 		r.Waveform.SyncWord, r.Waveform.CRC))
 	tb.row("noise floor", floorText(r))
 	tb.row("tx mode", txModeText(r))
+	if r.Duty != nil {
+		if used, budget, ok := r.Duty(); ok {
+			tb.row("tx duty", fmt.Sprintf("%.1f%% — %s of %s per sliding hour",
+				100*float64(used)/float64(budget), used.Round(time.Millisecond), budget))
+		}
+	}
 	if r.ChipStats != nil {
 		if cs, ok := r.ChipStats(); ok {
 			// The chip's own tally — an independent second opinion on
@@ -122,6 +128,17 @@ func (s *session) relayJournal(ctx context.Context, tb *table, r RelayInfo) {
 				nz.Count, ago(nz.LastAt)))
 		}
 	}
+
+	drops, err := s.deps.Sentinel.TxDrops(ctx)
+	if err != nil {
+		tb.row("tx drops", "unavailable: "+err.Error())
+		return
+	}
+	for _, d := range drops {
+		if d.Relay == r.Name {
+			tb.row("tx drops", fmt.Sprintf("%s ×%d — last %s", d.Reason, d.Count, ago(d.LastAt)))
+		}
+	}
 }
 
 func (s *session) radio(_ context.Context, in input) error {
@@ -149,6 +166,19 @@ func (s *session) radio(_ context.Context, in input) error {
 		}
 	}
 	return s.showTraces("radio " + args[1])
+}
+
+// dutyText compacts the duty gauge for the status row; empty when
+// unbudgeted or not transmitting.
+func dutyText(r RelayInfo) string {
+	if r.Duty == nil {
+		return ""
+	}
+	used, budget, ok := r.Duty()
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf(" duty %.1f%%", 100*float64(used)/float64(budget))
 }
 
 // txModeText resolves a relay's gate for display; empty is dry.
@@ -306,6 +336,19 @@ func (s *session) txn(ctx context.Context, in input) error {
 			fmt.Fprintf(s.out, " — %s", w)
 		}
 		fmt.Fprint(s.out, "\r\n")
+		// The transaction's full life: what the pipeline sent for it.
+		sent, err := sen.SentFor(ctx, f.Txn)
+		if err != nil {
+			return err
+		}
+		for _, t := range sent {
+			shadow := ""
+			if t.Shadow {
+				shadow = "  (shadow)"
+			}
+			fmt.Fprintf(s.out, "  sent %s  %s  airtime %s  %d dBm%s\r\n",
+				t.At.Format("15:04:05"), t.Kind, t.Airtime, t.PowerDBm, shadow)
+		}
 	}
 	return nil
 }

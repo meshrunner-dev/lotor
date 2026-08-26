@@ -26,6 +26,37 @@ type Sentinel struct {
 	maxFrames   int
 	journalPath string
 	reported    uint64
+	// txWindows tracks each relay's sliding-hour airtime, feeding the
+	// tx_airtime series. Consumer-goroutine state, like the store.
+	txWindows map[string][]txStamp
+}
+
+// txStamp is one emission the airtime window remembers.
+type txStamp struct {
+	at  time.Time
+	air time.Duration
+}
+
+// txWindow records one emission and returns the relay's spent airtime
+// over the sliding hour ending at that instant.
+func (s *Sentinel) txWindow(relay string, at time.Time, air time.Duration) time.Duration {
+	if s.txWindows == nil {
+		s.txWindows = map[string][]txStamp{}
+	}
+	s.txWindows[relay] = append(s.txWindows[relay], txStamp{at: at, air: air})
+	w := s.txWindows[relay]
+	cut := at.Add(-time.Hour)
+	i := 0
+	for i < len(w) && w[i].at.Before(cut) {
+		i++
+	}
+	w = w[i:]
+	s.txWindows[relay] = w
+	var sum time.Duration
+	for _, t := range w {
+		sum += t.air
+	}
+	return sum
 }
 
 // Open prepares the journal. The path may be MemoryJournal for hosts
@@ -99,6 +130,16 @@ func (s *Sentinel) NoiseSpreadHistory(ctx context.Context, relay string, since t
 // channel was too busy for the floor to be measured at all.
 func (s *Sentinel) NoiseStarvedHistory(ctx context.Context, relay string, since time.Time) ([]MetricBucket, error) {
 	return s.store.MetricHistory(ctx, "noise_starved", relay, since)
+}
+
+// SentFor lists the emissions answering one transaction, oldest first.
+func (s *Sentinel) SentFor(ctx context.Context, txn string) ([]Sent, error) {
+	return s.store.SentFor(ctx, txn)
+}
+
+// TxDrops lists the emission-refusal tallies, most recent first.
+func (s *Sentinel) TxDrops(ctx context.Context) ([]TxDrop, error) {
+	return s.store.TxDrops(ctx)
 }
 
 // Journal reports where the archive lives and how long it reaches.
@@ -193,6 +234,16 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 		}
 	case bus.NoiseStarved:
 		err = s.store.insertMetric(ctx, "noise_starved", e.Relay, e.At, float64(e.Aborted))
+	case bus.FrameSent:
+		// The ledger row, then the derived series: the sliding hour's
+		// spent airtime in seconds, one point per emission.
+		if err = s.store.insertSent(ctx, e.At, e.Relay, e.Txn.String(), e.Kind,
+			e.Airtime, e.PowerDBm, e.Shadow); err == nil {
+			err = s.store.insertMetric(ctx, "tx_airtime", e.Relay, e.At,
+				s.txWindow(e.Relay, e.At, e.Airtime).Seconds())
+		}
+	case bus.TxDropped:
+		err = s.store.recordTxDrop(ctx, e.At, e.Relay, e.Reason)
 	case bus.RelayState:
 		err = s.store.insertRelayState(ctx, e.At, e.Relay, e.State, e.Err)
 	default:

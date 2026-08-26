@@ -57,6 +57,24 @@ CREATE TABLE IF NOT EXISTS noise_floor (
 	dbm       REAL NOT NULL,
 	spread_db REAL NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS tx (
+	at_ms      INTEGER NOT NULL,
+	relay      TEXT NOT NULL,
+	txn        TEXT NOT NULL,
+	kind       TEXT NOT NULL,
+	airtime_ms REAL NOT NULL,
+	power_dbm  INTEGER NOT NULL,
+	shadow     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS tx_txn ON tx(txn);
+CREATE INDEX IF NOT EXISTS tx_at ON tx(at_ms);
+CREATE TABLE IF NOT EXISTS tx_drops (
+	relay      TEXT NOT NULL,
+	reason     TEXT NOT NULL,
+	count      INTEGER NOT NULL DEFAULT 0,
+	last_at_ms INTEGER NOT NULL,
+	PRIMARY KEY (relay, reason)
+);
 CREATE TABLE IF NOT EXISTS metrics_raw (
 	series TEXT NOT NULL,
 	relay  TEXT NOT NULL,
@@ -416,6 +434,9 @@ func (s *store) prune(ctx context.Context, now time.Time, retention time.Duratio
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM relay_states WHERE at_ms < ?`, cutoff); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM tx WHERE at_ms < ?`, cutoff); err != nil {
+		return err
+	}
 	if maxFrames > 0 {
 		if _, err := s.db.ExecContext(ctx,
 			`DELETE FROM frames WHERE txn IN (
@@ -687,4 +708,90 @@ func prefixRange(prefix string) (lo, hi string) {
 	}
 	// All 0xFF bytes: everything from the prefix on matches.
 	return prefix, "\xff\xff\xff\xff\xff"
+}
+
+// Sent is one journalled emission — the duty ledger's row.
+type Sent struct {
+	At       time.Time
+	Relay    string
+	Kind     string
+	Airtime  time.Duration
+	PowerDBm int8
+	Shadow   bool
+}
+
+// insertSent journals one emission, shadow or real.
+func (s *store) insertSent(ctx context.Context, at time.Time, relay, txn, kind string,
+	airtime time.Duration, powerDBm int8, shadow bool,
+) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO tx (at_ms, relay, txn, kind, airtime_ms, power_dbm, shadow)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		at.UnixMilli(), relay, txn, kind,
+		float64(airtime)/float64(time.Millisecond), powerDBm, shadow)
+	return err
+}
+
+// SentFor lists the emissions answering one transaction, oldest first.
+func (s *store) SentFor(ctx context.Context, txn string) ([]Sent, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT at_ms, relay, kind, airtime_ms, power_dbm, shadow
+		 FROM tx WHERE txn = ? ORDER BY at_ms`, txn)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Sent
+	for rows.Next() {
+		var t Sent
+		var atMS int64
+		var airMS float64
+		if err := rows.Scan(&atMS, &t.Relay, &t.Kind, &airMS, &t.PowerDBm, &t.Shadow); err != nil {
+			return nil, err
+		}
+		t.At = time.UnixMilli(atMS)
+		t.Airtime = time.Duration(airMS * float64(time.Millisecond))
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// recordTxDrop tallies one refused emission by reason — bounded rows,
+// like the corrupt tally.
+func (s *store) recordTxDrop(ctx context.Context, at time.Time, relay, reason string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO tx_drops (relay, reason, count, last_at_ms) VALUES (?, ?, 1, ?)
+		 ON CONFLICT(relay, reason) DO UPDATE SET
+		   count = count + 1, last_at_ms = excluded.last_at_ms`,
+		relay, reason, at.UnixMilli())
+	return err
+}
+
+// TxDrop is one relay's refusal tally for one reason.
+type TxDrop struct {
+	Relay  string
+	Reason string
+	Count  int
+	LastAt time.Time
+}
+
+// TxDrops lists the refusal tallies, most recent first.
+func (s *store) TxDrops(ctx context.Context) ([]TxDrop, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT relay, reason, count, last_at_ms FROM tx_drops ORDER BY last_at_ms DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []TxDrop
+	for rows.Next() {
+		var d TxDrop
+		var lastMS int64
+		if err := rows.Scan(&d.Relay, &d.Reason, &d.Count, &lastMS); err != nil {
+			return nil, err
+		}
+		d.LastAt = time.UnixMilli(lastMS)
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }

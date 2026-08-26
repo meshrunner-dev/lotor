@@ -411,8 +411,20 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		NoiseFloor: r.NoiseFloor,
 		ChipStats:  r.ChipStats,
 		TXMode:     r.TXMode(),
+		Duty:       dutyOf(eng),
 		Identity:   eng.Identity(),
 	}
+}
+
+// dutyOf exposes an engine's duty gauge when it has one.
+func dutyOf(eng protocol.Engine) func() (time.Duration, time.Duration, bool) {
+	d, ok := eng.(interface {
+		Duty() (time.Duration, time.Duration, bool)
+	})
+	if !ok {
+		return nil
+	}
+	return d.Duty
 }
 
 // armEngine hands a non-dry policy to the engine's pipeline; an

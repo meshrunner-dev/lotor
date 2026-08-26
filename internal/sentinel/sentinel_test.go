@@ -309,3 +309,42 @@ func TestNodesDirectoryIsAdvertOnly(t *testing.T) {
 		t.Fatalf("directory = %+v", nodes)
 	}
 }
+
+func TestTxLedgerAndDrops(t *testing.T) {
+	s := testSentinel(t)
+	ctx := context.Background()
+	id := txn.New()
+	at := time.Now()
+	s.Process(ctx, bus.FrameSent{
+		Relay: "meshcore-868", Txn: id, At: at, Kind: "relay-flood",
+		Airtime: 1200 * time.Millisecond, PowerDBm: -5, Shadow: true,
+	})
+	s.Process(ctx, bus.TxDropped{Relay: "meshcore-868", Txn: id, At: at, Reason: "lbt"})
+	s.Process(ctx, bus.TxDropped{Relay: "meshcore-868", Txn: txn.New(), At: at, Reason: "lbt"})
+
+	sent, err := s.SentFor(ctx, id.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 1 || !sent[0].Shadow || sent[0].Kind != "relay-flood" ||
+		sent[0].PowerDBm != -5 || sent[0].Airtime != 1200*time.Millisecond {
+		t.Fatalf("ledger = %+v", sent)
+	}
+
+	drops, err := s.TxDrops(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(drops) != 1 || drops[0].Reason != "lbt" || drops[0].Count != 2 {
+		t.Fatalf("drops = %+v", drops)
+	}
+
+	var airtime float64
+	if err := s.store.db.QueryRowContext(ctx,
+		`SELECT value FROM metrics_raw WHERE series = 'tx_airtime'`).Scan(&airtime); err != nil {
+		t.Fatal(err)
+	}
+	if airtime != 1.2 {
+		t.Fatalf("tx_airtime point = %v, want 1.2 s", airtime)
+	}
+}

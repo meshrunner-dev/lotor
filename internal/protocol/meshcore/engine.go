@@ -43,6 +43,11 @@ type params struct {
 	// DedupEntries bounds the seen table's size.
 	DedupEntries int `yaml:"dedup_entries"`
 
+	// DutyCyclePct is the band's regulatory ceiling on airtime, in
+	// percent per sliding hour; zero leaves emission unbudgeted. Band
+	// presets carry the lawful figure.
+	DutyCyclePct float64 `yaml:"duty_cycle_pct"`
+
 	// AdvertFloodInterval paces the routable self-announcement a
 	// repeater owes the mesh's directories; applied only when the
 	// transmit pipeline runs, 48h when unset.
@@ -93,6 +98,7 @@ type engine struct {
 	// dry; zero values otherwise, and Run never consults them.
 	policy          protocol.TXPolicy
 	queue           *txQueue
+	duty            *dutyLedger
 	nextFloodAdvert time.Time
 	nextLocalAdvert time.Time
 }

@@ -65,6 +65,9 @@ type RelayInfo struct {
 	// TXMode is the transmit gate the relay runs behind: dry, shadow
 	// or on-air; empty reads as dry.
 	TXMode string
+	// Duty reports the sliding-hour airtime spent against the band's
+	// budget; may be nil, ok false when unbudgeted or not transmitting.
+	Duty func() (used, budget time.Duration, ok bool)
 	// Identity is the relay's node public key in hex, empty when none.
 	Identity string
 }
