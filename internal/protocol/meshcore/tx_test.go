@@ -2,6 +2,7 @@ package meshcore
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -21,6 +22,13 @@ type fakeDevice struct {
 	frames chan radio.Frame
 	sent   chan []byte
 	busy   int // AssessChannel says busy this many times
+	// pending makes AssessChannel refuse as "receiving" this many
+	// times — the library's guard on a destructive operation.
+	pending int
+	// txEntered fires when a transmission starts, and txCtxErr carries
+	// what its context said after the caller had a chance to cancel.
+	txEntered chan struct{}
+	txCtxErr  chan error
 }
 
 func newFakeDevice() *fakeDevice {
@@ -49,6 +57,10 @@ func (d *fakeDevice) Receive(ctx context.Context) (radio.Frame, error) {
 }
 
 func (d *fakeDevice) AssessChannel(context.Context, float64) (bool, error) {
+	if d.pending > 0 {
+		d.pending--
+		return false, fmt.Errorf("%w: fake", radio.ErrBusyReceiving)
+	}
 	if d.busy > 0 {
 		d.busy--
 		return true, nil
@@ -56,7 +68,12 @@ func (d *fakeDevice) AssessChannel(context.Context, float64) (bool, error) {
 	return false, nil
 }
 
-func (d *fakeDevice) Transmit(_ context.Context, payload []byte, powerDBm int8) (radio.TxReport, error) {
+func (d *fakeDevice) Transmit(ctx context.Context, payload []byte, powerDBm int8) (radio.TxReport, error) {
+	if d.txEntered != nil {
+		close(d.txEntered)
+		time.Sleep(50 * time.Millisecond) // the caller cancels meanwhile
+		d.txCtxErr <- ctx.Err()
+	}
 	d.sent <- payload
 	return radio.TxReport{
 		At: time.Now(), Airtime: time.Millisecond, PowerDBm: powerDBm,
@@ -419,4 +436,84 @@ func TestAdvertClocksAreSeededOnce(t *testing.T) {
 		t.Fatalf("a session restart moved the clocks: flood %v→%v, local %v→%v",
 			flood, e.nextFloodAdvert, local, e.nextLocalAdvert)
 	}
+}
+
+func TestReceptionPendingRequeuesInsteadOfKillingTheSession(t *testing.T) {
+	// A radio busy receiving is the channel being busy, not a fault:
+	// the entry waits its turn and the session lives on.
+	e, dev, sub, peer := txRig(t, "on-air")
+	dev.pending = 2
+	runEngine(t, e, dev)
+	dev.frames <- peerAdvert(t, peer, time.Now())
+
+	sent := awaitSent(t, sub)
+	if sent.Kind != "relay-flood" {
+		t.Fatalf("sent = %+v, want the relay to survive the refusals", sent)
+	}
+	if dev.pending != 0 {
+		t.Errorf("%d refusals unused — the pipeline gave up early", dev.pending)
+	}
+}
+
+func TestSessionRestartClearsTheQueue(t *testing.T) {
+	// The frames a dead session was about to relay are stale news by
+	// the time the backoff expires.
+	e, dev, sub, peer := txRig(t, "shadow")
+	for range 2 {
+		pkt, err := meshcore.BuildAdvert(peer, time.Now(), &meshcore.AdvertData{Name: "p"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.queue.push(txEntry{pkt: pkt, kind: "relay-flood", origin: txn.New(),
+			priority: prioFlood, notBefore: time.Now().Add(time.Hour)})
+	}
+	runEngine(t, e, dev) // Run clears what the previous session left
+
+	dropped := 0
+	deadline := time.After(2 * time.Second)
+	for dropped < 2 {
+		select {
+		case ev := <-sub.C:
+			if d, ok := ev.(bus.TxDropped); ok {
+				if d.Reason != "session-restart" {
+					t.Fatalf("dropped for %q, want session-restart", d.Reason)
+				}
+				dropped++
+			}
+		case <-deadline:
+			t.Fatalf("only %d of 2 stale entries cleared", dropped)
+		}
+	}
+}
+
+func TestKeyingSurvivesShutdown(t *testing.T) {
+	// Once the radio is committed, a cancelled daemon must not cut the
+	// frame short: the emission runs on its own deadline.
+	e, dev, sub, peer := txRig(t, "on-air")
+	dev.txEntered = make(chan struct{})
+	dev.txCtxErr = make(chan error, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = e.Run(ctx, dev) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	dev.frames <- peerAdvert(t, peer, time.Now())
+	select {
+	case <-dev.txEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the transmission never started")
+	}
+	cancel() // SIGTERM lands mid-frame
+
+	select {
+	case err := <-dev.txCtxErr:
+		if err != nil {
+			t.Fatalf("the keyed frame was cut short: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no transmit context verdict")
+	}
+	<-dev.sent
+	_ = sub
 }

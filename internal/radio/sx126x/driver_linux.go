@@ -160,7 +160,19 @@ func (d *device) AssessChannel(ctx context.Context, thresholdDB float64) (bool, 
 			}
 		}
 	}
-	return d.r.AssessChannel(ctx, sx126x.CAD{})
+	busy, err := d.r.AssessChannel(ctx, sx126x.CAD{})
+	return busy, receptionPending(err)
+}
+
+// receptionPending re-labels the library's refusals of a destructive
+// operation: a reception in progress, or a frame latched and unread,
+// is the channel being busy — not a radio fault. Anything else passes
+// through untouched.
+func receptionPending(err error) error {
+	if errors.Is(err, sx126x.ErrReceiveInProgress) || errors.Is(err, sx126x.ErrUnreadFrame) {
+		return fmt.Errorf("%w: %w", radio.ErrBusyReceiving, err)
+	}
+	return err
 }
 
 func (d *device) StartReceive() error { return d.r.StartReceive() }
@@ -277,7 +289,7 @@ func (d *device) restPhase(ctx context.Context, until time.Duration, rechecked *
 func (d *device) Transmit(ctx context.Context, payload []byte, powerDBm int8) (radio.TxReport, error) {
 	res, err := d.r.Transmit(ctx, payload, powerDBm)
 	if err != nil {
-		return radio.TxReport{}, err
+		return radio.TxReport{}, receptionPending(err)
 	}
 	return radio.TxReport{
 		At:       res.At,

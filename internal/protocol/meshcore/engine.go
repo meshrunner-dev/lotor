@@ -181,6 +181,9 @@ func (e *engine) Identity() string {
 
 func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 	if e.txEnabled() {
+		// A previous session's queue holds frames the mesh has moved on
+		// from: the backoff alone outlived their usefulness.
+		e.dropQueued("session-restart")
 		e.scheduleAdverts(time.Now())
 		e.log.Info("transmit pipeline up",
 			zap.String("mode", e.policy.Mode),

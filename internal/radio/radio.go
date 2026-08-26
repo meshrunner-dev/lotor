@@ -84,6 +84,12 @@ type TxReport struct {
 // not a fault — callers count it and continue.
 var ErrCorrupt = errors.New("radio: corrupt frame")
 
+// ErrBusyReceiving marks an operation refused because the radio has
+// reception work in hand — a frame arriving, or one latched and not
+// yet collected. It is the channel being busy, never a fault: the
+// caller collects and comes back, it does not tear a session down.
+var ErrBusyReceiving = errors.New("radio: reception pending")
+
 // NoiseFloor is the channel's ambient level: what the radio hears
 // between frames, when nothing is arriving and nothing transmits.
 // DBm is the batch's median — the robust estimator radio-noise

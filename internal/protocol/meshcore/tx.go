@@ -256,10 +256,20 @@ func (e *engine) advert(dev radio.Device, now time.Time, kind string, priority i
 	e.enqueue(dev, pkt, kind, id, priority, 0)
 }
 
+// lbtOutcome is what the channel assessment decided about one entry.
+type lbtOutcome int
+
+const (
+	lbtGo      lbtOutcome = iota // the channel is clear enough
+	lbtRequeue                   // the radio has reception work: collect first
+	lbtDrop                      // busy past the bound, and the site drops
+)
+
 // txPhase serves one due emission: LBT first, then the gate decides
 // whether the radio is keyed or the emission is journalled as shadow.
 // Radio faults bubble — a sick radio restarts the session, the same
-// contract as reception.
+// contract as reception — but a radio busy receiving is not a fault:
+// the entry goes back in the queue and the loop collects the frame.
 func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	e.dueAdverts(dev, time.Now())
 	entry, ok := e.queue.pop(time.Now())
@@ -270,12 +280,22 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 		return nil
 	}
 	log := e.log.With(zap.String("txn", entry.origin.Short()), zap.String("kind", entry.kind))
-	if proceed, err := e.clearChannel(ctx, dev, log); err != nil || !proceed {
+	outcome, err := e.clearChannel(ctx, dev, log)
+	switch {
+	case err != nil:
 		return err
+	case outcome == lbtRequeue:
+		e.requeue(entry)
+		return nil
+	case outcome == lbtDrop:
+		return nil // clearChannel published the refusal
 	}
 	raw, err := entry.pkt.MarshalBinary()
 	if err != nil {
 		log.Warn("tx marshal failed", zap.Error(err))
+		e.bus.Publish(bus.TxDropped{
+			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: "malformed",
+		})
 		return nil
 	}
 	sent := bus.FrameSent{
@@ -285,7 +305,12 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	if sent.Shadow {
 		sent.At, sent.Airtime = time.Now(), dev.Airtime(len(raw))
 	} else {
-		report, err := dev.Transmit(ctx, raw, e.policy.PowerDBm)
+		report, err := e.key(ctx, dev, raw)
+		if errors.Is(err, radio.ErrBusyReceiving) {
+			// A frame landed between the assessment and the keying.
+			e.requeue(entry)
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -298,18 +323,44 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	return nil
 }
 
+// key transmits under a deadline of its own. Once the radio is
+// committed, a cancelled daemon must not cut the frame short: a
+// truncated emission is garbage on the air and its airtime never
+// reaches the ledger. The detached deadline is generous enough for
+// the frame plus the chip's own timeout, and no longer.
+func (e *engine) key(ctx context.Context, dev radio.Device, raw []byte) (radio.TxReport, error) {
+	budget := 2*dev.Airtime(len(raw)) + time.Second
+	txCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
+	defer cancel()
+	return dev.Transmit(txCtx, raw, e.policy.PowerDBm)
+}
+
+// requeue puts an entry back for the next pass; a queue that filled
+// meanwhile refuses it, counted like any other refusal.
+func (e *engine) requeue(entry txEntry) {
+	entry.notBefore = time.Now()
+	if !e.queue.push(entry) {
+		e.bus.Publish(bus.TxDropped{
+			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: "queue-full",
+		})
+	}
+}
+
 // clearChannel is the LBT wait: bounded retries while the channel is
 // busy, then the site's exhausted policy — transmit anyway (the
-// mesh's convention) or a counted drop.
-func (e *engine) clearChannel(ctx context.Context, dev radio.Device, log *zap.Logger) (bool, error) {
+// mesh's convention) or a counted drop. A refusal because the radio
+// is receiving ends the wait early: the frame in hand comes first.
+func (e *engine) clearChannel(ctx context.Context, dev radio.Device, log *zap.Logger) (lbtOutcome, error) {
 	deadline := time.Now().Add(lbtMaxWait)
 	for {
 		busy, err := dev.AssessChannel(ctx, e.policy.LBTThresholdDB)
-		if err != nil {
-			return false, err
-		}
-		if !busy {
-			return true, nil
+		switch {
+		case errors.Is(err, radio.ErrBusyReceiving):
+			return lbtRequeue, nil
+		case err != nil:
+			return lbtDrop, err
+		case !busy:
+			return lbtGo, nil
 		}
 		if time.Now().After(deadline) {
 			if e.policy.LBTExhausted == "drop" {
@@ -317,18 +368,34 @@ func (e *engine) clearChannel(ctx context.Context, dev radio.Device, log *zap.Lo
 				e.bus.Publish(bus.TxDropped{
 					Relay: e.relay, At: time.Now(), Reason: "lbt",
 				})
-				return false, nil
+				return lbtDrop, nil
 			}
 			log.Warn("channel busy past the LBT bound, transmitting anyway")
-			return true, nil
+			return lbtGo, nil
 		}
 		retry := lbtRetryNominal/2 + rand.N(lbtRetryNominal) //nolint:gosec // backoff jitter, not security
 		select {
 		case <-ctx.Done():
-			return false, ctx.Err()
+			return lbtDrop, ctx.Err()
 		case <-time.After(retry):
 		}
 	}
+}
+
+// dropQueued empties the queue, counting what it refuses. A radio
+// session that ended took its moment with it: the frames it was about
+// to relay are stale news by the time the backoff expires, and the
+// mesh has long since carried them past us.
+func (e *engine) dropQueued(reason string) {
+	for _, entry := range e.queue.entries {
+		e.bus.Publish(bus.TxDropped{
+			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: reason,
+		})
+	}
+	if n := len(e.queue.entries); n > 0 {
+		e.log.Info("outbound queue cleared", zap.Int("dropped", n), zap.String("reason", reason))
+	}
+	e.queue.entries = e.queue.entries[:0]
 }
 
 // dutyMaxWait bounds how long an emission may wait for the duty budget
