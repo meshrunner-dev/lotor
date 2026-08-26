@@ -1,7 +1,10 @@
 package meshcore
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
 	"encoding/binary"
+	"encoding/hex"
 	"os"
 	"sort"
 	"strconv"
@@ -15,348 +18,416 @@ import (
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/txn"
+	"meshrunner.dev/lotor/internal/version"
 )
 
-// Guest sessions, the reference repeater's shape — with one deliberate
-// cut: there is no admin over RF here. The local console socket is the
-// administration surface; the radio offers read-only guest access, and
-// the admin password simply does not exist. What a guest may ask is
-// exactly what the reference grants its guests: status, base
-// telemetry, the neighbourhood, the owner line.
+// Client sessions, the reference repeater's shape. A companion logs in
+// with a password and may then ask a handful of authenticated
+// questions: how the node is doing, what it hears, who it is.
+//
+// Only the guest role exists here. The reference also serves an admin
+// role — settings, access lists, a whole CLI over the air — and this
+// daemon deliberately declines that: administration goes through the
+// local console socket, where the operating system's own permissions
+// are the authentication, not a password crossing a shared band.
 const (
-	permGuest = 0x02 // PERM_ACL_GUEST
+	permGuest    = 0
+	permAdmin    = 3
+	permRoleMask = 3
 
-	respServerLoginOK = 0
+	// The authenticated request types a client may send.
+	reqTypeGetStatus     = 0x01
+	reqTypeKeepAlive     = 0x02
+	reqTypeGetTelemetry  = 0x03
+	reqTypeGetNeighbours = 0x06
+	reqTypeGetOwnerInfo  = 0x07
 
-	reqTypeGetStatus    = 0x01
-	reqTypeKeepAlive    = 0x02
-	reqTypeGetTelemetry = 0x03
-	reqTypeGetAccessLst = 0x05
-	reqTypeGetNeighbrs  = 0x06
-	reqTypeGetOwnerInfo = 0x07
-
-	// firmwareVerLevel is the protocol feature level the login reply
-	// advertises; 2 is where GET_OWNER_INFO appeared.
+	// respLoginOK heads a successful login reply.
+	respLoginOK = 0
+	// firmwareVerLevel tells a companion which reply fields to expect;
+	// 2 is the level whose shapes this engine answers with.
 	firmwareVerLevel = 2
 
-	// maxClients bounds the ACL; the least recently active guest makes
-	// room. Nothing persists — the reference deliberately spares its
-	// flash for guests too, and a guest just logs in again.
+	// telemChannelSelf is the LPP channel a node's own readings ride.
+	telemChannelSelf = 1
+
+	// maxClients bounds the session table; the least recently active
+	// session makes room for a new one.
 	maxClients = 32
 
-	// The login limiter is ours, not the reference's: its login path
-	// stands behind no limiter at all, which leaves password guessing
-	// bounded only by airtime. Same fixed window as the others.
+	// Login attempts are bounded on their own — separate from the
+	// anonymous questions, so a password guesser cannot starve the
+	// name lookups, and slower than the reference, which bounds them
+	// not at all.
 	loginLimitMax    = 4
 	loginLimitWindow = 3 * time.Minute
 )
 
-// client is one logged-in guest.
+// client is one logged-in companion.
 type client struct {
-	pubKey       [32]byte
-	secret       []byte
-	lastStamp    uint32 // replay floor: every request must beat it
-	lastActivity time.Time
-	outPath      []byte // the path a flood login walked, reversed by the client
-	outPathKnown bool
+	pubKey [meshcore.PubKeySize]byte
+	secret []byte
+	perms  byte
+	// lastTimestamp is the newest request instant this client has
+	// signed: anything at or before it is a replay.
+	lastTimestamp uint32
+	lastActive    time.Time
 }
 
-// acl is the client table. The engine's goroutine owns all writes.
+// isAdmin reports the role; always false here, kept because the wire
+// carries the field and a reader should see why it is what it is.
+func (c *client) isAdmin() bool { return c.perms&permRoleMask == permAdmin }
+
+// clientACL holds the live sessions. The engine's goroutine writes it;
+// the console reads it, so it is held under a mutex. Sessions live in
+// memory only — a restart asks every companion to log in again, which
+// is the honest posture for a credential we never persist.
 type acl struct {
 	mu sync.Mutex
-	by map[byte][]*client // keyed by the 1-byte path hash; collisions share a bucket
-	n  int
+	by map[[meshcore.PubKeySize]byte]*client
 }
 
-func newACL() *acl { return &acl{by: map[byte][]*client{}} }
-
-// find returns the clients whose hash matches; the MAC decides which,
-// if any, is the real sender.
-func (a *acl) find(hash byte) []*client {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return append([]*client(nil), a.by[hash]...)
+func newACL() *acl {
+	return &acl{by: map[[meshcore.PubKeySize]byte]*client{}}
 }
 
-// put adds or refreshes a client, evicting the least recently active
-// when full.
+// put adds or refreshes a session, evicting the least recently active
+// one when the table is full.
 func (a *acl) put(c *client) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	bucket := a.by[c.pubKey[0]]
-	for i, old := range bucket {
-		if old.pubKey == c.pubKey {
-			bucket[i] = c
-			return
-		}
-	}
-	if a.n >= maxClients {
-		a.evictOldest()
-	}
-	a.by[c.pubKey[0]] = append(a.by[c.pubKey[0]], c)
-	a.n++
-}
-
-// evictOldest drops the least recently active client; the caller holds
-// the lock.
-func (a *acl) evictOldest() {
-	var oldestKey byte
-	oldestIdx := -1
-	var oldestAt time.Time
-	for k, bucket := range a.by {
-		for i, c := range bucket {
-			if oldestIdx < 0 || c.lastActivity.Before(oldestAt) {
-				oldestKey, oldestIdx, oldestAt = k, i, c.lastActivity
+	if _, known := a.by[c.pubKey]; !known && len(a.by) >= maxClients {
+		var oldest [meshcore.PubKeySize]byte
+		first := true
+		for k, v := range a.by {
+			if first || v.lastActive.Before(a.by[oldest].lastActive) {
+				oldest, first = k, false
 			}
 		}
+		delete(a.by, oldest)
 	}
-	if oldestIdx >= 0 {
-		b := a.by[oldestKey]
-		a.by[oldestKey] = append(b[:oldestIdx], b[oldestIdx+1:]...)
-		a.n--
-	}
+	a.by[c.pubKey] = c
 }
 
-// respondLogin serves a password carried by an ANON_REQ. Only the
-// guest password opens anything; a wrong password — the admin's
-// included, deliberately — is silence, exactly like the reference's
-// failed login.
-func (e *engine) respondLogin(pkt *meshcore.Packet, sender, secret, plain []byte, origin txn.ID) {
-	if e.p.GuestPassword == "" {
-		return // no guests configured: the door does not exist
-	}
-	password := string(trimNul(plain[4:]))
-	senderStamp := binary.LittleEndian.Uint32(plain[0:4])
+// get returns a session by full public key.
+func (a *acl) get(pubKey []byte) *client {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var k [meshcore.PubKeySize]byte
+	copy(k[:], pubKey)
+	return a.by[k]
+}
 
-	c := e.admitLogin(sender, secret, password, senderStamp, origin)
-	if c == nil {
+// matching returns every session whose key starts with the given hash
+// — the reference's searchPeersByHash. A one-byte hash collides often;
+// the MAC decides which session actually sent the packet.
+func (a *acl) matching(hash byte) []*client {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out []*client
+	for k, c := range a.by {
+		if k[0] == hash {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// handleLogin answers a password attempt. Unlike the other anonymous
+// questions this one is served whatever the inbound route — a
+// companion that has not found a path yet floods it.
+func (e *engine) respondLogin(pkt *meshcore.Packet, senderPub, secret, plain []byte, origin txn.ID) {
+	if e.p.GuestPassword == "" {
+		return // no credential configured: the door does not exist
+	}
+	ts := binary.LittleEndian.Uint32(plain[:4])
+	password := cString(plain[4:])
+
+	c := e.acl.get(senderPub)
+	switch {
+	case password == "" && c != nil:
+		// A blank password re-checks an existing session.
+	case subtle.ConstantTimeCompare([]byte(password), []byte(e.p.GuestPassword)) == 1:
+		if c == nil {
+			c = &client{perms: permGuest}
+			copy(c.pubKey[:], senderPub)
+		}
+		c.secret = secret
+	default:
+		e.log.Debug("login refused", zap.String("txn", origin.Short()))
 		return
 	}
-	c.lastStamp = senderStamp
-	c.lastActivity = time.Now()
-	if pkt.IsRouteFlood() {
-		c.outPathKnown = false // the client must rediscover its path
-	}
-	e.acl.put(c)
-
-	// The reference's login reply: our clock, OK, a legacy zero, the
-	// admin flag (never, here), the permissions, a random blob for
-	// hash uniqueness, and the protocol feature level.
-	reply := binary.LittleEndian.AppendUint32(nil, uint32(time.Now().Unix()))
-	reply = append(reply, respServerLoginOK, 0, 0, permGuest)
-	var blob [4]byte
-	timeBlob(blob[:])
-	reply = append(reply, blob[:]...)
-	reply = append(reply, firmwareVerLevel)
-	e.replyToClient(pkt, c, reply, origin, "login-resp")
-}
-
-// admitLogin decides whether a password opens (or refreshes) a
-// session; nil is silence, the fate of every wrong password.
-func (e *engine) admitLogin(sender, secret []byte, password string, senderStamp uint32, origin txn.ID) *client {
-	if password == "" {
-		// A blank password is an "am I still known?" probe.
-		return e.clientFor(sender)
-	}
-	if password != e.p.GuestPassword {
-		return nil
+	if ts <= c.lastTimestamp {
+		e.log.Warn("login replay refused", zap.String("txn", origin.Short()))
+		return
 	}
 	if !e.loginLimit.allow(time.Now()) {
 		e.log.Debug("login rate-limited", zap.String("txn", origin.Short()))
-		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Txn: origin, At: time.Now(), Reason: reasonRateLimited,
-		})
-		return nil
+		e.dropRateLimited(origin)
+		return
 	}
-	c := e.clientFor(sender)
-	if c == nil {
-		c = &client{secret: secret}
-		copy(c.pubKey[:], sender)
+	c.lastTimestamp, c.lastActive = ts, time.Now()
+	e.acl.put(c)
+
+	// The reply the reference composes: our clock, the verdict, a
+	// legacy keep-alive hint, the role, the permissions, a random blob
+	// for hash uniqueness, and the reply level we answer at.
+	body := make([]byte, 13)
+	binary.LittleEndian.PutUint32(body, uint32(time.Now().Unix()))
+	body[4] = respLoginOK
+	body[5] = 0 // legacy: recommended keep-alive interval, secs/16
+	if c.isAdmin() {
+		body[6] = 1
 	}
-	if senderStamp <= c.lastStamp {
-		e.log.Debug("login replay refused", zap.String("txn", origin.Short()))
-		return nil
+	body[7] = c.perms
+	if _, err := rand.Read(body[8:12]); err != nil {
+		return
 	}
-	return c
+	body[12] = firmwareVerLevel
+
+	e.log.Info("guest logged in", zap.String("txn", origin.Short()),
+		zap.String("pubkey", shortKey(c.pubKey[:])))
+	e.replyToClient(pkt, c, body, "login-resp", origin)
 }
 
-// clientFor finds the sender's client entry by full key.
-func (e *engine) clientFor(pubKey []byte) *client {
-	for _, c := range e.acl.find(pubKey[0]) {
-		if string(c.pubKey[:]) == string(pubKey) {
-			return c
-		}
+// reqVerdict judges an authenticated request: ours to read only when a
+// live session's MAC verifies over it.
+func (e *engine) reqVerdict(pkt *meshcore.Packet) (verdict, why string, handled bool) {
+	if c, _ := e.openReq(pkt); c == nil {
+		return "", "", false // not ours, or no session: route it on
 	}
-	return nil
+	return verdictRequest, "authenticated request", true
 }
 
-// reqVerdict judges a REQ: ours when the destination hash is ours and
-// a logged-in client's MAC verifies; anything else flows through plain
-// routing, unread.
-func (e *engine) reqVerdict(pkt *meshcore.Packet) (verdict string, handled bool) {
-	if e.id == nil || e.acl == nil {
-		return "", false
-	}
+// openReq finds the session that sent a REQ and returns its decrypted
+// content. The source hash narrows the candidates; the MAC decides.
+func (e *engine) openReq(pkt *meshcore.Packet) (*client, []byte) {
 	d, err := meshcore.ParseDatagram(pkt.Payload)
-	if err != nil {
-		return "", false
+	if err != nil || e.id == nil || d.DestHash[0] != e.id.PubKey[0] {
+		return nil, nil
 	}
-	if d.DestHash[0] != e.id.PubKey[0] {
-		return "", false
-	}
-	for _, c := range e.acl.find(d.SrcHash[0]) {
-		if _, err := d.Open(c.secret); err == nil {
-			return verdictPeerReq, true
+	for _, c := range e.acl.matching(d.SrcHash[0]) {
+		if plain, err := d.Open(c.secret); err == nil && len(plain) >= 5 {
+			return c, plain
 		}
 	}
-	return "", false
+	return nil, nil
 }
 
-// respondRequest serves a REQ from a logged-in guest: found by source
-// hash, proven by the MAC, replay-floored by its timestamp.
+// respondRequest serves one authenticated request.
 func (e *engine) respondRequest(pkt *meshcore.Packet, origin txn.ID) {
-	d, err := meshcore.ParseDatagram(pkt.Payload)
-	if err != nil {
+	c, plain := e.openReq(pkt)
+	if c == nil {
 		return
 	}
-	for _, c := range e.acl.find(d.SrcHash[0]) {
-		plain, err := d.Open(c.secret)
-		if err != nil {
-			continue // not this client: the MAC said no
-		}
-		if len(plain) < 5 {
-			return
-		}
-		stamp := binary.LittleEndian.Uint32(plain[0:4])
-		if stamp <= c.lastStamp {
-			e.log.Debug("request replay refused", zap.String("txn", origin.Short()))
-			return
-		}
-		body := e.answer(stamp, plain[4], plain[5:])
-		if body == nil {
-			return // unknown or refused request: silence
-		}
-		c.lastStamp = stamp
-		c.lastActivity = time.Now()
-		e.replyToClient(pkt, c, body, origin, "req-resp")
+	ts := binary.LittleEndian.Uint32(plain[:4])
+	if ts <= c.lastTimestamp {
+		e.log.Warn("request replay refused", zap.String("txn", origin.Short()))
 		return
 	}
+	body := e.answerRequest(c, plain[4:])
+	if body == nil {
+		return // a question we do not answer
+	}
+	c.lastTimestamp, c.lastActive = ts, time.Now()
+
+	// Every response is tagged with the asker's own timestamp, so a
+	// companion can match answers to questions.
+	reply := binary.LittleEndian.AppendUint32(nil, ts)
+	e.replyToClient(pkt, c, append(reply, body...), "req-resp", origin)
 }
 
-// answer builds one reply body — the sender's timestamp reflected as a
-// tag, then the answer — or nil for anything a guest may not ask.
-func (e *engine) answer(stamp uint32, reqType byte, args []byte) []byte {
-	reply := binary.LittleEndian.AppendUint32(nil, stamp)
-	switch reqType {
+// answerRequest builds the body of an authenticated answer, or nil for
+// a question this node does not serve.
+func (e *engine) answerRequest(c *client, args []byte) []byte {
+	switch args[0] {
 	case reqTypeGetStatus:
-		return append(reply, e.statusBlob()...)
-	case reqTypeKeepAlive:
-		return reply
+		return e.statusBody()
 	case reqTypeGetTelemetry:
-		return append(reply, e.telemetryBlob()...)
-	case reqTypeGetNeighbrs:
-		body := e.neighboursBlob(args)
-		if body == nil {
-			return nil
-		}
-		return append(reply, body...)
+		return e.telemetryBody()
+	case reqTypeGetNeighbours:
+		return e.neighboursBody(args)
 	case reqTypeGetOwnerInfo:
-		info := Version + "\n" + e.p.NodeName + "\n" + e.p.OwnerInfo
-		return append(reply, info...)
-	case reqTypeGetAccessLst:
-		return nil // admin's question; there are no admins over RF here
+		return []byte("lotor " + version.Version + "\n" + e.p.NodeName + "\n" + e.p.OwnerInfo)
+	case reqTypeKeepAlive:
+		// The reference answers nothing here either: the session's
+		// clock moves on the request that carried it, and silence
+		// costs the band nothing.
+		return nil
 	default:
+		_ = c
 		return nil
 	}
 }
 
-// replyToClient routes a sealed reply the reference's way: a flooded
-// question earns a PATH return that both teaches the way back and
-// carries the answer; a direct one is answered direct along the known
-// out path, or flooded when none is known yet.
-func (e *engine) replyToClient(pkt *meshcore.Packet, c *client, body []byte, origin txn.ID, kind string) {
-	if pkt.IsRouteFlood() {
-		resp, err := meshcore.BuildPathReturn(
-			c.pubKey[:meshcore.PathHashSize], e.id.PubKey[:meshcore.PathHashSize],
-			c.secret, pkt.PathLen, pkt.Path,
-			byte(meshcore.PayloadTypeResponse), body)
+// statusBody packs the repeater statistics a companion's status page
+// reads — the reference's RepeaterStats, field for field, in its own
+// little-endian order.
+func (e *engine) statusBody() []byte {
+	s := e.stats.snapshot()
+	nf := int16(0)
+	if e.floor != nil {
+		if f, ok := e.floor(); ok {
+			nf = int16(f.DBm)
+		}
+	}
+	out := make([]byte, 0, 56)
+	u16 := func(v uint16) { out = binary.LittleEndian.AppendUint16(out, v) }
+	u32 := func(v uint32) { out = binary.LittleEndian.AppendUint32(out, v) }
+
+	u16(0) // battery millivolts: mains powered, and a lie would be worse
+	u16(uint16(e.queueLen()))
+	u16(uint16(nf))
+	u16(uint16(int16(s.LastRSSI)))
+	u32(s.RecvFlood + s.RecvDirect)
+	u32(s.SentFlood + s.SentDirect)
+	u32(uint32(s.TxAirtime / time.Second))
+	u32(uint32(time.Since(e.started) / time.Second))
+	u32(s.SentFlood)
+	u32(s.SentDirect)
+	u32(s.RecvFlood)
+	u32(s.RecvDirect)
+	u16(0) // error events: none tracked as a bitfield here
+	u16(uint16(int16(s.LastSNR * 4)))
+	u16(uint16(s.DirectDups))
+	u16(uint16(s.FloodDups))
+	u32(uint32(s.RxAirtime / time.Second))
+	u32(s.RecvErrors)
+	return out
+}
+
+// telemetryBody reports what this node can honestly measure about
+// itself, in the Cayenne encoding companions expect.
+func (e *engine) telemetryBody() []byte {
+	enc := meshcore.NewLPPEncoder()
+	if c, ok := hostTemperature(); ok {
+		_ = enc.Add(meshcore.LPPReading{
+			Channel: telemChannelSelf, Type: meshcore.LPPTemperature, Value: c,
+		})
+	}
+	return enc.Bytes()
+}
+
+// neighboursBody answers the neighbourhood query: the total known, how
+// many are returned, then each one's key prefix, how long ago it was
+// heard, and the SNR it was heard at.
+func (e *engine) neighboursBody(args []byte) []byte {
+	if len(args) < 7 || args[1] != 0 {
+		return nil // only version 0 exists
+	}
+	count := int(args[2])
+	offset := int(binary.LittleEndian.Uint16(args[3:5]))
+	orderBy := args[5]
+	prefixLen := min(int(args[6]), meshcore.PubKeySize)
+
+	all := e.neighbours.snapshot() // newest heard first
+	switch orderBy {
+	case 1: // oldest to newest
+		sort.SliceStable(all, func(i, j int) bool { return all[i].Heard.Before(all[j].Heard) })
+	case 2: // strongest to weakest
+		sort.SliceStable(all, func(i, j int) bool { return all[i].SNR > all[j].SNR })
+	case 3: // weakest to strongest
+		sort.SliceStable(all, func(i, j int) bool { return all[i].SNR < all[j].SNR })
+	}
+
+	// The reference bounds its results buffer; so does this, and the
+	// count it reports is what actually fits.
+	const maxResults = 130
+	entry := prefixLen + 5
+	var rows []byte
+	returned := 0
+	now := time.Now()
+	for i := offset; i < len(all) && returned < count; i++ {
+		if len(rows)+entry > maxResults {
+			break
+		}
+		n := all[i]
+		rows = append(rows, n.PubKey[:prefixLen]...)
+		rows = binary.LittleEndian.AppendUint32(rows, uint32(now.Sub(n.Heard)/time.Second))
+		rows = append(rows, byte(int8(n.SNR*4)))
+		returned++
+	}
+	out := binary.LittleEndian.AppendUint16(nil, uint16(len(all)))
+	out = binary.LittleEndian.AppendUint16(out, uint16(returned))
+	return append(out, rows...)
+}
+
+// replyToClient routes one answer back the way the reference chooses:
+// a flooded question earns a path return — telling the asker how to
+// reach us directly next time, with the answer riding along — and a
+// direct question is answered direct when a path is known, flooded
+// when none is.
+func (e *engine) replyToClient(inbound *meshcore.Packet, c *client, body []byte, kind string, origin txn.ID) {
+	destHash := c.pubKey[:meshcore.PathHashSize]
+	srcHash := e.id.PubKey[:meshcore.PathHashSize]
+
+	if inbound.IsRouteFlood() {
+		path, err := meshcore.BuildPathReturn(destHash, srcHash, c.secret,
+			inbound.PathLen, inbound.Path, byte(meshcore.PayloadTypeResponse), body)
 		if err != nil {
 			e.log.Warn("path return build failed", zap.Error(err))
 			return
 		}
-		resp.Header = meshcore.MakeHeader(meshcore.RouteFlood,
-			meshcore.PayloadTypePath, meshcore.PayloadVer1)
-		e.seen.witness(resp.Hash(), origin, time.Now())
-		e.enqueueAfter(resp, kind, origin, prioPathReturn, serverResponseDelay)
+		e.enqueueAfter(path, kind, origin, prioPathReturn, serverResponseDelay)
 		return
 	}
-	resp, err := meshcore.BuildDatagram(meshcore.PayloadTypeResponse,
-		c.pubKey[:meshcore.PathHashSize], e.id.PubKey[:meshcore.PathHashSize],
-		c.secret, body)
+
+	resp, err := meshcore.BuildResponse(destHash, srcHash, c.secret,
+		binary.LittleEndian.Uint32(body[:4]), body[4:])
 	if err != nil {
-		e.log.Warn("reply build failed", zap.Error(err))
+		e.log.Warn("response build failed", zap.Error(err))
 		return
 	}
-	if c.outPathKnown {
-		resp.Header = meshcore.MakeHeader(meshcore.RouteDirect,
-			meshcore.PayloadTypeResponse, meshcore.PayloadVer1)
-		resp.Path = append([]byte(nil), c.outPath...)
-		resp.SetPathHashSizeAndCount(1, len(c.outPath))
-	} else {
-		resp.Header = meshcore.MakeHeader(meshcore.RouteFlood,
-			meshcore.PayloadTypeResponse, meshcore.PayloadVer1)
-		e.seen.witness(resp.Hash(), origin, time.Now())
+	resp.Header = meshcore.MakeHeader(meshcore.RouteDirect,
+		meshcore.PayloadTypeResponse, meshcore.PayloadVer1)
+	// The asker's own path, reversed, is the way home; a zero-hop
+	// question is answered zero hop.
+	if hops := inbound.PathHashCount(); hops > 0 {
+		size := inbound.PathHashSize()
+		back := make([]byte, 0, len(inbound.Path))
+		for i := hops - 1; i >= 0; i-- {
+			back = append(back, inbound.Path[i*size:(i+1)*size]...)
+		}
+		resp.Path = back
+		resp.SetPathHashSizeAndCount(size, hops)
 	}
 	e.enqueueAfter(resp, kind, origin, prioDirect, serverResponseDelay)
 }
 
-// statusBlob is the reference's RepeaterStats, packed little-endian:
-// the wire layout every companion status page reads.
-func (e *engine) statusBlob() []byte {
-	s := e.stats.snapshot()
-	used, _, _ := e.Duty()
-	out := make([]byte, 0, 56)
-	le16 := func(v uint16) { out = binary.LittleEndian.AppendUint16(out, v) }
-	le32 := func(v uint32) { out = binary.LittleEndian.AppendUint32(out, v) }
-
-	le16(0)                                 // batt_milli_volts: no battery on this host
-	le16(uint16(len(e.queue.entries)))      // curr_tx_queue_len
-	le16(uint16(int16(e.lastFloor())))      // noise_floor
-	le16(uint16(int16(s.LastRSSI)))         // last_rssi
-	le32(s.RecvFlood + s.RecvDirect)        // n_packets_recv
-	le32(s.SentFlood + s.SentDirect)        // n_packets_sent
-	le32(uint32(s.TxAirtime / time.Second)) // total_air_time_secs
-	le32(uint32(time.Since(e.started) / time.Second))
-	le32(s.SentFlood)                       // n_sent_flood
-	le32(s.SentDirect)                      // n_sent_direct
-	le32(s.RecvFlood)                       // n_recv_flood
-	le32(s.RecvDirect)                      // n_recv_direct
-	le16(0)                                 // err_events
-	le16(uint16(int16(s.LastSNR * 4)))      // last_snr ×4
-	le16(uint16(s.DirectDups))              // n_direct_dups
-	le16(uint16(s.FloodDups))               // n_flood_dups
-	le32(uint32(s.RxAirtime / time.Second)) // total_rx_air_time_secs
-	le32(s.RecvErrors)                      // n_recv_errors
-	_ = used
-	return out
-}
-
-// telemetryBlob is the base sensor set, Cayenne-encoded: what the
-// reference grants guests — no permission mask games, just channel 1.
-// This host has no battery; the CPU temperature stands in when the
-// platform offers one.
-func (e *engine) telemetryBlob() []byte {
-	enc := meshcore.NewLPPEncoder()
-	if t, ok := hostTemperature(); ok {
-		_ = enc.Add(meshcore.LPPReading{Channel: 1, Type: meshcore.LPPTemperature, Value: t})
+// cString reads up to the terminator, the form every password and name
+// crosses the air in.
+func cString(b []byte) string {
+	for i, c := range b {
+		if c == 0 {
+			return string(b[:i])
+		}
 	}
-	_ = enc.Add(meshcore.LPPReading{Channel: 1, Type: meshcore.LPPUnixTime,
-		Value: float64(time.Now().Unix())})
-	return enc.Bytes()
+	return string(b)
 }
 
-// hostTemperature reads the platform's first thermal zone, best
-// effort: absent on hosts without one, and no reason to fail anything.
+// shortKey is a public key's readable prefix.
+func shortKey(k []byte) string {
+	return hex.EncodeToString(k[:min(6, len(k))])
+}
+
+// queueLen reports the outbound backlog for the status answer.
+func (e *engine) queueLen() int {
+	if e.queue == nil {
+		return 0
+	}
+	return len(e.queue.entries)
+}
+
+// dropRateLimited counts a refusal that never became a packet.
+func (e *engine) dropRateLimited(origin txn.ID) {
+	e.bus.Publish(bus.TxDropped{
+		Relay: e.relay, Txn: origin, At: time.Now(), Reason: "rate-limited",
+	})
+}
+
+// hostTemperature reads the host's own thermal sensor, the one figure
+// a mains-powered relay can honestly report about itself. Absent on
+// hosts without one, which is not a fault.
 func hostTemperature() (float64, bool) {
 	raw, err := os.ReadFile("/sys/class/thermal/thermal_zone0/temp")
 	if err != nil {
@@ -367,87 +438,4 @@ func hostTemperature() (float64, bool) {
 		return 0, false
 	}
 	return float64(milli) / 1000, true
-}
-
-// neighboursBlob answers GET_NEIGHBOURS version 0: total, returned,
-// then per neighbour the key prefix, seconds since heard, and the SNR
-// quarter-dB byte.
-func (e *engine) neighboursBlob(args []byte) []byte {
-	if len(args) < 6 || args[0] != 0 {
-		return nil // only request version 0 exists
-	}
-	count := int(args[1])
-	offset := int(binary.LittleEndian.Uint16(args[2:4]))
-	orderBy := args[4]
-	prefixLen := min(int(args[5]), 32)
-
-	rows := e.neighbours.snapshot() // newest first — order 0
-	switch orderBy {
-	case 1:
-		sort.Slice(rows, func(i, j int) bool { return rows[i].Heard.Before(rows[j].Heard) })
-	case 2:
-		sort.Slice(rows, func(i, j int) bool { return rows[i].SNR > rows[j].SNR })
-	case 3:
-		sort.Slice(rows, func(i, j int) bool { return rows[i].SNR < rows[j].SNR })
-	}
-
-	out := make([]byte, 4, 4+128)
-	binary.LittleEndian.PutUint16(out[0:2], uint16(len(rows)))
-	returned := 0
-	const resultsCap = 130
-	body := make([]byte, 0, resultsCap)
-	for i := 0; i < count && i+offset < len(rows); i++ {
-		entry := prefixLen + 4 + 1
-		if len(body)+entry > resultsCap {
-			break
-		}
-		n := rows[i+offset]
-		body = append(body, n.PubKey[:prefixLen]...)
-		body = binary.LittleEndian.AppendUint32(body, uint32(time.Since(n.Heard)/time.Second))
-		body = append(body, byte(int8(n.SNR*4)))
-		returned++
-	}
-	binary.LittleEndian.PutUint16(out[2:4], uint16(returned))
-	return append(out, body...)
-}
-
-// Version is what GET_OWNER_INFO reports as the firmware line; the
-// daemon sets it at start-up.
-var Version = "lotor"
-
-// Neighbours reports the direct neighbourhood, newest first; nil when
-// the pipeline never armed. Any goroutine.
-func (e *engine) Neighbours() []Neighbour {
-	if e.neighbours == nil {
-		return nil
-	}
-	return e.neighbours.snapshot()
-}
-
-// trimNul cuts a C string at its terminator.
-func trimNul(b []byte) []byte {
-	for i, c := range b {
-		if c == 0 {
-			return b[:i]
-		}
-	}
-	return b
-}
-
-// timeBlob fills b with hash-uniqueness bytes derived from the clock —
-// the role the reference gives four random bytes.
-func timeBlob(b []byte) {
-	binary.LittleEndian.PutUint32(b, uint32(time.Now().UnixNano()))
-}
-
-// lastFloor is the noise floor the status reports, dBm; zero when
-// unmeasured.
-func (e *engine) lastFloor() float64 {
-	if e.floor == nil {
-		return 0
-	}
-	if nf, ok := e.floor(); ok {
-		return nf.DBm
-	}
-	return 0
 }

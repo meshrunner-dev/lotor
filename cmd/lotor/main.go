@@ -39,10 +39,12 @@ import (
 
 	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 	_ "meshrunner.dev/lotor/internal/radio/sx126x"
+	lotorversion "meshrunner.dev/lotor/internal/version"
 )
 
-// version identifies this build in the CLI banner and status.
-const version = "0.1.0-dev"
+// version identifies this build in the CLI banner and status; the
+// firmware string a companion reads over the air is the same one.
+const version = lotorversion.Version
 
 // commandLine is the Kong grammar. Bare `lotor` prints this help and
 // does nothing else — running the daemon is an explicit choice.
@@ -161,7 +163,6 @@ func console(addr string) error {
 }
 
 func run(configPath, logLevel string) error {
-	enginemc.Version = "lotor " + version
 	log, err := newLogger(logLevel)
 	if err != nil {
 		return err

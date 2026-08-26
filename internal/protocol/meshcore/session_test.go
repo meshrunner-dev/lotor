@@ -93,7 +93,7 @@ func TestGuestLoginAndStatus(t *testing.T) {
 		t.Fatalf("sent = %+v", sent)
 	}
 	_, body := openReply(t, <-dev.sent, secret)
-	if len(body) < 9 || body[0] != respServerLoginOK || body[2] != 0 || body[3] != permGuest {
+	if len(body) < 9 || body[0] != respLoginOK || body[2] != 0 || body[3] != permGuest {
 		t.Fatalf("login reply = % x — want OK, no admin, guest perms", body)
 	}
 
@@ -189,7 +189,7 @@ func TestNeighboursAnswerListsWhoWeHear(t *testing.T) {
 
 	// version 0, count 10, offset 0, order newest, 8-byte prefixes,
 	// then the 4-byte uniqueness blob.
-	args := []byte{reqTypeGetNeighbrs, 0, 10, 0, 0, 0, 8, 1, 2, 3, 4}
+	args := []byte{reqTypeGetNeighbours, 0, 10, 0, 0, 0, 8, 1, 2, 3, 4}
 	dev.frames <- request(t, e.id, peer, 401, args)
 	awaitSent(t, sub)
 	_, body := openReply(t, <-dev.sent, secret)

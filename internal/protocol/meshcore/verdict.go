@@ -25,6 +25,7 @@ const (
 	verdictNotAddressed  = "direct-not-addressed"       // the path's next hop is not us (or no identity exists)
 	verdictDiscover      = "discover-request"           // a zero-hop neighbourhood scan asking who hears it
 	verdictAnon          = "anon-request"               // an ephemeral-keyed question addressed to our key
+	verdictRequest       = "authenticated-request"      // a question from a client whose session we hold
 	verdictPeerReq       = "peer-request"               // a logged-in guest's question, proven by its MAC
 	verdictTraceTransit  = "trace-transit"              // trace walking its target path, next hop unjudgeable
 	verdictTraceNotUs    = "trace-not-addressed"        // trace walking its target path, next hop is not us
@@ -100,11 +101,11 @@ func (e *engine) verdict(pkt *meshcore.Packet, advertOK, selfAdvert bool) (strin
 			return v, why
 		}
 	}
-	// Same order for a guest's request: read before routing, forward
-	// only what no client's MAC vouches for.
+	// An authenticated request is examined the same way, and only a
+	// live session's MAC can claim it.
 	if pkt.PayloadType() == meshcore.PayloadTypeReq {
-		if v, handled := e.reqVerdict(pkt); handled {
-			return v, ""
+		if v, why, handled := e.reqVerdict(pkt); handled {
+			return v, why
 		}
 	}
 	switch {

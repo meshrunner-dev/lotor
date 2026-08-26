@@ -263,6 +263,8 @@ func (e *engine) relayFor(dev radio.Device, pkt *meshcore.Packet, verdict string
 		e.respondDiscover(dev, pkt, origin, snr)
 	case verdictAnon:
 		e.respondAnon(dev, pkt, origin)
+	case verdictRequest:
+		e.respondRequest(pkt, origin)
 	case verdictPeerReq:
 		e.respondRequest(pkt, origin)
 	case verdictRelayTrace:
