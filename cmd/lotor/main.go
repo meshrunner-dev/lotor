@@ -8,7 +8,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -487,8 +486,9 @@ func resolveTX(rc config.Relay, env radio.Envelope, eng protocol.Engine,
 		}
 		dbm = env.MaxTxPowerDBm
 	}
-	if policy.Mode == config.TXOnAir && env.MaxTxPowerDBm == 0 {
-		return policy, errors.New("tx: on-air requires the radio's max_tx_power_dbm declared")
+	if (policy.Mode == config.TXOnAir || policy.Mode == config.TXOnAirZeroHop) &&
+		env.MaxTxPowerDBm == 0 {
+		return policy, fmt.Errorf("tx: %s requires the radio's max_tx_power_dbm declared", policy.Mode)
 	}
 	policy.PowerDBm = dbm
 	return policy, nil

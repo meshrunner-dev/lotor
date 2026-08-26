@@ -143,7 +143,26 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 
 // txEnabled reports whether the pipeline runs at all.
 func (e *engine) txEnabled() bool {
-	return e.policy.Mode == "shadow" || e.policy.Mode == "on-air"
+	switch e.policy.Mode {
+	case "shadow", "on-air-zero-hop", "on-air":
+		return true
+	}
+	return false
+}
+
+// paperOnly decides whether one emission is journalled rather than
+// keyed. Shadow keys nothing; the zero-hop rung keys only what stays
+// with the direct neighbourhood — a local advert, a discovery answer —
+// while everything routable continues on paper, so the parity audit
+// runs on while the node becomes discoverable.
+func (e *engine) paperOnly(pkt *meshcore.Packet) bool {
+	switch e.policy.Mode {
+	case "shadow":
+		return true
+	case "on-air-zero-hop":
+		return !pkt.IsRouteDirect() || pkt.PathHashCount() != 0
+	}
+	return false
 }
 
 // enqueue schedules one emission, publishing the drop when the queue
@@ -452,7 +471,7 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	}
 	sent := bus.FrameSent{
 		Relay: e.relay, Txn: entry.origin, Kind: entry.kind,
-		PowerDBm: e.policy.PowerDBm, Shadow: e.policy.Mode == "shadow",
+		PowerDBm: e.policy.PowerDBm, Shadow: e.paperOnly(entry.pkt),
 	}
 	if sent.Shadow {
 		sent.At, sent.Airtime = time.Now(), dev.Airtime(len(raw))

@@ -754,3 +754,35 @@ func TestOperatorAdvertNeedsALiveGate(t *testing.T) {
 		t.Fatal("a dry engine accepted an emission order")
 	}
 }
+
+func TestZeroHopRungKeysOnlyTheNeighbourhood(t *testing.T) {
+	// The ladder's third rung: local adverts and discovery answers are
+	// really keyed, everything routable stays on paper — the parity
+	// audit runs on while the node becomes discoverable.
+	e, dev, sub, peer := txRig(t, "on-air-zero-hop")
+	runEngine(t, e, dev)
+
+	// A flood relay: judged, journalled — never on the air.
+	dev.frames <- peerAdvert(t, peer, time.Now())
+	sent := awaitSent(t, sub)
+	if sent.Kind != "relay-flood" || !sent.Shadow {
+		t.Fatalf("sent = %+v, want a paper relay-flood", sent)
+	}
+	select {
+	case raw := <-dev.sent:
+		t.Fatalf("the zero-hop rung keyed a flood relay: % X", raw)
+	default:
+	}
+
+	// A discovery answer: zero-hop, really emitted.
+	dev.frames <- scanFrame(t, meshcore.DiscoverReq{
+		Filter: meshcore.RepeaterFilter(), Tag: 42,
+	})
+	sent = awaitSent(t, sub)
+	if sent.Kind != "discover-resp" || sent.Shadow {
+		t.Fatalf("sent = %+v, want a real discover-resp", sent)
+	}
+	if pkt, err := meshcore.ParsePacket(<-dev.sent); err != nil || !pkt.IsRouteDirect() {
+		t.Fatalf("keyed frame: %v (%v)", pkt, err)
+	}
+}

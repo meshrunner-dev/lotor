@@ -45,11 +45,14 @@ type Relay struct {
 
 // The transmit gate ladder: dry runs the judgement alone, shadow runs
 // the whole pipeline and journals the emissions it would have made,
-// on-air keys the radio.
+// on-air-zero-hop keys only what stays with the direct neighbourhood
+// (local adverts, discovery answers) while everything routable is
+// still journalled on paper, and on-air keys the radio for all of it.
 const (
-	TXDry    = "dry"
-	TXShadow = "shadow"
-	TXOnAir  = "on-air"
+	TXDry          = "dry"
+	TXShadow       = "shadow"
+	TXOnAirZeroHop = "on-air-zero-hop"
+	TXOnAir        = "on-air"
 )
 
 // TX configures a relay's transmit gate and channel politeness.
@@ -75,8 +78,8 @@ func (t *TX) Normalize() error {
 	if t.Mode == "" {
 		t.Mode = TXDry
 	}
-	if t.Mode != TXDry && t.Mode != TXShadow && t.Mode != TXOnAir {
-		return fmt.Errorf("tx: mode %q — want dry, shadow or on-air", t.Mode)
+	if t.Mode != TXDry && t.Mode != TXShadow && t.Mode != TXOnAirZeroHop && t.Mode != TXOnAir {
+		return fmt.Errorf("tx: mode %q — want dry, shadow, on-air-zero-hop or on-air", t.Mode)
 	}
 	if t.LBTExhausted == "" {
 		t.LBTExhausted = "transmit"
