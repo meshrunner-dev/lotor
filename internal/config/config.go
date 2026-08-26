@@ -64,6 +64,10 @@ type TX struct {
 	// past the bounded wait: "transmit" (default — the mesh's
 	// convention) or "drop", counted and visible.
 	LBTExhausted string `yaml:"lbt_exhausted"`
+	// QueueDepth bounds the outbound queue. The default holds about
+	// ten seconds of backlog at the narrow waveforms this daemon
+	// ships for; a field knob because sites will want to experiment.
+	QueueDepth int `yaml:"queue_depth"`
 }
 
 // Normalize fills the TX defaults and rejects unknown enum values.
@@ -79,6 +83,12 @@ func (t *TX) Normalize() error {
 	}
 	if t.LBTExhausted != "transmit" && t.LBTExhausted != "drop" {
 		return fmt.Errorf("tx: lbt_exhausted %q — want transmit or drop", t.LBTExhausted)
+	}
+	if t.QueueDepth == 0 {
+		t.QueueDepth = 8
+	}
+	if t.QueueDepth < 1 || t.QueueDepth > 63 {
+		return fmt.Errorf("tx: queue_depth %d — want 1..63", t.QueueDepth)
 	}
 	return nil
 }

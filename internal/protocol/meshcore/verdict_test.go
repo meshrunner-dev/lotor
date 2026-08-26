@@ -10,7 +10,7 @@ import (
 func judgeOne(t *testing.T, raw []byte) string {
 	t.Helper()
 	e, sub := testEngine(t)
-	e.judge(frame(raw))
+	e.judge(newFakeDevice(), frame(raw))
 	judged := drainJudged(t, sub)
 	if len(judged) != 1 {
 		t.Fatalf("judged %d frames", len(judged))
@@ -86,11 +86,11 @@ func TestSeenRingEvictsOldestByCapacity(t *testing.T) {
 	a := []byte{0x01 | 0x05<<2, 0x00, 0x01}
 	b := []byte{0x01 | 0x05<<2, 0x00, 0x02}
 	c := []byte{0x01 | 0x05<<2, 0x00, 0x03}
-	e.judge(frame(a))
-	e.judge(frame(b))
-	e.judge(frame(c)) // evicts a
-	e.judge(frame(a)) // no longer remembered: judged afresh
-	e.judge(frame(c)) // still remembered: duplicate
+	e.judge(newFakeDevice(), frame(a))
+	e.judge(newFakeDevice(), frame(b))
+	e.judge(newFakeDevice(), frame(c)) // evicts a
+	e.judge(newFakeDevice(), frame(a)) // no longer remembered: judged afresh
+	e.judge(newFakeDevice(), frame(c)) // still remembered: duplicate
 
 	judged := drainJudged(t, sub)
 	want := []string{

@@ -68,12 +68,12 @@ func drainJudged(t *testing.T, sub *bus.Subscription) []bus.FrameJudged {
 func TestVerdicts(t *testing.T) {
 	e, sub := testEngine(t)
 
-	e.judge(frame(floodAdvert)) // raw bytes: no valid signature
-	e.judge(frame(zeroHopCtl))
-	e.judge(frame(directPath))
-	e.judge(frame(transportFlood))
-	e.judge(frame(transportPath))
-	e.judge(frame([]byte{0x01})) // truncated
+	e.judge(newFakeDevice(), frame(floodAdvert)) // raw bytes: no valid signature
+	e.judge(newFakeDevice(), frame(zeroHopCtl))
+	e.judge(newFakeDevice(), frame(directPath))
+	e.judge(newFakeDevice(), frame(transportFlood))
+	e.judge(newFakeDevice(), frame(transportPath))
+	e.judge(newFakeDevice(), frame([]byte{0x01})) // truncated
 
 	judged := drainJudged(t, sub)
 	want := []string{
@@ -93,8 +93,8 @@ func TestVerdicts(t *testing.T) {
 func TestDuplicateChainsToFirstTransaction(t *testing.T) {
 	e, sub := testEngine(t)
 
-	e.judge(frame(floodAdvert))
-	e.judge(frame(floodAdvert))
+	e.judge(newFakeDevice(), frame(floodAdvert))
+	e.judge(newFakeDevice(), frame(floodAdvert))
 
 	judged := drainJudged(t, sub)
 	if len(judged) != 2 {
@@ -114,9 +114,9 @@ func TestSeenTableExpires(t *testing.T) {
 	e.seen = newSeenTable(time.Millisecond, 8)
 
 	grpTxt := []byte{0x01 | 0x05<<2, 0x00, 0xDD, 0xEE}
-	e.judge(frame(grpTxt))
+	e.judge(newFakeDevice(), frame(grpTxt))
 	time.Sleep(5 * time.Millisecond)
-	e.judge(frame(grpTxt))
+	e.judge(newFakeDevice(), frame(grpTxt))
 
 	judged := drainJudged(t, sub)
 	if judged[1].Verdict != "would-relay-flood" {

@@ -52,6 +52,32 @@ type FrameCorrupt struct {
 	Err   string
 }
 
+// FrameSent is one emission — real, or shadow-journalled by a relay
+// whose gate stops short of keying. Txn links a relayed frame to the
+// reception it answers; originated traffic (adverts) carries its own.
+type FrameSent struct {
+	Relay    string
+	Txn      txn.ID
+	At       time.Time
+	Airtime  time.Duration
+	PowerDBm int8
+	// Kind names what was sent: relay-flood, relay-direct,
+	// relay-trace, advert-flood, advert-local.
+	Kind string
+	// Shadow marks a journalled-never-keyed emission: the audit trail
+	// that earns on-air.
+	Shadow bool
+}
+
+// TxDropped is an emission the pipeline gave up on, with its reason:
+// queue-full, duty, lbt (when the site chose drop), tx-failed.
+type TxDropped struct {
+	Relay  string
+	Txn    txn.ID
+	At     time.Time
+	Reason string
+}
+
 // NoiseFloor is a relay channel's measured ambient level — what the
 // radio hears between frames: the batch median in DBm, the 90th
 // percentile's excess over it in SpreadDB (the site's impulsiveness).

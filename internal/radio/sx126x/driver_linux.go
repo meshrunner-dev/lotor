@@ -28,9 +28,10 @@ type device struct {
 	// dio1 is kept for its level: the line stays high while an IRQ is
 	// latched, so reading it before a sleep catches any transition the
 	// edge path missed — a GPIO read, never the SPI bus.
-	dio1  lora.InterruptPin
-	floor floorTracker
-	log   *zap.Logger
+	dio1   lora.InterruptPin
+	floor  floorTracker
+	params lora.Params
+	log    *zap.Logger
 	// watchdog optionally bounds a transition degraded while asleep in
 	// the rest phase; nil channel — the default — never fires.
 	wdTicker *time.Ticker
@@ -136,7 +137,30 @@ func (d *device) Configure(w radio.Waveform) error {
 	if err != nil {
 		return err
 	}
-	return d.r.Configure(p)
+	if err := d.r.Configure(p); err != nil {
+		return err
+	}
+	// Kept for airtime arithmetic; read-only once the engine runs.
+	d.params = p
+	return nil
+}
+
+// Airtime is pure arithmetic over the configured waveform.
+func (d *device) Airtime(bytes int) time.Duration { return d.params.Airtime(bytes) }
+
+// AssessChannel is the LBT verdict: the optional RSSI stage first —
+// cheapest, and only meaningful once a floor is known — then the
+// chip's own channel-activity detection.
+func (d *device) AssessChannel(ctx context.Context, thresholdDB float64) (bool, error) {
+	if thresholdDB > 0 {
+		if nf, ok := d.floor.value(); ok {
+			rssi, err := d.r.RSSI()
+			if err == nil && rssi > nf.DBm+thresholdDB {
+				return true, nil
+			}
+		}
+	}
+	return d.r.AssessChannel(ctx, sx126x.CAD{})
 }
 
 func (d *device) StartReceive() error { return d.r.StartReceive() }

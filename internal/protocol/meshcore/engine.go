@@ -43,6 +43,16 @@ type params struct {
 	// DedupEntries bounds the seen table's size.
 	DedupEntries int `yaml:"dedup_entries"`
 
+	// AdvertFloodInterval paces the routable self-announcement a
+	// repeater owes the mesh's directories; applied only when the
+	// transmit pipeline runs, 48h when unset.
+	AdvertFloodInterval time.Duration `yaml:"advert_flood_interval"`
+	// AdvertLocalInterval paces the zero-hop announcement — the form
+	// band rules allow first; zero (the default) disables it.
+	AdvertLocalInterval time.Duration `yaml:"advert_local_interval"`
+	// NodeName is the name adverts carry; the relay's name by default.
+	NodeName string `yaml:"node_name"`
+
 	// Identity is this relay's node key material, inline and in hex:
 	// a 32-byte seed, a 64-byte expanded private key (the reference
 	// CLI's prv.key form, for migrating an existing node), or the
@@ -78,6 +88,13 @@ type engine struct {
 	bus   *bus.Bus
 	log   *zap.Logger
 	seen  *seenTable
+
+	// The transmit pipeline, armed at assembly when the gate is not
+	// dry; zero values otherwise, and Run never consults them.
+	policy          protocol.TXPolicy
+	queue           *txQueue
+	nextFloodAdvert time.Time
+	nextLocalAdvert time.Time
 }
 
 // paramsFrom is the strict decode both build and the config checker
@@ -107,6 +124,12 @@ func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (p
 	// no time bound. dedup_ttl adds an operator time bound on top.
 	if p.DedupEntries == 0 {
 		p.DedupEntries = referenceCapacity
+	}
+	if p.AdvertFloodInterval == 0 {
+		p.AdvertFloodInterval = 48 * time.Hour
+	}
+	if p.NodeName == "" {
+		p.NodeName = relayName
 	}
 	var id *meshcore.LocalIdentity
 	if p.Identity != "" {
@@ -144,28 +167,56 @@ func (e *engine) Identity() string {
 }
 
 func (e *engine) Run(ctx context.Context, dev radio.Device) error {
-	e.log.Info("dry run: judging frames, transmitting nothing")
+	if e.txEnabled() {
+		e.scheduleAdverts(time.Now())
+		e.log.Info("transmit pipeline up",
+			zap.String("mode", e.policy.Mode),
+			zap.Int8("power_dbm", e.policy.PowerDBm),
+			zap.Int("queue_depth", e.policy.QueueDepth))
+	} else {
+		e.log.Info("dry run: judging frames, transmitting nothing")
+	}
 	for {
-		frame, err := dev.Receive(ctx)
+		// Reception blocks until the pipeline next needs the radio —
+		// the queue's earliest schedule or an advert clock. Nothing
+		// pending means no deadline at all.
+		rctx, cancel := e.receiveWindow(ctx)
+		frame, err := dev.Receive(rctx)
+		cancel()
 		switch {
 		case err == nil:
+			e.judge(dev, frame)
 		case errors.Is(err, radio.ErrCorrupt):
 			e.log.Debug("corrupt reception", zap.Error(err))
 			e.bus.Publish(bus.FrameCorrupt{
 				Relay: e.relay, At: time.Now(), Err: err.Error(),
 			})
-			continue
+		case errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil:
+			// The receive window closed: the pipeline's turn.
+			if err := e.txPhase(ctx, dev); err != nil {
+				return err
+			}
 		default:
 			// Returned as-is: a context error means shutdown, anything
 			// else is the driver's fault — replacing it with ctx.Err()
 			// when the two race would mask the fault's cause.
 			return err
 		}
-		e.judge(frame)
 	}
 }
 
-func (e *engine) judge(frame radio.Frame) {
+// receiveWindow bounds one Receive call by the pipeline's next duty.
+func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.CancelFunc) {
+	if !e.txEnabled() {
+		return ctx, func() {}
+	}
+	if wait, ok := e.txWait(time.Now()); ok {
+		return context.WithDeadline(ctx, time.Now().Add(wait))
+	}
+	return ctx, func() {}
+}
+
+func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 	id := txn.New()
 	log := e.log.With(zap.String("txn", id.Short()))
 	log.Info("frame heard",
@@ -223,4 +274,8 @@ func (e *engine) judge(frame radio.Frame) {
 	}
 	log.Info("frame judged", zap.String("verdict", verdict), zap.String("why", why))
 	e.bus.Publish(judged)
+
+	if e.txEnabled() {
+		e.relayFor(dev, pkt, verdict, id, frame.SNR)
+	}
 }

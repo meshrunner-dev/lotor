@@ -34,6 +34,26 @@ type Engine interface {
 	Run(ctx context.Context, dev radio.Device) error
 }
 
+// TXPolicy is the transmit contract a relay resolved from its
+// configuration and hands to an engine that can honour it: the gate,
+// the channel-politeness knobs, the queue bound and the power the
+// pipeline accounts for.
+type TXPolicy struct {
+	Mode           string // dry, shadow, on-air
+	LBTThresholdDB float64
+	LBTExhausted   string // transmit or drop
+	QueueDepth     int
+	PowerDBm       int8
+}
+
+// Armer is the optional capability of engines that own a transmit
+// pipeline. Arm is called once at assembly, before Run; an engine that
+// cannot honour the policy (no node identity to relay under, say)
+// refuses, and the relay is stillborn rather than silently dry.
+type Armer interface {
+	Arm(policy TXPolicy) error
+}
+
 // Builder turns a resolved relay configuration into an engine. Check
 // validates a configuration without building — the config loader runs
 // it over every override scope, so a typo under a profile that is not

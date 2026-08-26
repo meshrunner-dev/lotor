@@ -32,7 +32,7 @@ func signedAdvert(t *testing.T, name string) []byte {
 func TestAdvertsAreNamedAndVerified(t *testing.T) {
 	e, sub := testEngine(t)
 
-	e.judge(frame(signedAdvert(t, "Wanadoo")))
+	e.judge(newFakeDevice(), frame(signedAdvert(t, "Wanadoo")))
 
 	judged := drainJudged(t, sub)
 	if len(judged) != 1 {
@@ -56,7 +56,7 @@ func TestTamperedAdvertIsCalledOut(t *testing.T) {
 	raw := signedAdvert(t, "Wanadoo")
 	raw[len(raw)-1] ^= 0xFF // corrupt the signed region
 
-	e.judge(frame(raw))
+	e.judge(newFakeDevice(), frame(raw))
 
 	judged := drainJudged(t, sub)
 	if len(judged) != 1 {
@@ -86,7 +86,7 @@ func TestDiscoveryRequestIsDescribed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e.judge(frame(raw))
+	e.judge(newFakeDevice(), frame(raw))
 
 	judged := drainJudged(t, sub)
 	if len(judged) != 1 {

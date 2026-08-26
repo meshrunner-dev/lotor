@@ -80,8 +80,8 @@ func TestDirectAddressingJudgedWithIdentity(t *testing.T) {
 	ours := e.id.PubKey[0]
 	toUs := []byte{0x02 | 0x02<<2, 0x02, ours, 0x99, 0x01, 0x02, 0x03}
 	notUs := []byte{0x02 | 0x02<<2, 0x02, ^ours, 0x99, 0x01, 0x02, 0x04}
-	e.judge(frame(toUs))
-	e.judge(frame(notUs))
+	e.judge(newFakeDevice(), frame(toUs))
+	e.judge(newFakeDevice(), frame(notUs))
 
 	judged := drainJudged(t, sub)
 	if judged[0].Verdict != "would-relay-direct" {
@@ -98,8 +98,8 @@ func TestFloodLoopDetected(t *testing.T) {
 	ours := e.id.PubKey[0]
 	looped := []byte{0x01 | 0x05<<2, 0x03, 0x11, ours, 0x22, 0xDD, 0xEE}
 	clean := []byte{0x01 | 0x05<<2, 0x03, 0x11, ^ours, 0x22, 0xDD, 0xEF}
-	e.judge(frame(looped))
-	e.judge(frame(clean))
+	e.judge(newFakeDevice(), frame(looped))
+	e.judge(newFakeDevice(), frame(clean))
 
 	judged := drainJudged(t, sub)
 	if judged[0].Verdict != "would-drop-flood-loop" {
@@ -123,7 +123,7 @@ func TestSelfAdvertRecognised(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.judge(frame(raw))
+	e.judge(newFakeDevice(), frame(raw))
 
 	judged := drainJudged(t, sub)
 	if judged[0].Verdict != "self-advert" {
@@ -146,8 +146,8 @@ func TestTraceNextHopJudgedWithIdentity(t *testing.T) {
 	}
 	toUs := append([]byte{0x02 | 0x09<<2, 0x00}, payload(e.id.PubKey[0])...)
 	notUs := append([]byte{0x02 | 0x09<<2, 0x00}, payload(^e.id.PubKey[0])...)
-	e.judge(frame(toUs))
-	e.judge(frame(notUs))
+	e.judge(newFakeDevice(), frame(toUs))
+	e.judge(newFakeDevice(), frame(notUs))
 
 	judged := drainJudged(t, sub)
 	if judged[0].Verdict != "would-relay-trace" {

@@ -97,6 +97,23 @@ type NoiseFloor struct {
 	At       time.Time
 }
 
+// Telemetry is a device's measurement read side: cached state written
+// by the owning goroutine, safe for any goroutine to consult, never a
+// hardware touch.
+type Telemetry interface {
+	// NoiseFloor reports the last measured floor; ok is false until
+	// the first measurement converges.
+	NoiseFloor() (NoiseFloor, bool)
+	// NoiseStarved counts noise-floor batches abandoned because the
+	// channel left too few idle gaps to observe within a batch's age
+	// bound. Cumulative.
+	NoiseStarved() uint64
+	// ChipStats reports the transceiver's own reception counters,
+	// refreshed periodically by the receive loop; ok is false until
+	// the first read.
+	ChipStats() (ChipStats, bool)
+}
+
 // Device is an opened radio owned by exactly one relay.
 type Device interface {
 	Envelope() Envelope
@@ -106,24 +123,23 @@ type Device interface {
 	// an error wrapping ErrCorrupt. While it waits, the device keeps
 	// the noise floor current — measurement is part of listening.
 	Receive(ctx context.Context) (Frame, error)
-	// NoiseFloor reports the last measured floor; ok is false until
-	// the first measurement converges. Safe to call from any
-	// goroutine — it reads state, it never touches the hardware.
-	NoiseFloor() (NoiseFloor, bool)
-	// NoiseStarved counts noise-floor batches abandoned because the
-	// channel left too few idle gaps to observe within a batch's age
-	// bound. Cumulative; same calling rules as NoiseFloor.
-	NoiseStarved() uint64
-	// ChipStats reports the transceiver's own reception counters,
-	// refreshed periodically by the receive loop; ok is false until
-	// the first read. Same calling rules as NoiseFloor.
-	ChipStats() (ChipStats, bool)
+	// Telemetry is the read side any goroutine may consult.
+	Telemetry
 	// Transmit keys the radio: it belongs to the owning goroutine,
 	// exactly like Receive, and returns once the frame is on the air.
 	// The gates deciding whether keying is allowed at all — dry,
 	// shadow, on-air — live above this seam; a Device transmits when
 	// told to.
 	Transmit(ctx context.Context, payload []byte, powerDBm int8) (TxReport, error)
+	// AssessChannel is the listen-before-talk verdict: an optional
+	// RSSI stage (thresholdDB above the measured floor; zero skips
+	// it) then the hardware's own activity detection. Owning
+	// goroutine only.
+	AssessChannel(ctx context.Context, thresholdDB float64) (busy bool, err error)
+	// Airtime computes a frame's channel occupancy at the configured
+	// waveform — pure arithmetic, any goroutine, and what a shadow
+	// emission journals for a frame it never keyed.
+	Airtime(bytes int) time.Duration
 	Close() error
 }
 
