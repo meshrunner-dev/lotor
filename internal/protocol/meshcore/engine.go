@@ -214,6 +214,9 @@ func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (p
 		bus:   b,
 		log:   log,
 		seen:  newSeenTable(p.DedupTTL, p.DedupEntries),
+		// Who we hear directly is an observation, not an emission: a
+		// relay that never transmits still learns its neighbourhood.
+		neighbours: newNeighbourTable(),
 	}, nil
 }
 
@@ -304,6 +307,15 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 	e.wakeRx = cancel
 	e.wakeMu.Unlock()
 	return rctx, cancel
+}
+
+// Neighbours reports the nodes heard with no relay in between, newest
+// heard first — any goroutine.
+func (e *engine) Neighbours() []Neighbour {
+	if e.neighbours == nil {
+		return nil
+	}
+	return e.neighbours.snapshot()
 }
 
 // observe feeds the neighbour table: the repeaters we hear with no

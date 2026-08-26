@@ -416,7 +416,7 @@ func (s *session) neighbours(_ context.Context, in input) error {
 		return err
 	}
 	if r.Neighbours == nil {
-		return fmt.Errorf("relay %q keeps no neighbourhood — its gate is dry", r.Name)
+		return fmt.Errorf("relay %q does not keep a neighbourhood", r.Name)
 	}
 	rows := r.Neighbours()
 	if len(rows) == 0 {

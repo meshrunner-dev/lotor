@@ -112,6 +112,9 @@ func txRig(t *testing.T, mode string) (*engine, *fakeDevice, *bus.Subscription, 
 		bus:   b,
 		log:   zap.NewNop(),
 		seen:  newSeenTable(0, referenceCapacity),
+		// build() supplies this in production; the rig assembles the
+		// engine by hand.
+		neighbours: newNeighbourTable(),
 	}
 	if err := e.Arm(protocol.TXPolicy{
 		Mode: mode, LBTExhausted: "transmit", QueueDepth: 2, PowerDBm: -5,

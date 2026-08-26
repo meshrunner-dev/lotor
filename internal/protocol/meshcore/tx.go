@@ -162,7 +162,6 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 	e.anonLimit = rateLimiter{max: anonLimitMax, window: anonLimitWindow}
 	e.loginLimit = rateLimiter{max: loginLimitMax, window: loginLimitWindow}
 	e.acl = newACL()
-	e.neighbours = newNeighbourTable()
 	e.started = time.Now()
 	e.advertAsk = make(chan string, 1)
 	// What "changed since" means for us: this process's pipeline came
