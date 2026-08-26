@@ -202,6 +202,16 @@ func (e *engine) abandon(origin txn.ID, reason, msg string, err error) {
 	})
 }
 
+// dropOnFault counts an emission lost to a radio fault. A daemon
+// shutting down is not a fault: that entry goes unsent like the rest
+// of the queue, and counting it would blame the radio for the stop.
+func (e *engine) dropOnFault(ctx context.Context, origin txn.ID, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	e.abandon(origin, "tx-failed", "emission lost to a radio fault", err)
+}
+
 // selfHash is this node's path identity at the packet's hash size.
 func (e *engine) selfHash(size int) []byte { return e.id.PubKey[:size] }
 
@@ -314,6 +324,7 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	outcome, err := e.clearChannel(ctx, dev, log, entry.origin)
 	switch {
 	case err != nil:
+		e.dropOnFault(ctx, entry.origin, err)
 		return err
 	case outcome == lbtRequeue:
 		e.requeue(entry)
@@ -336,6 +347,12 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	if sent.Shadow {
 		sent.At, sent.Airtime = time.Now(), dev.Airtime(len(raw))
 	} else if requeued, err := e.keyAndFill(ctx, dev, raw, entry, &sent, log); requeued || err != nil {
+		if err != nil && sent.Airtime == 0 {
+			// Nothing was radiated and nothing will be: the entry was
+			// already popped, so the session restart's queue purge
+			// cannot count it — this is its only witness.
+			e.dropOnFault(ctx, entry.origin, err)
+		}
 		return err
 	}
 	e.duty.record(sent.At, sent.Airtime)

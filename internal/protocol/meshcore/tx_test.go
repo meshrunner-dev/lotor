@@ -2,6 +2,7 @@ package meshcore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -25,6 +26,8 @@ type fakeDevice struct {
 	// pending makes AssessChannel refuse as "receiving" this many
 	// times — the library's guard on a destructive operation.
 	pending int
+	// assessErr makes AssessChannel fail hard — a real radio fault.
+	assessErr error
 	// txEntered fires when a transmission starts, and txCtxErr carries
 	// what its context said after the caller had a chance to cancel.
 	txEntered chan struct{}
@@ -57,6 +60,9 @@ func (d *fakeDevice) Receive(ctx context.Context) (radio.Frame, error) {
 }
 
 func (d *fakeDevice) AssessChannel(context.Context, float64) (bool, error) {
+	if d.assessErr != nil {
+		return false, d.assessErr
+	}
 	if d.pending > 0 {
 		d.pending--
 		return false, fmt.Errorf("%w: fake", radio.ErrBusyReceiving)
@@ -622,5 +628,33 @@ func TestDutyGaugeDecaysWhenIdle(t *testing.T) {
 	d.record(time.Now().Add(-90*time.Minute), 30*time.Second)
 	if used := d.usage(time.Now()); used != 0 {
 		t.Fatalf("usage = %v after the hour passed, want 0", used)
+	}
+}
+
+func TestRadioFaultCountsTheLostEmission(t *testing.T) {
+	// An entry already popped when the radio faults would otherwise
+	// vanish: the session-restart purge only counts what was still
+	// queued. This event is the popped entry's only witness.
+	e, dev, sub, peer := txRig(t, "on-air")
+	dev.assessErr = errors.New("spi: bus gone")
+	runEngine(t, e, dev)
+	dev.frames <- peerAdvert(t, peer, time.Now())
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-sub.C:
+			if d, ok := ev.(bus.TxDropped); ok {
+				if d.Reason != "tx-failed" {
+					t.Fatalf("dropped for %q, want tx-failed", d.Reason)
+				}
+				if d.Txn.Short() == (txn.ID{}).Short() {
+					t.Error("the drop does not name its reception")
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("no tx-failed drop on the bus")
+		}
 	}
 }
