@@ -337,13 +337,14 @@ func (e *engine) Neighbours() []Neighbour {
 // observe feeds the neighbour table: the repeaters we hear with no
 // relay in between — a zero-hop advert, or their answer to a scan.
 // The SNR recorded is ours: how well WE hear THEM.
-func (e *engine) observe(pkt *meshcore.Packet, frame radio.Frame, advertOK, selfAdvert bool) {
+func (e *engine) observe(rx *reception) {
+	pkt := rx.pkt
 	if e.neighbours == nil || pkt.PathHashCount() != 0 {
 		return
 	}
 	switch pkt.PayloadType() {
 	case meshcore.PayloadTypeAdvert:
-		if !advertOK || selfAdvert {
+		if !rx.advertOK || rx.selfAdvert || rx.advert == nil {
 			return
 		}
 		// Transport codes of {0, 0} mean "send to nowhere": a contact
@@ -353,9 +354,8 @@ func (e *engine) observe(pkt *meshcore.Packet, frame radio.Frame, advertOK, self
 		if pkt.HasTransportCodes() && pkt.TransportCodes == [2]uint16{0, 0} {
 			return
 		}
-		if adv, err := meshcore.ParseAdvert(pkt.Payload); err == nil &&
-			adv.Data.Type == meshcore.AdvTypeRepeater {
-			e.neighbours.put(adv.Identity.PubKey, frame.SNR, frame.At)
+		if rx.advert.Data != nil && rx.advert.Data.Type == meshcore.AdvTypeRepeater {
+			e.neighbours.put(rx.advert.Identity.PubKey, rx.frame.SNR, rx.frame.At)
 		}
 	// A discovery answer is not evidence for us: the reference learns
 	// from one only when it matches a scan it sent itself, and this
@@ -411,8 +411,8 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 		Route:   pkt.Route().String(),
 		PathLen: hops,
 	}
-	fields, advertOK, selfAdvert := describe(pkt, &judged, e.id)
-	log = log.With(fields...)
+	rx := &reception{pkt: pkt, frame: frame, id: id}
+	log = log.With(describe(rx, &judged, e.id)...)
 	if first, dup := e.seen.witness(pkt.Hash(), id, frame.At); dup {
 		e.stats.countHeard(pkt, frame.RSSI, frame.SNR, frame.Airtime, true)
 		log.Info("frame judged",
@@ -427,9 +427,9 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 	e.stats.countHeard(pkt, frame.RSSI, frame.SNR, frame.Airtime, false)
 	// Past the duplicate gate: a replayed advert is not fresh evidence
 	// that its sender is still there.
-	e.observe(pkt, frame, advertOK, selfAdvert)
+	e.observe(rx)
 
-	verdict, why := e.verdict(pkt, advertOK, selfAdvert)
+	verdict, why := e.verdict(rx)
 	judged.Verdict = verdict
 	if why != "" && judged.Detail == "" {
 		judged.Detail = why
@@ -438,6 +438,6 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 	e.bus.Publish(judged)
 
 	if e.txEnabled() {
-		e.relayFor(dev, pkt, verdict, id, frame.SNR)
+		e.relayFor(dev, rx, verdict)
 	}
 }

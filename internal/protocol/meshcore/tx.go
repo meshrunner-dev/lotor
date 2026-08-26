@@ -229,9 +229,8 @@ func (e *engine) enqueueAfter(pkt *meshcore.Packet, kind string, origin txn.ID,
 // relayFor turns a judged reception into its scheduled retransmission.
 // The packet is copied — the transforms must not write through the
 // received frame — and the transform follows the verdict.
-func (e *engine) relayFor(dev radio.Device, pkt *meshcore.Packet, verdict string,
-	origin txn.ID, snr float64,
-) {
+func (e *engine) relayFor(dev radio.Device, rx *reception, verdict string) {
+	pkt, origin, snr := rx.pkt, rx.id, rx.frame.SNR
 	cp := *pkt
 	switch verdict {
 	case verdictRelayFlood:
@@ -261,9 +260,9 @@ func (e *engine) relayFor(dev radio.Device, pkt *meshcore.Packet, verdict string
 	case verdictDiscover:
 		e.respondDiscover(dev, pkt, origin, snr)
 	case verdictAnon:
-		e.respondAnon(dev, pkt, origin)
+		e.respondAnon(rx, origin)
 	case verdictRequest:
-		e.respondRequest(pkt, origin)
+		e.respondRequest(rx, origin)
 	case verdictRelayTrace:
 		// A trace whose next target hop is us walks on: our SNR
 		// reading — quarter-dB, one raw byte — joins the walked path

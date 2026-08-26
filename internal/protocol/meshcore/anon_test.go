@@ -74,7 +74,7 @@ func TestRequestNameGetsTheName(t *testing.T) {
 }
 
 func TestAnonRepliesAreRateLimited(t *testing.T) {
-	e, dev, sub, peer := txRig(t, "shadow")
+	e, _, sub, peer := txRig(t, "shadow")
 	e.queue.depth = 16
 	for i := range anonLimitMax + 2 {
 		frame, _ := anonAsk(t, e.id, peer, uint32(i), anonReqTypeOwner)
@@ -82,7 +82,7 @@ func TestAnonRepliesAreRateLimited(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		e.respondAnon(dev, pkt, txn.New())
+		e.respondAnon(rxOf(e, pkt), txn.New())
 	}
 	if n := len(e.queue.entries); n != anonLimitMax {
 		t.Fatalf("%d replies queued, want the cap %d", n, anonLimitMax)
@@ -118,7 +118,7 @@ func TestUnreadableAnonTrafficRoutesOn(t *testing.T) {
 	}
 	pkt.Header = meshcore.MakeHeader(meshcore.RouteFlood,
 		meshcore.PayloadTypeAnonReq, meshcore.PayloadVer1)
-	if v, _ := e.verdict(pkt, false, false); v != verdictDropFloodType && v != verdictRelayFlood {
+	if v, _ := e.verdict(rxOf(e, pkt)); v != verdictDropFloodType && v != verdictRelayFlood {
 		t.Fatalf("verdict = %q, want plain flood routing", v)
 	}
 
@@ -131,11 +131,11 @@ func TestUnreadableAnonTrafficRoutesOn(t *testing.T) {
 	}
 	pkt.Header = meshcore.MakeHeader(meshcore.RouteFlood,
 		meshcore.PayloadTypeAnonReq, meshcore.PayloadVer1)
-	if v, _ := e.verdict(pkt, false, false); v != verdictAnon {
+	if v, _ := e.verdict(rxOf(e, pkt)); v != verdictAnon {
 		t.Fatalf("verdict = %q, want anon-request", v)
 	}
 	before := len(e.queue.entries)
-	e.respondAnon(newFakeDevice(), pkt, txn.New())
+	e.respondAnon(rxOf(e, pkt), txn.New())
 	if len(e.queue.entries) != before {
 		t.Fatal("a flooded owner request was answered — the reference gates on direct")
 	}

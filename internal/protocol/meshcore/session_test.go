@@ -134,7 +134,7 @@ func TestGuestLoginAndStatus(t *testing.T) {
 }
 
 func TestWrongPasswordIsSilence(t *testing.T) {
-	e, dev, _, peer := txRig(t, "on-air")
+	e, _, _, peer := txRig(t, "on-air")
 	e.p.GuestPassword = "raccoon"
 	e.queue.depth = 8
 	for i, pw := range []string{"admin", "wrong", ""} {
@@ -143,7 +143,7 @@ func TestWrongPasswordIsSilence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		e.respondAnon(dev, pkt, txn.New())
+		e.respondAnon(rxOf(e, pkt), txn.New())
 	}
 	if n := len(e.queue.entries); n != 0 {
 		t.Fatalf("%d replies queued — wrong or blank passwords must be silence", n)
@@ -268,7 +268,7 @@ func TestDryEngineSurvivesAStrangersRequest(t *testing.T) {
 func TestEveryLoginAttemptCostsAToken(t *testing.T) {
 	// A limiter that only sees successes bounds the honest client and
 	// lets the guesser run free.
-	e, dev, _, peer := txRig(t, "shadow")
+	e, _, _, peer := txRig(t, "shadow")
 	e.p.GuestPassword = "open-sesame"
 	e.queue.depth = 16
 
@@ -278,7 +278,7 @@ func TestEveryLoginAttemptCostsAToken(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		e.respondAnon(dev, pkt, txn.New())
+		e.respondAnon(rxOf(e, pkt), txn.New())
 	}
 	if n := len(e.queue.entries); n != 0 {
 		t.Fatalf("%d replies to wrong passwords", n)
@@ -289,7 +289,7 @@ func TestEveryLoginAttemptCostsAToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.respondAnon(dev, pkt, txn.New())
+	e.respondAnon(rxOf(e, pkt), txn.New())
 	if n := len(e.queue.entries); n != 0 {
 		t.Fatalf("%d replies past the exhausted window — guessing is unbounded", n)
 	}
@@ -340,15 +340,14 @@ func TestOneSessionCannotFloodTheMesh(t *testing.T) {
 func TestKeepAliveKeepsTheSessionAlive(t *testing.T) {
 	// A companion that sends a keep-alive instead of polling must not
 	// be the one retired first.
-	e, dev, _, peer := txRig(t, "shadow")
+	e, _, _, peer := txRig(t, "shadow")
 	e.p.GuestPassword = "raccoon"
 	frame, _ := login(t, e.id, peer, nowTS(700), "raccoon", false)
 	pkt, err := meshcore.ParsePacket(frame.Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sender, secret, plain := e.openAnon(pkt)
-	e.respondLogin(pkt, sender, secret, plain, txn.New())
+	e.respondAnon(rxOf(e, pkt), txn.New())
 
 	c := e.acl.get(peer.PubKey[:])
 	if c == nil {
@@ -361,14 +360,13 @@ func TestKeepAliveKeepsTheSessionAlive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.respondRequest(req, txn.New())
+	e.respondRequest(rxOf(e, req), txn.New())
 
 	if again := e.acl.get(peer.PubKey[:]); again == nil {
 		t.Fatal("the session was retired")
 	} else if time.Since(again.lastActive) > time.Minute {
 		t.Fatalf("keep-alive left lastActive at %v — it keeps nothing alive", again.lastActive)
 	}
-	_ = dev
 }
 
 func TestIdleSessionsRetire(t *testing.T) {

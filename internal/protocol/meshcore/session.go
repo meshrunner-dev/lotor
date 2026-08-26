@@ -260,10 +260,13 @@ func loginReply(c *client) ([]byte, error) {
 
 // reqVerdict judges an authenticated request: ours to read only when a
 // live session's MAC verifies over it.
-func (e *engine) reqVerdict(pkt *meshcore.Packet) (verdict, why string, handled bool) {
-	if c, _ := e.openReq(pkt); c == nil {
+func (e *engine) reqVerdict(rx *reception) (verdict, why string, handled bool) {
+	c, plain := e.openReq(rx.pkt)
+	if c == nil {
 		return "", "", false // not ours, or no session: route it on
 	}
+	// The MAC sweep this took is kept for the answer.
+	rx.opened = &opened{session: c, secret: c.secret, plain: plain}
 	return verdictRequest, "authenticated request", true
 }
 
@@ -283,11 +286,11 @@ func (e *engine) openReq(pkt *meshcore.Packet) (*client, []byte) {
 }
 
 // respondRequest serves one authenticated request.
-func (e *engine) respondRequest(pkt *meshcore.Packet, origin txn.ID) {
-	c, plain := e.openReq(pkt)
-	if c == nil {
+func (e *engine) respondRequest(rx *reception, origin txn.ID) {
+	if rx.opened == nil || rx.opened.session == nil {
 		return
 	}
+	pkt, c, plain := rx.pkt, rx.opened.session, rx.opened.plain
 	ts := binary.LittleEndian.Uint32(plain[:4])
 	if ts <= c.lastTimestamp {
 		e.log.Warn("request replay refused", zap.String("txn", origin.Short()))

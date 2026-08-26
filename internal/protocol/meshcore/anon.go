@@ -10,7 +10,6 @@ import (
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/bus"
-	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/txn"
 )
 
@@ -47,8 +46,8 @@ const (
 // decrypt. A request we could read is consumed here whatever its type:
 // the reference marks it do-not-retransmit the moment decryption
 // succeeds.
-func (e *engine) anonVerdict(pkt *meshcore.Packet) (verdict, why string, handled bool) {
-	d, err := meshcore.ParseAnonDatagram(pkt.Payload)
+func (e *engine) anonVerdict(rx *reception) (verdict, why string, handled bool) {
+	d, err := meshcore.ParseAnonDatagram(rx.pkt.Payload)
 	if err != nil {
 		// The reference releases an incomplete anon packet unrouted.
 		return verdictIgnored, "anon request too short", true
@@ -67,6 +66,9 @@ func (e *engine) anonVerdict(pkt *meshcore.Packet) (verdict, why string, handled
 	if len(plain) < 5 {
 		return verdictIgnored, "anon request truncated", true
 	}
+	// What this cost — one scalar multiplication and a MAC sweep — is
+	// kept for the answer rather than paid again.
+	rx.opened = &opened{sender: d.SenderPub, secret: secret, plain: plain}
 	switch t := plain[4]; {
 	case t == anonReqTypeOwner:
 		return verdictAnon, "owner request — the name behind the key", true
@@ -105,29 +107,12 @@ var placeholderRegions = []string{"lotor-1", "lotor-2"}
 // request came direct, the reference's own gating, and all behind one
 // shared limiter. Logins were consumed by the judgement and stay
 // unanswered.
-// openAnon parses and decrypts an ANON_REQ addressed to us; nil when
-// it is not ours to read or too short to mean anything.
-func (e *engine) openAnon(pkt *meshcore.Packet) (sender, secret, plain []byte) {
-	d, err := meshcore.ParseAnonDatagram(pkt.Payload)
-	if err != nil {
-		return nil, nil, nil
-	}
-	secret, err = e.id.SharedSecret(d.SenderPub)
-	if err != nil {
-		return nil, nil, nil
-	}
-	plain, err = d.Open(secret)
-	if err != nil || len(plain) < 5 {
-		return nil, nil, nil
-	}
-	return d.SenderPub, secret, plain
-}
 
-func (e *engine) respondAnon(dev radio.Device, pkt *meshcore.Packet, origin txn.ID) {
-	sender, secret, plain := e.openAnon(pkt)
-	if plain == nil {
+func (e *engine) respondAnon(rx *reception, origin txn.ID) {
+	if rx.opened == nil {
 		return
 	}
+	pkt, sender, secret, plain := rx.pkt, rx.opened.sender, rx.opened.secret, rx.opened.plain
 	if t := plain[4]; t == 0 || t >= ' ' {
 		// A password: the login path, which the reference accepts by
 		// flood as well as direct — a stranger logging in from across
@@ -185,5 +170,4 @@ func (e *engine) respondAnon(dev radio.Device, pkt *meshcore.Packet, origin txn.
 		resp.PathLen = pathLen
 	}
 	e.enqueueAfter(resp, "anon-resp", origin, prioDirect, serverResponseDelay)
-	_ = dev
 }

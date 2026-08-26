@@ -93,37 +93,39 @@ var floodRoutable = map[meshcore.PayloadType]bool{
 // reach its payload switch: a direct packet still walking a path is
 // somebody else's hop to carry, never ours to open. handled is false
 // for everything the ordinary routing should decide.
-func (e *engine) addressedToUs(pkt *meshcore.Packet) (verdict, why string, handled bool) {
+func (e *engine) addressedToUs(rx *reception) (verdict, why string, handled bool) {
+	pkt := rx.pkt
 	if !pkt.IsRouteFlood() && pkt.PathHashCount() != 0 {
 		return "", "", false
 	}
 	switch pkt.PayloadType() {
 	case meshcore.PayloadTypeAnonReq:
-		return e.anonVerdict(pkt)
+		return e.anonVerdict(rx)
 	case meshcore.PayloadTypeReq:
 		// Only a live session's MAC can claim an authenticated one.
-		return e.reqVerdict(pkt)
+		return e.reqVerdict(rx)
 	default:
 		return "", "", false
 	}
 }
 
-func (e *engine) verdict(pkt *meshcore.Packet, advertOK, selfAdvert bool) (string, string) {
+func (e *engine) verdict(rx *reception) (string, string) {
+	pkt := rx.pkt
 	if pkt.PayloadVer() > meshcore.PayloadVer1 {
 		return verdictBadVersion, ""
 	}
 	// Requests addressed to us are examined before any routing: the
 	// reference decrypts first and forwards only what it could not
 	// read.
-	if v, why, handled := e.addressedToUs(pkt); handled {
+	if v, why, handled := e.addressedToUs(rx); handled {
 		return v, why
 	}
 	switch {
-	case selfAdvert:
+	case rx.selfAdvert:
 		// The reference releases its own adverts before any routing.
 		return verdictSelfAdvert, ""
 	case pkt.IsRouteFlood():
-		return e.floodVerdict(pkt, advertOK)
+		return e.floodVerdict(pkt, rx.advertOK)
 	case pkt.IsRouteDirect():
 		if pkt.PayloadType() == meshcore.PayloadTypeTrace {
 			return e.traceVerdict(pkt)

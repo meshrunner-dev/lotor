@@ -167,6 +167,19 @@ func runEngine(t *testing.T, e *engine, dev *fakeDevice) {
 	t.Cleanup(func() { cancel(); <-done })
 }
 
+// rxTestSNR is the signal every hand-built reception is heard at.
+const rxTestSNR = 8
+
+// rxOf wraps a packet the way judge() would, so a test can drive a
+// responder directly. Running the verdict first is what fills the
+// reception's opened envelope — the same order production uses.
+func rxOf(e *engine, pkt *meshcore.Packet) *reception {
+	rx := &reception{pkt: pkt, id: txn.New(),
+		frame: radio.Frame{At: time.Now(), SNR: rxTestSNR}}
+	e.verdict(rx)
+	return rx
+}
+
 func TestShadowRelaysOnPaperOnly(t *testing.T) {
 	e, dev, sub, peer := txRig(t, "shadow")
 	runEngine(t, e, dev)
@@ -619,7 +632,7 @@ func TestAbandonedRelayIsCounted(t *testing.T) {
 	}
 	pkt.Path = make([]byte, maxPathHashes)
 	pkt.SetPathHashSizeAndCount(1, maxPathHashes)
-	e.relayFor(dev, pkt, verdictRelayFlood, txn.New(), 8)
+	e.relayFor(dev, rxOf(e, pkt), verdictRelayFlood)
 
 	select {
 	case ev := <-sub.C:
@@ -648,7 +661,7 @@ func TestAcksAreRelayedWithoutJitter(t *testing.T) {
 	ack.Path = []byte{e.id.PubKey[0], 0x77}
 	ack.SetPathHashSizeAndCount(1, 2)
 	before := time.Now()
-	e.relayFor(dev, ack, verdictRelayDirect, txn.New(), 8)
+	e.relayFor(dev, rxOf(e, ack), verdictRelayDirect)
 
 	if len(e.queue.entries) != 1 {
 		t.Fatalf("%d entries queued", len(e.queue.entries))
@@ -812,11 +825,11 @@ func TestPrioritiesFollowTheReferenceLadder(t *testing.T) {
 	}
 	pkt.Path = []byte{^e.id.PubKey[0], ^e.id.PubKey[0]}
 	pkt.SetPathHashSizeAndCount(1, 2)
-	e.relayFor(dev, pkt, verdictRelayFlood, txn.New(), 8)
+	e.relayFor(dev, rxOf(e, pkt), verdictRelayFlood)
 
 	e.advert(dev, time.Now(), "advert-flood", false)
 	e.advert(dev, time.Now(), "advert-local", true)
-	e.relayFor(dev, traceMustParse(t, e), verdictRelayTrace, txn.New(), 8)
+	e.relayFor(dev, rxOf(e, traceMustParse(t, e)), verdictRelayTrace)
 
 	got := map[string]int{}
 	for _, entry := range e.queue.entries {
