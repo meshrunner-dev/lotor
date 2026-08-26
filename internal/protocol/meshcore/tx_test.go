@@ -105,18 +105,7 @@ func txRig(t *testing.T, mode string) (*engine, *fakeDevice, *bus.Subscription, 
 	b := bus.New()
 	sub := b.Subscribe(32)
 	t.Cleanup(sub.Close)
-	e := &engine{
-		relay: "test-868",
-		p:     params{NodeName: "test", DutyCyclePct: 100},
-		id:    self,
-		bus:   b,
-		log:   zap.NewNop(),
-		seen:  newSeenTable(0, referenceCapacity),
-		// build() supplies these in production; the rig assembles the
-		// engine by hand.
-		neighbours: newNeighbourTable(),
-		acl:        newACL(),
-	}
+	e := newEngine("test-868", params{NodeName: "test", DutyCyclePct: 100}, self, b, zap.NewNop())
 	if err := e.Arm(protocol.TXPolicy{
 		Mode: mode, LBTExhausted: "transmit", QueueDepth: 2, PowerDBm: -5,
 	}); err != nil {

@@ -40,12 +40,35 @@ type rateLimiter struct {
 // allow consumes one slot; the window opens on the first event after
 // the previous one expired.
 func (r *rateLimiter) allow(now time.Time) bool {
+	if r.max <= 0 {
+		// A budget nobody set grants nothing. These are the only
+		// defence against being made an amplifier, so the zero value
+		// refuses rather than permits.
+		return false
+	}
 	if now.Before(r.start.Add(r.window)) {
 		r.count++
 		return r.count <= r.max
 	}
 	r.start, r.count = now, 1
 	return true
+}
+
+// limits are the budgets for the work a stranger can ask of this
+// node — one set, built with the engine, so none of them can sit at a
+// zero value while a packet is already being judged.
+type limits struct {
+	discover rateLimiter
+	anon     rateLimiter
+	login    rateLimiter
+}
+
+func newLimits() limits {
+	return limits{
+		discover: rateLimiter{max: discoverLimitMax, window: discoverLimitWindow},
+		anon:     rateLimiter{max: anonLimitMax, window: anonLimitWindow},
+		login:    rateLimiter{max: loginLimitMax, window: loginLimitWindow},
+	}
 }
 
 // controlVerdict judges a direct CONTROL packet. The reference admits
@@ -77,7 +100,7 @@ func (e *engine) respondDiscover(dev radio.Device, pkt *meshcore.Packet, origin 
 	if req.Since != 0 && uint32(e.discoverySince.Unix()) < req.Since {
 		return // nothing about us changed since the scanner last looked
 	}
-	if !e.discoverLimit.allow(time.Now()) {
+	if !e.limits.discover.allow(time.Now()) {
 		// Debug, not Warn: the volume here is attacker-controlled.
 		e.log.Debug("discovery response rate-limited", zap.String("txn", origin.Short()))
 		e.bus.Publish(bus.TxDropped{

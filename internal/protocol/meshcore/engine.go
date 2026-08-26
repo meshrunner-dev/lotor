@@ -133,9 +133,7 @@ type engine struct {
 	duty            *dutyLedger
 	nextFloodAdvert time.Time
 	nextLocalAdvert time.Time
-	discoverLimit   rateLimiter
-	anonLimit       rateLimiter
-	loginLimit      rateLimiter
+	limits          limits
 	discoverySince  time.Time
 	clockWarned     bool
 	acl             *acl
@@ -216,21 +214,29 @@ func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (p
 		log.Info("node identity",
 			zap.String("pubkey", hex.EncodeToString(id.PubKey[:])[:keyPrefixLen]))
 	}
+	return newEngine(relayName, p, id, b, log), nil
+}
+
+// newEngine assembles the state every engine has whatever its gate:
+// what it needs to hear, judge and remember. The transmit pipeline is
+// added later by Arm, and only then — but nothing here may wait for
+// that, because judging happens in every mode. Both the daemon and
+// the tests build through here, so a field added to the engine cannot
+// be missed by one of them.
+func newEngine(relayName string, p params, id *meshcore.LocalIdentity,
+	b *bus.Bus, log *zap.Logger,
+) *engine {
 	return &engine{
-		relay: relayName,
-		p:     p,
-		id:    id,
-		bus:   b,
-		log:   log,
-		seen:  newSeenTable(p.DedupTTL, p.DedupEntries),
-		// Who we hear directly is an observation, not an emission: a
-		// relay that never transmits still learns its neighbourhood.
+		relay:      relayName,
+		p:          p,
+		id:         id,
+		bus:        b,
+		log:        log,
+		seen:       newSeenTable(p.DedupTTL, p.DedupEntries),
 		neighbours: newNeighbourTable(),
-		// The judgement reads the session table on every authenticated
-		// request, and judging happens in every mode — a dry relay
-		// that finds this nil dies on a stranger's packet.
-		acl: newACL(),
-	}, nil
+		acl:        newACL(),
+		limits:     newLimits(),
+	}
 }
 
 func (e *engine) Waveform() radio.Waveform { return e.p.Waveform }

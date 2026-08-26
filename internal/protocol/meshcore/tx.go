@@ -147,7 +147,6 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 	}
 	e.policy = p
 	e.queue = &txQueue{depth: p.QueueDepth}
-	e.discoverLimit = rateLimiter{max: discoverLimitMax, window: discoverLimitWindow}
 	// The sliding hour did not restart with the process: what the
 	// journal remembers being spent is spent, or a crash-loop could
 	// launder the budget.
@@ -160,8 +159,6 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 		dl.record(sp.At, sp.Airtime)
 	}
 	e.duty = dl
-	e.anonLimit = rateLimiter{max: anonLimitMax, window: anonLimitWindow}
-	e.loginLimit = rateLimiter{max: loginLimitMax, window: loginLimitWindow}
 	e.started = time.Now()
 	e.advertAsk = make(chan string, 1)
 	// What "changed since" means for us: this process's pipeline came

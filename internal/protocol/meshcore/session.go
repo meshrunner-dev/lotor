@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -99,12 +98,16 @@ type client struct {
 // carries the field and a reader should see why it is what it is.
 func (c *client) isAdmin() bool { return c.perms&permRoleMask == permAdmin }
 
-// clientACL holds the live sessions. The engine's goroutine writes it;
-// the console reads it, so it is held under a mutex. Sessions live in
-// memory only — a restart asks every companion to log in again, which
-// is the honest posture for a credential we never persist.
+// acl holds the live sessions, and belongs to the engine's goroutine
+// alone — like the dedup table and unlike the neighbourhood, which the
+// console reads. That is why there is no mutex here: nothing outside
+// judges a frame, and a lock would only have protected the map while
+// the sessions it points at were written through anyway.
+//
+// Sessions live in memory only. A restart asks every companion to log
+// in again, which is the honest posture for a credential nothing here
+// persists.
 type acl struct {
-	mu sync.Mutex
 	by map[[meshcore.PubKeySize]byte]*client
 }
 
@@ -115,8 +118,6 @@ func newACL() *acl {
 // put adds or refreshes a session, evicting the least recently active
 // one when the table is full.
 func (a *acl) put(c *client) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	if _, known := a.by[c.pubKey]; !known && len(a.by) >= maxClients {
 		var oldest [meshcore.PubKeySize]byte
 		first := true
@@ -133,8 +134,6 @@ func (a *acl) put(c *client) {
 // get returns a live session by full public key; one nobody has used
 // within sessionIdle is retired rather than returned.
 func (a *acl) get(pubKey []byte) *client {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	var k [meshcore.PubKeySize]byte
 	copy(k[:], pubKey)
 	return a.live(k)
@@ -158,8 +157,6 @@ func (a *acl) live(k [meshcore.PubKeySize]byte) *client {
 // — the reference's searchPeersByHash. A one-byte hash collides often;
 // the MAC decides which session actually sent the packet.
 func (a *acl) matching(hash byte) []*client {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	var out []*client
 	for k := range a.by {
 		if k[0] != hash {
@@ -182,7 +179,7 @@ func (e *engine) respondLogin(pkt *meshcore.Packet, senderPub, secret, plain []b
 	// Charged before the password is even read: a limiter that only
 	// sees successes bounds the honest client and lets the guesser
 	// run free — the exact inverse of what it is for.
-	if !e.loginLimit.allow(time.Now()) {
+	if !e.limits.login.allow(time.Now()) {
 		e.log.Debug("login rate-limited", zap.String("txn", origin.Short()))
 		e.dropRateLimited(origin)
 		return
