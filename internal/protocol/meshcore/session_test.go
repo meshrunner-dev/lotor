@@ -2,11 +2,15 @@ package meshcore
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+
 	"meshrunner.dev/pkg/meshcore"
 
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/txn"
 )
@@ -208,5 +212,76 @@ func TestNeighboursAnswerListsWhoWeHear(t *testing.T) {
 	}
 	if int8(row[12]) != int8(9.25*4) {
 		t.Fatalf("snr byte = %d", int8(row[12]))
+	}
+}
+
+func TestDryEngineSurvivesAStrangersRequest(t *testing.T) {
+	// A relay that never transmits still judges everything it hears,
+	// and judging an authenticated request consults the session table.
+	// That table must exist in every mode: when it did not, one packet
+	// from anybody — no session, no password, no MAC — killed the
+	// daemon.
+	seed := make([]byte, meshcore.SeedSize)
+	seed[0] = 5
+	id, err := meshcore.LocalIdentityFromSeed(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	built, err := build("dry-relay", map[string]any{
+		"frequency_hz": 869_618_000,
+		"identity":     hex.EncodeToString(seed),
+	}, bus.New(), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, ok := built.(*engine)
+	if !ok {
+		t.Fatalf("build returned %T", built)
+	}
+	if e.txEnabled() {
+		t.Fatal("the rig is meant to be dry")
+	}
+
+	// A request addressed to our key prefix, from nobody at all.
+	pkt := &meshcore.Packet{
+		Header: meshcore.MakeHeader(meshcore.RouteDirect,
+			meshcore.PayloadTypeReq, meshcore.PayloadVer1),
+		Payload: append([]byte{id.PubKey[0], 0x99}, make([]byte, 24)...),
+	}
+	raw, err := pkt.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.judge(newFakeDevice(), radio.Frame{Payload: raw, At: time.Now(), SNR: 5})
+	// Surviving the call is the assertion.
+}
+
+func TestEveryLoginAttemptCostsAToken(t *testing.T) {
+	// A limiter that only sees successes bounds the honest client and
+	// lets the guesser run free.
+	e, dev, _, peer := txRig(t, "shadow")
+	e.p.GuestPassword = "open-sesame"
+	e.queue.depth = 16
+
+	for i := range loginLimitMax {
+		frame, _ := login(t, e.id, peer, uint32(i+1), "wrong", false)
+		pkt, err := meshcore.ParsePacket(frame.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.respondAnon(dev, pkt, txn.New())
+	}
+	if n := len(e.queue.entries); n != 0 {
+		t.Fatalf("%d replies to wrong passwords", n)
+	}
+	// The window is spent: even the right password waits its turn.
+	frame, _ := login(t, e.id, peer, 99, "open-sesame", false)
+	pkt, err := meshcore.ParsePacket(frame.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.respondAnon(dev, pkt, txn.New())
+	if n := len(e.queue.entries); n != 0 {
+		t.Fatalf("%d replies past the exhausted window — guessing is unbounded", n)
 	}
 }

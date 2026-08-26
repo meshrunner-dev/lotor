@@ -217,6 +217,10 @@ func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (p
 		// Who we hear directly is an observation, not an emission: a
 		// relay that never transmits still learns its neighbourhood.
 		neighbours: newNeighbourTable(),
+		// The judgement reads the session table on every authenticated
+		// request, and judging happens in every mode — a dry relay
+		// that finds this nil dies on a stranger's packet.
+		acl: newACL(),
 	}, nil
 }
 
@@ -334,13 +338,10 @@ func (e *engine) observe(pkt *meshcore.Packet, frame radio.Frame, advertOK, self
 			adv.Data.Type == meshcore.AdvTypeRepeater {
 			e.neighbours.put(adv.Identity.PubKey, frame.SNR, frame.At)
 		}
-	case meshcore.PayloadTypeControl:
-		if resp, err := meshcore.ParseDiscoverResp(pkt); err == nil &&
-			resp.NodeType == meshcore.AdvTypeRepeater && len(resp.PubKey) == meshcore.PubKeySize {
-			var key [32]byte
-			copy(key[:], resp.PubKey)
-			e.neighbours.put(key, frame.SNR, frame.At)
-		}
+	// A discovery answer is not evidence for us: the reference learns
+	// from one only when it matches a scan it sent itself, and this
+	// node scans for nobody. Taking them on trust would let any
+	// stranger write into the neighbourhood we report.
 	default: // other zero-hop traffic names nobody reliably
 	}
 }
@@ -392,7 +393,6 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 	}
 	fields, advertOK, selfAdvert := describe(pkt, &judged, e.id)
 	log = log.With(fields...)
-	e.observe(pkt, frame, advertOK, selfAdvert)
 	if first, dup := e.seen.witness(pkt.Hash(), id, frame.At); dup {
 		e.stats.countHeard(pkt, frame.RSSI, frame.SNR, frame.Airtime, true)
 		log.Info("frame judged",
@@ -405,6 +405,10 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 	}
 
 	e.stats.countHeard(pkt, frame.RSSI, frame.SNR, frame.Airtime, false)
+	// Past the duplicate gate: a replayed advert is not fresh evidence
+	// that its sender is still there.
+	e.observe(pkt, frame, advertOK, selfAdvert)
+
 	verdict, why := e.verdict(pkt, advertOK, selfAdvert)
 	judged.Verdict = verdict
 	if why != "" && judged.Detail == "" {

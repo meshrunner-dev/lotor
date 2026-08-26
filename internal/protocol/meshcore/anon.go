@@ -79,6 +79,20 @@ func (e *engine) anonVerdict(pkt *meshcore.Packet) (verdict, why string, handled
 	}
 }
 
+// replyPath decodes the return path a request supplies: the
+// reference's path descriptor — hop count in the low six bits, hash
+// width in the top two — followed by that many bytes of path.
+func replyPath(body []byte) (pathLen uint8, path []byte, ok bool) {
+	if len(body) < 1 || !meshcore.ValidPathLen(body[0]) {
+		return 0, nil, false
+	}
+	n := int(body[0]&63) * (int(body[0]>>6) + 1)
+	if len(body) < 1+n {
+		return 0, nil, false
+	}
+	return body[0], append([]byte(nil), body[1:1+n]...), true
+}
+
 // placeholderRegions is what the regions request gets until transport
 // scoping exists here: named placeholders, so a companion's region
 // browser shows something honest to point at rather than an error.
@@ -136,15 +150,10 @@ func (e *engine) respondAnon(dev radio.Device, pkt *meshcore.Packet, origin txn.
 	default:
 		return // logins and the unknown stay unanswered
 	}
-	// The body supplies the return path: {len}{hashes}. Reject a bad
-	// encoding before the limiter — it costs nothing and is not an
-	// answer.
-	body := plain[5:]
-	if len(body) < 1 {
-		return
-	}
-	plen := int(body[0])
-	if plen > 63 || len(body) < 1+plen {
+	// The body supplies the return path. A bad encoding is refused
+	// before the limiter — it costs nothing and is not an answer.
+	pathLen, path, ok := replyPath(plain[5:])
+	if !ok {
 		return
 	}
 	if !e.anonLimit.allow(time.Now()) {
@@ -169,9 +178,9 @@ func (e *engine) respondAnon(dev radio.Device, pkt *meshcore.Packet, origin txn.
 	}
 	resp.Header = meshcore.MakeHeader(meshcore.RouteDirect,
 		meshcore.PayloadTypeResponse, meshcore.PayloadVer1)
-	if plen > 0 {
-		resp.Path = append([]byte(nil), body[1:1+plen]...)
-		resp.SetPathHashSizeAndCount(1, plen)
+	if len(path) > 0 {
+		resp.Path = path
+		resp.PathLen = pathLen
 	}
 	e.enqueueAfter(resp, "anon-resp", origin, prioDirect, serverResponseDelay)
 	_ = dev

@@ -140,6 +140,14 @@ func (e *engine) respondLogin(pkt *meshcore.Packet, senderPub, secret, plain []b
 	if e.p.GuestPassword == "" {
 		return // no credential configured: the door does not exist
 	}
+	// Charged before the password is even read: a limiter that only
+	// sees successes bounds the honest client and lets the guesser
+	// run free — the exact inverse of what it is for.
+	if !e.loginLimit.allow(time.Now()) {
+		e.log.Debug("login rate-limited", zap.String("txn", origin.Short()))
+		e.dropRateLimited(origin)
+		return
+	}
 	ts := binary.LittleEndian.Uint32(plain[:4])
 	password := cString(plain[4:])
 
@@ -159,11 +167,6 @@ func (e *engine) respondLogin(pkt *meshcore.Packet, senderPub, secret, plain []b
 	}
 	if ts <= c.lastTimestamp {
 		e.log.Warn("login replay refused", zap.String("txn", origin.Short()))
-		return
-	}
-	if !e.loginLimit.allow(time.Now()) {
-		e.log.Debug("login rate-limited", zap.String("txn", origin.Short()))
-		e.dropRateLimited(origin)
 		return
 	}
 	c.lastTimestamp, c.lastActive = ts, time.Now()
@@ -225,9 +228,9 @@ func (e *engine) respondRequest(pkt *meshcore.Packet, origin txn.ID) {
 		e.log.Warn("request replay refused", zap.String("txn", origin.Short()))
 		return
 	}
-	body := e.answerRequest(c, plain[4:])
-	if body == nil {
-		return // a question we do not answer
+	body, answered := e.answerRequest(plain[4:])
+	if !answered {
+		return // a question this node does not serve
 	}
 	c.lastTimestamp, c.lastActive = ts, time.Now()
 
@@ -237,26 +240,27 @@ func (e *engine) respondRequest(pkt *meshcore.Packet, origin txn.ID) {
 	e.replyToClient(pkt, c, append(reply, body...), "req-resp", origin)
 }
 
-// answerRequest builds the body of an authenticated answer, or nil for
-// a question this node does not serve.
-func (e *engine) answerRequest(c *client, args []byte) []byte {
+// answerRequest builds the body of an authenticated answer. answered
+// is false for a question this node does not serve — which is not the
+// same as an answer that happens to be empty: a node with no sensor
+// still owes the asker a reply saying so.
+func (e *engine) answerRequest(args []byte) (body []byte, answered bool) {
 	switch args[0] {
 	case reqTypeGetStatus:
-		return e.statusBody()
+		return e.statusBody(), true
 	case reqTypeGetTelemetry:
-		return e.telemetryBody()
+		return e.telemetryBody(), true
 	case reqTypeGetNeighbours:
-		return e.neighboursBody(args)
+		b := e.neighboursBody(args)
+		return b, b != nil
 	case reqTypeGetOwnerInfo:
-		return []byte("lotor " + version.Version + "\n" + e.p.NodeName + "\n" + e.p.OwnerInfo)
+		return []byte("lotor " + version.Version + "\n" + e.p.NodeName + "\n" + e.p.OwnerInfo), true
 	case reqTypeKeepAlive:
-		// The reference answers nothing here either: the session's
-		// clock moves on the request that carried it, and silence
-		// costs the band nothing.
-		return nil
+		// The reference answers nothing here either, and the session's
+		// clock has already moved on the request that carried it.
+		return nil, false
 	default:
-		_ = c
-		return nil
+		return nil, false
 	}
 }
 
@@ -378,20 +382,16 @@ func (e *engine) replyToClient(inbound *meshcore.Packet, c *client, body []byte,
 		e.log.Warn("response build failed", zap.Error(err))
 		return
 	}
-	resp.Header = meshcore.MakeHeader(meshcore.RouteDirect,
+	// A direct question arrives with its path already spent — every
+	// hop consumed its own entry on the way — so an empty path says
+	// nothing about how far the asker is. Adjacent or five hops out,
+	// they look identical here, and the only route that reaches both
+	// is a flood. The reference makes the same call, and buys its way
+	// out of it by remembering an out-path per client, which this
+	// engine does not learn yet.
+	resp.Header = meshcore.MakeHeader(meshcore.RouteFlood,
 		meshcore.PayloadTypeResponse, meshcore.PayloadVer1)
-	// The asker's own path, reversed, is the way home; a zero-hop
-	// question is answered zero hop.
-	if hops := inbound.PathHashCount(); hops > 0 {
-		size := inbound.PathHashSize()
-		back := make([]byte, 0, len(inbound.Path))
-		for i := hops - 1; i >= 0; i-- {
-			back = append(back, inbound.Path[i*size:(i+1)*size]...)
-		}
-		resp.Path = back
-		resp.SetPathHashSizeAndCount(size, hops)
-	}
-	e.enqueueAfter(resp, kind, origin, prioDirect, serverResponseDelay)
+	e.enqueueAfter(resp, kind, origin, prioFloodReply, serverResponseDelay)
 }
 
 // cString reads up to the terminator, the form every password and name

@@ -89,24 +89,35 @@ var floodRoutable = map[meshcore.PayloadType]bool{
 // walking the reference's gates in the reference's order. advertOK
 // reports the advert signature check when the type is ADVERT;
 // selfAdvert that the advert is our own echo.
+// addressedToUs judges the requests a stranger or a client sends to
+// this node's own key — but only among the packets the reference lets
+// reach its payload switch: a direct packet still walking a path is
+// somebody else's hop to carry, never ours to open. handled is false
+// for everything the ordinary routing should decide.
+func (e *engine) addressedToUs(pkt *meshcore.Packet) (verdict, why string, handled bool) {
+	if !pkt.IsRouteFlood() && pkt.PathHashCount() != 0 {
+		return "", "", false
+	}
+	switch pkt.PayloadType() {
+	case meshcore.PayloadTypeAnonReq:
+		return e.anonVerdict(pkt)
+	case meshcore.PayloadTypeReq:
+		// Only a live session's MAC can claim an authenticated one.
+		return e.reqVerdict(pkt)
+	default:
+		return "", "", false
+	}
+}
+
 func (e *engine) verdict(pkt *meshcore.Packet, advertOK, selfAdvert bool) (string, string) {
 	if pkt.PayloadVer() > meshcore.PayloadVer1 {
 		return verdictBadVersion, ""
 	}
-	// An anonymous request is examined before any routing: the
+	// Requests addressed to us are examined before any routing: the
 	// reference decrypts first and forwards only what it could not
-	// read (Mesh::onRecvPacket, ANON_REQ).
-	if pkt.PayloadType() == meshcore.PayloadTypeAnonReq {
-		if v, why, handled := e.anonVerdict(pkt); handled {
-			return v, why
-		}
-	}
-	// An authenticated request is examined the same way, and only a
-	// live session's MAC can claim it.
-	if pkt.PayloadType() == meshcore.PayloadTypeReq {
-		if v, why, handled := e.reqVerdict(pkt); handled {
-			return v, why
-		}
+	// read.
+	if v, why, handled := e.addressedToUs(pkt); handled {
+		return v, why
 	}
 	switch {
 	case selfAdvert:

@@ -64,6 +64,7 @@ const reasonRateLimited = "rate-limited"
 // the back (5). Lower serves first, ties by earliest schedule.
 const (
 	prioDirect      = 0
+	prioFloodReply  = 1
 	prioPathReturn  = 2
 	prioFloodAdvert = 3
 	prioTrace       = 5
@@ -161,7 +162,6 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 	e.duty = dl
 	e.anonLimit = rateLimiter{max: anonLimitMax, window: anonLimitWindow}
 	e.loginLimit = rateLimiter{max: loginLimitMax, window: loginLimitWindow}
-	e.acl = newACL()
 	e.started = time.Now()
 	e.advertAsk = make(chan string, 1)
 	// What "changed since" means for us: this process's pipeline came
@@ -583,6 +583,13 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 			e.dropOnFault(ctx, entry.origin, err)
 		}
 		return err
+	}
+	if !sent.Shadow {
+		// The reference marks every emission seen as it sends it: a
+		// flood we originate comes back from our neighbours, and
+		// without this we would judge our own words a stranger's and
+		// flood them again.
+		e.seen.witness(entry.pkt.Hash(), entry.origin, time.Now())
 	}
 	e.duty.record(sent.At, sent.Airtime)
 	if !sent.Shadow {
