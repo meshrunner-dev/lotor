@@ -24,9 +24,8 @@ const (
 	verdictZeroHop       = "heard-zero-hop"             // direct, empty path: addressed to whoever hears it
 	verdictNotAddressed  = "direct-not-addressed"       // the path's next hop is not us (or no identity exists)
 	verdictDiscover      = "discover-request"           // a zero-hop neighbourhood scan asking who hears it
-	verdictAnon          = "anon-request"               // an ephemeral-keyed question addressed to our key
+	verdictAnon          = "anon-request"               // a question sealed to our key, asker named in the clear
 	verdictRequest       = "authenticated-request"      // a question from a client whose session we hold
-	verdictPeerReq       = "peer-request"               // a logged-in guest's question, proven by its MAC
 	verdictTraceTransit  = "trace-transit"              // trace walking its target path, next hop unjudgeable
 	verdictTraceNotUs    = "trace-not-addressed"        // trace walking its target path, next hop is not us
 	verdictTraceArrived  = "trace-arrived"              // trace consumed its whole target path

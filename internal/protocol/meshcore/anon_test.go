@@ -13,8 +13,8 @@ import (
 	"meshrunner.dev/lotor/internal/txn"
 )
 
-// anonAsk builds a companion's anonymous question: an ephemeral-keyed
-// ANON_REQ, zero-hop direct, with an empty return path.
+// anonAsk builds a companion's anonymous question: an ANON_REQ sealed to
+// our key, zero-hop direct, with an empty return path.
 func anonAsk(t *testing.T, self, peer *meshcore.LocalIdentity, ts uint32, reqType byte) (radio.Frame, []byte) {
 	t.Helper()
 	secret, err := peer.SharedSecret(self.PubKey[:])

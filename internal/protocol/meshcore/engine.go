@@ -167,6 +167,15 @@ func paramsFrom(cfg map[string]any) (params, error) {
 	// The reference's operator ranges: outside them, its CLI refuses
 	// the setting — so does the config, or a site would run a cadence
 	// no reference node would.
+	// The reference's own field sizes (char[32] / char[120]); past
+	// them an owner answer no longer fits a packet and the node goes
+	// quiet on a question it should serve.
+	if len(p.NodeName) > 31 {
+		return p, fmt.Errorf("meshcore params: node_name is %d bytes — the mesh carries at most 31", len(p.NodeName))
+	}
+	if len(p.OwnerInfo) > 119 {
+		return p, fmt.Errorf("meshcore params: owner_info is %d bytes — the mesh carries at most 119", len(p.OwnerInfo))
+	}
 	if v := p.AdvertLocalInterval; v > 0 && (v < time.Hour || v > 4*time.Hour) {
 		return p, fmt.Errorf(
 			"meshcore params: advert_local_interval %s — the reference accepts 60..240 minutes; negative disables", v)
@@ -297,6 +306,11 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 	if !e.txEnabled() {
 		return ctx, func() {}
 	}
+	// Held across the choice and the store both: an order landing
+	// between them would otherwise fire a cancel this window has not
+	// published yet, and wait for a frame that may never come.
+	e.wakeMu.Lock()
+	defer e.wakeMu.Unlock()
 	var rctx context.Context
 	var cancel context.CancelFunc
 	switch wait, ok := e.txWait(time.Now()); {
@@ -307,9 +321,7 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 	default:
 		rctx, cancel = context.WithCancel(ctx)
 	}
-	e.wakeMu.Lock()
 	e.wakeRx = cancel
-	e.wakeMu.Unlock()
 	return rctx, cancel
 }
 
@@ -332,6 +344,13 @@ func (e *engine) observe(pkt *meshcore.Packet, frame radio.Frame, advertOK, self
 	switch pkt.PayloadType() {
 	case meshcore.PayloadTypeAdvert:
 		if !advertOK || selfAdvert {
+			return
+		}
+		// Transport codes of {0, 0} mean "send to nowhere": a contact
+		// somebody re-shared from their companion, not a node
+		// announcing itself. Recorded as a neighbour it would claim a
+		// direct link that does not exist, at the sharer's own SNR.
+		if pkt.HasTransportCodes() && pkt.TransportCodes == [2]uint16{0, 0} {
 			return
 		}
 		if adv, err := meshcore.ParseAdvert(pkt.Payload); err == nil &&
@@ -369,6 +388,7 @@ func (e *engine) heard(frame radio.Frame) (txn.ID, *zap.Logger) {
 }
 
 func (e *engine) judge(dev radio.Device, frame radio.Frame) {
+	e.stats.countFrame()
 	id, log := e.heard(frame)
 	pkt, err := meshcore.ParsePacket(frame.Payload)
 	if err != nil {

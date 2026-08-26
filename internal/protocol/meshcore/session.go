@@ -61,6 +61,10 @@ const (
 	// not at all.
 	loginLimitMax    = 4
 	loginLimitWindow = 3 * time.Minute
+
+	// loginMaxSkew bounds how far a login's own timestamp may sit from
+	// ours before we read it as a recording rather than a request.
+	loginMaxSkew = 24 * time.Hour
 )
 
 // client is one logged-in companion.
@@ -149,6 +153,18 @@ func (e *engine) respondLogin(pkt *meshcore.Packet, senderPub, secret, plain []b
 		return
 	}
 	ts := binary.LittleEndian.Uint32(plain[:4])
+	// A session that does not survive a restart is a session an
+	// attacker can resurrect by replaying the login that made it,
+	// rolling its replay clock back to the capture. Nothing in the
+	// packet says how old it is, so our own clock does: a login
+	// stamped far from now is a recording, not a request. The window
+	// is generous — a companion's clock is its own — but finite,
+	// which is the part the reference's RTC-less nodes cannot afford.
+	if skew := time.Since(time.Unix(int64(ts), 0)); skew > loginMaxSkew || skew < -loginMaxSkew {
+		e.log.Debug("login refused: stale or future timestamp",
+			zap.String("txn", origin.Short()), zap.Duration("skew", skew))
+		return
+	}
 	password := cString(plain[4:])
 
 	c := e.acl.get(senderPub)
@@ -283,7 +299,7 @@ func (e *engine) statusBody() []byte {
 	u16(uint16(e.queueLen()))
 	u16(uint16(nf))
 	u16(uint16(int16(s.LastRSSI)))
-	u32(s.RecvFlood + s.RecvDirect)
+	u32(s.RecvTotal)
 	u32(s.SentFlood + s.SentDirect)
 	u32(uint32(s.TxAirtime / time.Second))
 	u32(uint32(time.Since(e.started) / time.Second))
@@ -372,6 +388,10 @@ func (e *engine) replyToClient(inbound *meshcore.Packet, c *client, body []byte,
 			e.log.Warn("path return build failed", zap.Error(err))
 			return
 		}
+		// The reply propagates with the hash width the asker's mesh
+		// uses, as every reference reply does: a narrower one collides
+		// more often for repeaters extending it.
+		path.SetPathHashSizeAndCount(inbound.PathHashSize(), 0)
 		e.enqueueAfter(path, kind, origin, prioPathReturn, serverResponseDelay)
 		return
 	}
@@ -391,6 +411,7 @@ func (e *engine) replyToClient(inbound *meshcore.Packet, c *client, body []byte,
 	// engine does not learn yet.
 	resp.Header = meshcore.MakeHeader(meshcore.RouteFlood,
 		meshcore.PayloadTypeResponse, meshcore.PayloadVer1)
+	resp.SetPathHashSizeAndCount(inbound.PathHashSize(), 0)
 	e.enqueueAfter(resp, kind, origin, prioFloodReply, serverResponseDelay)
 }
 

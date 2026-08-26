@@ -15,6 +15,15 @@ import (
 	"meshrunner.dev/lotor/internal/txn"
 )
 
+// nowTS is where the tests put their clock: the freshness gate reads
+// a login's stamp against ours, so a 1970 counter would be a
+// recording, not a request.
+// The base is taken once, so a stamp built at the top of a test and
+// the assertion that reads it back agree even across a second boundary.
+var testEpoch = uint32(time.Now().Unix())
+
+func nowTS(offset uint32) uint32 { return testEpoch + offset }
+
 // login builds a guest login as a companion sends it: an ANON_REQ
 // whose plaintext is timestamp ‖ password (a C string).
 func login(t *testing.T, self, peer *meshcore.LocalIdentity, ts uint32, password string, flood bool) (radio.Frame, []byte) {
@@ -91,7 +100,7 @@ func TestGuestLoginAndStatus(t *testing.T) {
 	e.p.GuestPassword = "raccoon"
 	runEngine(t, e, dev)
 
-	frame, secret := login(t, e.id, peer, 100, "raccoon", false)
+	frame, secret := login(t, e.id, peer, nowTS(100), "raccoon", false)
 	dev.frames <- frame
 	if sent := awaitSent(t, sub); sent.Kind != "login-resp" {
 		t.Fatalf("sent = %+v", sent)
@@ -102,12 +111,12 @@ func TestGuestLoginAndStatus(t *testing.T) {
 	}
 
 	// The session works: ask for the status.
-	dev.frames <- request(t, e.id, peer, 101, []byte{reqTypeGetStatus, 0, 0, 0, 0})
+	dev.frames <- request(t, e.id, peer, nowTS(101), []byte{reqTypeGetStatus, 0, 0, 0, 0})
 	if sent := awaitSent(t, sub); sent.Kind != "req-resp" {
 		t.Fatalf("sent = %+v", sent)
 	}
 	tag, blob := openReply(t, <-dev.sent, secret)
-	if tag != 101 {
+	if tag != nowTS(101) {
 		t.Fatalf("tag = %d, want the request timestamp reflected", tag)
 	}
 	// The reference's RepeaterStats is 56 bytes; the opened datagram
@@ -116,7 +125,7 @@ func TestGuestLoginAndStatus(t *testing.T) {
 		t.Fatalf("status blob = %d bytes, want at least the reference's 56", len(blob))
 	}
 	// Replay: the same timestamp must be refused.
-	dev.frames <- request(t, e.id, peer, 101, []byte{reqTypeGetStatus, 0, 0, 0, 0})
+	dev.frames <- request(t, e.id, peer, nowTS(101), []byte{reqTypeGetStatus, 0, 0, 0, 0})
 	select {
 	case raw := <-dev.sent:
 		t.Fatalf("a replayed request was answered: % x", raw[:8])
@@ -129,7 +138,7 @@ func TestWrongPasswordIsSilence(t *testing.T) {
 	e.p.GuestPassword = "raccoon"
 	e.queue.depth = 8
 	for i, pw := range []string{"admin", "wrong", ""} {
-		frame, _ := login(t, e.id, peer, uint32(200+i), pw, false)
+		frame, _ := login(t, e.id, peer, nowTS(uint32(200+i)), pw, false)
 		pkt, err := meshcore.ParsePacket(frame.Payload)
 		if err != nil {
 			t.Fatal(err)
@@ -149,7 +158,7 @@ func TestFloodLoginEarnsAPathReturn(t *testing.T) {
 	e.p.GuestPassword = "raccoon"
 	runEngine(t, e, dev)
 
-	frame, secret := login(t, e.id, peer, 300, "raccoon", true)
+	frame, secret := login(t, e.id, peer, nowTS(300), "raccoon", true)
 	dev.frames <- frame
 	if sent := awaitSent(t, sub); sent.Kind != "login-resp" {
 		t.Fatalf("sent = %+v", sent)
@@ -186,7 +195,7 @@ func TestNeighboursAnswerListsWhoWeHear(t *testing.T) {
 	e.neighbours.put(third, 9.25, time.Now().Add(-90*time.Second))
 	runEngine(t, e, dev)
 
-	frame, secret := login(t, e.id, peer, 400, "raccoon", false)
+	frame, secret := login(t, e.id, peer, nowTS(400), "raccoon", false)
 	dev.frames <- frame
 	awaitSent(t, sub)
 	<-dev.sent
@@ -194,7 +203,7 @@ func TestNeighboursAnswerListsWhoWeHear(t *testing.T) {
 	// version 0, count 10, offset 0, order newest, 8-byte prefixes,
 	// then the 4-byte uniqueness blob.
 	args := []byte{reqTypeGetNeighbours, 0, 10, 0, 0, 0, 8, 1, 2, 3, 4}
-	dev.frames <- request(t, e.id, peer, 401, args)
+	dev.frames <- request(t, e.id, peer, nowTS(401), args)
 	awaitSent(t, sub)
 	_, body := openReply(t, <-dev.sent, secret)
 	total := binary.LittleEndian.Uint16(body[0:2])
@@ -264,7 +273,7 @@ func TestEveryLoginAttemptCostsAToken(t *testing.T) {
 	e.queue.depth = 16
 
 	for i := range loginLimitMax {
-		frame, _ := login(t, e.id, peer, uint32(i+1), "wrong", false)
+		frame, _ := login(t, e.id, peer, nowTS(uint32(i+1)), "wrong", false)
 		pkt, err := meshcore.ParsePacket(frame.Payload)
 		if err != nil {
 			t.Fatal(err)
@@ -275,7 +284,7 @@ func TestEveryLoginAttemptCostsAToken(t *testing.T) {
 		t.Fatalf("%d replies to wrong passwords", n)
 	}
 	// The window is spent: even the right password waits its turn.
-	frame, _ := login(t, e.id, peer, 99, "open-sesame", false)
+	frame, _ := login(t, e.id, peer, nowTS(99), "open-sesame", false)
 	pkt, err := meshcore.ParsePacket(frame.Payload)
 	if err != nil {
 		t.Fatal(err)

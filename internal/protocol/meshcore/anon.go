@@ -17,7 +17,9 @@ import (
 // Anonymous requests, the reference repeater's shape: a stranger who
 // knows only our public key — a neighbourhood scan gave it to them —
 // may ask a few harmless questions before any login exists. The
-// request rides an ephemeral-keyed envelope; only the holder of our
+// request rides an envelope sealed to our key — the asker's own
+// public key travels in the clear, so the content is private and the
+// asker's identity is not; only the holder of our
 // private key can read it, and only the asker can read the answer.
 const (
 	// The request types the reference dispatches (MyMesh.cpp); a

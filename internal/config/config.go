@@ -93,7 +93,11 @@ func (t *TX) Normalize() error {
 			t.LBTThresholdDB)
 	}
 	if t.QueueDepth == 0 {
-		t.QueueDepth = 8
+		// The reference's pool size. Smaller looks tempting on a narrow
+		// waveform, but the anonymous answers a stranger can demand
+		// without any credential would then fill the whole queue and
+		// crowd out the relaying this node exists to do.
+		t.QueueDepth = 32
 	}
 	if t.QueueDepth < 1 || t.QueueDepth > 63 {
 		return fmt.Errorf("tx: queue_depth %d — want 1..63", t.QueueDepth)

@@ -264,8 +264,6 @@ func (e *engine) relayFor(dev radio.Device, pkt *meshcore.Packet, verdict string
 		e.respondAnon(dev, pkt, origin)
 	case verdictRequest:
 		e.respondRequest(pkt, origin)
-	case verdictPeerReq:
-		e.respondRequest(pkt, origin)
 	case verdictRelayTrace:
 		// A trace whose next target hop is us walks on: our SNR
 		// reading — quarter-dB, one raw byte — joins the walked path
