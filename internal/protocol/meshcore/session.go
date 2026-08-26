@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
-	"sort"
 	"time"
 
 	"go.uber.org/zap"
@@ -77,87 +76,6 @@ const (
 	// ours before we read it as a recording rather than a request.
 	loginMaxSkew = 24 * time.Hour
 )
-
-// client is one logged-in companion.
-type client struct {
-	pubKey [meshcore.PubKeySize]byte
-	secret []byte
-	perms  byte
-	// lastTimestamp is the newest request instant this client has
-	// signed: anything at or before it is a replay.
-	lastTimestamp uint32
-	lastActive    time.Time
-	// asks bounds what this session may make us emit.
-	asks rateLimiter
-}
-
-// isAdmin reports the role; always false here, kept because the wire
-// carries the field and a reader should see why it is what it is.
-func (c *client) isAdmin() bool { return c.perms&permRoleMask == permAdmin }
-
-// acl holds the live sessions, and belongs to the engine's goroutine
-// alone — like the dedup table and unlike the neighbourhood, which the
-// console reads. That is why there is no mutex here: nothing outside
-// judges a frame, and a lock would only have protected the map while
-// the sessions it points at were written through anyway.
-//
-// Sessions live in memory only. A restart asks every companion to log
-// in again, which is the honest posture for a credential nothing here
-// persists.
-type acl struct {
-	by map[[meshcore.PubKeySize]byte]*client
-}
-
-func newACL() *acl {
-	return &acl{by: map[[meshcore.PubKeySize]byte]*client{}}
-}
-
-// put adds or refreshes a session, evicting the least recently active
-// one when the table is full.
-func (a *acl) put(c *client) {
-	if _, known := a.by[c.pubKey]; !known {
-		evictOldest(a.by, maxClients, func(v *client) time.Time { return v.lastActive })
-	}
-	a.by[c.pubKey] = c
-}
-
-// get returns a live session by full public key; one nobody has used
-// within sessionIdle is retired rather than returned.
-func (a *acl) get(pubKey []byte) *client {
-	var k [meshcore.PubKeySize]byte
-	copy(k[:], pubKey)
-	return a.live(k)
-}
-
-// live returns the session under k, dropping it when it has gone
-// quiet. The caller holds mu.
-func (a *acl) live(k [meshcore.PubKeySize]byte) *client {
-	c, ok := a.by[k]
-	if !ok {
-		return nil
-	}
-	if time.Since(c.lastActive) > sessionIdle {
-		delete(a.by, k)
-		return nil
-	}
-	return c
-}
-
-// matching returns every session whose key starts with the given hash
-// — the reference's searchPeersByHash. A one-byte hash collides often;
-// the MAC decides which session actually sent the packet.
-func (a *acl) matching(hash byte) []*client {
-	var out []*client
-	for k := range a.by {
-		if k[0] != hash {
-			continue
-		}
-		if c := a.live(k); c != nil {
-			out = append(out, c)
-		}
-	}
-	return out
-}
 
 // handleLogin answers a password attempt. Unlike the other anonymous
 // questions this one is served whatever the inbound route — a
@@ -337,95 +255,6 @@ func (e *engine) answerRequest(args []byte) (body []byte, answered bool) {
 
 // statusBody packs the repeater statistics a companion's status page
 // reads — the reference's RepeaterStats, field for field, in its own
-// little-endian order.
-func (e *engine) statusBody() []byte {
-	s := e.stats.snapshot()
-	nf := int16(0)
-	if e.floor != nil {
-		if f, ok := e.floor(); ok {
-			nf = int16(f.DBm)
-		}
-	}
-	out := make([]byte, 0, 56)
-	u16 := func(v uint16) { out = binary.LittleEndian.AppendUint16(out, v) }
-	u32 := func(v uint32) { out = binary.LittleEndian.AppendUint32(out, v) }
-
-	u16(0) // battery millivolts: mains powered, and a lie would be worse
-	u16(uint16(e.queueLen()))
-	u16(uint16(nf))
-	u16(uint16(int16(s.LastRSSI)))
-	u32(s.RecvTotal)
-	u32(s.SentFlood + s.SentDirect)
-	u32(uint32(s.TxAirtime / time.Second))
-	u32(uint32(time.Since(e.started) / time.Second))
-	u32(s.SentFlood)
-	u32(s.SentDirect)
-	u32(s.RecvFlood)
-	u32(s.RecvDirect)
-	u16(0) // error events: none tracked as a bitfield here
-	u16(uint16(int16(s.LastSNR * 4)))
-	u16(uint16(s.DirectDups))
-	u16(uint16(s.FloodDups))
-	u32(uint32(s.RxAirtime / time.Second))
-	u32(s.RecvErrors)
-	return out
-}
-
-// telemetryBody reports what this node can honestly measure about
-// itself, in the Cayenne encoding companions expect.
-func (e *engine) telemetryBody() []byte {
-	enc := meshcore.NewLPPEncoder()
-	if c, ok := hostTemperature(); ok {
-		_ = enc.Add(meshcore.LPPReading{
-			Channel: telemChannelSelf, Type: meshcore.LPPTemperature, Value: c,
-		})
-	}
-	return enc.Bytes()
-}
-
-// neighboursBody answers the neighbourhood query: the total known, how
-// many are returned, then each one's key prefix, how long ago it was
-// heard, and the SNR it was heard at.
-func (e *engine) neighboursBody(args []byte) []byte {
-	if len(args) < 7 || args[1] != 0 {
-		return nil // only version 0 exists
-	}
-	count := int(args[2])
-	offset := int(binary.LittleEndian.Uint16(args[3:5]))
-	orderBy := args[5]
-	prefixLen := min(int(args[6]), meshcore.PubKeySize)
-
-	all := e.neighbours.snapshot() // newest heard first
-	switch orderBy {
-	case 1: // oldest to newest
-		sort.SliceStable(all, func(i, j int) bool { return all[i].Heard.Before(all[j].Heard) })
-	case 2: // strongest to weakest
-		sort.SliceStable(all, func(i, j int) bool { return all[i].SNR > all[j].SNR })
-	case 3: // weakest to strongest
-		sort.SliceStable(all, func(i, j int) bool { return all[i].SNR < all[j].SNR })
-	}
-
-	// The reference bounds its results buffer; so does this, and the
-	// count it reports is what actually fits.
-	const maxResults = 130
-	entry := prefixLen + 5
-	var rows []byte
-	returned := 0
-	now := time.Now()
-	for i := offset; i < len(all) && returned < count; i++ {
-		if len(rows)+entry > maxResults {
-			break
-		}
-		n := all[i]
-		rows = append(rows, n.PubKey[:prefixLen]...)
-		rows = binary.LittleEndian.AppendUint32(rows, uint32(now.Sub(n.Heard)/time.Second))
-		rows = append(rows, byte(int8(n.SNR*4)))
-		returned++
-	}
-	out := binary.LittleEndian.AppendUint16(nil, uint16(len(all)))
-	out = binary.LittleEndian.AppendUint16(out, uint16(returned))
-	return append(out, rows...)
-}
 
 // cString reads up to the terminator, the form every password and name
 // crosses the air in.
