@@ -3,6 +3,7 @@ package meshcore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"sync/atomic"
 	"time"
@@ -110,6 +111,11 @@ func (q *txQueue) nextDue(now time.Time) (time.Duration, bool) {
 func (e *engine) Arm(p protocol.TXPolicy) error {
 	if e.id == nil {
 		return errors.New("tx: relaying needs a node identity — the path carries our hash")
+	}
+	if e.p.DutyCyclePct <= 0 {
+		return fmt.Errorf(
+			"tx: mode %s needs duty_cycle_pct on this relay's band — set the lawful ceiling, "+
+				"or 100 to state the band has none", p.Mode)
 	}
 	e.policy = p
 	e.queue = &txQueue{depth: p.QueueDepth}

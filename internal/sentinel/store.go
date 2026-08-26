@@ -15,7 +15,11 @@ import (
 // the mode for hosts whose storage dislikes continuous writes.
 const MemoryJournal = ":memory:"
 
-const schema = `
+// schemaTables and schemaIndexes are applied either side of the
+// grafts: an index over a column migrate is about to add cannot be
+// created before that column exists, and an older journal would
+// fail its open rather than reach the migration that saves it.
+const schemaTables = `
 CREATE TABLE IF NOT EXISTS frames (
 	txn          TEXT PRIMARY KEY,
 	relay        TEXT NOT NULL,
@@ -35,16 +39,12 @@ CREATE TABLE IF NOT EXISTS frames (
 	pubkey       TEXT NOT NULL DEFAULT '',
 	detail       TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS frames_at ON frames(at_ms);
-CREATE INDEX IF NOT EXISTS frames_pubkey ON frames(pubkey, at_ms);
-CREATE INDEX IF NOT EXISTS frames_dup ON frames(duplicate_of);
 CREATE TABLE IF NOT EXISTS relay_states (
 	at_ms INTEGER NOT NULL,
 	relay TEXT NOT NULL,
 	state TEXT NOT NULL,
 	err   TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS relay_states_at ON relay_states(at_ms);
 CREATE TABLE IF NOT EXISTS noise (
 	relay      TEXT PRIMARY KEY,
 	count      INTEGER NOT NULL DEFAULT 0,
@@ -66,8 +66,6 @@ CREATE TABLE IF NOT EXISTS tx (
 	power_dbm  INTEGER NOT NULL,
 	shadow     INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS tx_txn ON tx(txn);
-CREATE INDEX IF NOT EXISTS tx_at ON tx(at_ms);
 CREATE TABLE IF NOT EXISTS tx_drops (
 	relay      TEXT NOT NULL,
 	reason     TEXT NOT NULL,
@@ -81,7 +79,6 @@ CREATE TABLE IF NOT EXISTS metrics_raw (
 	at_ms  INTEGER NOT NULL,
 	value  REAL NOT NULL
 );
-CREATE INDEX IF NOT EXISTS metrics_raw_key ON metrics_raw(series, relay, at_ms);
 CREATE TABLE IF NOT EXISTS metrics_hourly (
 	series TEXT NOT NULL,
 	relay  TEXT NOT NULL,
@@ -102,6 +99,15 @@ CREATE TABLE IF NOT EXISTS metrics_daily (
 	n      INTEGER NOT NULL,
 	PRIMARY KEY (series, relay, at_ms)
 );
+`
+
+const schemaIndexes = `CREATE INDEX IF NOT EXISTS frames_at ON frames(at_ms);
+CREATE INDEX IF NOT EXISTS frames_pubkey ON frames(pubkey, at_ms);
+CREATE INDEX IF NOT EXISTS frames_dup ON frames(duplicate_of);
+CREATE INDEX IF NOT EXISTS relay_states_at ON relay_states(at_ms);
+CREATE INDEX IF NOT EXISTS tx_txn ON tx(txn);
+CREATE INDEX IF NOT EXISTS tx_at ON tx(at_ms);
+CREATE INDEX IF NOT EXISTS metrics_raw_key ON metrics_raw(series, relay, at_ms);
 `
 
 // Frame is one journalled reception, judgement included once it lands.
@@ -149,7 +155,7 @@ func openStore(ctx context.Context, path string) (*store, error) {
 			return nil, fmt.Errorf("journal pragmas: %w", err)
 		}
 	}
-	if _, err := db.ExecContext(ctx, schema); err != nil {
+	if _, err := db.ExecContext(ctx, schemaTables); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("journal schema: %w", err)
 	}
@@ -157,40 +163,89 @@ func openStore(ctx context.Context, path string) (*store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("journal migration: %w", err)
 	}
+	if _, err := db.ExecContext(ctx, schemaIndexes); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("journal indexes: %w", err)
+	}
 	return &store{db: db}, nil
 }
 
-// migrate brings a journal created by an earlier schema up to date.
-// CREATE IF NOT EXISTS leaves an existing table alone, so columns
-// added since are grafted here, idempotently.
+// graft is one column added to a table after it first shipped.
+type graft struct{ column, ddl string }
+
+// The column shapes the grafts use.
+const (
+	ddlText = "TEXT NOT NULL DEFAULT ''"
+	ddlReal = "REAL NOT NULL DEFAULT 0"
+	ddlInt  = "INTEGER NOT NULL DEFAULT 0"
+)
+
+// grafts lists every column added since a table first shipped. CREATE
+// IF NOT EXISTS leaves an existing table alone, so a journal from an
+// older build reaches the current schema through here — and every
+// column added to a shipped table belongs on this list, or that
+// journal fails its first insert.
+var grafts = map[string][]graft{
+	// Every frames column that carries a default is listed, not just
+	// the ones added last: the list costs nothing on a current journal
+	// and spares an older one a cryptic failure when an index reaches
+	// for a column nobody grafted.
+	"frames": {
+		{"ptype", ddlText},
+		{"route", ddlText},
+		{"path_len", ddlInt},
+		{"verdict", ddlText},
+		{"duplicate_of", ddlText},
+		{"node", ddlText},
+		{"pubkey", ddlText},
+		{"detail", ddlText},
+		{"signal_dbm", ddlReal},
+		{"freq_err_hz", ddlReal},
+	},
+	"noise_floor": {
+		{"spread_db", ddlReal},
+	},
+}
+
+// migrate brings a journal created by an earlier schema up to date,
+// idempotently.
 func migrate(ctx context.Context, db *sql.DB) error {
-	cols := map[string]bool{}
-	rows, err := db.QueryContext(ctx, `PRAGMA table_info(frames)`)
+	for table, cols := range grafts {
+		present, err := tableColumns(ctx, db, table)
+		if err != nil {
+			return err
+		}
+		for _, c := range cols {
+			if present[c.column] {
+				continue
+			}
+			if _, err := db.ExecContext(ctx,
+				fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, c.column, c.ddl)); err != nil {
+				return fmt.Errorf("graft %s.%s: %w", table, c.column, err)
+			}
+		}
+	}
+	return nil
+}
+
+// tableColumns reads a table's current column set.
+func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
+	cols := map[string]bool{}
 	for rows.Next() {
 		var cid, notnull, pk int
 		var name, ctype string
 		var dflt any
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return err
+			return nil, err
 		}
 		cols[name] = true
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, col := range []string{"node", "pubkey", "detail"} {
-		if !cols[col] {
-			if _, err := db.ExecContext(ctx,
-				fmt.Sprintf(`ALTER TABLE frames ADD COLUMN %s TEXT NOT NULL DEFAULT ''`, col)); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return cols, rows.Err()
 }
 
 func (s *store) insertHeard(ctx context.Context, f Frame) error {
@@ -321,25 +376,37 @@ const (
 // hourly buckets, hourly older than the journal's retention into daily
 // ones, and daily rows fall off after two years.
 func (s *store) rollupMetrics(ctx context.Context, now time.Time, retention time.Duration) error {
-	rawCut := (now.Add(-metricRawKeep).UnixMilli() / hourMS) * hourMS
-	if _, err := s.db.ExecContext(ctx, rollupRawSQL, rawCut, hourMS); err != nil {
+	// One transaction per pass: a consolidation folds rows into a
+	// bucket and then deletes them, so a crash between the two would
+	// double that bucket's count for good — the tiers are supposed to
+	// be a lossless retelling, not an approximation that drifts.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx,
+	defer func() { _ = tx.Rollback() }()
+
+	rawCut := (now.Add(-metricRawKeep).UnixMilli() / hourMS) * hourMS
+	if _, err := tx.ExecContext(ctx, rollupRawSQL, rawCut, hourMS); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM metrics_raw WHERE at_ms < ?`, rawCut); err != nil {
 		return err
 	}
 	hourlyCut := (now.Add(-retention).UnixMilli() / dayMS) * dayMS
-	if _, err := s.db.ExecContext(ctx, rollupHourlySQL, hourlyCut, dayMS); err != nil {
+	if _, err := tx.ExecContext(ctx, rollupHourlySQL, hourlyCut, dayMS); err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM metrics_hourly WHERE at_ms < ?`, hourlyCut); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM metrics_daily WHERE at_ms < ?`, now.Add(-metricDailyKeep).UnixMilli())
-	return err
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM metrics_daily WHERE at_ms < ?`, now.Add(-metricDailyKeep).UnixMilli()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // MetricBucket is one consolidated span of a series' history.

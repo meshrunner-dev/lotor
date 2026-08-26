@@ -18,7 +18,7 @@ var presets = map[string]map[string]any{
 		"tcxo":             "1.8",
 		"dcdc":             true,
 		"rx_boosted":       true,
-		"chip":             "sx1262",
+		"chip":             chipSX1262,
 		"max_tx_power_dbm": int8(22),
 		"frequency_range":  []uint32{850_000_000, 930_000_000},
 	},

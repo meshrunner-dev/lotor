@@ -382,7 +382,7 @@ func assemble(name string, rc config.Relay, radioSpec config.Radio,
 		return nil, none, fmt.Errorf("radio %q: %w", rc.Radio, err)
 	}
 
-	policy, err := resolveTX(rc, env, eng)
+	policy, err := resolveTX(rc, env, eng, drv, radioCfg)
 	if err != nil {
 		return nil, none, err
 	}
@@ -446,10 +446,20 @@ func armEngine(protocolName string, policy protocol.TXPolicy, eng protocol.Engin
 // board's declared ceiling — and on-air additionally refuses to exist
 // without that ceiling. A violation is a stillborn relay, never a
 // silent dry.
-func resolveTX(rc config.Relay, env radio.Envelope, eng protocol.Engine) (protocol.TXPolicy, error) {
+func resolveTX(rc config.Relay, env radio.Envelope, eng protocol.Engine,
+	drv radio.Driver, radioCfg map[string]any,
+) (protocol.TXPolicy, error) {
 	policy := protocol.TXPolicy{Mode: rc.TXMode()}
 	if policy.Mode == config.TXDry {
 		return policy, nil
+	}
+	// What the radio itself requires before it can key at all: a
+	// relay that could never transmit must not spend its life
+	// reopening the radio and failing on the first frame.
+	if drv.CheckTransmit != nil {
+		if err := drv.CheckTransmit(radioCfg); err != nil {
+			return policy, fmt.Errorf("tx: mode %s: %w", policy.Mode, err)
+		}
 	}
 	policy.LBTThresholdDB = rc.TX.LBTThresholdDB
 	policy.LBTExhausted = rc.TX.LBTExhausted

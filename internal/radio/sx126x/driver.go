@@ -55,6 +55,39 @@ type Settings struct {
 	FrequencyRangeHz []uint32 `yaml:"frequency_range"`
 }
 
+// The parts this driver's transmit tables cover. The SX126x version
+// register cannot tell them apart, so the integrator declares which
+// one is on the board — and the PA tables differ destructively
+// between them.
+const (
+	chipSX1261 = "sx1261"
+	chipSX1262 = "sx1262"
+	chipSX1268 = "sx1268"
+)
+
+var knownChips = map[string]bool{chipSX1261: true, chipSX1262: true, chipSX1268: true}
+
+// checkTransmit reports why this radio could not key as configured.
+func checkTransmit(cfg map[string]any) error {
+	s, err := settingsFrom(cfg)
+	if err != nil {
+		return err
+	}
+	if s.Chip == "" {
+		return errors.New(
+			"sx126x-spi: transmitting needs chip: (" + chipSX1261 + ", " + chipSX1262 +
+				" or " + chipSX1268 + ") — " +
+				"the version register cannot identify the part, and the PA tables differ")
+	}
+	if !knownChips[s.Chip] {
+		return fmt.Errorf("sx126x-spi: unknown chip %q", s.Chip)
+	}
+	if s.MaxTxPowerDBm == 0 {
+		return errors.New("sx126x-spi: transmitting needs max_tx_power_dbm declared")
+	}
+	return nil
+}
+
 func settingsFrom(cfg map[string]any) (Settings, error) {
 	s, err := config.Decode[Settings](cfg)
 	if err != nil {

@@ -18,7 +18,9 @@ import (
 )
 
 func init() {
-	radio.Register("sx126x-spi", radio.Driver{Open: open, Inspect: Inspect, Presets: Presets()})
+	radio.Register("sx126x-spi", radio.Driver{
+		Open: open, Inspect: Inspect, CheckTransmit: checkTransmit, Presets: Presets(),
+	})
 }
 
 type device struct {
@@ -386,11 +388,11 @@ func chipFrom(s string) (sx126x.ChipVariant, error) {
 	switch s {
 	case "":
 		return sx126x.ChipUnset, nil
-	case "sx1261":
+	case chipSX1261:
 		return sx126x.SX1261, nil
-	case "sx1262":
+	case chipSX1262:
 		return sx126x.SX1262, nil
-	case "sx1268":
+	case chipSX1268:
 		return sx126x.SX1268, nil
 	}
 	return sx126x.ChipUnset, fmt.Errorf("unknown chip %q", s)

@@ -2,6 +2,7 @@ package sentinel
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -346,5 +347,59 @@ func TestTxLedgerAndDrops(t *testing.T) {
 	}
 	if airtime != 1.2 {
 		t.Fatalf("tx_airtime point = %v, want 1.2 s", airtime)
+	}
+}
+
+func TestMigrateGraftsEveryColumnAddedSince(t *testing.T) {
+	// A journal written by an older build carries the tables as they
+	// were; opening it must reach today's schema, not fail the first
+	// insert.
+	path := t.TempDir() + "/old.db"
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.ExecContext(context.Background(), `
+		CREATE TABLE frames (
+			txn TEXT PRIMARY KEY, relay TEXT NOT NULL, at_ms INTEGER NOT NULL,
+			bytes INTEGER NOT NULL, rssi_dbm REAL NOT NULL, snr_db REAL NOT NULL,
+			airtime_ms REAL NOT NULL);
+		CREATE TABLE noise_floor (
+			relay TEXT PRIMARY KEY, at_ms INTEGER NOT NULL, dbm REAL NOT NULL);`); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	st, err := openStore(ctx, path)
+	if err != nil {
+		t.Fatalf("opening an older journal: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	for table, want := range map[string][]string{
+		"frames":      {"node", "pubkey", "detail", "signal_dbm", "freq_err_hz"},
+		"noise_floor": {"spread_db"},
+	} {
+		cols, err := tableColumns(ctx, st.db, table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range want {
+			if !cols[c] {
+				t.Errorf("%s.%s was never grafted", table, c)
+			}
+		}
+	}
+	// And the grafted journal takes today's writes.
+	s := &Sentinel{store: st}
+	s.Process(ctx, bus.FrameHeard{
+		Relay: "r", Txn: txn.New(), At: time.Now(), SignalRSSI: -70, FreqErrHz: 12})
+	s.Process(ctx, bus.NoiseFloor{Relay: "r", At: time.Now(), DBm: -100, SpreadDB: 3})
+	frames, err := st.RecentFrames(ctx, FrameQuery{Limit: 5})
+	if err != nil || len(frames) != 1 || frames[0].SignalRSSI != -70 {
+		t.Fatalf("frames = %+v, %v", frames, err)
 	}
 }

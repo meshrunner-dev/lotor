@@ -100,7 +100,7 @@ func txRig(t *testing.T, mode string) (*engine, *fakeDevice, *bus.Subscription, 
 	t.Cleanup(sub.Close)
 	e := &engine{
 		relay: "test-868",
-		p:     params{NodeName: "test"},
+		p:     params{NodeName: "test", DutyCyclePct: 100},
 		id:    self,
 		bus:   b,
 		log:   zap.NewNop(),
@@ -516,4 +516,17 @@ func TestKeyingSurvivesShutdown(t *testing.T) {
 	}
 	<-dev.sent
 	_ = sub
+}
+
+func TestArmRefusesAnUnbudgetedBand(t *testing.T) {
+	// A gate that cannot account for its airtime does not open: the
+	// operator states the band's ceiling, or states it has none.
+	e := &engine{id: &meshcore.LocalIdentity{}, p: params{}}
+	if err := e.Arm(protocol.TXPolicy{Mode: "shadow", QueueDepth: 2}); err == nil {
+		t.Fatal("shadow armed with no duty budget")
+	}
+	e.p.DutyCyclePct = 100
+	if err := e.Arm(protocol.TXPolicy{Mode: "on-air", QueueDepth: 2}); err != nil {
+		t.Fatalf("a band declaring no limit should arm: %v", err)
+	}
 }

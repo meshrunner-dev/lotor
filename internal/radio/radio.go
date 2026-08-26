@@ -156,7 +156,14 @@ type Device interface {
 type Driver struct {
 	Open    func(cfg map[string]any, log *zap.Logger) (Device, error)
 	Inspect func(cfg map[string]any) (Envelope, error)
-	Presets map[string]map[string]any
+	// CheckTransmit reports why this radio could not transmit as
+	// configured — a part the driver cannot identify, a ceiling left
+	// undeclared. Nil means the driver has no transmit prerequisites.
+	// A relay whose gate leaves dry asks this at assembly, so a
+	// transmitter that could never key is a stillborn relay instead of
+	// one that reopens its radio every few seconds forever.
+	CheckTransmit func(cfg map[string]any) error
+	Presets       map[string]map[string]any
 }
 
 var (
