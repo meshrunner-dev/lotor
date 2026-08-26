@@ -5,10 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
-	"os"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -118,15 +115,8 @@ func newACL() *acl {
 // put adds or refreshes a session, evicting the least recently active
 // one when the table is full.
 func (a *acl) put(c *client) {
-	if _, known := a.by[c.pubKey]; !known && len(a.by) >= maxClients {
-		var oldest [meshcore.PubKeySize]byte
-		first := true
-		for k, v := range a.by {
-			if first || v.lastActive.Before(a.by[oldest].lastActive) {
-				oldest, first = k, false
-			}
-		}
-		delete(a.by, oldest)
+	if _, known := a.by[c.pubKey]; !known {
+		evictOldest(a.by, maxClients, func(v *client) time.Time { return v.lastActive })
 	}
 	a.by[c.pubKey] = c
 }
@@ -466,19 +456,4 @@ func (e *engine) dropRateLimited(origin txn.ID) {
 	e.bus.Publish(bus.TxDropped{
 		Relay: e.relay, Txn: origin, At: time.Now(), Reason: "rate-limited",
 	})
-}
-
-// hostTemperature reads the host's own thermal sensor, the one figure
-// a mains-powered relay can honestly report about itself. Absent on
-// hosts without one, which is not a fault.
-func hostTemperature() (float64, bool) {
-	raw, err := os.ReadFile("/sys/class/thermal/thermal_zone0/temp")
-	if err != nil {
-		return 0, false
-	}
-	milli, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err != nil {
-		return 0, false
-	}
-	return float64(milli) / 1000, true
 }

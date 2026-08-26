@@ -11,19 +11,18 @@ import (
 // figures the GET_STATUS request returns and the console shows. The
 // engine's goroutine writes it; readers take a copy under the lock.
 type Stats struct {
-	mu sync.Mutex
+	StatsSnapshot
 
-	recvTotal             uint32
-	recvFlood, recvDirect uint32
-	sentFlood, sentDirect uint32
-	floodDups, directDups uint32
-	recvErrors            uint32
-	rxAirtime, txAirtime  time.Duration
-	lastRSSI, lastSNR     float64
+	mu sync.Mutex
 }
 
-// StatsSnapshot is a copy readable from any goroutine.
+// StatsSnapshot is the tally itself, copied out for any goroutine to
+// read. Stats embeds it rather than shadowing every field: eleven
+// counters written down three times is three chances to forget one.
 type StatsSnapshot struct {
+	// RecvTotal counts frames the radio handed us, whatever became of
+	// them; the route counters split what parsed, and the duplicate
+	// counters run alongside rather than instead.
 	RecvTotal             uint32
 	RecvFlood, RecvDirect uint32
 	SentFlood, SentDirect uint32
@@ -38,21 +37,21 @@ type StatsSnapshot struct {
 func (s *Stats) countHeard(pkt *meshcore.Packet, rssi, snr float64, airtime time.Duration, dup bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastRSSI, s.lastSNR = rssi, snr
-	s.rxAirtime += airtime
+	s.LastRSSI, s.LastSNR = rssi, snr
+	s.RxAirtime += airtime
 	// The reference counts a reception by its route whether or not a
 	// copy came before it, and keeps the duplicate tallies alongside
 	// rather than instead: a companion reads the dup ratio from both.
 	flood := pkt.IsRouteFlood()
 	if flood {
-		s.recvFlood++
+		s.RecvFlood++
 	} else {
-		s.recvDirect++
+		s.RecvDirect++
 	}
 	if dup && flood {
-		s.floodDups++
+		s.FloodDups++
 	} else if dup {
-		s.directDups++
+		s.DirectDups++
 	}
 }
 
@@ -62,25 +61,25 @@ func (s *Stats) countHeard(pkt *meshcore.Packet, rssi, snr float64, airtime time
 func (s *Stats) countFrame() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.recvTotal++
+	s.RecvTotal++
 }
 
 // countCorrupt records a reception the radio could not decode.
 func (s *Stats) countCorrupt() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.recvErrors++
+	s.RecvErrors++
 }
 
 // countSent records one emission by its route.
 func (s *Stats) countSent(flood bool, airtime time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.txAirtime += airtime
+	s.TxAirtime += airtime
 	if flood {
-		s.sentFlood++
+		s.SentFlood++
 	} else {
-		s.sentDirect++
+		s.SentDirect++
 	}
 }
 
@@ -88,13 +87,5 @@ func (s *Stats) countSent(flood bool, airtime time.Duration) {
 func (s *Stats) snapshot() StatsSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return StatsSnapshot{
-		RecvTotal: s.recvTotal,
-		RecvFlood: s.recvFlood, RecvDirect: s.recvDirect,
-		SentFlood: s.sentFlood, SentDirect: s.sentDirect,
-		FloodDups: s.floodDups, DirectDups: s.directDups,
-		RecvErrors: s.recvErrors,
-		RxAirtime:  s.rxAirtime, TxAirtime: s.txAirtime,
-		LastRSSI: s.lastRSSI, LastSNR: s.lastSNR,
-	}
+	return s.StatsSnapshot
 }
