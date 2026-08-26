@@ -13,16 +13,16 @@ import (
 	"meshrunner.dev/lotor/internal/txn"
 )
 
-// ownerReq builds the companion's "request name": an ephemeral-keyed
-// ANON_REQ of type owner, zero-hop direct, with an empty return path.
-func ownerReq(t *testing.T, self, peer *meshcore.LocalIdentity, ts uint32) (radio.Frame, []byte) {
+// anonAsk builds a companion's anonymous question: an ephemeral-keyed
+// ANON_REQ, zero-hop direct, with an empty return path.
+func anonAsk(t *testing.T, self, peer *meshcore.LocalIdentity, ts uint32, reqType byte) (radio.Frame, []byte) {
 	t.Helper()
 	secret, err := peer.SharedSecret(self.PubKey[:])
 	if err != nil {
 		t.Fatal(err)
 	}
 	plain := binary.LittleEndian.AppendUint32(nil, ts)
-	plain = append(plain, anonReqTypeOwner, 0) // type, then an empty return path
+	plain = append(plain, reqType, 0) // type, then an empty return path
 	pkt, err := meshcore.BuildAnonDatagram(self.PubKey[:1], peer.PubKey[:], secret, plain)
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +39,7 @@ func ownerReq(t *testing.T, self, peer *meshcore.LocalIdentity, ts uint32) (radi
 func TestRequestNameGetsTheName(t *testing.T) {
 	e, dev, sub, peer := txRig(t, "on-air")
 	runEngine(t, e, dev)
-	frame, secret := ownerReq(t, e.id, peer, 0x11223344)
+	frame, secret := anonAsk(t, e.id, peer, 0x11223344, anonReqTypeOwner)
 	dev.frames <- frame
 
 	sent := awaitSent(t, sub)
@@ -77,7 +77,7 @@ func TestAnonRepliesAreRateLimited(t *testing.T) {
 	e, dev, sub, peer := txRig(t, "shadow")
 	e.queue.depth = 16
 	for i := range anonLimitMax + 2 {
-		frame, _ := ownerReq(t, e.id, peer, uint32(i))
+		frame, _ := anonAsk(t, e.id, peer, uint32(i), anonReqTypeOwner)
 		pkt, err := meshcore.ParsePacket(frame.Payload)
 		if err != nil {
 			t.Fatal(err)
@@ -111,7 +111,7 @@ func TestUnreadableAnonTrafficRoutesOn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	frame, _ := ownerReq(t, other, peer, 7) // addressed to another node
+	frame, _ := anonAsk(t, other, peer, 7, anonReqTypeOwner) // addressed to another node
 	pkt, err := meshcore.ParsePacket(frame.Payload)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +124,7 @@ func TestUnreadableAnonTrafficRoutesOn(t *testing.T) {
 
 	// Addressed to us but flooded: consumed — read, never answered,
 	// never relayed (the reference marks it do-not-retransmit).
-	frame, _ = ownerReq(t, e.id, peer, 8)
+	frame, _ = anonAsk(t, e.id, peer, 8, anonReqTypeOwner)
 	pkt, err = meshcore.ParsePacket(frame.Payload)
 	if err != nil {
 		t.Fatal(err)
@@ -138,5 +138,55 @@ func TestUnreadableAnonTrafficRoutesOn(t *testing.T) {
 	e.respondAnon(newFakeDevice(), pkt, txn.New())
 	if len(e.queue.entries) != before {
 		t.Fatal("a flooded owner request was answered — the reference gates on direct")
+	}
+}
+
+// askAndOpen drives one anonymous question through a running engine
+// and returns the decrypted reply body after the echoed tag and clock.
+func askAndOpen(t *testing.T, reqType byte) []byte {
+	t.Helper()
+	e, dev, sub, peer := txRig(t, "on-air")
+	runEngine(t, e, dev)
+	frame, secret := anonAsk(t, e.id, peer, 0xCAFE, reqType)
+	dev.frames <- frame
+
+	if sent := awaitSent(t, sub); sent.Kind != "anon-resp" {
+		t.Fatalf("sent = %+v", sent)
+	}
+	pkt, err := meshcore.ParsePacket(<-dev.sent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dg, err := meshcore.ParseDatagram(pkt.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := dg.Open(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts, rest, err := meshcore.UnframeAdmin(plain)
+	if err != nil || ts != 0xCAFE {
+		t.Fatalf("tag = %x (%v)", ts, err)
+	}
+	if len(rest) < 4 {
+		t.Fatalf("no clock in the reply: %x", rest)
+	}
+	now := binary.LittleEndian.Uint32(rest[:4])
+	if delta := int64(now) - time.Now().Unix(); delta < -5 || delta > 5 {
+		t.Fatalf("clock off by %d s", delta)
+	}
+	return bytes.TrimRight(rest[4:], "\x00")
+}
+
+func TestClockRequestGetsTheClock(t *testing.T) {
+	if text := askAndOpen(t, anonReqTypeBasic); len(text) != 0 {
+		t.Fatalf("clock reply carries text %q — the clock alone is the answer", text)
+	}
+}
+
+func TestRegionsRequestGetsThePlaceholders(t *testing.T) {
+	if text := askAndOpen(t, anonReqTypeRegions); string(text) != "lotor-1,lotor-2" {
+		t.Fatalf("regions = %q, want the placeholders", text)
 	}
 }
