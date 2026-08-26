@@ -125,6 +125,10 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 	if e.id == nil {
 		return errors.New("tx: relaying needs a node identity — the path carries our hash")
 	}
+	if e.p.NodeName == "" {
+		return errors.New("tx: announcing needs node_name — the advert carries it, " +
+			"and a config slug is not a name")
+	}
 	if e.p.DutyCyclePct <= 0 {
 		return fmt.Errorf(
 			"tx: mode %s needs duty_cycle_pct on this relay's band — set the lawful ceiling, "+

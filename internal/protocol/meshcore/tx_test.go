@@ -580,7 +580,7 @@ func TestKeyingSurvivesShutdown(t *testing.T) {
 func TestArmRefusesAnUnbudgetedBand(t *testing.T) {
 	// A gate that cannot account for its airtime does not open: the
 	// operator states the band's ceiling, or states it has none.
-	e := &engine{id: &meshcore.LocalIdentity{}, p: params{}}
+	e := &engine{id: &meshcore.LocalIdentity{}, p: params{NodeName: "test"}}
 	if err := e.Arm(protocol.TXPolicy{Mode: "shadow", QueueDepth: 2}); err == nil {
 		t.Fatal("shadow armed with no duty budget")
 	}
@@ -784,5 +784,14 @@ func TestZeroHopRungKeysOnlyTheNeighbourhood(t *testing.T) {
 	}
 	if pkt, err := meshcore.ParsePacket(<-dev.sent); err != nil || !pkt.IsRouteDirect() {
 		t.Fatalf("keyed frame: %v (%v)", pkt, err)
+	}
+}
+
+func TestArmRefusesANamelessNode(t *testing.T) {
+	// The advert carries the name every companion screen will show;
+	// a config slug is not a name, so there is no default.
+	e := &engine{id: &meshcore.LocalIdentity{}, p: params{DutyCyclePct: 100}}
+	if err := e.Arm(protocol.TXPolicy{Mode: "shadow", QueueDepth: 2}); err == nil {
+		t.Fatal("armed without a node_name")
 	}
 }

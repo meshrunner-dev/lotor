@@ -70,7 +70,10 @@ type params struct {
 	// choice, one boot announcement goes out shortly after the
 	// pipeline comes up, as the reference's does.
 	AdvertLocalInterval time.Duration `yaml:"advert_local_interval"`
-	// NodeName is the name adverts carry; the relay's name by default.
+	// NodeName is the name adverts carry — what the mesh's directories
+	// and every companion screen will call this node. There is no
+	// default: a config slug is an implementation detail, not a name,
+	// and announcing needs a deliberate one.
 	NodeName string `yaml:"node_name"`
 
 	// Identity is this relay's node key material, inline and in hex:
@@ -172,9 +175,6 @@ func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (p
 	}
 	if p.AdvertLocalInterval == 0 {
 		p.AdvertLocalInterval = 2 * time.Hour
-	}
-	if p.NodeName == "" {
-		p.NodeName = relayName
 	}
 	var id *meshcore.LocalIdentity
 	if p.Identity != "" {
