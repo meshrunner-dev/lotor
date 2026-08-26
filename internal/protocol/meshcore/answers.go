@@ -59,6 +59,31 @@ func (e *engine) telemetryBody() []byte {
 	return enc.Bytes()
 }
 
+// The orderings the query may ask for, as the reference numbers them.
+const (
+	orderNewestFirst    = 0
+	orderOldestFirst    = 1
+	orderStrongestFirst = 2
+	orderWeakestFirst   = 3
+)
+
+// orderNeighbours sorts a neighbourhood the way the query asked. An
+// order nobody defined leaves the newest-heard first, which is what
+// the table already gives — stated here rather than left to the
+// reader to discover in another file.
+func orderNeighbours(all []Neighbour, orderBy byte) {
+	switch orderBy {
+	case orderOldestFirst:
+		sort.SliceStable(all, func(i, j int) bool { return all[i].Heard.Before(all[j].Heard) })
+	case orderStrongestFirst:
+		sort.SliceStable(all, func(i, j int) bool { return all[i].SNR > all[j].SNR })
+	case orderWeakestFirst:
+		sort.SliceStable(all, func(i, j int) bool { return all[i].SNR < all[j].SNR })
+	case orderNewestFirst:
+	default: // an order we do not know is the order we already have
+	}
+}
+
 // neighboursBody answers the neighbourhood query: the total known, how
 // many are returned, then each one's key prefix, how long ago it was
 // heard, and the SNR it was heard at.
@@ -72,14 +97,7 @@ func (e *engine) neighboursBody(args []byte) []byte {
 	prefixLen := min(int(args[6]), meshcore.PubKeySize)
 
 	all := e.neighbours.snapshot() // newest heard first
-	switch orderBy {
-	case 1: // oldest to newest
-		sort.SliceStable(all, func(i, j int) bool { return all[i].Heard.Before(all[j].Heard) })
-	case 2: // strongest to weakest
-		sort.SliceStable(all, func(i, j int) bool { return all[i].SNR > all[j].SNR })
-	case 3: // weakest to strongest
-		sort.SliceStable(all, func(i, j int) bool { return all[i].SNR < all[j].SNR })
-	}
+	orderNeighbours(all, orderBy)
 
 	// The reference bounds its results buffer; so does this, and the
 	// count it reports is what actually fits.

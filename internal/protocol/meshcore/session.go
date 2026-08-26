@@ -77,7 +77,7 @@ const (
 	loginMaxSkew = 24 * time.Hour
 )
 
-// handleLogin answers a password attempt. Unlike the other anonymous
+// respondLogin answers a password attempt. Unlike the other anonymous
 // questions this one is served whatever the inbound route — a
 // companion that has not found a path yet floods it.
 func (e *engine) respondLogin(pkt *meshcore.Packet, senderPub, secret, plain []byte, origin txn.ID) {
@@ -122,7 +122,7 @@ func (e *engine) respondLogin(pkt *meshcore.Packet, senderPub, secret, plain []b
 		return
 	}
 	if ts <= c.lastTimestamp {
-		e.log.Warn("login replay refused", zap.String("txn", origin.Short()))
+		e.log.Debug("login replay refused", zap.String("txn", origin.Short()))
 		return
 	}
 	// Built before the session moves: a failure here would otherwise
@@ -201,7 +201,7 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 	pkt, c, plain := rx.pkt, rx.opened.session, rx.opened.plain
 	ts := binary.LittleEndian.Uint32(plain[:4])
 	if ts <= c.lastTimestamp {
-		e.log.Warn("request replay refused", zap.String("txn", origin.Short()))
+		e.log.Debug("request replay refused", zap.String("txn", origin.Short()))
 		return
 	}
 	// A live session still costs the mesh something: every answer
