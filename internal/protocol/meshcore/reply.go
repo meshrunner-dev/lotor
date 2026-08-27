@@ -1,8 +1,6 @@
 package meshcore
 
 import (
-	"encoding/binary"
-
 	"go.uber.org/zap"
 
 	"meshrunner.dev/pkg/meshcore"
@@ -51,8 +49,7 @@ type answer struct {
 // narrower one collides more often for the repeaters carrying it.
 func (e *engine) reply(inbound *meshcore.Packet, a answer, origin txn.ID) {
 	srcHash := e.id.PubKey[:meshcore.PathHashSize]
-	framed := binary.LittleEndian.AppendUint32(nil, a.tag)
-	framed = append(framed, a.body...)
+	framed := meshcore.FrameAdmin(a.tag, a.body)
 
 	if inbound.IsRouteFlood() {
 		pkt, err := meshcore.BuildPathReturn(a.destHash, srcHash, a.secret,

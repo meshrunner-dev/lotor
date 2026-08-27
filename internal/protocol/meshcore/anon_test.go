@@ -39,7 +39,7 @@ func anonAsk(t *testing.T, self, peer *meshcore.LocalIdentity, ts uint32, reqTyp
 func TestRequestNameGetsTheName(t *testing.T) {
 	e, dev, sub, peer := txRig(t, "on-air")
 	runEngine(t, e, dev)
-	frame, secret := anonAsk(t, e.id, peer, 0x11223344, anonReqTypeOwner)
+	frame, secret := anonAsk(t, e.id, peer, 0x11223344, meshcore.AnonReqOwner)
 	dev.frames <- frame
 
 	sent := awaitSent(t, sub)
@@ -77,7 +77,7 @@ func TestAnonRepliesAreRateLimited(t *testing.T) {
 	e, _, sub, peer := txRig(t, "shadow")
 	e.queue.depth = 16
 	for i := range anonLimitMax + 2 {
-		frame, _ := anonAsk(t, e.id, peer, uint32(i), anonReqTypeOwner)
+		frame, _ := anonAsk(t, e.id, peer, uint32(i), meshcore.AnonReqOwner)
 		pkt, err := meshcore.ParsePacket(frame.Payload)
 		if err != nil {
 			t.Fatal(err)
@@ -111,7 +111,7 @@ func TestUnreadableAnonTrafficRoutesOn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	frame, _ := anonAsk(t, other, peer, 7, anonReqTypeOwner) // addressed to another node
+	frame, _ := anonAsk(t, other, peer, 7, meshcore.AnonReqOwner) // addressed to another node
 	pkt, err := meshcore.ParsePacket(frame.Payload)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +124,7 @@ func TestUnreadableAnonTrafficRoutesOn(t *testing.T) {
 
 	// Addressed to us but flooded: consumed — read, never answered,
 	// never relayed (the reference marks it do-not-retransmit).
-	frame, _ = anonAsk(t, e.id, peer, 8, anonReqTypeOwner)
+	frame, _ = anonAsk(t, e.id, peer, 8, meshcore.AnonReqOwner)
 	pkt, err = meshcore.ParsePacket(frame.Payload)
 	if err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func askAndOpen(t *testing.T, reqType byte) []byte {
 }
 
 func TestClockRequestGetsTheClock(t *testing.T) {
-	if text := askAndOpen(t, anonReqTypeBasic); len(text) != 0 {
+	if text := askAndOpen(t, meshcore.AnonReqClock); len(text) != 0 {
 		t.Fatalf("clock reply carries text %q — the clock alone is the answer", text)
 	}
 }
@@ -188,7 +188,7 @@ func TestClockRequestGetsTheClock(t *testing.T) {
 func TestScopesRequestNamesWhatWeCarry(t *testing.T) {
 	// The answer is the reference's shape: the wildcard first when
 	// plain floods are carried, then each scope with its hash stripped.
-	if text := askAndOpen(t, anonReqTypeScopes); string(text) != "*" {
+	if text := askAndOpen(t, meshcore.AnonReqScopes); string(text) != "*" {
 		t.Fatalf("scopes = %q, want just the wildcard from a relay with none", text)
 	}
 }

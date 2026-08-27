@@ -1,9 +1,7 @@
 package meshcore
 
 import (
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/binary"
 	"encoding/hex"
 	"time"
 
@@ -30,15 +28,6 @@ const (
 	permAdmin    = 3
 	permRoleMask = 3
 
-	// The authenticated request types a client may send.
-	reqTypeGetStatus     = 0x01
-	reqTypeKeepAlive     = 0x02
-	reqTypeGetTelemetry  = 0x03
-	reqTypeGetNeighbours = 0x06
-	reqTypeGetOwnerInfo  = 0x07
-
-	// respLoginOK heads a successful login reply.
-	respLoginOK = 0
 	// firmwareVerLevel tells a companion which reply fields to expect;
 	// 2 is the level whose shapes this engine answers with.
 	firmwareVerLevel = 2
@@ -95,7 +84,10 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 		e.dropRateLimited(origin)
 		return
 	}
-	ts := binary.LittleEndian.Uint32(plain[:4])
+	ts, password, err := meshcore.AnonPassword(plain)
+	if err != nil {
+		return
+	}
 	// A session that does not survive a restart is a session an
 	// attacker can resurrect by replaying the login that made it,
 	// rolling its replay clock back to the capture. Nothing in the
@@ -108,8 +100,6 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 			zap.String("txn", origin.Short()), zap.Duration("skew", skew))
 		return
 	}
-	password := cString(plain[4:])
-
 	c := e.acl.get(senderPub)
 	switch {
 	case password == "" && c != nil:
@@ -144,9 +134,16 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 
 	e.log.Info("guest logged in", zap.String("txn", origin.Short()),
 		zap.String("pubkey", shortKey(c.pubKey[:])))
+	// A login reply echoes no tag: the reference puts its own clock in
+	// that position, so the frame's timestamp is the clock and the
+	// body is what follows it.
+	clock, rest, err := meshcore.UnframeAdmin(body)
+	if err != nil {
+		return
+	}
 	e.reply(pkt, answer{
 		destHash: c.pubKey[:meshcore.PathHashSize], secret: c.secret,
-		tag: binary.LittleEndian.Uint32(body[:4]), body: body[4:], kind: "login-resp",
+		tag: clock, body: rest, kind: "login-resp",
 		scope: e.replyScope(rx),
 	}, origin)
 }
@@ -156,19 +153,14 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 // random blob so two logins never hash alike, and the reply level we
 // answer at.
 func loginReply(c *client) ([]byte, error) {
-	body := make([]byte, 13)
-	binary.LittleEndian.PutUint32(body, uint32(time.Now().Unix()))
-	body[4] = respLoginOK
-	body[5] = 0 // legacy: recommended keep-alive interval, secs/16
-	if c.isAdmin() {
-		body[6] = 1
-	}
-	body[7] = c.perms
-	if _, err := rand.Read(body[8:12]); err != nil {
-		return nil, err
-	}
-	body[12] = firmwareVerLevel
-	return body, nil
+	return meshcore.FrameLoginReply(meshcore.LoginReply{
+		Clock:         uint32(time.Now().Unix()),
+		Result:        meshcore.LoginOK,
+		KeepAlive:     0, // legacy hint, in units of sixteen seconds
+		IsAdmin:       c.isAdmin(),
+		Permissions:   c.perms,
+		FirmwareLevel: firmwareVerLevel,
+	})
 }
 
 // reqVerdict judges an authenticated request: ours to read only when a
@@ -204,7 +196,10 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 		return
 	}
 	pkt, c, plain := rx.pkt, rx.opened.session, rx.opened.plain
-	ts := binary.LittleEndian.Uint32(plain[:4])
+	ts, args, err := meshcore.UnframeAdmin(plain)
+	if err != nil {
+		return
+	}
 	if ts <= c.lastTimestamp {
 		e.log.Debug("request replay refused", zap.String("txn", origin.Short()))
 		return
@@ -217,7 +212,7 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 		e.dropRateLimited(origin)
 		return
 	}
-	body, answered := e.answerRequest(plain[4:])
+	body, answered := e.answerRequest(args)
 	// A question we do not answer still proves the client is there:
 	// the keep-alive exists for exactly that, and retiring the
 	// companion that sends one instead of polling would be perverse.
@@ -241,36 +236,22 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 // still owes the asker a reply saying so.
 func (e *engine) answerRequest(args []byte) (body []byte, answered bool) {
 	switch args[0] {
-	case reqTypeGetStatus:
+	case meshcore.ReqGetStatus:
 		return e.statusBody(), true
-	case reqTypeGetTelemetry:
+	case meshcore.ReqGetTelemetry:
 		return e.telemetryBody(), true
-	case reqTypeGetNeighbours:
+	case meshcore.ReqGetNeighbours:
 		b := e.neighboursBody(args)
 		return b, b != nil
-	case reqTypeGetOwnerInfo:
+	case meshcore.ReqGetOwnerInfo:
 		return []byte("lotor " + version.Version + "\n" + e.p.NodeName + "\n" + e.p.OwnerInfo), true
-	case reqTypeKeepAlive:
+	case meshcore.ReqKeepAlive:
 		// The reference answers nothing here either, and the session's
 		// clock has already moved on the request that carried it.
 		return nil, false
 	default:
 		return nil, false
 	}
-}
-
-// statusBody packs the repeater statistics a companion's status page
-// reads — the reference's RepeaterStats, field for field, in its own
-
-// cString reads up to the terminator, the form every password and name
-// crosses the air in.
-func cString(b []byte) string {
-	for i, c := range b {
-		if c == 0 {
-			return string(b[:i])
-		}
-	}
-	return string(b)
 }
 
 // shortKey is a public key's readable prefix.

@@ -3,6 +3,8 @@ package meshcore
 import (
 	"testing"
 	"time"
+
+	"meshrunner.dev/pkg/meshcore"
 )
 
 func TestNeighbourOrderings(t *testing.T) {
@@ -19,10 +21,10 @@ func TestNeighbourOrderings(t *testing.T) {
 		first float64 // the SNR the first row should carry
 		what  string
 	}{
-		{orderNewestFirst, -2, "newest heard"},
-		{orderOldestFirst, 9, "oldest heard"},
-		{orderStrongestFirst, 9, "strongest"},
-		{orderWeakestFirst, -2, "weakest"},
+		{meshcore.NeighboursNewestFirst, -2, "newest heard"},
+		{meshcore.NeighboursOldestFirst, 9, "oldest heard"},
+		{meshcore.NeighboursStrongestFirst, 9, "strongest"},
+		{meshcore.NeighboursWeakestFirst, -2, "weakest"},
 		{200, -2, "an order nobody defined leaves what the table gave"},
 	} {
 		all := append([]Neighbour(nil), base...)

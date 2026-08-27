@@ -48,4 +48,7 @@ type opened struct {
 	session *client
 	secret  []byte
 	plain   []byte
+	// req is the decoded anonymous question, nil when the plaintext
+	// held a password rather than one of the typed questions.
+	req *meshcore.AnonRequest
 }

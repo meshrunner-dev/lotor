@@ -6,14 +6,15 @@ package meshcore
 // allowed to ask.
 
 import (
-	"encoding/binary"
 	"sort"
 	"time"
 
 	"meshrunner.dev/pkg/meshcore"
 )
 
-// little-endian order.
+// statusBody packs the tally a companion's status page reads. Two
+// fields this node cannot answer honestly are sent as zero: it has no
+// battery to measure, and it keeps no error bitfield.
 func (e *engine) statusBody() []byte {
 	s := e.stats.snapshot()
 	nf := int16(0)
@@ -22,29 +23,24 @@ func (e *engine) statusBody() []byte {
 			nf = int16(f.DBm)
 		}
 	}
-	out := make([]byte, 0, 56)
-	u16 := func(v uint16) { out = binary.LittleEndian.AppendUint16(out, v) }
-	u32 := func(v uint32) { out = binary.LittleEndian.AppendUint32(out, v) }
-
-	u16(0) // battery millivolts: mains powered, and a lie would be worse
-	u16(uint16(e.queueLen()))
-	u16(uint16(nf))
-	u16(uint16(int16(s.LastRSSI)))
-	u32(s.RecvTotal)
-	u32(s.SentFlood + s.SentDirect)
-	u32(uint32(s.TxAirtime / time.Second))
-	u32(uint32(time.Since(e.started) / time.Second))
-	u32(s.SentFlood)
-	u32(s.SentDirect)
-	u32(s.RecvFlood)
-	u32(s.RecvDirect)
-	u16(0) // error events: none tracked as a bitfield here
-	u16(uint16(int16(s.LastSNR * 4)))
-	u16(uint16(s.DirectDups))
-	u16(uint16(s.FloodDups))
-	u32(uint32(s.RxAirtime / time.Second))
-	u32(s.RecvErrors)
-	return out
+	return meshcore.RepeaterStats{
+		TxQueueLen:    uint16(e.queueLen()),
+		NoiseFloor:    nf,
+		LastRSSI:      int16(s.LastRSSI),
+		PacketsRecv:   s.RecvTotal,
+		PacketsSent:   s.SentFlood + s.SentDirect,
+		TxAirtimeSecs: uint32(s.TxAirtime / time.Second),
+		UptimeSecs:    uint32(time.Since(e.started) / time.Second),
+		SentFlood:     s.SentFlood,
+		SentDirect:    s.SentDirect,
+		RecvFlood:     s.RecvFlood,
+		RecvDirect:    s.RecvDirect,
+		LastSNR:       s.LastSNR,
+		DirectDups:    uint16(s.DirectDups),
+		FloodDups:     uint16(s.FloodDups),
+		RxAirtimeSecs: uint32(s.RxAirtime / time.Second),
+		RecvErrors:    s.RecvErrors,
+	}.AppendTo(nil)
 }
 
 // telemetryBody reports what this node can honestly measure about
@@ -59,27 +55,19 @@ func (e *engine) telemetryBody() []byte {
 	return enc.Bytes()
 }
 
-// The orderings the query may ask for, as the reference numbers them.
-const (
-	orderNewestFirst    = 0
-	orderOldestFirst    = 1
-	orderStrongestFirst = 2
-	orderWeakestFirst   = 3
-)
-
 // orderNeighbours sorts a neighbourhood the way the query asked. An
 // order nobody defined leaves the newest-heard first, which is what
 // the table already gives — stated here rather than left to the
 // reader to discover in another file.
 func orderNeighbours(all []Neighbour, orderBy byte) {
 	switch orderBy {
-	case orderOldestFirst:
+	case meshcore.NeighboursOldestFirst:
 		sort.SliceStable(all, func(i, j int) bool { return all[i].Heard.Before(all[j].Heard) })
-	case orderStrongestFirst:
+	case meshcore.NeighboursStrongestFirst:
 		sort.SliceStable(all, func(i, j int) bool { return all[i].SNR > all[j].SNR })
-	case orderWeakestFirst:
+	case meshcore.NeighboursWeakestFirst:
 		sort.SliceStable(all, func(i, j int) bool { return all[i].SNR < all[j].SNR })
-	case orderNewestFirst:
+	case meshcore.NeighboursNewestFirst:
 	default: // an order we do not know is the order we already have
 	}
 }
@@ -88,35 +76,22 @@ func orderNeighbours(all []Neighbour, orderBy byte) {
 // many are returned, then each one's key prefix, how long ago it was
 // heard, and the SNR it was heard at.
 func (e *engine) neighboursBody(args []byte) []byte {
-	if len(args) < 7 || args[1] != 0 {
-		return nil // only version 0 exists
+	q, err := meshcore.ParseNeighboursQuery(args)
+	if err != nil {
+		return nil
 	}
-	count := int(args[2])
-	offset := int(binary.LittleEndian.Uint16(args[3:5]))
-	orderBy := args[5]
-	prefixLen := min(int(args[6]), meshcore.PubKeySize)
-
 	all := e.neighbours.snapshot() // newest heard first
-	orderNeighbours(all, orderBy)
+	orderNeighbours(all, q.OrderBy)
 
-	// The reference bounds its results buffer; so does this, and the
-	// count it reports is what actually fits.
-	const maxResults = 130
-	entry := prefixLen + 5
-	var rows []byte
-	returned := 0
 	now := time.Now()
-	for i := offset; i < len(all) && returned < count; i++ {
-		if len(rows)+entry > maxResults {
-			break
-		}
+	rows := make([]meshcore.NeighbourEntry, 0, q.Count)
+	for i := int(q.Offset); i < len(all) && len(rows) < int(q.Count); i++ {
 		n := all[i]
-		rows = append(rows, n.PubKey[:prefixLen]...)
-		rows = binary.LittleEndian.AppendUint32(rows, uint32(now.Sub(n.Heard)/time.Second))
-		rows = append(rows, byte(int8(n.SNR*4)))
-		returned++
+		rows = append(rows, meshcore.NeighbourEntry{
+			PubKeyPrefix: n.PubKey[:q.PrefixLen],
+			HeardSecsAgo: uint32(now.Sub(n.Heard) / time.Second),
+			SNR:          n.SNR,
+		})
 	}
-	out := binary.LittleEndian.AppendUint16(nil, uint16(len(all)))
-	out = binary.LittleEndian.AppendUint16(out, uint16(returned))
-	return append(out, rows...)
+	return meshcore.FrameNeighbours(len(all), rows)
 }

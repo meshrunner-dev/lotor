@@ -51,7 +51,7 @@ func TestAskingANeighbourItsScopes(t *testing.T) {
 		t.Fatal(err)
 	}
 	tag, body, err := meshcore.UnframeAdmin(plain)
-	if err != nil || len(body) < 1 || body[0] != anonReqTypeScopes {
+	if err != nil || len(body) < 1 || body[0] != meshcore.AnonReqScopes {
 		t.Fatalf("question body = %x (%v)", body, err)
 	}
 

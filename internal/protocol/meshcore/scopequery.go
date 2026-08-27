@@ -8,7 +8,6 @@ package meshcore
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -140,7 +139,10 @@ func (e *engine) drainScopeAsk(dev radio.Device, now time.Time) {
 // path of zero hops — we are adjacent by definition, since a scoped
 // mesh is learned one neighbour at a time.
 func (e *engine) scopeRequest(q *scopeQuery) (*meshcore.Packet, error) {
-	plain := meshcore.FrameAdmin(q.tag, []byte{anonReqTypeScopes, 0x00})
+	plain, err := meshcore.FrameAnonRequest(q.tag, meshcore.AnonReqScopes, 0, nil)
+	if err != nil {
+		return nil, err
+	}
 	pkt, err := meshcore.BuildAnonDatagram(
 		q.peer[:meshcore.PathHashSize], e.id.PubKey[:], q.secret, plain)
 	if err != nil {
@@ -173,34 +175,14 @@ func (e *engine) scopeAnswer(rx *reception) (verdict, why string, handled bool) 
 		return "", "", false // an answer to a question we did not ask
 	}
 	e.pendingScope = nil
-	names := parseScopeNames(body)
+	reply, err := meshcore.ParseAnonReply(body)
+	if err != nil {
+		return "", "", false
+	}
+	names := meshcore.ScopeNames(reply.Text)
 	select {
 	case q.answer <- names:
 	default:
 	}
 	return verdictScopeAnswer, fmt.Sprintf("carries %d scopes", len(names)), true
-}
-
-// parseScopeNames reads the answer's body: our neighbour's clock, then
-// the comma-separated names. The text stops at the first terminator —
-// the block cipher pads past it, and trimming from the right would let
-// anything hiding in that padding through.
-func parseScopeNames(body []byte) []string {
-	if len(body) < 4 {
-		return nil
-	}
-	text := body[4:]
-	for i, c := range text {
-		if c == 0 {
-			text = text[:i]
-			break
-		}
-	}
-	var out []string
-	for name := range strings.SplitSeq(string(text), ",") {
-		if n := strings.TrimSpace(name); n != "" {
-			out = append(out, n)
-		}
-	}
-	return out
 }

@@ -266,11 +266,10 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict string) {
 		// A trace whose next target hop is us walks on: our SNR
 		// reading — quarter-dB, one raw byte — joins the walked path
 		// (Mesh::onRecvPacket).
-		grown := make([]byte, 0, len(cp.Path)+1)
-		grown = append(grown, cp.Path...)
-		grown = append(grown, byte(int8(snr*4)))
-		cp.Path = grown
-		cp.PathLen++ // TRACE paths count raw bytes, no size bits
+		if err := cp.AppendTraceHop(snr); err != nil {
+			e.abandon(origin, "malformed", "trace path could not grow", err)
+			return
+		}
 		e.enqueue(dev, &cp, "relay-trace", origin, prioTrace, directDelayFactor)
 	}
 }
@@ -305,41 +304,34 @@ func (e *engine) dropOnFault(ctx context.Context, origin txn.ID, err error) {
 // extra copies of our own are added (the reference's extra-ACK count
 // ships at zero).
 func (e *engine) forwardMultipart(cp *meshcore.Packet, origin txn.ID) {
-	if len(cp.Payload) < 5 || meshcore.PayloadType(cp.Payload[0]&0x0F) != meshcore.PayloadTypeAck {
-		e.abandon(origin, "malformed", "multipart wraps no ack", nil)
+	mp, stripped, err := cp.UnwrapMultipart()
+	if err != nil || mp.Inner != meshcore.PayloadTypeAck || len(mp.Data) < 4 {
+		e.abandon(origin, "malformed", "multipart wraps no ack", err)
 		return
 	}
-	remaining := int(cp.Payload[0] >> 4)
 	// Dedup on the unwrapped shape, exactly as the reference hashes it:
 	// the multipart header over the stripped payload.
-	stripped := *cp
-	stripped.Payload = cp.Payload[1:]
 	if _, dup := e.seen.witness(stripped.Hash(), origin, time.Now()); dup {
 		e.bus.Publish(bus.TxDropped{
 			Relay: e.relay, Txn: origin, At: time.Now(), Reason: "duplicate",
 		})
 		return
 	}
-	if _, err := cp.ConsumeNextHop(); err != nil {
+	if _, err := stripped.ConsumeNextHop(); err != nil {
 		e.abandon(origin, "malformed", "multipart hop consume failed", err)
 		return
 	}
-	ack, err := meshcore.BuildAck(cp.Payload[1:5])
+	ack, err := meshcore.BuildAck(mp.Data[:4])
 	if err != nil {
 		e.abandon(origin, "malformed", "multipart ack rebuild failed", err)
 		return
 	}
 	// The unwrapped ACK travels the way its multipart did, scope
-	// included: the reference copies the inbound header rather than
-	// composing a fresh one, and dropping the scope mid-relay would
-	// strand the answer outside the mesh that asked for it.
-	ack.Header = meshcore.MakeHeader(cp.Route(),
-		meshcore.PayloadTypeAck, meshcore.PayloadVer1)
-	ack.TransportCodes = cp.TransportCodes
-	ack.Path = append([]byte(nil), cp.Path...)
-	ack.PathLen = cp.PathLen
+	// included: dropping the scope mid-relay would strand the answer
+	// outside the mesh that asked for it.
+	ack.InheritRouting(stripped)
 	e.enqueueAfter(ack, "relay-ack", origin, prioDirect,
-		time.Duration(remaining+1)*300*time.Millisecond)
+		time.Duration(mp.Remaining+1)*300*time.Millisecond)
 }
 
 // selfHash is this node's path identity at the packet's hash size.

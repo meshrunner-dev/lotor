@@ -106,12 +106,12 @@ func TestGuestLoginAndStatus(t *testing.T) {
 		t.Fatalf("sent = %+v", sent)
 	}
 	_, body := openReply(t, <-dev.sent, secret)
-	if len(body) < 9 || body[0] != respLoginOK || body[2] != 0 || body[3] != permGuest {
+	if len(body) < 9 || body[0] != meshcore.LoginOK || body[2] != 0 || body[3] != permGuest {
 		t.Fatalf("login reply = % x — want OK, no admin, guest perms", body)
 	}
 
 	// The session works: ask for the status.
-	dev.frames <- request(t, e.id, peer, nowTS(101), []byte{reqTypeGetStatus, 0, 0, 0, 0})
+	dev.frames <- request(t, e.id, peer, nowTS(101), []byte{meshcore.ReqGetStatus, 0, 0, 0, 0})
 	if sent := awaitSent(t, sub); sent.Kind != "req-resp" {
 		t.Fatalf("sent = %+v", sent)
 	}
@@ -125,7 +125,7 @@ func TestGuestLoginAndStatus(t *testing.T) {
 		t.Fatalf("status blob = %d bytes, want at least the reference's 56", len(blob))
 	}
 	// Replay: the same timestamp must be refused.
-	dev.frames <- request(t, e.id, peer, nowTS(101), []byte{reqTypeGetStatus, 0, 0, 0, 0})
+	dev.frames <- request(t, e.id, peer, nowTS(101), []byte{meshcore.ReqGetStatus, 0, 0, 0, 0})
 	select {
 	case raw := <-dev.sent:
 		t.Fatalf("a replayed request was answered: % x", raw[:8])
@@ -202,7 +202,7 @@ func TestNeighboursAnswerListsWhoWeHear(t *testing.T) {
 
 	// version 0, count 10, offset 0, order newest, 8-byte prefixes,
 	// then the 4-byte uniqueness blob.
-	args := []byte{reqTypeGetNeighbours, 0, 10, 0, 0, 0, 8, 1, 2, 3, 4}
+	args := []byte{meshcore.ReqGetNeighbours, 0, 10, 0, 0, 0, 8, 1, 2, 3, 4}
 	dev.frames <- request(t, e.id, peer, nowTS(401), args)
 	awaitSent(t, sub)
 	_, body := openReply(t, <-dev.sent, secret)
@@ -310,7 +310,7 @@ func TestOneSessionCannotFloodTheMesh(t *testing.T) {
 	}
 	for i := range sessionLimitMax + 3 {
 		dev.frames <- request(t, e.id, peer, nowTS(uint32(601+i)),
-			[]byte{reqTypeGetStatus, 0, 0, 0, 0})
+			[]byte{meshcore.ReqGetStatus, 0, 0, 0, 0})
 	}
 
 	answers, refused := 0, 0
@@ -356,7 +356,7 @@ func TestKeepAliveKeepsTheSessionAlive(t *testing.T) {
 	c.lastActive = time.Now().Add(-30 * time.Minute)
 
 	req, err := meshcore.ParsePacket(request(t, e.id, peer, nowTS(701),
-		[]byte{reqTypeKeepAlive, 0, 0, 0, 0}).Payload)
+		[]byte{meshcore.ReqKeepAlive, 0, 0, 0, 0}).Payload)
 	if err != nil {
 		t.Fatal(err)
 	}

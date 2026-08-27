@@ -1,7 +1,7 @@
 package meshcore
 
 import (
-	"encoding/binary"
+	"errors"
 	"strings"
 	"time"
 
@@ -21,14 +21,6 @@ import (
 // asker's identity is not; only the holder of our
 // private key can read it, and only the asker can read the answer.
 const (
-	// The request types the reference dispatches (MyMesh.cpp); a
-	// first byte of zero or a printable is a login attempt instead.
-	// The scopes request; the reference names this one REGIONS, the
-	// word this codebase reserves for a radio band.
-	anonReqTypeScopes = 0x01
-	anonReqTypeOwner  = 0x02
-	anonReqTypeBasic  = 0x03
-
 	// One fixed-window limiter across every anonymous answer — the
 	// reference's anon_limiter(4, 180): at most four replies per three
 	// minutes, whatever the mix, tested before anything is built.
@@ -65,38 +57,27 @@ func (e *engine) anonVerdict(rx *reception) (verdict, why string, handled bool) 
 	if err != nil {
 		return "", "", false // a failed MAC routes on, unread
 	}
-	if len(plain) < 5 {
-		return verdictIgnored, "anon request truncated", true
-	}
 	// What this cost — one scalar multiplication and a MAC sweep — is
 	// kept for the answer rather than paid again.
-	rx.opened = &opened{sender: d.SenderPub, secret: secret, plain: plain}
-	switch t := plain[4]; {
-	case t == anonReqTypeOwner:
-		return verdictAnon, "owner request — the name behind the key", true
-	case t == anonReqTypeScopes:
-		return verdictAnon, "scopes request", true
-	case t == anonReqTypeBasic:
-		return verdictAnon, "clock request", true
-	case t == 0 || t >= ' ':
+	req, err := meshcore.ParseAnonRequest(plain)
+	if errors.Is(err, meshcore.ErrIsLogin) {
+		rx.opened = &opened{sender: d.SenderPub, secret: secret, plain: plain}
 		return verdictAnon, "login request", true
+	}
+	if err != nil {
+		return verdictIgnored, "anon request truncated", true
+	}
+	rx.opened = &opened{sender: d.SenderPub, secret: secret, plain: plain, req: req}
+	switch req.Kind {
+	case meshcore.AnonReqOwner:
+		return verdictAnon, "owner request — the name behind the key", true
+	case meshcore.AnonReqScopes:
+		return verdictAnon, "scopes request", true
+	case meshcore.AnonReqClock:
+		return verdictAnon, "clock request", true
 	default:
 		return verdictAnon, "unknown anonymous request", true
 	}
-}
-
-// replyPath decodes the return path a request supplies: the
-// reference's path descriptor — hop count in the low six bits, hash
-// width in the top two — followed by that many bytes of path.
-func replyPath(body []byte) (pathLen uint8, path []byte, ok bool) {
-	if len(body) < 1 || !meshcore.ValidPathLen(body[0]) {
-		return 0, nil, false
-	}
-	n := int(body[0]&63) * (int(body[0]>>6) + 1)
-	if len(body) < 1+n {
-		return 0, nil, false
-	}
-	return body[0], append([]byte(nil), body[1:1+n]...), true
 }
 
 // respondAnon answers the anonymous questions a stranger may ask —
@@ -109,36 +90,31 @@ func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 	if rx.opened == nil {
 		return
 	}
-	pkt, sender, secret, plain := rx.pkt, rx.opened.sender, rx.opened.secret, rx.opened.plain
-	if t := plain[4]; t == 0 || t >= ' ' {
+	pkt, sender, secret := rx.pkt, rx.opened.sender, rx.opened.secret
+	req := rx.opened.req
+	if req == nil {
 		// A password: the login path, which the reference accepts by
 		// flood as well as direct — a stranger logging in from across
 		// the mesh has no path to us yet.
-		e.respondLogin(rx, sender, secret, plain, origin)
+		e.respondLogin(rx, sender, secret, rx.opened.plain, origin)
 		return
 	}
 	if !pkt.IsRouteDirect() {
 		return // the reference gates every other anonymous answer on direct
 	}
-	// What each question gets. The clock prefix below is common to all
-	// three; owner adds the name, scopes the comma-joined list the
-	// reference's exportNamesTo produces.
+	// What each question gets. The clock the reply opens with is
+	// common to all three; owner adds the name, scopes the
+	// comma-joined list the reference's exportNamesTo produces.
 	var text string
-	switch plain[4] {
-	case anonReqTypeOwner:
+	switch req.Kind {
+	case meshcore.AnonReqOwner:
 		text = e.p.NodeName + "\n" + e.p.OwnerInfo
-	case anonReqTypeBasic:
+	case meshcore.AnonReqClock:
 		// The clock alone is the whole answer.
-	case anonReqTypeScopes:
+	case meshcore.AnonReqScopes:
 		text = strings.Join(e.scopes.served(), ",")
 	default:
-		return // logins and the unknown stay unanswered
-	}
-	// The body supplies the return path. A bad encoding is refused
-	// before the limiter — it costs nothing and is not an answer.
-	pathLen, path, ok := replyPath(plain[5:])
-	if !ok {
-		return
+		return // a question nobody defined stays unanswered
 	}
 	if !e.limits.anon.allow(time.Now()) {
 		e.log.Debug("anonymous reply rate-limited", zap.String("txn", origin.Short()))
@@ -150,17 +126,15 @@ func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 
 	// The reply the reference composes: the asker's timestamp echoed
 	// as a tag, our clock for an easy sync, then the answer's text.
-	body := binary.LittleEndian.AppendUint32(nil, uint32(time.Now().Unix()))
-	body = append(body, []byte(text)...)
 	e.reply(pkt, answer{
 		destHash: sender[:meshcore.PathHashSize],
 		secret:   secret,
-		tag:      binary.LittleEndian.Uint32(plain[0:4]),
-		body:     body,
+		tag:      req.Timestamp,
+		body:     meshcore.FrameAnonReply(uint32(time.Now().Unix()), text),
 		scope:    e.replyScope(rx),
 		supplied: true,
-		pathLen:  pathLen,
-		path:     path,
+		pathLen:  req.PathLen,
+		path:     req.Path,
 		kind:     "anon-resp",
 	}, origin)
 }

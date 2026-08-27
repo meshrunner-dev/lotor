@@ -223,23 +223,23 @@ func (e *engine) floodVerdict(rx *reception, advertOK bool) (string, string) {
 // 1<<(flags&3) bytes each) and the packet's own path accumulates one
 // SNR byte per hop walked.
 func (e *engine) traceVerdict(pkt *meshcore.Packet) (string, string) {
-	const traceHeader = 9 // tag(4) + auth(4) + flags(1)
-	if len(pkt.Payload) < traceHeader {
+	tr, err := meshcore.ParseTrace(pkt)
+	if err != nil {
 		return verdictIgnored, "trace payload too short"
 	}
-	shift := uint(pkt.Payload[8] & 0x03)
-	size := 1 << shift
-	targetBytes := len(pkt.Payload) - traceHeader
-	walked := len(pkt.Path)
-	offset := walked << shift
-	total := targetBytes >> shift
+	// The route is a list of node hashes, one per planned hop; the
+	// walked path is one SNR byte per hop already taken. The hop we
+	// are being asked about is therefore at the walked length.
+	walked := len(tr.SNRx4)
+	offset := walked * tr.HashWidth
+	total := len(tr.Route) / tr.HashWidth
 	why := fmt.Sprintf("hop %d of %d", walked, total)
 	switch {
-	case offset >= targetBytes:
+	case offset >= len(tr.Route):
 		return verdictTraceArrived, fmt.Sprintf("walked %d hops", walked)
 	case e.id == nil:
 		return verdictTraceTransit, why
-	case e.id.HashMatches(pkt.Payload[traceHeader+offset : min(traceHeader+offset+size, len(pkt.Payload))]):
+	case e.id.HashMatches(tr.Route[offset:min(offset+tr.HashWidth, len(tr.Route))]):
 		return verdictRelayTrace, why
 	default:
 		return verdictTraceNotUs, why
