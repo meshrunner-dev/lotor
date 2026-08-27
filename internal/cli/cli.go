@@ -154,6 +154,11 @@ type Deps struct {
 		unset []string, principal string) (string, error)
 	// Undo inverts the newest recorded mutation.
 	Undo func(ctx context.Context, principal string) (string, error)
+	// Create brings a new instance into existence; Remove takes one
+	// out. Both go through the same manager door as Mutate.
+	Create func(ctx context.Context, kind, name string, attrs map[string]string,
+		principal string) (string, error)
+	Remove func(ctx context.Context, kind, name, principal string) (string, error)
 }
 
 // maxLineBytes bounds one command line: a client that never sends a

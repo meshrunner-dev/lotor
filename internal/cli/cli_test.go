@@ -94,7 +94,8 @@ func testKinds() []schema.Kind {
 			Name: "radio", Doc: "one transceiver", ChoiceAttr: "driver",
 			Attrs: []schema.Attr{{Name: "driver", Type: schema.String, Doc: "the driver"}},
 		},
-		{Name: "sentinel", Doc: "the journal", Singleton: true},
+		{Name: "sentinel", Doc: "the journal", Singleton: true,
+			Attrs: config.SentinelAttrs()},
 	}
 }
 

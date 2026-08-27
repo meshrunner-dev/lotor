@@ -382,6 +382,8 @@ func consoleDeps(mgr *manager, b *bus.Bus, sen *sentinel.Sentinel) cli.Deps {
 		LiveTraces: mgr.Traces,
 		Mutate:     mgr.Mutate,
 		Undo:       mgr.Undo,
+		Create:     mgr.Create,
+		Remove:     mgr.Remove,
 	}
 }
 

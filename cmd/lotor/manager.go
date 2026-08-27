@@ -9,11 +9,15 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
 	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -26,6 +30,8 @@ import (
 	"meshrunner.dev/lotor/internal/relay"
 	"meshrunner.dev/lotor/internal/schema"
 	"meshrunner.dev/lotor/internal/sentinel"
+
+	"meshrunner.dev/pkg/meshcore"
 )
 
 // The structural attribute names, written once. The schema declares
@@ -40,6 +46,11 @@ const (
 	attrTXThreshold  = "tx.lbt_threshold_db"
 	attrTXExhausted  = "tx.lbt_exhausted"
 	attrTXQueueDepth = "tx.queue_depth"
+	attrSocket       = "socket"
+
+	// sourceConfig is what a singleton's print shows as provenance —
+	// no layering, just the store.
+	sourceConfig = "config"
 )
 
 type manager struct {
@@ -169,8 +180,28 @@ func (m *manager) RadioInfos() []cli.RadioInfo {
 func (m *manager) Traces() map[string][]config.Trace {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make(map[string][]config.Trace, len(m.traces))
+	out := make(map[string][]config.Trace, len(m.traces)+2)
 	maps.Copy(out, m.traces)
+	// The singletons have no layering, so their "provenance" is the
+	// store itself — synthesised here so print works the same way
+	// everywhere.
+	if sen := m.file.Sentinel; sen != nil {
+		rows := []config.Trace{
+			{Key: "journal", Value: sen.Journal, Source: sourceConfig},
+			{Key: "retention", Value: sen.Retention.String(), Source: sourceConfig},
+		}
+		if sen.MaxFrames != 0 {
+			rows = append(rows, config.Trace{Key: "max_frames", Value: sen.MaxFrames, Source: sourceConfig})
+		}
+		out[confdb.KindSentinel] = rows
+	}
+	if c := m.file.CLI; c != nil {
+		rows := []config.Trace{{Key: "listen", Value: c.Listen, Source: sourceConfig}}
+		if c.Socket != nil {
+			rows = append(rows, config.Trace{Key: "socket", Value: *c.Socket, Source: sourceConfig})
+		}
+		out[confdb.KindCLI] = rows
+	}
 	return out
 }
 
@@ -271,6 +302,9 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 	m.file = next
 
 	if relayName == "" {
+		if kind == confdb.KindSentinel || kind == confdb.KindCLI {
+			return "applied — takes effect when the daemon restarts", nil
+		}
 		return "applied — no running relay uses this yet", nil
 	}
 	m.stopRelay(relayName)
@@ -281,15 +315,274 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 	return fmt.Sprintf("applied — relay %s restarting", relayName), nil
 }
 
-// parseChanges types every value against the schema the instance's
-// choice resolves — an unknown attribute or a value of the wrong
-// shape is refused before anything else happens.
-func (m *manager) parseChanges(kind, name string,
+// Create brings one object into existence: the structural minimum in
+// its fields, everything else parsed like any set. A relay starts the
+// moment it exists; a radio waits to be claimed. identity=new mints a
+// fresh node identity in the daemon — the seed goes into the store and
+// never over the wire, only the public key comes back.
+func (m *manager) Create(ctx context.Context, kind, name string,
+	attrs map[string]string, principal string,
+) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if name == "" || strings.ContainsAny(name, " /\"") {
+		return "", fmt.Errorf("%q is not a usable name", name)
+	}
+	next, err := cloneFile(m.file)
+	if err != nil {
+		return "", err
+	}
+	var minted string
+	change := map[string]confdb.Change{}
+	switch kind {
+	case confdb.KindRelay:
+		if _, dup := next.Relays[name]; dup {
+			return "", fmt.Errorf("relay %q already exists", name)
+		}
+		minted, err = m.createRelay(next, name, attrs, change)
+	case confdb.KindRadio:
+		if _, dup := next.Radios[name]; dup {
+			return "", fmt.Errorf("radio %q already exists", name)
+		}
+		err = m.createRadio(next, name, attrs, change)
+	default:
+		return "", fmt.Errorf("%q takes no new instances", kind)
+	}
+	if err != nil {
+		return "", err
+	}
+	msg, err := m.commitCreate(ctx, next, kind, name, principal, change)
+	if err != nil {
+		return "", err
+	}
+	if minted != "" {
+		msg += fmt.Sprintf(" (new identity, pubkey %s)", minted)
+	}
+	return msg, nil
+}
+
+// commitCreate is Create's tail: validate, persist, start.
+func (m *manager) commitCreate(ctx context.Context, next *config.File,
+	kind, name, principal string, change map[string]confdb.Change,
+) (string, error) {
+	if err := next.Validate(false); err != nil {
+		return "", err
+	}
+	if kind == confdb.KindRelay {
+		rc := next.Relays[name]
+		if _, err := resolveConfigs(rc, next.Radios[rc.Radio]); err != nil {
+			return "", err
+		}
+	} else if err := checkRadioAlone(next.Radios[name]); err != nil {
+		return "", err
+	}
+	section, err := objectSection(next, kind, name)
+	if err != nil {
+		return "", err
+	}
+	if err := m.store.Replace(ctx, kind, name, section, principal, "add", change); err != nil {
+		return "", err
+	}
+	m.file = next
+	if kind == confdb.KindRelay {
+		m.startRelay(m.ctx, name) //nolint:contextcheck // deliberate: daemon lifetime
+		return fmt.Sprintf("added — relay %s starting", name), nil
+	}
+	return fmt.Sprintf("added — %s %s", kind, name), nil
+}
+
+// createRelay fills a new relay from its creation line. protocol and
+// radio are the identity of the thing; they are required here and
+// immutable after.
+func (m *manager) createRelay(next *config.File, name string,
+	attrs map[string]string, change map[string]confdb.Change,
+) (minted string, err error) {
+	rc := config.Relay{
+		Protocol: attrs[attrProtocol],
+		Radio:    attrs[attrRadio],
+		Layered:  config.Layered{Profile: attrs[attrProfile]},
+	}
+	if rc.Protocol == "" || rc.Radio == "" {
+		return "", errors.New("a new relay needs protocol= and radio=")
+	}
+	for _, a := range []string{attrProtocol, attrRadio, attrProfile} {
+		if v, ok := attrs[a]; ok {
+			change[a] = confdb.Change{New: v}
+		}
+	}
+	rest := make(map[string]string, len(attrs))
+	for k, v := range attrs {
+		if k == attrProtocol || k == attrRadio || k == attrProfile {
+			continue
+		}
+		rest[k] = v
+	}
+	if rest["identity"] == "new" {
+		seed, pub, err := mintIdentity()
+		if err != nil {
+			return "", err
+		}
+		rest["identity"], minted = seed, pub
+	}
+	next.Relays[name] = rc
+	typed, err := m.parseAgainst(confdb.KindRelay, rc.Protocol, rest, nil)
+	if err != nil {
+		return "", err
+	}
+	rc = next.Relays[name]
+	for attr, v := range typed {
+		if _, err := setRelayAttr(&rc, attr, v); err != nil {
+			return "", err
+		}
+		if attr == "identity" && minted != "" {
+			// The seed is a secret from birth: the revision records
+			// that an identity exists, never what it is.
+			change[attr] = confdb.Change{New: maskedChange}
+			continue
+		}
+		change[attr] = confdb.Change{New: v}
+	}
+	next.Relays[name] = rc
+	return minted, nil
+}
+
+// maskedChange stands in a revision for a value too secret to record.
+const maskedChange = "<secret>"
+
+func (m *manager) createRadio(next *config.File, name string,
+	attrs map[string]string, change map[string]confdb.Change,
+) error {
+	rd := config.Radio{
+		Driver:  attrs[attrDriver],
+		Layered: config.Layered{Profile: attrs[attrProfile]},
+	}
+	if rd.Driver == "" {
+		return errors.New("a new radio needs driver=")
+	}
+	for _, a := range []string{attrDriver, attrProfile} {
+		if v, ok := attrs[a]; ok {
+			change[a] = confdb.Change{New: v}
+		}
+	}
+	rest := make(map[string]string, len(attrs))
+	for k, v := range attrs {
+		if k == attrDriver || k == attrProfile {
+			continue
+		}
+		rest[k] = v
+	}
+	next.Radios[name] = rd
+	typed, err := m.parseAgainst(confdb.KindRadio, rd.Driver, rest, nil)
+	if err != nil {
+		return err
+	}
+	rd = next.Radios[name]
+	for attr, v := range typed {
+		if _, err := setRadioAttr(&rd, attr, v); err != nil {
+			return err
+		}
+		change[attr] = confdb.Change{New: v}
+	}
+	next.Radios[name] = rd
+	return nil
+}
+
+// Remove takes one object out of existence. A relay stops first; a
+// radio somebody claims refuses; the sentinel and the CLI blocks come
+// off at the next daemon start.
+func (m *manager) Remove(ctx context.Context, kind, name, principal string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	next, err := cloneFile(m.file)
+	if err != nil {
+		return "", err
+	}
+	msg, err := removeFromFile(next, kind, name)
+	if err != nil {
+		return "", err
+	}
+	if err := next.Validate(false); err != nil {
+		return "", err
+	}
+	if err := m.store.Remove(ctx, kind, name, principal); err != nil {
+		return "", err
+	}
+	m.file = next
+	if kind == confdb.KindRelay {
+		m.stopRelay(name)
+		delete(m.infos, name)
+		delete(m.traces, "relay "+name)
+		for radioName, info := range m.radios {
+			if info.Relay == name {
+				delete(m.radios, radioName)
+				delete(m.traces, "radio "+radioName)
+			}
+		}
+	}
+	return msg, nil
+}
+
+// removeFromFile deletes one object from the copy, naming what that
+// takes with it.
+func removeFromFile(next *config.File, kind, name string) (string, error) {
+	switch kind {
+	case confdb.KindRelay:
+		if _, ok := next.Relays[name]; !ok {
+			return "", fmt.Errorf("no relay %q", name)
+		}
+		delete(next.Relays, name)
+		return fmt.Sprintf("removed — relay %s stopped", name), nil
+	case confdb.KindRadio:
+		if _, ok := next.Radios[name]; !ok {
+			return "", fmt.Errorf("no radio %q", name)
+		}
+		for rn, rl := range next.Relays {
+			if rl.Radio == name {
+				return "", fmt.Errorf("relay %q claims this radio — remove it first", rn)
+			}
+		}
+		delete(next.Radios, name)
+		return "removed — radio " + name, nil
+	case confdb.KindSentinel:
+		next.Sentinel = nil
+		return "removed — takes effect when the daemon restarts", nil
+	case confdb.KindCLI:
+		next.CLI = nil
+		return "removed — takes effect when the daemon restarts", nil
+	}
+	return "", fmt.Errorf("%q cannot be removed", kind)
+}
+
+// mintIdentity draws a fresh node identity: the seed for the store,
+// the public key for the operator.
+func mintIdentity() (seed, pubkey string, err error) {
+	raw := make([]byte, meshcore.SeedSize)
+	if _, err := rand.Read(raw); err != nil {
+		return "", "", err
+	}
+	id, err := meshcore.LocalIdentityFromSeed(raw)
+	if err != nil {
+		return "", "", err
+	}
+	return hex.EncodeToString(raw), hex.EncodeToString(id.PubKey[:]), nil
+}
+
+// parseAgainst is parseChanges against an explicit choice — the
+// creation path, where the object is not in the file yet.
+func (m *manager) parseAgainst(kind, choice string,
 	set map[string]string, unset []string,
 ) (map[string]any, error) {
-	k, choice, err := m.kindAndChoice(kind, name)
-	if err != nil {
-		return nil, err
+	var k *schema.Kind
+	for i := range m.kinds {
+		if m.kinds[i].Name == kind {
+			k = &m.kinds[i]
+			break
+		}
+	}
+	if k == nil {
+		return nil, fmt.Errorf("no such context %q", kind)
 	}
 	attrs := k.AttrsFor(choice)
 	typed := make(map[string]any, len(set))
@@ -312,6 +605,19 @@ func (m *manager) parseChanges(kind, name string,
 	return typed, nil
 }
 
+// parseChanges types every value against the schema the instance's
+// choice resolves — an unknown attribute or a value of the wrong
+// shape is refused before anything else happens.
+func (m *manager) parseChanges(kind, name string,
+	set map[string]string, unset []string,
+) (map[string]any, error) {
+	_, choice, err := m.kindAndChoice(kind, name)
+	if err != nil {
+		return nil, err
+	}
+	return m.parseAgainst(kind, choice, set, unset)
+}
+
 func (m *manager) kindAndChoice(kind, name string) (*schema.Kind, string, error) {
 	var k *schema.Kind
 	for i := range m.kinds {
@@ -320,8 +626,11 @@ func (m *manager) kindAndChoice(kind, name string) (*schema.Kind, string, error)
 			break
 		}
 	}
-	if k == nil || k.Singleton {
-		return nil, "", fmt.Errorf("%q is not configurable from here yet", kind)
+	if k == nil {
+		return nil, "", fmt.Errorf("no such context %q", kind)
+	}
+	if k.Singleton {
+		return k, "", nil
 	}
 	switch kind {
 	case confdb.KindRelay:
@@ -349,6 +658,12 @@ func applyChanges(next *config.File, kind, name string,
 	typed map[string]any, unset []string,
 ) (map[string]confdb.Change, string, error) {
 	switch kind {
+	case confdb.KindSentinel:
+		change, err := applySentinelChanges(next, typed, unset)
+		return change, "", err
+	case confdb.KindCLI:
+		change, err := applyCLIChanges(next, typed, unset)
+		return change, "", err
 	case confdb.KindRelay:
 		change, err := applyRelayChanges(next, name, typed, unset)
 		return change, name, err
@@ -528,6 +843,104 @@ func unsetOverride(l *config.Layered, attr string) (old any, err error) {
 	return v, nil
 }
 
+// applySentinelChanges edits the journal block, creating it on first
+// touch — the block's absence is "no observation", and setting a
+// journal path is how observation begins.
+func applySentinelChanges(next *config.File,
+	typed map[string]any, unset []string,
+) (map[string]confdb.Change, error) {
+	change := map[string]confdb.Change{}
+	sen := config.Sentinel{}
+	if next.Sentinel != nil {
+		sen = *next.Sentinel
+	}
+	for attr, v := range typed {
+		var err error
+		switch attr {
+		case "journal":
+			change[attr] = confdb.Change{Old: orNil(sen.Journal), New: v}
+			sen.Journal, err = asString(attr, v)
+		case "retention":
+			change[attr] = confdb.Change{Old: orNil(sen.Retention.String()), New: v}
+			sen.Retention, err = asDuration(attr, v)
+		case "max_frames":
+			change[attr] = confdb.Change{Old: orNilInt(sen.MaxFrames), New: v}
+			sen.MaxFrames, err = asInt(attr, v)
+		default:
+			err = fmt.Errorf("no attribute %q here", attr)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(unset) > 0 {
+		return nil, errors.New("the sentinel's attributes cannot be unset — remove the whole block, or set them")
+	}
+	next.Sentinel = &sen
+	return change, nil
+}
+
+// applyCLIChanges edits the operator-listener block.
+func applyCLIChanges(next *config.File,
+	typed map[string]any, unset []string,
+) (map[string]confdb.Change, error) {
+	change := map[string]confdb.Change{}
+	c := config.CLI{}
+	if next.CLI != nil {
+		c = *next.CLI
+	}
+	for attr, v := range typed {
+		var err error
+		switch attr {
+		case "listen":
+			change[attr] = confdb.Change{Old: orNil(c.Listen), New: v}
+			c.Listen, err = asString(attr, v)
+		case attrSocket:
+			old := any(nil)
+			if c.Socket != nil {
+				old = *c.Socket
+			}
+			change[attr] = confdb.Change{Old: old, New: v}
+			var sock string
+			if sock, err = asString(attr, v); err == nil {
+				c.Socket = &sock
+			}
+		default:
+			err = fmt.Errorf("no attribute %q here", attr)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, attr := range unset {
+		if attr != attrSocket {
+			return nil, fmt.Errorf("%s cannot be unset — set it to what it should be", attr)
+		}
+		old := any(nil)
+		if c.Socket != nil {
+			old = *c.Socket
+		}
+		change[attr] = confdb.Change{Old: old}
+		c.Socket = nil // back to the default path
+	}
+	next.CLI = &c
+	return change, nil
+}
+
+func orNil(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func orNilInt(n int) any {
+	if n == 0 {
+		return nil
+	}
+	return n
+}
+
 // objectSection extracts the stored shape of one object.
 func objectSection(f *config.File, kind, name string) (any, error) {
 	switch kind {
@@ -535,6 +948,16 @@ func objectSection(f *config.File, kind, name string) (any, error) {
 		return f.Relays[name], nil
 	case confdb.KindRadio:
 		return f.Radios[name], nil
+	case confdb.KindSentinel:
+		if f.Sentinel == nil {
+			return nil, errors.New("no sentinel block")
+		}
+		return *f.Sentinel, nil
+	case confdb.KindCLI:
+		if f.CLI == nil {
+			return nil, errors.New("no cli block")
+		}
+		return *f.CLI, nil
 	}
 	return nil, fmt.Errorf("%q is not configurable from here yet", kind)
 }
@@ -596,6 +1019,20 @@ func asFloat(attr string, v any) (float64, error) {
 		return float64(n), nil
 	}
 	return 0, fmt.Errorf("%s: %v is not a number", attr, v)
+}
+
+func asDuration(attr string, v any) (time.Duration, error) {
+	switch d := v.(type) {
+	case string:
+		out, err := time.ParseDuration(d)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %q is not a duration", attr, d)
+		}
+		return out, nil
+	case float64:
+		return time.Duration(int64(d)), nil
+	}
+	return 0, fmt.Errorf("%s: %v is not a duration", attr, v)
 }
 
 func asInt(attr string, v any) (int, error) {

@@ -84,17 +84,24 @@ func (s *session) traces() map[string][]config.Trace {
 	return s.deps.Traces
 }
 
-// kindByName resolves a kind the tree serves. Singletons hold no
-// values a session could show yet, so they stay out of the tree until
-// the daemon carries the store.
+// kindByName resolves a kind the tree serves — singletons included:
+// they are contexts with no instance step.
 func (s *session) kindByName(name string) *schema.Kind {
 	for i := range s.deps.Kinds {
-		k := &s.deps.Kinds[i]
-		if k.Name == name && !k.Singleton {
-			return k
+		if s.deps.Kinds[i].Name == name {
+			return &s.deps.Kinds[i]
 		}
 	}
 	return nil
+}
+
+// isSingleton reports whether a context path stands on a singleton.
+func (s *session) isSingleton(path []string) bool {
+	if len(path) != 1 {
+		return false
+	}
+	k := s.kindByName(path[0])
+	return k != nil && k.Singleton
 }
 
 // instances lists a kind's live objects and the choice each one made.
@@ -177,6 +184,10 @@ func (s *session) tree(ctx context.Context, line string) {
 		if err := s.treeSet(ctx, path, verb, args); err != nil {
 			fmt.Fprintf(s.out, "error: %s\r\n", err)
 		}
+	case verb == verbAdd || verb == verbRemove:
+		if err := s.treeCreateRemove(ctx, path, verb, args); err != nil {
+			fmt.Fprintf(s.out, "error: %s\r\n", err)
+		}
 	case verb == verbExport:
 		if err := s.treeExport(path); err != nil {
 			fmt.Fprintf(s.out, "error: %s\r\n", err)
@@ -194,7 +205,64 @@ const (
 	verbSet    = "set"
 	verbUnset  = "unset"
 	verbExport = "export"
+	verbAdd    = "add"
+	verbRemove = "remove"
 )
+
+// treeCreateRemove serves add and remove, from a kind's collection —
+// and remove from a singleton, whose whole block is the instance.
+func (s *session) treeCreateRemove(ctx context.Context, path []string, verb string, args []string) error {
+	if s.deps.Create == nil || s.deps.Remove == nil {
+		return errors.New("this daemon has no mutation channel")
+	}
+	if s.deps.Privilege != Admin {
+		return fmt.Errorf("%s is an admin verb — use the local console socket", verb)
+	}
+	if len(path) != 1 {
+		return fmt.Errorf("%s works from the collection — /relay %s <name> …", verb, verb)
+	}
+	kind := path[0]
+	if s.isSingleton(path) {
+		if verb == verbAdd {
+			return fmt.Errorf("/%s is one block — set its attributes instead", kind)
+		}
+		msg, err := s.deps.Remove(ctx, kind, "", "console")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(s.out, "%s\r\n", msg)
+		return nil
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("usage: %s <name> [attr=value …]", verb)
+	}
+	name, rest := args[0], args[1:]
+	if verb == verbRemove {
+		if len(rest) > 0 {
+			return errors.New("remove takes one name and nothing else")
+		}
+		msg, err := s.deps.Remove(ctx, kind, name, "console")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(s.out, "%s\r\n", msg)
+		return nil
+	}
+	attrs := map[string]string{}
+	for _, a := range rest {
+		k, v, ok := strings.Cut(a, "=")
+		if !ok {
+			return fmt.Errorf("%q — add wants attr=value after the name", a)
+		}
+		attrs[k] = v
+	}
+	msg, err := s.deps.Create(ctx, kind, name, attrs, "console")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(s.out, "%s\r\n", msg)
+	return nil
+}
 
 // treeSet applies one line of changes: every attr=value on it lands
 // in one transaction, so a retune touching three attributes bounces
@@ -206,7 +274,7 @@ func (s *session) treeSet(ctx context.Context, path []string, verb string, args 
 	if s.deps.Privilege != Admin {
 		return fmt.Errorf("%s is an admin verb — use the local console socket", verb)
 	}
-	if len(path) != 2 {
+	if len(path) != 2 && !s.isSingleton(path) {
 		return fmt.Errorf("%s works on an instance — /relay <name> %s …", verb, verb)
 	}
 	if len(args) == 0 {
@@ -228,7 +296,11 @@ func (s *session) treeSet(ctx context.Context, path []string, verb string, args 
 			set[name] = value
 		}
 	}
-	msg, err := s.deps.Mutate(ctx, path[0], path[1], set, unset, "console")
+	name := ""
+	if len(path) == 2 {
+		name = path[1]
+	}
+	msg, err := s.deps.Mutate(ctx, path[0], name, set, unset, "console")
 	if err != nil {
 		return err
 	}
@@ -306,6 +378,12 @@ func (s *session) mountedVerb(kind, verb string) bool {
 // treePrint shows a context: a kind lists its instances, an instance
 // shows its effective configuration with provenance.
 func (s *session) treePrint(ctx context.Context, path []string) {
+	if s.isSingleton(path) {
+		if err := s.showTraces(path[0]); err != nil {
+			fmt.Fprintf(s.out, "error: %s\r\n", err)
+		}
+		return
+	}
 	if len(path) == 1 {
 		if path[0] == scopeRelay {
 			s.dispatch(ctx, []string{scopeRelay, verbList})
@@ -335,14 +413,21 @@ func (s *session) treeHelp(path []string) string {
 		b.WriteString("contexts:\r\n")
 		for i := range s.deps.Kinds {
 			k := s.deps.Kinds[i]
-			if k.Singleton {
-				continue
-			}
 			fmt.Fprintf(&b, "  %-10s %s\r\n", s.color(cCyan, "/"+k.Name), k.Doc)
 		}
 		b.WriteString("the flat commands work here too — \"help\" lists them\r\n")
 	case 1:
-		fmt.Fprintf(&b, "verbs: %s\r\n", s.color(cGreen, verbPrint))
+		if s.isSingleton(path) {
+			fmt.Fprintf(&b, "verbs: %s\r\n",
+				s.color(cGreen, strings.Join([]string{verbPrint, verbSet, verbUnset, verbRemove}, " ")))
+			b.WriteString("attributes:\r\n")
+			for _, a := range s.attrsAt(path) {
+				fmt.Fprintf(&b, "  %-24s %s\r\n", s.color(cYellow, a.Name), a.Doc)
+			}
+			break
+		}
+		fmt.Fprintf(&b, "verbs: %s\r\n",
+			s.color(cGreen, strings.Join([]string{verbPrint, verbAdd, verbRemove}, " ")))
 		names := make([]string, 0, 4)
 		inst := s.instances(path[0])
 		for name := range inst {
@@ -352,7 +437,7 @@ func (s *session) treeHelp(path []string) string {
 		for _, name := range names {
 			fmt.Fprintf(&b, "  %-16s %s\r\n", s.color(cCyan, name), inst[name])
 		}
-	case 2:
+	case 2: //nolint:mnd // the tree is two levels deep by design
 		verbs := []string{verbPrint, verbSet, verbUnset, verbExport}
 		for _, v := range []string{cmdNeighbours, cmdScopes, cmdDiscover, cmdAdvert} {
 			if s.mountedVerb(path[0], v) {
@@ -372,8 +457,12 @@ func (s *session) treeHelp(path []string) string {
 	return b.String()
 }
 
-// attrsAt resolves the attribute set an instance context offers.
+// attrsAt resolves the attribute set a context offers: an instance's
+// choice decides the contributed ones, a singleton has only its own.
 func (s *session) attrsAt(path []string) []schema.Attr {
+	if s.isSingleton(path) {
+		return s.kindByName(path[0]).AttrsFor("")
+	}
 	if len(path) != 2 {
 		return nil
 	}
@@ -403,7 +492,7 @@ func (s *session) complete(line string) (add string, hints []string) {
 	}
 	path, rest := s.resolveTree(prior)
 	if len(rest) > 0 {
-		return "", nil // past the grammar the tree knows; nothing to offer
+		return s.completeArgs(path, rest, last)
 	}
 	return finish(strings.TrimPrefix(last, "/"),
 		s.candidatesAt(path, strings.HasPrefix(line, "/")))
@@ -415,18 +504,20 @@ func (s *session) candidatesAt(path []string, absolute bool) []string {
 	switch len(path) {
 	case 0:
 		for i := range s.deps.Kinds {
-			if !s.deps.Kinds[i].Singleton {
-				cands = append(cands, s.deps.Kinds[i].Name)
-			}
+			cands = append(cands, s.deps.Kinds[i].Name)
 		}
 		if !absolute {
 			cands = append(cands, commandNames()...)
 		}
 	case 1:
+		if s.isSingleton(path) {
+			cands = append(cands, verbPrint, verbSet, verbUnset, verbRemove)
+			break
+		}
 		for name := range s.instances(path[0]) {
 			cands = append(cands, name)
 		}
-		cands = append(cands, verbPrint)
+		cands = append(cands, verbPrint, verbAdd, verbRemove)
 	case 2:
 		cands = append(cands, verbPrint, verbSet, verbUnset, verbExport,
 			cmdNeighbours, cmdScopes, cmdDiscover, cmdAdvert)
@@ -457,6 +548,60 @@ func finish(prefix string, cands []string) (add string, hints []string) {
 		}
 	}
 	return common[len(prefix):], matched
+}
+
+// completeArgs finishes what comes after a verb: attribute names for
+// set, unset and add — and, past the '=', an enum's values.
+func (s *session) completeArgs(path, rest []string, last string) (add string, hints []string) {
+	verb := rest[0]
+	if verb != verbSet && verb != verbUnset && verbAdd != verb {
+		return "", nil
+	}
+	attrs := s.attrsAt(path)
+	if verb == verbAdd && len(path) == 1 && !s.isSingleton(path) {
+		// completing "add <name> attr=…": the choice is on the line.
+		attrs = s.attrsForAddLine(path[0], rest)
+	}
+	if attrs == nil {
+		return "", nil
+	}
+	if attr, val, has := strings.Cut(last, "="); has {
+		a, ok := schema.Find(attrs, attr)
+		if !ok || len(a.Enum) == 0 {
+			return "", nil
+		}
+		return finish(val, a.Enum)
+	}
+	names := make([]string, 0, len(attrs))
+	for _, a := range attrs {
+		if verb == verbUnset {
+			names = append(names, a.Name)
+			continue
+		}
+		names = append(names, a.Name+"=")
+	}
+	add, hints = finish(last, names)
+	if verb != verbUnset {
+		// The '=' is the boundary: nothing to append after it yet.
+		add = strings.TrimSuffix(add, " ")
+	}
+	return add, hints
+}
+
+// attrsForAddLine resolves what a creation line may still say, from
+// the choice it already made.
+func (s *session) attrsForAddLine(kind string, rest []string) []schema.Attr {
+	k := s.kindByName(kind)
+	if k == nil {
+		return nil
+	}
+	choice := ""
+	for _, t := range rest {
+		if v, ok := strings.CutPrefix(t, k.ChoiceAttr+"="); ok {
+			choice = v
+		}
+	}
+	return k.AttrsFor(choice)
 }
 
 // helpForLine is the '?' key: describe where the typed line stands.

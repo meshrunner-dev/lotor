@@ -277,22 +277,56 @@ func (s *Store) Replace(ctx context.Context, kind, name string, section any,
 }
 
 // LastMutation returns the newest revision an undo may invert — a set
-// or an unset, not an import, whose inverse would be a wipe nobody
-// asked for.
+// or an unset. An import's inverse would be a wipe nobody asked for,
+// and an object's birth or death is not a value change: undo refuses
+// them by name instead of silently inverting something older.
 func (s *Store) LastMutation(ctx context.Context) (*Revision, error) {
-	revs, err := s.Revisions(ctx, 50)
+	revs, err := s.Revisions(ctx, 1)
 	if err != nil {
 		return nil, err
 	}
-	for i := range revs {
-		switch revs[i].Op {
-		case "set", "unset", "undo":
-			return &revs[i], nil
-		case "import":
-			return nil, errors.New("nothing to undo — the last change is an import")
-		}
+	if len(revs) == 0 {
+		return nil, errors.New("nothing to undo")
 	}
-	return nil, errors.New("nothing to undo")
+	r := revs[0]
+	switch r.Op {
+	case "set", "unset", "undo":
+		return &r, nil
+	case "add":
+		return nil, fmt.Errorf("the last change added %s %q — remove it if that is what you mean", r.Kind, r.Name)
+	case "remove":
+		return nil, fmt.Errorf("the last change removed %s %q — add it anew if that is what you mean", r.Kind, r.Name)
+	}
+	return nil, errors.New("nothing to undo — the last change is an import")
+}
+
+// Remove deletes one object, keeping its last shape in the revision —
+// the audit must show what died, not only that something did.
+func (s *Store) Remove(ctx context.Context, kind, name, principal string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var attrs string
+	if err := tx.QueryRowContext(ctx,
+		"SELECT attrs FROM objects WHERE kind = ? AND name = ?", kind, name).Scan(&attrs); err != nil {
+		return fmt.Errorf("config %s %q: %w", kind, name, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM objects WHERE kind = ? AND name = ?", kind, name); err != nil {
+		return err
+	}
+	diff, err := json.Marshal(map[string]Change{"object": {Old: json.RawMessage(attrs)}})
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO revisions(at, principal, kind, name, op, change) VALUES(?, ?, ?, ?, 'remove', ?)",
+		time.Now().UTC().Format(time.RFC3339), principal, kind, name, string(diff)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Changes decodes what a revision recorded.

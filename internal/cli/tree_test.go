@@ -4,6 +4,9 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/schema"
 )
 
 func TestTreeNavigationChangesThePrompt(t *testing.T) {
@@ -176,5 +179,95 @@ func TestTreeExportIsPasteableAndKeepsSecrets(t *testing.T) {
 	}
 	if !strings.Contains(out, "identity is secret") {
 		t.Errorf("export does not say what it cannot carry:\n%s", out)
+	}
+}
+
+func TestTreeAddAndRemoveGoThroughTheirDoors(t *testing.T) {
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	var created, removed string
+	deps.Create = func(_ context.Context, kind, name string, attrs map[string]string,
+		_ string,
+	) (string, error) {
+		created = kind + "/" + name + "/" + attrs["driver"]
+		return "added — radio " + name, nil
+	}
+	deps.Remove = func(_ context.Context, kind, name, _ string) (string, error) {
+		removed = kind + "/" + name
+		return "removed — radio " + name, nil
+	}
+	out := run(t, deps, "/radio add hat2 driver=sx126x-spi", "/radio remove hat2")
+	if created != "radio/hat2/sx126x-spi" {
+		t.Fatalf("create saw %q", created)
+	}
+	if removed != "radio/hat2" {
+		t.Fatalf("remove saw %q", removed)
+	}
+	if !strings.Contains(out, "added — radio hat2") || !strings.Contains(out, "removed — radio hat2") {
+		t.Errorf("the answers never reached the operator:\n%s", out)
+	}
+}
+
+func TestSingletonContextSetsAndPrints(t *testing.T) {
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	deps.Traces["sentinel"] = []config.Trace{
+		{Key: "journal", Value: "/var/lib/lotor/journal.db", Source: "config"},
+		{Key: "retention", Value: "720h0m0s", Source: "config"},
+	}
+	var got map[string]string
+	deps.Mutate = func(_ context.Context, kind, name string, set map[string]string,
+		_ []string, _ string,
+	) (string, error) {
+		if kind != "sentinel" || name != "" {
+			t.Errorf("mutation aimed at %s %q", kind, name)
+		}
+		got = set
+		return "applied — takes effect when the daemon restarts", nil
+	}
+	out := run(t, deps, "/sentinel", "print", "set retention=800h", "?")
+	if !strings.Contains(out, "[/sentinel] > ") {
+		t.Errorf("the singleton has no context:\n%s", out)
+	}
+	if !strings.Contains(out, "/var/lib/lotor/journal.db") {
+		t.Errorf("print shows no values:\n%s", out)
+	}
+	if got["retention"] != "800h" {
+		t.Fatalf("set saw %v", got)
+	}
+	if !strings.Contains(out, "takes effect when the daemon restarts") {
+		t.Errorf("the apply semantics were not named:\n%s", out)
+	}
+	if !strings.Contains(out, "how far back the journal reaches") {
+		t.Errorf("? lists no attributes:\n%s", out)
+	}
+}
+
+func TestCompletionReachesAttributesAndEnums(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	// After set, attribute names complete with their '='.
+	add, _ := s.complete("/relay meshcore-868 set node_")
+	if add != "name=" {
+		t.Fatalf("attr completion = %q", add)
+	}
+	// After '=', a closed set completes its values.
+	s2 := &session{deps: testDeps(t)}
+	s2.deps.Kinds[0].Contributed = func(string) []schema.Attr {
+		return []schema.Attr{{Name: "guest_access", Type: schema.String,
+			Enum: []string{"blocked", "password", "open"}, Doc: "d"}}
+	}
+	add, _ = s2.complete("/relay meshcore-868 set guest_access=blo")
+	if add != "cked " {
+		t.Fatalf("enum completion = %q", add)
+	}
+	// unset completes bare names.
+	add, _ = s.complete("/relay meshcore-868 unset node_")
+	if add != "name " {
+		t.Fatalf("unset completion = %q", add)
+	}
+	// add completes against the choice already on the line.
+	add, _ = s.complete("/relay add r2 protocol=meshcore node_")
+	if add != "name=" {
+		t.Fatalf("add completion = %q", add)
 	}
 }
