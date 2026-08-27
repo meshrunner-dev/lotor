@@ -311,7 +311,7 @@ func verdictWithChain(f sentinel.Frame) string {
 func who(f sentinel.Frame) string {
 	switch {
 	case f.Node != "":
-		return fmt.Sprintf("%s (%s)", quoted(f.Node), f.Detail)
+		return fmt.Sprintf("%s (%s)", meshName(f.Node), f.Detail)
 	case f.Detail != "":
 		return f.Detail
 	default:
@@ -486,11 +486,8 @@ func (s *session) discover(ctx context.Context, in input) error {
 func (s *session) printNeighbour(n Neighbour) {
 	// An answer names nobody; the name, when there is one, comes from
 	// an advert this relay heard earlier.
-	name := ""
-	if n.Name != "" {
-		name = "  " + n.Name
-	}
-	fmt.Fprintf(s.out, "%s  %.1f dB%s\r\n", hex.EncodeToString(n.PubKey[:6]), n.SNR, name)
+	fmt.Fprintf(s.out, "%s  %.1f dB  %s\r\n",
+		hex.EncodeToString(n.PubKey[:6]), n.SNR, meshName(n.Name))
 }
 
 // drainAnswers prints what has already landed without waiting for
@@ -614,10 +611,7 @@ func (s *session) neighbours(ctx context.Context, in input) error {
 			// can put a name to a node that only ever answered a scan.
 			name = named[key]
 		}
-		if name == "" {
-			name = "—"
-		}
-		tb.row(key, name, fmt.Sprintf("snr %+.2f dB", n.SNR), ago(n.Heard))
+		tb.row(key, meshName(name), fmt.Sprintf("snr %+.2f dB", n.SNR), ago(n.Heard))
 	}
 	return tb.flush(s.out)
 }
@@ -679,7 +673,7 @@ func (s *session) nodes(ctx context.Context, in input) error {
 		if n.HasRSSI {
 			best = fmt.Sprintf("%.0f dBm", n.BestRSSI)
 		}
-		tb.row(quoted(n.Name), n.Type, n.PubKey,
+		tb.row(meshName(n.Name), n.Type, n.PubKey,
 			fmt.Sprintf("%d×", n.Heard), ago(n.LastAt), best, drift)
 	}
 	return tb.flush(s.out)
@@ -1012,7 +1006,7 @@ func watchLine(j bus.FrameJudged) string {
 	}
 	switch {
 	case j.Node != "":
-		line += fmt.Sprintf("  %s (%s)", quoted(j.Node), j.Detail)
+		line += fmt.Sprintf("  %s (%s)", meshName(j.Node), j.Detail)
 	case j.Detail != "":
 		line += "  " + j.Detail
 	}

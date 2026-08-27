@@ -57,3 +57,24 @@ func TestQuotedDelimitsAndEscapes(t *testing.T) {
 		t.Errorf("escaped = %s", got)
 	}
 }
+
+func TestMeshNameIsTheOneDoor(t *testing.T) {
+	// A name we do not have and a name that is empty must not read
+	// alike: one is a node that never said, the other a node that
+	// said nothing.
+	if got := meshName(""); got != unnamed {
+		t.Errorf("no name rendered as %q", got)
+	}
+	if got := meshName("FR91 🦝 Radiocom"); got != `"FR91 🦝 Radiocom"` {
+		t.Errorf("meshName = %s", got)
+	}
+	// Neutralisation and escaping ride along, because every view that
+	// shows a name off the air comes through here.
+	got := meshName("evil\x1b[2Jname\" end")
+	if strings.ContainsRune(got, '\x1b') {
+		t.Errorf("a control rune reached the terminal: %q", got)
+	}
+	if got != `"evil?[2Jname\" end"` {
+		t.Errorf("meshName = %s", got)
+	}
+}

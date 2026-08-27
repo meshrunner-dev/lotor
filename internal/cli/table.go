@@ -69,3 +69,19 @@ func printable(s string) string {
 func quoted(s string) string {
 	return `"` + strings.ReplaceAll(printable(s), `"`, `\"`) + `"`
 }
+
+// unnamed is what a view shows for a node that has never said what it
+// calls itself. It is not an empty pair of quotes: a name we do not
+// have and a name that is empty should not read alike.
+const unnamed = "—"
+
+// meshName renders a name that came off the air. Every view that shows
+// one goes through here — a name is attacker-chosen text arriving on a
+// public band, and a view that formats it itself is a view that will
+// eventually forget to neutralise it.
+func meshName(s string) string {
+	if s == "" {
+		return unnamed
+	}
+	return quoted(s)
+}

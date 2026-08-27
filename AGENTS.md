@@ -66,6 +66,15 @@ Nothing forbidden is imported and the seam is gone anyway. If a method
 or a field only makes sense for one chip on one bus, it belongs behind
 the driver, whatever the linter says.
 
+## Names off the air
+
+A node name is attacker-chosen text arriving on a public band. Anything
+that displays one goes through `meshName` in `internal/cli/table.go`,
+which neutralises control and formatting runes — escape sequences, bidi
+overrides — quotes the result so its bounds are unmistakable, and shows
+a placeholder when there is no name at all. Format one yourself and you
+have written the view that eventually forgets.
+
 ## Orders from outside, and why the mutex count stays flat
 
 The console, a web UI and an API are three callers of the same
