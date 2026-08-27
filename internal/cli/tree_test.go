@@ -23,9 +23,13 @@ func TestTreeNavigationChangesThePrompt(t *testing.T) {
 	if !strings.Contains(out, "[read-only@lab-pi] > ") {
 		t.Errorf("the root prompt lost its shape:\n%s", out)
 	}
-	// Context help names the instances and what each one speaks.
-	if !strings.Contains(out, "meshcore-868") || !strings.Contains(out, "print") {
-		t.Errorf("context help lacks its content:\n%s", out)
+	// Context help describes the grammar — the verbs, and that a name
+	// is the step inward. What exists is print's answer, not help's.
+	if !strings.Contains(out, "print") || !strings.Contains(out, "go into one") {
+		t.Errorf("context help lacks its grammar:\n%s", out)
+	}
+	if strings.Contains(out, "meshcore-868") {
+		t.Errorf("help enumerated what print already lists:\n%s", out)
 	}
 	// After .., the prompt is the root's again.
 	if !strings.HasSuffix(strings.TrimSpace(out), "bye.") {
@@ -85,7 +89,7 @@ func TestTreeRefusesWhatIsNotThere(t *testing.T) {
 func TestTreeCompletion(t *testing.T) {
 	s := &session{deps: testDeps(t)}
 	for _, c := range []struct{ line, add string }{
-		{"/re", "lay "},
+		{"/re", "lay/"}, // a container completes to its separator
 		{"/relay mesh", "core-868 "},
 		{"/relay meshcore-868 pr", "int "},
 		{"/relay meshcore-868 disc", "over "},
@@ -490,7 +494,7 @@ func TestEveryVerbAPlaceAnswersIsAlsoOffered(t *testing.T) {
 		if len(verbs) == 0 {
 			t.Errorf("%s answers nothing", where)
 		}
-		offered := s.candidatesAt(path, true)
+		offered := names(s.candidatesAt(path, true))
 		for _, v := range verbs {
 			if !slices.Contains(offered, v) {
 				t.Errorf("%s answers %q but never offers it", where, v)
@@ -596,5 +600,162 @@ func TestEmptyListingSaysSoInsteadOfShowingColumns(t *testing.T) {
 	}
 	if !strings.Contains(out, "no relays configured") {
 		t.Errorf("nothing said the room was empty:\n%s", out)
+	}
+}
+
+func TestCompletionListingIsGroupedAndColoured(t *testing.T) {
+	s := &session{deps: testDeps(t), colors: true}
+	// After a slash a single letter reaches both places and actions;
+	// the listing puts the places first and paints each by its class,
+	// so what is somewhere to go reads apart from what is something
+	// to do.
+	_, hints := s.complete("/s")
+	if len(hints) < 2 {
+		t.Fatalf("hints = %v", hints)
+	}
+	places := 0
+	for _, h := range hints {
+		if strings.HasPrefix(h, cPath) {
+			places++
+			continue
+		}
+		break // once actions start, no place may follow
+	}
+	if places == 0 {
+		t.Fatalf("no place led the listing: %q", hints)
+	}
+	for _, h := range hints[places:] {
+		if strings.HasPrefix(h, cPath) {
+			t.Errorf("a place came after the actions: %q", hints)
+		}
+		if !strings.HasPrefix(h, cVerb) {
+			t.Errorf("an action carries no class: %q", h)
+		}
+	}
+	// A plain session gets the same names with nothing around them.
+	_, plain := (&session{deps: s.deps}).complete("/s")
+	for _, h := range plain {
+		if strings.Contains(h, "\x1b") {
+			t.Errorf("a plain session got escapes: %q", h)
+		}
+	}
+}
+
+func TestContainersCompleteToTheirSeparator(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	// A context holds instances, so completing it leaves the operator
+	// mid-path rather than mid-word.
+	if add, _ := s.complete("/rel"); add != "ay/" {
+		t.Errorf("a container completed with %q", add)
+	}
+	// An instance holds verbs, not names: the path ends there.
+	if add, _ := s.complete("/relay mesh"); add != "core-868 " {
+		t.Errorf("an instance completed with %q", add)
+	}
+	// A singleton has no instance step either.
+	if add, _ := s.complete("/sent"); add != "inel " {
+		t.Errorf("a singleton completed with %q", add)
+	}
+}
+
+func TestRefusalsPointAtTheWord(t *testing.T) {
+	out := run(t, testDeps(t), "/relay meshcore-868 dance")
+	if !strings.Contains(out, `no "dance" here (column 21)`) {
+		t.Errorf("the refusal does not point at the word:\n%s", out)
+	}
+}
+
+func TestCompletionOffersOnlyWhatWouldRun(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	// A context needs its slash: written bare the word reaches the
+	// flat command table, so offering it there would complete to
+	// something that does not run.
+	if add, _ := s.complete("sys"); add != "" {
+		t.Errorf("a bare prefix completed to a context: %q", add)
+	}
+	if add, _ := s.complete("/sys"); add != "tem " {
+		t.Errorf("an absolute prefix did not reach the context: %q", add)
+	}
+	// And a name that is both a place and a command is offered once,
+	// as the place the parser makes of it.
+	seen := map[string]int{}
+	for _, c := range s.candidatesAt(nil, true) {
+		seen[c.name]++
+		if c.name == scopeRelay && c.class != cPath {
+			t.Errorf("relay was offered as %q, not as the place it leads to", c.class)
+		}
+	}
+	if seen[scopeRelay] != 1 {
+		t.Errorf("relay was offered %d times", seen[scopeRelay])
+	}
+}
+
+func TestHelpIsOneEntryPerLine(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	s.setPath([]string{"relay", "meshcore-868"})
+	got := s.treeHelp([]string{"relay", "meshcore-868"})
+
+	// A blank line opens it, then one entry per line, each joining a
+	// word to its meaning with the same separator.
+	if !strings.HasPrefix(got, "\r\n") {
+		t.Errorf("no blank line above the answer: %q", got[:20])
+	}
+	for _, want := range []string{
+		".. -- go up to /relay\r\n",
+		"print -- show what is here\r\n",
+		"set -- change an attribute\r\n",
+		"node_name -- the name on the air\r\n",
+		"identity -- the private key (secret: never echoed)\r\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing entry %q in:\n%s", want, got)
+		}
+	}
+	// Nothing is padded into columns: the separator does the aligning
+	// a reader needs, and a long name must not push the descriptions
+	// away from the short ones.
+	for line := range strings.SplitSeq(got, "\r\n") {
+		if strings.Contains(line, " --") && strings.Contains(line, "  --") {
+			t.Errorf("an entry was padded: %q", line)
+		}
+	}
+}
+
+func TestHelpNamesTheGrammarNotTheContents(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	// A collection: the sub-places the grammar defines are named, the
+	// instances that happen to exist are not — those are print's.
+	got := s.treeHelp([]string{"relay"})
+	if strings.Contains(got, "meshcore-868") {
+		t.Errorf("help listed what print already lists:\n%s", got)
+	}
+	if !strings.Contains(got, "<name> -- go into one") {
+		t.Errorf("help does not say how to reach them:\n%s", got)
+	}
+	// The root: every context is grammar, so every context is named.
+	root := s.treeHelp(nil)
+	for _, want := range []string{"relay --", "radio --", "system --"} {
+		if !strings.Contains(root, want) {
+			t.Errorf("the root omits %q:\n%s", want, root)
+		}
+	}
+	// But completion still offers the instances, because typing one
+	// is exactly what the grammar allows.
+	if !slices.Contains(names(s.termsAt([]string{"relay"}, true)), "meshcore-868") {
+		t.Error("completion lost the instances")
+	}
+}
+
+func TestHelpColoursEachEntryByItsClass(t *testing.T) {
+	s := &session{deps: testDeps(t), colors: true}
+	got := s.treeHelp([]string{"relay", "meshcore-868"})
+	if !strings.Contains(got, cPath+".."+cReset+cPunct+" -- "+cReset) {
+		t.Errorf("the way up is not a place: %q", got)
+	}
+	if !strings.Contains(got, cVerb+"print"+cReset+cPunct+" -- "+cReset) {
+		t.Errorf("a verb is not an action: %q", got)
+	}
+	if !strings.Contains(got, cAttr+"node_name"+cReset+cPunct+" -- "+cReset) {
+		t.Errorf("an attribute is not an attribute: %q", got)
 	}
 }

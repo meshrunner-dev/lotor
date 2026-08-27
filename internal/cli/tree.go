@@ -226,8 +226,13 @@ func (s *session) walkStep(path []string, token string) ([]string, bool) {
 
 // tree runs one line of the context grammar.
 func (s *session) tree(ctx context.Context, line string) {
-	tokens := splitArgs(line)
+	tokens, columns := splitArgsAt(line)
 	path, rest := s.resolveTree(tokens)
+	// Where the leftovers begin, so a refusal can point at the word.
+	at := 1
+	if consumed := len(tokens) - len(rest); consumed < len(columns) {
+		at = columns[consumed]
+	}
 	if len(rest) == 0 {
 		// A pure path is navigation.
 		s.setPath(path)
@@ -265,7 +270,9 @@ func (s *session) tree(ctx context.Context, line string) {
 		// The flat command runs as itself, told which instance asked.
 		s.dispatch(ctx, append(append([]string{verb}, args...), "--"+scopeRelay, path[1]))
 	default:
-		fmt.Fprintf(s.out, "error: no %q here — \"?\" says what this context offers\r\n", verb)
+		fmt.Fprintf(s.out,
+			"error: no %q here (column %d) — \"?\" says what this context offers\r\n",
+			verb, at)
 	}
 }
 
@@ -589,56 +596,61 @@ func (s *session) treePrint(ctx context.Context, path []string) {
 	}
 }
 
-// treeHelp describes one place: what it holds, what runs there, and —
-// on an instance — every attribute its choice gives it, one doc line
-// each.
+// treeHelp describes one place, one line per thing that can be typed
+// there: the word in the colour of its class, then what it does. No
+// column padding — the separator does the aligning work a reader
+// actually needs, and a long name would otherwise push every
+// description away from the names it belongs to.
 func (s *session) treeHelp(path []string) string {
 	var b strings.Builder
-	switch len(path) {
-	case 0:
-		s.writeVerbs(&b, path)
-		b.WriteString("contexts:\r\n")
-		for i := range s.deps.Kinds {
-			k := s.deps.Kinds[i]
-			fmt.Fprintf(&b, "  %-10s%s %s\r\n", s.color(cPath, "/"+k.Name),
-				s.color(cPunct, " --"), k.Doc)
+	// A blank line first: help interrupts a line of work, and the
+	// answer reads better with air above it than pressed against the
+	// prompt it came from.
+	b.WriteString("\r\n")
+	var terms []term
+	for _, t := range s.termsAt(path, true) {
+		if !t.content {
+			terms = append(terms, t)
 		}
-		b.WriteString("the flat commands work here too — \"help\" lists them\r\n")
-	case 1:
-		s.writeVerbs(&b, path)
-		if s.isSingleton(path) {
-			b.WriteString("attributes:\r\n")
-			for _, a := range s.attrsAt(path) {
-				fmt.Fprintf(&b, "  %-24s%s %s\r\n", s.color(cAttr, a.Name), s.color(cPunct, " --"), a.Doc)
-			}
-			break
-		}
-		names := make([]string, 0, 4)
-		inst := s.instances(path[0])
-		for name := range inst {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			fmt.Fprintf(&b, "  %-16s%s %s\r\n", s.color(cPath, name), s.color(cPunct, " --"), inst[name])
-		}
-	case 2: //nolint:mnd // the tree is two levels deep by design
-		s.writeVerbs(&b, path)
-		b.WriteString("attributes:\r\n")
-		for _, a := range s.attrsAt(path) {
+	}
+	// ".." leads, then everything else by name — the order a reader
+	// scans in when they do not yet know what they are looking for.
+	rest := terms
+	if len(rest) > 0 && rest[0].name == ".." {
+		s.writeTerm(&b, rest[0])
+		rest = rest[1:]
+	}
+	sort.Slice(rest, func(i, j int) bool { return rest[i].name < rest[j].name })
+	for _, t := range rest {
+		s.writeTerm(&b, t)
+	}
+	// A collection holds things the grammar does not name; say how to
+	// reach them rather than listing what print already lists.
+	if len(path) == 1 && !s.isSingleton(path) {
+		fmt.Fprintf(&b, "%s%s%s\r\n",
+			s.color(cPath, "<name>"), s.color(cPunct, " -- "),
+			"go into one; "+verbPrint+" lists them")
+	}
+	// An instance also answers about its attributes, which are what
+	// its verbs act on.
+	if attrs := s.attrsAt(path); len(attrs) > 0 {
+		b.WriteString("\r\n")
+		for _, a := range attrs {
 			doc := a.Doc
 			if a.Secret {
 				doc += " (secret: never echoed)"
 			}
-			fmt.Fprintf(&b, "  %-24s%s %s\r\n", s.color(cAttr, a.Name), s.color(cPunct, " --"), doc)
+			s.writeTerm(&b, term{name: a.Name, class: cAttr, doc: doc})
 		}
 	}
 	return b.String()
 }
 
-// writeVerbs names what this place answers.
-func (s *session) writeVerbs(b *strings.Builder, path []string) {
-	fmt.Fprintf(b, "verbs: %s\r\n", s.color(cVerb, strings.Join(s.verbsAt(path), " ")))
+// writeTerm renders one entry: the word in its class, the separator
+// that joins it to its meaning, the meaning.
+func (s *session) writeTerm(b *strings.Builder, t term) {
+	fmt.Fprintf(b, "%s%s%s\r\n", s.color(t.class, t.name),
+		s.color(cPunct, " -- "), t.doc)
 }
 
 // attrsAt resolves the attribute set a context offers: an instance's
@@ -678,15 +690,113 @@ func (s *session) complete(line string) (add string, hints []string) {
 	if len(rest) > 0 {
 		return s.completeArgs(path, rest, last)
 	}
-	return finish(strings.TrimPrefix(last, "/"),
-		s.candidatesAt(path, strings.HasPrefix(line, "/")))
+	cands := s.candidatesAt(path, strings.HasPrefix(line, "/"))
+	prefix := strings.TrimPrefix(last, "/")
+	matched, common := match(prefix, names(cands))
+	switch len(matched) {
+	case 0:
+		return "", nil
+	case 1:
+		// A container is completed up to its separator: the operator
+		// is mid-path, not mid-word, and the next TAB carries on from
+		// there.
+		tail := " "
+		for _, c := range cands {
+			if c.name == matched[0] && c.container {
+				tail = "/"
+			}
+		}
+		return matched[0][len(prefix):] + tail, nil
+	default:
+		return common[len(prefix):], s.listing(matched, cands)
+	}
 }
 
-// verbsAt is what a place answers — the one list, read by the help
-// that describes it and by the completion that offers it. Keeping
-// them in step by hand is how export came to work everywhere and be
-// offered in only some places.
-func (s *session) verbsAt(path []string) []string {
+// term is one word an operator may type at a place: what it is
+// called, which class it belongs to, what it does, and whether typing
+// it leaves them mid-path. One type, because help, completion and the
+// painter are three views of the same question — and three separate
+// lists were three chances to answer it differently.
+type term struct {
+	name  string
+	class string
+	doc   string
+	// container says the term has things under it, so completing it
+	// leaves the operator mid-path rather than mid-word.
+	container bool
+	// content says the term is a thing that exists rather than a
+	// word the grammar defines. Completion offers both; help stays
+	// with the grammar, because what exists is print's answer and
+	// naming it twice makes one of the two the stale copy.
+	content bool
+}
+
+// verbDoc says what each of the tree's own verbs does, in the one line
+// the help gives it.
+var verbDoc = map[string]string{
+	verbPrint:  "show what is here",
+	verbExport: "print the lines that would recreate this",
+	verbSet:    "change an attribute",
+	verbUnset:  "clear an attribute, back to what the preset says",
+	verbAdd:    "bring a new one into existence",
+	verbRemove: "take one out of existence",
+}
+
+// termsAt lists everything typeable at one place. absolute says the
+// line began with a slash, which is what lets a context be named: a
+// bare word at the root reaches the flat command table instead.
+func (s *session) termsAt(path []string, absolute bool) []term {
+	var out []term
+	if len(path) > 0 {
+		out = append(out, term{name: "..", class: cPath, doc: "go up to " + s.parentOf(path)})
+	}
+	for _, v := range s.verbNamesAt(path) {
+		doc := verbDoc[v]
+		if doc == "" {
+			if c := lookup(v); c != nil && len(c.forms) > 0 {
+				doc = c.forms[0].desc // a mounted command describes itself
+			}
+		}
+		out = append(out, term{name: v, class: cVerb, doc: doc})
+	}
+	switch {
+	case len(path) == 0:
+		if absolute {
+			for i := range s.deps.Kinds {
+				k := s.deps.Kinds[i]
+				out = append(out, term{
+					name: k.Name, class: cPath, doc: k.Doc, container: !k.Singleton,
+				})
+			}
+		}
+		for _, c := range commands {
+			doc := ""
+			if len(c.forms) > 0 {
+				doc = c.forms[0].desc
+			}
+			out = append(out, term{name: c.name, class: cVerb, doc: doc})
+		}
+	case len(path) == 1 && !s.isSingleton(path):
+		inst := s.instances(path[0])
+		for name := range inst {
+			out = append(out, term{name: name, class: cPath, doc: inst[name], content: true})
+		}
+	}
+	return dedupe(out)
+}
+
+// parentOf names where ".." leads, so the entry says where it goes
+// rather than merely that it goes.
+func (s *session) parentOf(path []string) string {
+	if len(path) < 2 {
+		return "the root"
+	}
+	return "/" + strings.Join(path[:len(path)-1], "/")
+}
+
+// verbNamesAt is what a place answers, without the descriptions — the
+// painter asks only whether a word is one of them.
+func (s *session) verbNamesAt(path []string) []string {
 	switch {
 	case len(path) == 0:
 		// The root holds no object, so nothing that needs one: print
@@ -708,50 +818,96 @@ func (s *session) verbsAt(path []string) []string {
 	}
 }
 
-// candidatesAt lists what may legally come next at one place: the
-// verbs, plus whatever names a place one step further in.
-func (s *session) candidatesAt(path []string, absolute bool) []string {
-	cands := s.verbsAt(path)
-	switch {
-	case len(path) == 0:
-		for i := range s.deps.Kinds {
-			cands = append(cands, s.deps.Kinds[i].Name)
+// verbsAt is kept for the places that only need the names.
+func (s *session) verbsAt(path []string) []string { return s.verbNamesAt(path) }
+
+// dedupe keeps the first meaning of each name: a word that is both a
+// place and a command is the place it leads to, since that is what the
+// parser makes of it.
+func dedupe(terms []term) []term {
+	seen := make(map[string]bool, len(terms))
+	out := terms[:0]
+	for _, t := range terms {
+		if seen[t.name] {
+			continue
 		}
-		if !absolute {
-			// The flat commands answer at the root too.
-			cands = append(cands, commandNames()...)
-		}
-	case len(path) == 1 && !s.isSingleton(path):
-		for name := range s.instances(path[0]) {
-			cands = append(cands, name)
-		}
+		seen[t.name] = true
+		out = append(out, t)
 	}
-	return cands
+	return out
 }
 
-// finish picks what the prefix may become: the whole word when one
-// candidate remains, the shared advance plus the list when several do.
-func finish(prefix string, cands []string) (add string, hints []string) {
-	var matched []string
-	for _, c := range cands {
-		if strings.HasPrefix(c, prefix) {
-			matched = append(matched, c)
-		}
+// names strips the descriptions off, for the matching that does not
+// need them.
+func names(terms []term) []string {
+	out := make([]string, 0, len(terms))
+	for _, t := range terms {
+		out = append(out, t.name)
 	}
-	sort.Strings(matched)
+	return out
+}
+
+// candidatesAt lists what may legally come next at one place.
+func (s *session) candidatesAt(path []string, absolute bool) []term {
+	return s.termsAt(path, absolute)
+}
+
+// listing orders and colours the candidates for the screen: places
+// before actions, alphabetical within each, so an operator sees at a
+// glance what is somewhere to go and what is something to do.
+func (s *session) listing(matched []string, terms []term) []string {
+	class := map[string]string{}
+	for _, t := range terms {
+		class[t.name] = t.class
+	}
+	places, actions := []string{}, []string{}
+	for _, m := range matched {
+		if class[m] == cPath {
+			places = append(places, m)
+			continue
+		}
+		actions = append(actions, m)
+	}
+	sort.Strings(places)
+	sort.Strings(actions)
+	out := make([]string, 0, len(matched))
+	for _, m := range append(places, actions...) {
+		out = append(out, s.color(class[m], m))
+	}
+	return out
+}
+
+// finishPlain completes against one class of candidate.
+func (s *session) finishPlain(prefix string, cands []string, class string) (string, []string) {
+	matched, common := match(prefix, cands)
 	switch len(matched) {
 	case 0:
 		return "", nil
 	case 1:
 		return matched[0][len(prefix):] + " ", nil
+	default:
+		out := make([]string, 0, len(matched))
+		for _, m := range matched {
+			out = append(out, s.color(class, m))
+		}
+		return common[len(prefix):], out
 	}
-	common := matched[0]
-	for _, m := range matched[1:] {
-		for !strings.HasPrefix(m, common) {
-			common = common[:len(common)-1]
+}
+
+// attrsForAddLine resolves what a creation line may still say, from
+// the choice it already made.
+func (s *session) attrsForAddLine(kind string, rest []string) []schema.Attr {
+	k := s.kindByName(kind)
+	if k == nil {
+		return nil
+	}
+	choice := ""
+	for _, t := range rest {
+		if v, ok := strings.CutPrefix(t, k.ChoiceAttr+"="); ok {
+			choice = v
 		}
 	}
-	return common[len(prefix):], matched
+	return k.AttrsFor(choice)
 }
 
 // completeArgs finishes what comes after a verb: attribute names for
@@ -774,7 +930,7 @@ func (s *session) completeArgs(path, rest []string, last string) (add string, hi
 		if !ok || len(a.Enum) == 0 {
 			return "", nil
 		}
-		return finish(val, a.Enum)
+		return s.finishPlain(val, a.Enum, cAttr)
 	}
 	names := make([]string, 0, len(attrs))
 	for _, a := range attrs {
@@ -784,7 +940,7 @@ func (s *session) completeArgs(path, rest []string, last string) (add string, hi
 		}
 		names = append(names, a.Name+"=")
 	}
-	add, hints = finish(last, names)
+	add, hints = s.finishPlain(last, names, cAttr)
 	if verb != verbUnset {
 		// The '=' is the boundary: nothing to append after it yet.
 		add = strings.TrimSuffix(add, " ")
@@ -792,20 +948,25 @@ func (s *session) completeArgs(path, rest []string, last string) (add string, hi
 	return add, hints
 }
 
-// attrsForAddLine resolves what a creation line may still say, from
-// the choice it already made.
-func (s *session) attrsForAddLine(kind string, rest []string) []schema.Attr {
-	k := s.kindByName(kind)
-	if k == nil {
-		return nil
-	}
-	choice := ""
-	for _, t := range rest {
-		if v, ok := strings.CutPrefix(t, k.ChoiceAttr+"="); ok {
-			choice = v
+// match reports which candidates a prefix could still become, and how
+// far they agree — the point past which only the operator can choose.
+func match(prefix string, cands []string) (matched []string, common string) {
+	for _, c := range cands {
+		if strings.HasPrefix(c, prefix) {
+			matched = append(matched, c)
 		}
 	}
-	return k.AttrsFor(choice)
+	sort.Strings(matched)
+	if len(matched) == 0 {
+		return nil, prefix
+	}
+	common = matched[0]
+	for _, m := range matched[1:] {
+		for !strings.HasPrefix(m, common) {
+			common = common[:len(common)-1]
+		}
+	}
+	return matched, common
 }
 
 // helpForLine answers the help key. Pressed again it moves on rather
@@ -814,7 +975,7 @@ func (s *session) attrsForAddLine(kind string, rest []string) []schema.Attr {
 // operator has once the first is answered.
 func (s *session) helpForLine(line string, level int) string {
 	if level%2 == 1 {
-		return keyHelp
+		return "\r\n" + keyHelp + "\r\npress it again for what this place offers\r\n"
 	}
 	path, _ := s.resolveTree(splitArgs(line))
 	return s.treeHelp(path) + "\r\npress it again for the keys\r\n"

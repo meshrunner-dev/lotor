@@ -460,28 +460,46 @@ func (s *session) needSentinel() (*sentinel.Sentinel, error) {
 // splitArgs tokenises a command line, honouring double quotes so
 // arguments may carry spaces — the mesh's names do.
 func splitArgs(line string) []string {
-	var args []string
+	args, _ := splitArgsAt(line)
+	return args
+}
+
+// splitArgsAt tokenises and remembers where each word began, counted
+// in columns from one — so an error can point at the word it means
+// instead of describing it and leaving the operator to find it.
+func splitArgsAt(line string) (args []string, columns []int) {
 	var cur strings.Builder
 	inQuote, has := false, false
+	start := 1
+	col := 1
+	flush := func() {
+		if has || cur.Len() > 0 {
+			args = append(args, cur.String())
+			columns = append(columns, start)
+			cur.Reset()
+			has = false
+		}
+	}
 	for _, r := range line {
 		switch {
 		case r == '"':
+			if cur.Len() == 0 && !has {
+				start = col
+			}
 			inQuote = !inQuote
 			has = true
 		case !inQuote && (r == ' ' || r == '\t'):
-			if has || cur.Len() > 0 {
-				args = append(args, cur.String())
-				cur.Reset()
-				has = false
-			}
+			flush()
 		default:
+			if cur.Len() == 0 && !has {
+				start = col
+			}
 			cur.WriteRune(r)
 		}
+		col++
 	}
-	if has || cur.Len() > 0 {
-		args = append(args, cur.String())
-	}
-	return args
+	flush()
+	return args, columns
 }
 
 func ago(t time.Time) string {
