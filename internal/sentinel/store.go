@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS frames (
 	freq_err_hz  REAL NOT NULL DEFAULT 0,
 	ptype        TEXT NOT NULL DEFAULT '',
 	route        TEXT NOT NULL DEFAULT '',
+	scope        TEXT NOT NULL DEFAULT '',
 	path_len     INTEGER NOT NULL DEFAULT 0,
 	verdict      TEXT NOT NULL DEFAULT '',
 	duplicate_of TEXT NOT NULL DEFAULT '',
@@ -123,6 +124,7 @@ type Frame struct {
 	Airtime     time.Duration
 	Type        string
 	Route       string
+	Scope       string
 	PathLen     int
 	Verdict     string
 	DuplicateOf string
@@ -193,6 +195,7 @@ var grafts = map[string][]graft{
 	"frames": {
 		{"ptype", ddlText},
 		{"route", ddlText},
+		{"scope", ddlText},
 		{"path_len", ddlInt},
 		{"verdict", ddlText},
 		{"duplicate_of", ddlText},
@@ -272,10 +275,10 @@ var errJudgementOrphan = errors.New("judgement arrived for a frame the journal n
 
 func (s *store) applyJudgement(ctx context.Context, txn string, relay string, f Frame) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE frames SET ptype = ?, route = ?, path_len = ?, verdict = ?, duplicate_of = ?,
+		`UPDATE frames SET ptype = ?, route = ?, scope = ?, path_len = ?, verdict = ?, duplicate_of = ?,
 		        node = ?, pubkey = ?, detail = ?
 		 WHERE txn = ?`,
-		f.Type, f.Route, f.PathLen, f.Verdict, f.DuplicateOf,
+		f.Type, f.Route, f.Scope, f.PathLen, f.Verdict, f.DuplicateOf,
 		f.Node, f.PubKey, f.Detail, txn,
 	)
 	if err != nil {
@@ -286,9 +289,9 @@ func (s *store) applyJudgement(ctx context.Context, txn string, relay string, f 
 		// columns it cannot know are zeroed, honestly absent.
 		if _, ierr := s.db.ExecContext(ctx,
 			`INSERT INTO frames (txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms,
-			        ptype, route, path_len, verdict, duplicate_of, node, pubkey, detail)
-			 VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			txn, relay, time.Now().UnixMilli(), f.Type, f.Route, f.PathLen,
+			        ptype, route, scope, path_len, verdict, duplicate_of, node, pubkey, detail)
+			 VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			txn, relay, time.Now().UnixMilli(), f.Type, f.Route, f.Scope, f.PathLen,
 			f.Verdict, f.DuplicateOf, f.Node, f.PubKey, f.Detail); ierr != nil {
 			return ierr
 		}
@@ -534,7 +537,7 @@ type FrameQuery struct {
 // view, and the txn prefix is an index range, not a LIKE.
 func (s *store) RecentFrames(ctx context.Context, fq FrameQuery) ([]Frame, error) {
 	q := `SELECT txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms, signal_dbm, freq_err_hz,
-	             ptype, route, path_len, verdict, duplicate_of, node, pubkey, detail
+	             ptype, route, scope, path_len, verdict, duplicate_of, node, pubkey, detail
 	      FROM frames WHERE 1=1`
 	args := []any{}
 	if fq.TxnPrefix != "" {
@@ -570,7 +573,7 @@ func (s *store) RecentFrames(ctx context.Context, fq FrameQuery) ([]Frame, error
 		var airtimeMS float64
 		if err := rows.Scan(&f.Txn, &f.Relay, &atMS, &f.Bytes, &f.RSSI, &f.SNR,
 			&airtimeMS, &f.SignalRSSI, &f.FreqErrHz,
-			&f.Type, &f.Route, &f.PathLen, &f.Verdict, &f.DuplicateOf,
+			&f.Type, &f.Route, &f.Scope, &f.PathLen, &f.Verdict, &f.DuplicateOf,
 			&f.Node, &f.PubKey, &f.Detail); err != nil {
 			return nil, err
 		}

@@ -73,6 +73,9 @@ type RelayInfo struct {
 	// TXMode is the transmit gate the relay runs behind: dry, shadow
 	// or on-air; empty reads as dry.
 	TXMode string
+	// Scopes lists the transport scopes this relay carries; empty for
+	// a protocol that has none.
+	Scopes []string
 	// TriggerAdvert queues one operator announcement (flood or
 	// zero-hop); nil when the engine has no transmit pipeline.
 	TriggerAdvert func(flood bool) error

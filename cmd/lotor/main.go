@@ -418,6 +418,7 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		ChipStats:     r.ChipStats,
 		TXMode:        r.TXMode(),
 		Duty:          dutyOf(eng),
+		Scopes:        scopesOf(eng),
 		TriggerAdvert: advertTrigger(eng),
 		Neighbours:    neighboursOf(eng),
 		Identity:      eng.Identity(),
@@ -452,6 +453,16 @@ func advertTrigger(eng protocol.Engine) func(bool) error {
 		return nil
 	}
 	return a.RequestAdvert
+}
+
+// scopesOf exposes the transport scopes an engine carries, when it
+// speaks a protocol that has any.
+func scopesOf(eng protocol.Engine) []string {
+	s, ok := eng.(interface{ Scopes() []string })
+	if !ok {
+		return nil
+	}
+	return s.Scopes()
 }
 
 // dutyOf exposes an engine's duty gauge when it has one.

@@ -73,7 +73,7 @@ func (e *engine) anonVerdict(rx *reception) (verdict, why string, handled bool) 
 	case t == anonReqTypeOwner:
 		return verdictAnon, "owner request — the name behind the key", true
 	case t == anonReqTypeRegions:
-		return verdictAnon, "regions request", true
+		return verdictAnon, "scopes request", true
 	case t == anonReqTypeBasic:
 		return verdictAnon, "clock request", true
 	case t == 0 || t >= ' ':
@@ -96,11 +96,6 @@ func replyPath(body []byte) (pathLen uint8, path []byte, ok bool) {
 	}
 	return body[0], append([]byte(nil), body[1:1+n]...), true
 }
-
-// placeholderRegions is what the regions request gets until transport
-// scoping exists here: named placeholders, so a companion's region
-// browser shows something honest to point at rather than an error.
-var placeholderRegions = []string{"lotor-1", "lotor-2"}
 
 // respondAnon answers the anonymous questions a stranger may ask —
 // owner (the name behind the key), clock, regions — each only when the
@@ -133,7 +128,7 @@ func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 	case anonReqTypeBasic:
 		// The clock alone is the whole answer.
 	case anonReqTypeRegions:
-		text = strings.Join(placeholderRegions, ",")
+		text = strings.Join(e.scopes.served(), ",")
 	default:
 		return // logins and the unknown stay unanswered
 	}

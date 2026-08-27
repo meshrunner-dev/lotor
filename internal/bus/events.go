@@ -33,8 +33,13 @@ type FrameJudged struct {
 	// carried the first copy, so log chains can be followed.
 	DuplicateOf string
 	// Wire identity, protocol vocabulary; empty on malformed frames.
-	Type    string
-	Route   string
+	Type  string
+	Route string
+	// Scope names the transport scope a frame arrived in: a scope this
+	// relay carries, the raw code of one it does not, or the wildcard
+	// for a plain flood. Empty for direct traffic, which carries no
+	// scope a relay acts on.
+	Scope   string
 	PathLen int
 	// What the frame says, when its payload speaks an open format:
 	// the advertised node name, a public-key prefix, a human detail.

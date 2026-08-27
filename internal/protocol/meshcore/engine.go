@@ -496,6 +496,7 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 		PathLen: hops,
 	}
 	rx := &reception{pkt: pkt, frame: frame, id: id}
+	judged.Scope = e.scopeName(rx)
 	log = log.With(describe(rx, &judged, e.id)...)
 	if first, dup := e.seen.witness(pkt.Hash(), id, frame.At); dup {
 		e.stats.countHeard(pkt, frame.RSSI, frame.SNR, frame.Airtime, true)

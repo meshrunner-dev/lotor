@@ -260,7 +260,7 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 		})
 	case bus.FrameJudged:
 		err = s.store.applyJudgement(ctx, e.Txn.String(), e.Relay, Frame{
-			Type: e.Type, Route: e.Route, PathLen: e.PathLen,
+			Type: e.Type, Route: e.Route, Scope: e.Scope, PathLen: e.PathLen,
 			Verdict: e.Verdict, DuplicateOf: e.DuplicateOf,
 			Node: e.Node, PubKey: e.PubKey, Detail: e.Detail,
 		})

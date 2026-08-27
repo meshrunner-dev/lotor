@@ -75,6 +75,9 @@ func (s *session) relay(ctx context.Context, in input) error {
 		r.Waveform.BandwidthHz, r.Waveform.CodingRate, r.Waveform.Preamble,
 		r.Waveform.SyncWord, r.Waveform.CRC))
 	tb.row("noise floor", floorText(r))
+	if len(r.Scopes) > 0 {
+		tb.row("scopes", strings.Join(r.Scopes, ", "))
+	}
 	tb.row("tx mode", txModeText(r))
 	if r.Duty != nil {
 		if used, budget, ok := r.Duty(); ok {
@@ -338,7 +341,12 @@ func (s *session) txn(ctx context.Context, in input) error {
 		fmt.Fprintf(s.out, "%s  heard %s  %d B  %.0f dBm  snr %.1f  signal %.0f dBm  Δf %+.0f Hz  airtime %s\r\n",
 			f.Txn[:12], f.At.Format("15:04:05"), f.Bytes, f.RSSI, f.SNR,
 			f.SignalRSSI, f.FreqErrHz, f.Airtime)
-		fmt.Fprintf(s.out, "  %s %s path_len %d — %s", f.Type, f.Route, f.PathLen, verdictWithChain(f))
+		scope := ""
+		if f.Scope != "" {
+			scope = " scope " + f.Scope
+		}
+		fmt.Fprintf(s.out, "  %s %s%s path_len %d — %s",
+			f.Type, f.Route, scope, f.PathLen, verdictWithChain(f))
 		if w := who(f); w != "" {
 			fmt.Fprintf(s.out, " — %s", w)
 		}

@@ -185,8 +185,10 @@ func TestClockRequestGetsTheClock(t *testing.T) {
 	}
 }
 
-func TestRegionsRequestGetsThePlaceholders(t *testing.T) {
-	if text := askAndOpen(t, anonReqTypeRegions); string(text) != "lotor-1,lotor-2" {
-		t.Fatalf("regions = %q, want the placeholders", text)
+func TestScopesRequestNamesWhatWeCarry(t *testing.T) {
+	// The answer is the reference's shape: the wildcard first when
+	// plain floods are carried, then each scope with its hash stripped.
+	if text := askAndOpen(t, anonReqTypeRegions); string(text) != "*" {
+		t.Fatalf("scopes = %q, want just the wildcard from a relay with none", text)
 	}
 }

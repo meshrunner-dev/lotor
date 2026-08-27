@@ -173,3 +173,32 @@ func (e *engine) replyScope(rx *reception) meshcore.TransportKey {
 	}
 	return e.scopes.speak
 }
+
+// scopeName is what the journal records about a frame's scope: the
+// name when we carry it, the raw code when we do not, and the
+// wildcard for a plain flood. Direct traffic gets nothing — a relay
+// acts on no scope there, and matching one would cost an HMAC on a
+// path the reference never pays it.
+func (e *engine) scopeName(rx *reception) string {
+	switch {
+	case rx.pkt.IsRouteFlood():
+		name, _ := e.scopeOf(rx)
+		if name != "" {
+			return name
+		}
+		return fmt.Sprintf("%#04x", rx.pkt.TransportCodes[0])
+	case rx.pkt.HasTransportCodes():
+		return fmt.Sprintf("%#04x", rx.pkt.TransportCodes[0])
+	default:
+		return ""
+	}
+}
+
+// Scopes reports what this relay carries, for the console — the same
+// list the anonymous answer gives the mesh.
+func (e *engine) Scopes() []string {
+	if e.scopes == nil {
+		return nil
+	}
+	return e.scopes.served()
+}
