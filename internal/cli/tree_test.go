@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -411,5 +412,59 @@ func TestSystemNameIsHotAndSaysWhereItCameFrom(t *testing.T) {
 	}
 	if !strings.Contains(out, "the machine's hostname") {
 		t.Errorf("? does not describe the attribute:\n%s", out)
+	}
+}
+
+func TestEveryVerbAPlaceAnswersIsAlsoOffered(t *testing.T) {
+	// The help, the completion and the dispatch have to agree about
+	// what a place answers. Keeping three lists in step by hand is
+	// how export came to work everywhere and be offered in only some
+	// places, so this walks the whole tree and checks the two
+	// projections against the one list.
+	s := &session{deps: testDeps(t)}
+	places := [][]string{
+		nil,
+		{"relay"}, {"radio"}, {"sentinel"}, {"system"},
+		{"relay", "meshcore-868"},
+	}
+	for _, path := range places {
+		where := "/" + strings.Join(path, " ")
+		verbs := s.verbsAt(path)
+		if len(verbs) == 0 {
+			t.Errorf("%s answers nothing", where)
+		}
+		offered := s.candidatesAt(path, true)
+		for _, v := range verbs {
+			if !slices.Contains(offered, v) {
+				t.Errorf("%s answers %q but never offers it", where, v)
+			}
+			// And the help names it, so "?" and TAB tell one story.
+			s.setPath(path)
+			if !strings.Contains(s.treeHelp(path), v) {
+				t.Errorf("%s answers %q but its help omits it", where, v)
+			}
+		}
+		// Export is the one verb every place answers.
+		if !slices.Contains(verbs, verbExport) {
+			t.Errorf("%s does not answer export", where)
+		}
+	}
+}
+
+func TestCompletionOffersExportEverywhere(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	for _, line := range []string{
+		"expo", "/expo",
+		"/relay expo", "/radio expo",
+		"/sentinel expo", "/system expo",
+		"/relay meshcore-868 expo",
+	} {
+		if add, _ := s.complete(line); add != "rt " {
+			t.Errorf("complete(%q) = %q, want the rest of export", line, add)
+		}
+	}
+	// And print, which the root answers too.
+	if add, _ := s.complete("pri"); add != "nt " {
+		t.Errorf("complete(pri) at the root = %q", add)
 	}
 }

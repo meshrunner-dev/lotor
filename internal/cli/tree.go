@@ -566,6 +566,7 @@ func (s *session) treeHelp(path []string) string {
 	var b strings.Builder
 	switch len(path) {
 	case 0:
+		s.writeVerbs(&b, path)
 		b.WriteString("contexts:\r\n")
 		for i := range s.deps.Kinds {
 			k := s.deps.Kinds[i]
@@ -573,17 +574,14 @@ func (s *session) treeHelp(path []string) string {
 		}
 		b.WriteString("the flat commands work here too — \"help\" lists them\r\n")
 	case 1:
+		s.writeVerbs(&b, path)
 		if s.isSingleton(path) {
-			fmt.Fprintf(&b, "verbs: %s\r\n",
-				s.color(cGreen, strings.Join([]string{verbPrint, verbSet, verbUnset, verbRemove}, " ")))
 			b.WriteString("attributes:\r\n")
 			for _, a := range s.attrsAt(path) {
 				fmt.Fprintf(&b, "  %-24s %s\r\n", s.color(cYellow, a.Name), a.Doc)
 			}
 			break
 		}
-		fmt.Fprintf(&b, "verbs: %s\r\n",
-			s.color(cGreen, strings.Join([]string{verbPrint, verbAdd, verbRemove}, " ")))
 		names := make([]string, 0, 4)
 		inst := s.instances(path[0])
 		for name := range inst {
@@ -594,13 +592,7 @@ func (s *session) treeHelp(path []string) string {
 			fmt.Fprintf(&b, "  %-16s %s\r\n", s.color(cCyan, name), inst[name])
 		}
 	case 2: //nolint:mnd // the tree is two levels deep by design
-		verbs := []string{verbPrint, verbSet, verbUnset, verbExport}
-		for _, v := range []string{cmdNeighbours, cmdScopes, cmdDiscover, cmdAdvert} {
-			if s.mountedVerb(path[0], v) {
-				verbs = append(verbs, v)
-			}
-		}
-		fmt.Fprintf(&b, "verbs: %s\r\n", s.color(cGreen, strings.Join(verbs, " ")))
+		s.writeVerbs(&b, path)
 		b.WriteString("attributes:\r\n")
 		for _, a := range s.attrsAt(path) {
 			doc := a.Doc
@@ -611,6 +603,11 @@ func (s *session) treeHelp(path []string) string {
 		}
 	}
 	return b.String()
+}
+
+// writeVerbs names what this place answers.
+func (s *session) writeVerbs(b *strings.Builder, path []string) {
+	fmt.Fprintf(b, "verbs: %s\r\n", s.color(cGreen, strings.Join(s.verbsAt(path), " ")))
 }
 
 // attrsAt resolves the attribute set a context offers: an instance's
@@ -654,30 +651,49 @@ func (s *session) complete(line string) (add string, hints []string) {
 		s.candidatesAt(path, strings.HasPrefix(line, "/")))
 }
 
-// candidatesAt lists what may legally come next at one place.
+// verbsAt is what a place answers — the one list, read by the help
+// that describes it and by the completion that offers it. Keeping
+// them in step by hand is how export came to work everywhere and be
+// offered in only some places.
+func (s *session) verbsAt(path []string) []string {
+	switch {
+	case len(path) == 0:
+		// The root holds no object, so nothing that needs one: print
+		// shows what stands below, export takes the whole tree.
+		return []string{verbPrint, verbExport}
+	case s.isSingleton(path):
+		// One block, always there: set it, clear it, take it away.
+		return []string{verbPrint, verbSet, verbUnset, verbExport, verbRemove}
+	case len(path) == 1:
+		return []string{verbPrint, verbAdd, verbRemove, verbExport}
+	default:
+		verbs := []string{verbPrint, verbSet, verbUnset, verbExport}
+		for _, v := range []string{cmdNeighbours, cmdScopes, cmdDiscover, cmdAdvert} {
+			if s.mountedVerb(path[0], v) {
+				verbs = append(verbs, v)
+			}
+		}
+		return verbs
+	}
+}
+
+// candidatesAt lists what may legally come next at one place: the
+// verbs, plus whatever names a place one step further in.
 func (s *session) candidatesAt(path []string, absolute bool) []string {
-	var cands []string
-	switch len(path) {
-	case 0:
+	cands := s.verbsAt(path)
+	switch {
+	case len(path) == 0:
 		for i := range s.deps.Kinds {
 			cands = append(cands, s.deps.Kinds[i].Name)
 		}
-		cands = append(cands, verbExport)
 		if !absolute {
+			// The flat commands answer at the root too.
 			cands = append(cands, commandNames()...)
 		}
-	case 1:
-		if s.isSingleton(path) {
-			cands = append(cands, verbPrint, verbSet, verbUnset, verbRemove)
-			break
-		}
+	case len(path) == 1 && !s.isSingleton(path):
 		for name := range s.instances(path[0]) {
 			cands = append(cands, name)
 		}
-		cands = append(cands, verbPrint, verbAdd, verbRemove, verbExport)
-	case 2:
-		cands = append(cands, verbPrint, verbSet, verbUnset, verbExport,
-			cmdNeighbours, cmdScopes, cmdDiscover, cmdAdvert)
 	}
 	return cands
 }
