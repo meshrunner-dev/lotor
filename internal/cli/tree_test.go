@@ -128,7 +128,7 @@ func TestPaintClassifiesTokens(t *testing.T) {
 	// An argument is marked against what its own verb takes, not
 	// against whatever the place holds: print does not act on
 	// attributes, and says so before Enter.
-	if arg := s.paintLine("/relay meshcore-868 print detail"); !strings.Contains(arg, cAttr+"detail"+cReset) {
+	if arg := s.paintLine("/relay meshcore-868 print show-secrets"); !strings.Contains(arg, cAttr+"show-secrets"+cReset) {
 		t.Errorf("print's own argument is not marked: %q", arg)
 	}
 	if arg := s.paintLine("/relay meshcore-868 print node_name=x"); !strings.Contains(arg, cUnres+"node_name"+cReset) {
@@ -1009,14 +1009,24 @@ func TestProvenanceMarksTheSourceCellAlone(t *testing.T) {
 	}
 }
 
-func TestPrintDetailIsTheOnlyViewThatShowsASecret(t *testing.T) {
+func TestOnlyAskingForSecretsByNameShowsThem(t *testing.T) {
 	masked := run(t, testDeps(t), "/relay meshcore-868 print")
 	if !strings.Contains(masked, maskedValue) || strings.Contains(masked, "b5445dd625d531fc") {
 		t.Errorf("print did not mask the identity:\n%s", masked)
 	}
-	shown := run(t, testDeps(t), "/relay meshcore-868 print detail")
+	shown := run(t, testDeps(t), "/relay meshcore-868 print show-secrets")
 	if !strings.Contains(shown, "b5445dd625d531fc") {
-		t.Errorf("print detail withheld the identity:\n%s", shown)
+		t.Errorf("the mask did not lift when asked:\n%s", shown)
+	}
+	// The two words are about different things, and neither does the
+	// other's job: unfolding a listing does not lift the mask.
+	folded := run(t, testDeps(t), "/relay print detail")
+	if !strings.Contains(folded, maskedValue) || strings.Contains(folded, "b5445dd625d531fc") {
+		t.Errorf("detail lifted a mask it was not asked to:\n%s", folded)
+	}
+	both := run(t, testDeps(t), "/relay print detail show-secrets")
+	if !strings.Contains(both, "b5445dd625d531fc") {
+		t.Errorf("the two words do not compose:\n%s", both)
 	}
 }
 
@@ -1029,28 +1039,45 @@ func TestPrintDetailUnfoldsACollection(t *testing.T) {
 	}
 }
 
-func TestPrintRefusesAnArgumentItDoesNotTake(t *testing.T) {
+func TestPrintRefusesAWordWhereItWouldMeanNothing(t *testing.T) {
 	out := run(t, testDeps(t), "/relay meshcore-868 print zz")
-	if !strings.Contains(out, "zz") || !strings.Contains(out, argDetail) {
-		t.Errorf("the refusal does not name what print takes:\n%s", out)
+	if !strings.Contains(out, "zz") || !strings.Contains(out, argSecrets) {
+		t.Errorf("the refusal does not name what print takes here:\n%s", out)
 	}
-	// The root holds no values, so it has nothing to detail.
-	if root := run(t, testDeps(t), "/print detail"); !strings.Contains(root, "no values") {
+	// An instance has no summary to unfold, so the word does not
+	// apply there — and saying so beats accepting it and doing
+	// nothing.
+	if inst := run(t, testDeps(t), "/relay meshcore-868 print detail"); !strings.Contains(inst, "nothing here") {
+		t.Errorf("an instance accepted detail:\n%s", inst)
+	}
+	// And a listing shows no attributes for a mask to hide.
+	if coll := run(t, testDeps(t), "/relay print show-secrets"); !strings.Contains(coll, argDetail) {
+		t.Errorf("a listing accepted show-secrets without detail:\n%s", coll)
+	}
+	if root := run(t, testDeps(t), "/print detail"); !strings.Contains(root, "nothing here") {
 		t.Errorf("the root accepted detail:\n%s", root)
 	}
 }
 
-func TestDetailIsDiscoverable(t *testing.T) {
+func TestPrintOffersOnlyWhatWorksWhereItStands(t *testing.T) {
 	s := &session{deps: testDeps(t)}
 	s.setPath([]string{"relay", "meshcore-868"})
-	if add, _ := s.complete("print d"); add != "etail " {
-		t.Errorf("detail does not complete: %q", add)
+	if add, _ := s.complete("print s"); add != "how-secrets " {
+		t.Errorf("show-secrets does not complete: %q", add)
 	}
-	if help := s.helpForLine("print ", 0); !strings.Contains(help, argDetail) {
-		t.Errorf("the help after print does not name it:\n%s", help)
+	// An instance is not offered a word that would be refused there.
+	if help := s.helpForLine("print ", 0); !strings.Contains(help, argSecrets) ||
+		strings.Contains(help, argDetail) {
+		t.Errorf("an instance was offered the wrong words:\n%s", help)
 	}
+	s.setPath([]string{"relay"})
+	if help := s.helpForLine("print ", 0); !strings.Contains(help, argDetail) ||
+		!strings.Contains(help, argSecrets) {
+		t.Errorf("a collection was not offered both:\n%s", help)
+	}
+	s.setPath([]string{"relay", "meshcore-868"})
 	// The same question put the other way reaches the same answer.
-	if out := run(t, testDeps(t), "/relay meshcore-868 print ?"); !strings.Contains(out, argDetail) {
+	if out := run(t, testDeps(t), "/relay meshcore-868 print ?"); !strings.Contains(out, argSecrets) {
 		t.Errorf("\"print ?\" did not answer what print takes:\n%s", out)
 	}
 	if out := run(t, testDeps(t), "/relay meshcore-868 set ?"); !strings.Contains(out, "node_name") {

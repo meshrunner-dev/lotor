@@ -581,9 +581,17 @@ func quoteIfSpaced(s string) string {
 // word for "show me".
 const verbPrint = "print"
 
-// argDetail is print's one argument: every attribute in full, nothing
-// held back. It is the only way a secret is ever shown.
-const argDetail = "detail"
+// print's arguments. They are orthogonal on purpose: one is about the
+// shape of the answer, the other about what the answer leaves out.
+const (
+	// argDetail unfolds a summary. Only a collection has one, so it
+	// is the only place the word means anything.
+	argDetail = "detail"
+	// argSecrets lifts the mask. print holds it up by default so a
+	// scrollback does not end up carrying a private key by accident;
+	// asking for it by name is the deliberate act.
+	argSecrets = "show-secrets"
+)
 
 // detailWidth is the column a detail paragraph wraps at. The console
 // never measures the terminal — its probe asks whether one is there,
@@ -616,17 +624,32 @@ func (s *session) treeStatus(ctx context.Context, path []string) error {
 // treePrint shows a context: a kind lists its instances, an instance
 // shows its effective configuration with provenance.
 func (s *session) treePrint(_ context.Context, path []string, args []string) error {
-	detail := false
+	var detail, secrets bool
 	for _, a := range args {
-		if a != argDetail {
-			return fmt.Errorf("%s takes %q and nothing else, not %q", verbPrint, argDetail, a)
+		switch a {
+		case argDetail:
+			detail = true
+		case argSecrets:
+			secrets = true
+		default:
+			return fmt.Errorf("%s takes %s, not %q",
+				verbPrint, humanList(names(s.printTerms(path))), a)
 		}
-		detail = true
+	}
+	collection := len(path) == 1 && !s.isSingleton(path)
+	switch {
+	case detail && !collection:
+		// Only a summary can be unfolded, and a collection is the one
+		// view that summarises. Everywhere else print already shows
+		// every attribute there is.
+		return fmt.Errorf("nothing here to %s: %s already shows every attribute",
+			argDetail, verbPrint)
+	case secrets && len(path) == 0:
+		return errors.New("the root holds no values, secret or otherwise")
+	case secrets && collection && !detail:
+		return fmt.Errorf("this listing shows no attributes — add %s", argDetail)
 	}
 	if len(path) == 0 {
-		if detail {
-			return fmt.Errorf("the root holds no values to %s", argDetail)
-		}
 		// The root holds no values of its own: what it can show is
 		// what stands below it.
 		tb := s.table()
@@ -642,27 +665,27 @@ func (s *session) treePrint(_ context.Context, path []string, args []string) err
 		return tb.flush(s.out)
 	}
 	if s.isSingleton(path) {
-		return s.showTraces(path[0], detail)
+		return s.showTraces(path[0], secrets)
 	}
 	if len(path) == 1 {
 		// A collection is the one place print summarises: it names
 		// its instances and little else. detail is what unfolds them.
 		if detail {
-			return s.printDetail(path[0])
+			return s.printDetail(path[0], secrets)
 		}
 		if path[0] == scopeRelay {
 			return s.relayList()
 		}
 		return s.radioList()
 	}
-	return s.showTraces(path[0]+" "+path[1], detail)
+	return s.showTraces(path[0]+" "+path[1], secrets)
 }
 
 // printDetail unfolds a collection: one paragraph per instance, every
-// attribute it holds, nothing withheld. Provenance is print's own
-// answer and stays in its table — a paragraph has no column to put it
-// in, and weight alone must never be the only thing that says it.
-func (s *session) printDetail(kind string) error {
+// attribute it holds. Provenance is print's own answer and stays in
+// its table — a paragraph has no column to put it in, and weight
+// alone must never be the only thing that says it.
+func (s *session) printDetail(kind string, secrets bool) error {
 	names := make([]string, 0, 4)
 	for name := range s.instances(kind) {
 		names = append(names, name)
@@ -682,7 +705,11 @@ func (s *session) printDetail(kind string) error {
 		if i > 0 {
 			fmt.Fprint(s.out, "\r\n")
 		}
-		s.writeDetail(name, gutter, s.traces()[kind+" "+name])
+		masked := map[string]bool(nil)
+		if !secrets {
+			masked = s.secretAttrs(kind + " " + name)
+		}
+		s.writeDetail(name, gutter, s.traces()[kind+" "+name], masked)
 	}
 	return nil
 }
@@ -691,13 +718,18 @@ func (s *session) printDetail(kind string) error {
 // gutter, then its attributes as pairs packed to the width, each
 // continuation line starting under the gutter so the handle column
 // stays clear.
-func (s *session) writeDetail(handle string, gutter int, traces []config.Trace) {
+func (s *session) writeDetail(handle string, gutter int, traces []config.Trace,
+	masked map[string]bool,
+) {
 	var b strings.Builder
 	b.WriteString(" " + s.color(cPath, handle))
 	b.WriteString(strings.Repeat(" ", gutter-1-len(handle)))
 	col := gutter
 	for _, t := range traces {
 		value := exportValue(t.Value)
+		if masked[t.Key] {
+			value = maskedValue
+		}
 		// Width arithmetic runs on the plain text: the escapes take up
 		// no columns, and counting them would wrap early.
 		if width := len(t.Key) + 1 + len(value) + 1; col > gutter && col+width > detailWidth {
@@ -1043,10 +1075,7 @@ func (s *session) argTermsFor(path, rest []string) []term {
 	verb := rest[0]
 	switch verb {
 	case verbPrint:
-		return []term{{
-			name: argDetail, class: cAttr,
-			doc: "every attribute in full, secrets included",
-		}}
+		return s.printTerms(path)
 	case verbSet, verbUnset, verbAdd:
 		attrs := s.attrsAt(path)
 		if verb == verbAdd && len(path) == 1 && !s.isSingleton(path) {
@@ -1082,6 +1111,42 @@ func (s *session) argTermsFor(path, rest []string) []term {
 			})
 		}
 		return out
+	}
+}
+
+// printTerms is what print accepts where it is asked. A word is only
+// offered where it would work: unfolding needs a summary to unfold,
+// and lifting the mask needs values to lift it from.
+func (s *session) printTerms(path []string) []term {
+	if len(path) == 0 {
+		return nil
+	}
+	var out []term
+	if len(path) == 1 && !s.isSingleton(path) {
+		out = append(out, term{
+			name: argDetail, class: cAttr,
+			doc: "open each one out into its attributes",
+		})
+	}
+	return append(out, term{
+		name: argSecrets, class: cAttr,
+		doc: "show what " + verbPrint + " masks",
+	})
+}
+
+// humanList joins words the way a refusal reads them out.
+func humanList(words []string) string {
+	quoted := make([]string, len(words))
+	for i, w := range words {
+		quoted[i] = strconv.Quote(w)
+	}
+	switch len(quoted) {
+	case 0:
+		return "no arguments"
+	case 1:
+		return quoted[0]
+	default:
+		return strings.Join(quoted[:len(quoted)-1], ", ") + " or " + quoted[len(quoted)-1]
 	}
 }
 

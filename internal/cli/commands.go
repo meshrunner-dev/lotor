@@ -256,7 +256,7 @@ func (s *session) config(_ context.Context, in input) error {
 	return s.showTraces(args[1]+" "+args[2], false)
 }
 
-func (s *session) showTraces(key string, detail bool) error {
+func (s *session) showTraces(key string, secrets bool) error {
 	traces, ok := s.traces()[key]
 	if !ok {
 		keys := make([]string, 0, len(s.traces()))
@@ -272,9 +272,9 @@ func (s *session) showTraces(key string, detail bool) error {
 	const sourceColumn = 2
 	for _, t := range traces {
 		value := fmt.Sprintf("%v", t.Value)
-		if secret[t.Key] && !detail {
+		if secret[t.Key] && !secrets {
 			// A secret is shown when it is asked for by name and not
-			// before: print masks, print detail does not.
+			// before.
 			value = maskedValue
 		}
 		// The mark lands on the source, which is the cell it is about.
