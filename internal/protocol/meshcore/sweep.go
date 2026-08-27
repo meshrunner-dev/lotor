@@ -12,6 +12,7 @@ import (
 	// get wrong.
 	"encoding/binary" //nolint:depguard
 	"errors"
+	"fmt"
 	"time"
 
 	"go.uber.org/zap"
@@ -39,7 +40,19 @@ type sweep struct {
 	until time.Time
 	found chan Neighbour
 	seen  map[[meshcore.PubKeySize]byte]bool
+	// started is how the pipeline answers the asker: closed once the
+	// question is really on its way, or carrying the reason it is not.
+	// Without it a scan the relay refused would look exactly like a
+	// scan nobody answered — an empty room and a silent failure read
+	// the same from the console, and only one of them is true.
+	started chan error
 }
+
+// scanStartWait bounds how long an asker waits to hear whether its
+// scan went out. The pipeline picks the question up on its next turn
+// of the receive loop, so this is slack, not a duration anyone should
+// notice.
+const scanStartWait = 3 * time.Second
 
 // Discover asks the neighbourhood who is there. The channel carries
 // each answer as it lands and closes when the window ends; the
@@ -53,10 +66,11 @@ func (e *engine) Discover() (<-chan Neighbour, time.Time, error) {
 		return nil, time.Time{}, err
 	}
 	s := &sweep{
-		tag:   binary.LittleEndian.Uint32(raw[:]),
-		until: time.Now().Add(sweepWindow),
-		found: make(chan Neighbour, maxNeighbours),
-		seen:  map[[meshcore.PubKeySize]byte]bool{},
+		tag:     binary.LittleEndian.Uint32(raw[:]),
+		until:   time.Now().Add(sweepWindow),
+		found:   make(chan Neighbour, maxNeighbours),
+		seen:    map[[meshcore.PubKeySize]byte]bool{},
+		started: make(chan error, 1),
 	}
 	select {
 	case e.sweepAsk <- s:
@@ -68,7 +82,26 @@ func (e *engine) Discover() (<-chan Neighbour, time.Time, error) {
 		e.wakeRx() // close the receive window: ask now
 	}
 	e.wakeMu.Unlock()
+
+	// Wait to hear that it went out. The window returned is the one
+	// the pipeline stamped when it did, not the one guessed here.
+	select {
+	case err := <-s.started:
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+	case <-time.After(scanStartWait):
+		return nil, time.Time{}, errors.New(
+			"the relay never picked the scan up — see \"relay <name>\" for what it is doing")
+	}
 	return s.found, s.until, nil
+}
+
+// refuse tells the asker why its scan never went out, and closes the
+// answers it will never receive.
+func (s *sweep) refuse(err error) {
+	s.started <- err
+	close(s.found)
 }
 
 // drainSweepAsk sends a scan the operator asked for, and closes one
@@ -81,7 +114,13 @@ func (e *engine) drainSweepAsk(dev radio.Device, now time.Time) {
 	select {
 	case s := <-e.sweepAsk:
 		if e.pendingSweep != nil {
-			close(s.found) // one window at a time; this one never opened
+			// One window at a time: two scans at once make every
+			// responder answer both, into the same jitter, and the
+			// collisions cost more answers than the second scan buys.
+			s.refuse(fmt.Errorf(
+				"a scan is already listening, %s left of its window — "+
+					"its answers join the neighbourhood either way",
+				time.Until(e.pendingSweep.until).Round(time.Second)))
 			return
 		}
 		pkt, err := meshcore.BuildDiscoverReq(meshcore.DiscoverReq{
@@ -95,11 +134,15 @@ func (e *engine) drainSweepAsk(dev radio.Device, now time.Time) {
 			PrefixOnly: false,
 		})
 		if err != nil {
-			close(s.found)
+			s.refuse(fmt.Errorf("the scan could not be composed: %w", err))
 			e.log.Warn("scan build failed", zap.Error(err))
 			return
 		}
+		// The window starts when the question does, not when it was
+		// typed: the wait above is short but it is not nothing.
+		s.until = now.Add(sweepWindow)
 		e.pendingSweep = s
+		close(s.started)
 		id := txn.New()
 		e.log.Info("scanning the neighbourhood",
 			zap.String("txn", id.Short()), zap.Duration("window", sweepWindow))

@@ -1,6 +1,7 @@
 package meshcore
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -84,5 +85,37 @@ func TestOurOwnAnswerIsNotANeighbour(t *testing.T) {
 	}
 	if len(e.Neighbours()) != 0 {
 		t.Fatal("this node became its own neighbour")
+	}
+}
+
+func TestASecondScanIsRefusedNotSilentlyEmptied(t *testing.T) {
+	e, dev, _, _ := txRig(t, "on-air")
+	runEngine(t, e, dev)
+
+	found, until, err := e.Discover()
+	if err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	if found == nil || time.Until(until) < sweepWindow-scanStartWait {
+		t.Fatalf("window = %s, want about %s from when the question went out",
+			time.Until(until), sweepWindow)
+	}
+
+	// A second one inside the first's window must say why it is not
+	// running. Closing its channel would read as an empty room.
+	_, _, err = e.Discover()
+	if err == nil {
+		t.Fatal("a second scan opened inside the first's window")
+	}
+	if !strings.Contains(err.Error(), "already listening") {
+		t.Fatalf("refusal said %q", err)
+	}
+}
+
+func TestADryRelayRefusesToScan(t *testing.T) {
+	e, dev, _, _ := txRig(t, "dry")
+	runEngine(t, e, dev)
+	if _, _, err := e.Discover(); err == nil {
+		t.Fatal("a dry relay asked the neighbourhood anyway")
 	}
 }
