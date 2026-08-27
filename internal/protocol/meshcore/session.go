@@ -18,11 +18,11 @@ import (
 // with a password and may then ask a handful of authenticated
 // questions: how the node is doing, what it hears, who it is.
 //
-// Only the guest role exists here. The reference also serves an admin
-// role — settings, access lists, a whole CLI over the air — and this
-// daemon deliberately declines that: administration goes through the
-// local console socket, where the operating system's own permissions
-// are the authentication, not a password crossing a shared band.
+// Only the guest role is served yet. The reference's admin role —
+// settings, access lists, a whole CLI over the air — is a surface
+// this daemon does not answer on today; until it does, administration
+// happens on the local console socket, where the operating system's
+// own permissions are the authentication.
 const (
 	permGuest    = 0
 	permAdmin    = 3

@@ -60,9 +60,9 @@ relays:
 
         # Guest sessions: whether a stranger may open a read-only
         # session over the air — status, telemetry, neighbours, owner.
-        # Never administration: that goes through the console socket,
-        # where the operating system's own permissions authenticate,
-        # not a password crossing a shared band.
+        # Administration is not served over the air today: it happens
+        # on the console socket, where the operating system's own
+        # permissions authenticate.
         #
         #   guest_access: blocked   nobody may — the default
         #                 password  whoever knows guest_password may
