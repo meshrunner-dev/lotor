@@ -54,6 +54,14 @@ func SentinelAttrs() []schema.Attr {
 	}
 }
 
+// SystemAttrs describes what this installation calls itself.
+func SystemAttrs() []schema.Attr {
+	return []schema.Attr{
+		{Name: "name", Type: schema.String, Apply: schema.Hot,
+			Doc: "what this installation calls itself; empty takes the machine's hostname"},
+	}
+}
+
 // CLIAttrs describes the operator listener.
 func CLIAttrs() []schema.Attr {
 	return []schema.Attr{

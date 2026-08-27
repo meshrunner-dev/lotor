@@ -66,18 +66,35 @@ func (s *session) setPath(p []string) {
 	s.path = p
 }
 
-// prompt names where the session stands. The REPL prints it, and the
-// editor repaints it, so both read the same function.
+// prompt names who is standing where, in the shape a network console
+// uses: the privilege and the system inside the brackets, the context
+// path outside them, the caret last. It says the same thing at the
+// root as anywhere else — a prompt that changes shape with depth
+// makes an operator read it twice.
 func (s *session) prompt() string {
-	p := s.curPath()
-	if len(p) == 0 {
-		return "> "
+	priv := s.deps.Privilege
+	if priv == "" {
+		priv = ReadOnly
 	}
-	label := "[/" + strings.Join(p, " ") + "]"
+	who := "[" + string(priv) + "@" + s.systemName() + "]"
+	path := ""
+	if p := s.curPath(); len(p) > 0 {
+		path = " /" + strings.Join(p, " ")
+	}
 	if s.colors {
-		label = cCyan + label + cReset
+		return cGreen + who + cReset + cCyan + path + cReset + "> "
 	}
-	return label + " > "
+	return who + path + "> "
+}
+
+// systemName is what this installation calls itself.
+func (s *session) systemName() string {
+	if s.deps.SystemName != nil {
+		if name := s.deps.SystemName(); name != "" {
+			return name
+		}
+	}
+	return "lotor"
 }
 
 // relays is the live view when the daemon serves one.

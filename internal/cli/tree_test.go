@@ -10,9 +10,17 @@ import (
 )
 
 func TestTreeNavigationChangesThePrompt(t *testing.T) {
-	out := run(t, testDeps(t), "/relay", "?", "..")
-	if !strings.Contains(out, "[/relay] > ") {
+	deps := testDeps(t)
+	deps.SystemName = func() string { return "lab-pi" }
+	out := run(t, deps, "/relay", "?", "..")
+	// The network-console shape: privilege and system in the brackets,
+	// the context path outside them.
+	if !strings.Contains(out, "[read-only@lab-pi] /relay> ") {
 		t.Errorf("the prompt never showed the context:\n%s", out)
+	}
+	// The root wears the same shape, only without a path.
+	if !strings.Contains(out, "[read-only@lab-pi]> ") {
+		t.Errorf("the root prompt lost its shape:\n%s", out)
 	}
 	// Context help names the instances and what each one speaks.
 	if !strings.Contains(out, "meshcore-868") || !strings.Contains(out, "print") {
@@ -247,7 +255,7 @@ func TestSingletonContextSetsAndPrints(t *testing.T) {
 		return "applied — takes effect when the daemon restarts", nil
 	}
 	out := run(t, deps, "/sentinel", "print", "set retention=800h", "?")
-	if !strings.Contains(out, "[/sentinel] > ") {
+	if !strings.Contains(out, "] /sentinel> ") {
 		t.Errorf("the singleton has no context:\n%s", out)
 	}
 	if !strings.Contains(out, "/var/lib/lotor/journal.db") {
@@ -356,5 +364,52 @@ func TestExportColoursItsSymbolClasses(t *testing.T) {
 	}
 	if !strings.Contains(plain.String(), "/relay add meshcore-868 ") {
 		t.Errorf("the plain line lost its shape:\n%q", plain.String())
+	}
+}
+
+func TestPromptNamesWhoAndWhere(t *testing.T) {
+	deps := testDeps(t)
+	deps.SystemName = func() string { return "lab-pi" }
+	s := &session{deps: deps}
+	if got := s.prompt(); got != "[read-only@lab-pi]> " {
+		t.Errorf("root prompt = %q", got)
+	}
+	s.setPath([]string{"relay", "meshcore-868"})
+	if got := s.prompt(); got != "[read-only@lab-pi] /relay meshcore-868> " {
+		t.Errorf("context prompt = %q", got)
+	}
+	// The privilege is part of the answer: an operator reads what they
+	// may do without trying it.
+	s.deps.Privilege = Admin
+	if got := s.prompt(); !strings.HasPrefix(got, "[admin@lab-pi]") {
+		t.Errorf("admin prompt = %q", got)
+	}
+	// A daemon that names no system still prompts.
+	bare := &session{deps: testDeps(t)}
+	if got := bare.prompt(); got != "[read-only@lotor]> " {
+		t.Errorf("nameless prompt = %q", got)
+	}
+	// Coloured sessions paint the two halves by their classes.
+	s.colors = true
+	if got := s.prompt(); !strings.Contains(got, cGreen+"[admin@lab-pi]"+cReset) ||
+		!strings.Contains(got, cCyan+" /relay meshcore-868"+cReset) {
+		t.Errorf("coloured prompt = %q", got)
+	}
+}
+
+func TestSystemNameIsHotAndSaysWhereItCameFrom(t *testing.T) {
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	deps.SystemName = func() string { return "lab-pi" }
+	deps.Traces["system"] = []config.Trace{
+		{Key: "name", Value: "lab-pi", Source: "hostname"},
+	}
+	out := run(t, deps, "/system print", "/system ?")
+	// print does not pass a fallback off as a choice.
+	if !strings.Contains(out, "hostname") {
+		t.Errorf("print hides where the name came from:\n%s", out)
+	}
+	if !strings.Contains(out, "the machine's hostname") {
+		t.Errorf("? does not describe the attribute:\n%s", out)
 	}
 }

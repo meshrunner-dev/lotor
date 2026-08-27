@@ -40,6 +40,7 @@ const (
 	KindRelay    = "relay"
 	KindSentinel = "sentinel"
 	KindCLI      = "cli"
+	KindSystem   = "system"
 )
 
 const schemaDDL = `
@@ -180,6 +181,12 @@ func assign(f *config.File, kind, name string, attrs []byte) error {
 			return err
 		}
 		f.CLI = &c
+	case KindSystem:
+		sys, err := fromAttrs[config.System](attrs)
+		if err != nil {
+			return err
+		}
+		f.System = &sys
 	default:
 		return fmt.Errorf("unknown object kind %q", kind)
 	}
@@ -206,6 +213,9 @@ func (s *Store) ImportFile(ctx context.Context, f *config.File, principal string
 	}
 	if f.CLI != nil {
 		objects = append(objects, object{KindCLI, "", *f.CLI})
+	}
+	if f.System != nil {
+		objects = append(objects, object{KindSystem, "", *f.System})
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)

@@ -65,5 +65,6 @@ func TestStructuralSchemasCoverTheirStructs(t *testing.T) {
 		"overrides": "the attr storage, not an attr",
 	})
 	covered(t, SentinelAttrs(), reflect.TypeFor[Sentinel](), nil)
+	covered(t, SystemAttrs(), reflect.TypeFor[System](), nil)
 	covered(t, CLIAttrs(), reflect.TypeFor[CLI](), nil)
 }

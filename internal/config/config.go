@@ -172,12 +172,22 @@ func (f *File) ConsoleSocket() (path string, explicit bool) {
 	return *f.CLI.Socket, true
 }
 
+// System is what this installation calls itself. The name identifies
+// the host an operator is standing on — in the console prompt, and in
+// whatever a browser eventually puts in its title bar — so it is one
+// setting, not one per surface. Absent, the machine's hostname
+// answers: a name nobody chose is still better than no name.
+type System struct {
+	Name string `yaml:"name"`
+}
+
 // File is the top-level configuration.
 type File struct {
 	Radios   map[string]Radio `yaml:"radios"`
 	Relays   map[string]Relay `yaml:"relays"`
 	Sentinel *Sentinel        `yaml:"sentinel"`
 	CLI      *CLI             `yaml:"cli"`
+	System   *System          `yaml:"system"`
 }
 
 // Load reads, decodes and cross-validates a configuration file.

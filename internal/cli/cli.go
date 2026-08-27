@@ -159,6 +159,10 @@ type Deps struct {
 	Create func(ctx context.Context, kind, name string, attrs map[string]string,
 		principal string) (string, error)
 	Remove func(ctx context.Context, kind, name, principal string) (string, error)
+	// SystemName is what this installation calls itself — the prompt's
+	// right-hand side, and the name a browser will show. Nil falls
+	// back to the product's own name.
+	SystemName func() string
 }
 
 // maxLineBytes bounds one command line: a client that never sends a
@@ -233,7 +237,7 @@ func ServeEdited(ctx context.Context, rw io.ReadWriter, deps Deps) {
 // after the banner and after every command, so it always lands below
 // the output it follows.
 func (s *session) repl(ctx context.Context) {
-	banner(s.out, s.deps.Version, s.deps.Privilege)
+	banner(s.out, s.deps.Version, s.systemName(), s.deps.Privilege)
 	for ctx.Err() == nil {
 		fmt.Fprint(s.out, s.prompt())
 		select {

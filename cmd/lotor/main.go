@@ -343,6 +343,10 @@ func buildKinds() []schema.Kind {
 			Name: confdb.KindCLI, Doc: "the operator listener", Singleton: true,
 			Attrs: config.CLIAttrs(),
 		},
+		{
+			Name: confdb.KindSystem, Doc: "what this installation calls itself", Singleton: true,
+			Attrs: config.SystemAttrs(),
+		},
 	}
 }
 
@@ -384,6 +388,7 @@ func consoleDeps(mgr *manager, b *bus.Bus, sen *sentinel.Sentinel) cli.Deps {
 		Undo:       mgr.Undo,
 		Create:     mgr.Create,
 		Remove:     mgr.Remove,
+		SystemName: mgr.SystemName,
 	}
 }
 

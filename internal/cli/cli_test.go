@@ -101,6 +101,8 @@ func testKinds() []schema.Kind {
 		},
 		{Name: "sentinel", Doc: "the journal", Singleton: true,
 			Attrs: config.SentinelAttrs()},
+		{Name: "system", Doc: "what this installation calls itself", Singleton: true,
+			Attrs: config.SystemAttrs()},
 	}
 }
 

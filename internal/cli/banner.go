@@ -19,14 +19,15 @@ var mascot = []string{
 }
 
 // banner writes the connection greeting: the mascot on the left, the
-// product lines beside it — the session's privilege included, so the
-// operator knows which door they came through.
-func banner(w io.Writer, version string, priv Privilege) {
+// product lines beside it — the system's name and the session's
+// privilege included, so an operator knows which machine they reached
+// and which door they came through.
+func banner(w io.Writer, version, system string, priv Privilege) {
 	if priv == "" {
 		priv = ReadOnly
 	}
 	info := map[int]string{
-		1: "Lotor " + version,
+		1: "Lotor " + version + " on " + system,
 		2: "A mesh relay daemon — https://meshrunner.dev/lotor",
 		4: string(priv) + " console",
 		5: "\"help\" lists commands, \"quit\" leaves.",

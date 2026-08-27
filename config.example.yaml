@@ -14,6 +14,13 @@ radios:
         # THIS host is yours to say (gpiochip defaults to gpiochip0).
         spi: /dev/spidev0.0
 
+# Optional: what this installation calls itself. The name identifies
+# the host in the console prompt and in the web interface, so it is
+# one setting rather than one per surface. Absent, the machine's
+# hostname answers.
+# system:
+#   name: lotor-lab
+
 # Optional: the sentinel journals every frame and verdict. Omit the
 # whole block to run without observation (tight-RAM hosts); use
 # journal: ":memory:" to observe without touching storage.

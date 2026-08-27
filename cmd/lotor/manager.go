@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -47,6 +48,7 @@ const (
 	attrTXExhausted  = "tx.lbt_exhausted"
 	attrTXQueueDepth = "tx.queue_depth"
 	attrSocket       = "socket"
+	attrName         = "name"
 
 	// sourceConfig is what a singleton's print shows as provenance —
 	// no layering, just the store.
@@ -218,6 +220,11 @@ func (m *manager) Traces() map[string][]config.Trace {
 		}
 		out[confdb.KindSentinel] = rows
 	}
+	// The system name is always shown, hostname included, because a
+	// default is still the answer to "what is this machine called".
+	out[confdb.KindSystem] = []config.Trace{
+		{Key: attrName, Value: m.systemName(), Source: m.nameSource()},
+	}
 	if c := m.file.CLI; c != nil {
 		rows := []config.Trace{{Key: "listen", Value: c.Listen, Source: sourceConfig}}
 		if c.Socket != nil {
@@ -227,6 +234,48 @@ func (m *manager) Traces() map[string][]config.Trace {
 	}
 	return out
 }
+
+// SystemName is what this installation calls itself — the console's
+// prompt, and whatever a browser puts in its title bar, read the same
+// answer from here. Safe from any goroutine.
+func (m *manager) SystemName() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.systemName()
+}
+
+// systemName resolves the configured name or falls back to the
+// machine's. The caller holds mu.
+func (m *manager) systemName() string {
+	if m.file.System != nil && m.file.System.Name != "" {
+		return m.file.System.Name
+	}
+	return machineName()
+}
+
+// nameSource says where the shown name came from, so print does not
+// pass a fallback off as a choice. The caller holds mu.
+func (m *manager) nameSource() string {
+	if m.file.System != nil && m.file.System.Name != "" {
+		return sourceConfig
+	}
+	return "hostname"
+}
+
+// machineName is the host's own name, read once: it does not change
+// under a running daemon, and a lookup per prompt would be a syscall
+// per keystroke. A host that will not say gets the product's name,
+// because a prompt with a hole in it helps nobody.
+var machineName = sync.OnceValue(func() string {
+	name, err := os.Hostname()
+	if err != nil || name == "" {
+		return "lotor"
+	}
+	// The short form: an operator knows which domain they are in, and
+	// a prompt is not the place to restate it.
+	short, _, _ := strings.Cut(name, ".")
+	return short
+})
 
 // The structural rows: what an object IS, rendered beside what its
 // layers resolved, so print and export see one coherent surface.
@@ -374,7 +423,11 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 	m.file = next
 
 	if relayName == "" {
-		if kind == confdb.KindSentinel || kind == confdb.KindCLI {
+		switch kind {
+		case confdb.KindSystem:
+			// The one attribute anything reads live.
+			return "applied — this system is now " + m.systemName(), nil
+		case confdb.KindSentinel, confdb.KindCLI:
 			return "applied — takes effect when the daemon restarts", nil
 		}
 		return "applied — no running relay uses this yet", nil
@@ -736,6 +789,9 @@ func applyChanges(next *config.File, kind, name string,
 	case confdb.KindCLI:
 		change, err := applyCLIChanges(next, typed, unset)
 		return change, "", err
+	case confdb.KindSystem:
+		change, err := applySystemChanges(next, typed, unset)
+		return change, "", err
 	case confdb.KindRelay:
 		change, err := applyRelayChanges(next, name, typed, unset)
 		return change, name, err
@@ -999,6 +1055,39 @@ func applyCLIChanges(next *config.File,
 	return change, nil
 }
 
+// applySystemChanges edits what this installation calls itself. The
+// name is felt at once — the prompt reads it live — so unsetting it is
+// meaningful too: back to the machine's hostname.
+func applySystemChanges(next *config.File,
+	typed map[string]any, unset []string,
+) (map[string]confdb.Change, error) {
+	change := map[string]confdb.Change{}
+	sys := config.System{}
+	if next.System != nil {
+		sys = *next.System
+	}
+	for attr, v := range typed {
+		if attr != attrName {
+			return nil, fmt.Errorf("no attribute %q here", attr)
+		}
+		change[attr] = confdb.Change{Old: orNil(sys.Name), New: v}
+		name, err := asString(attr, v)
+		if err != nil {
+			return nil, err
+		}
+		sys.Name = name
+	}
+	for _, attr := range unset {
+		if attr != attrName {
+			return nil, fmt.Errorf("no attribute %q here", attr)
+		}
+		change[attr] = confdb.Change{Old: orNil(sys.Name)}
+		sys.Name = ""
+	}
+	next.System = &sys
+	return change, nil
+}
+
 func orNil(s string) any {
 	if s == "" {
 		return nil
@@ -1030,6 +1119,11 @@ func objectSection(f *config.File, kind, name string) (any, error) {
 			return nil, errors.New("no cli block")
 		}
 		return *f.CLI, nil
+	case confdb.KindSystem:
+		if f.System == nil {
+			return nil, errors.New("no system block")
+		}
+		return *f.System, nil
 	}
 	return nil, fmt.Errorf("%q is not configurable from here yet", kind)
 }
