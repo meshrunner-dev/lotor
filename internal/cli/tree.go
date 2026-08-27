@@ -533,8 +533,10 @@ func (s *session) exportLine(kind, verb, name string, pairs [][2]string) {
 	fmt.Fprintf(s.out, "%s\r\n", b.String())
 }
 
-// exportComment writes a line the paste ignores, dimmed so it reads as
-// an aside rather than as configuration.
+// exportComment writes a line the paste ignores. It carries no
+// weight: an export is read as often through a pipe or a diff as on a
+// terminal, and a remark that only looks like one where escapes
+// survive is a remark that fails where it matters.
 func (s *session) exportComment(text string) {
 	fmt.Fprintf(s.out, "# %s\r\n", text)
 }
@@ -1134,11 +1136,39 @@ const (
 	cSystem = "\x1b[32m"   // this installation's name
 	cUser   = "\x1b[36m"   // who is holding the session
 
-	// emphasis is weight rather than hue: a table's column names have
-	// no class of their own — they name the classes below them — so
-	// giving them a colour would claim something untrue.
+	// Weight is the second axis, and it answers a different question
+	// from hue. Hue says what a word IS — a place, an action, an
+	// attribute. Weight says how firmly it was chosen: a value the
+	// operator set stands out, a value that merely came with the
+	// preset recedes, and the column names take emphasis because they
+	// have no class of their own to colour.
 	emphasis = "\x1b[1m"
+	// chosen marks a value the operator set. Weight again, not hue:
+	// every hue this console has means a kind of word, and a
+	// provenance is not one.
+	chosen = emphasis
+	// recede is a grey named from the 256-colour cube, and the cube is
+	// the point. Faint is the least reliably implemented attribute
+	// there is, and the sixteen base colours are a theme's to
+	// redefine — Solarized turns bright black into a tone a shade from
+	// its own background, so a row meant to step back stepped out of
+	// sight. Nothing remaps the cube.
+	recede = "\x1b[38;5;244m"
 )
+
+// weightOf reads a provenance and answers how firmly the value was
+// chosen. The source column still says it in words, because a pipe
+// gets no weight at all and must lose nothing.
+func weightOf(source string) string {
+	switch {
+	case strings.HasPrefix(source, "override:"):
+		return chosen // set here, on purpose
+	case strings.HasPrefix(source, "profile:"):
+		return recede // arrived with the preset
+	default:
+		return "" // the store's own word, neither louder nor softer
+	}
+}
 
 // table starts one aligned table that knows whether this session can
 // show emphasis.

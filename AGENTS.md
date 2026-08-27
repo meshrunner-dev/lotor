@@ -83,6 +83,26 @@ look alike. The constants in `internal/cli/tree.go` are named for those
 classes rather than their hues — reach for `cVerb`, not "magenta" —
 so a palette change stays one edit.
 
+Hue and weight answer different questions, and mixing them muddles
+both. **Hue says what a word is** — a place, an action, an attribute,
+a value. **Weight says how firmly it was chosen**: an override stands
+out, a preset's value recedes, a column name takes emphasis because it
+has no class of its own to colour. Reach for weight when the thing you
+want to show is not a kind of word.
+
+Not faint — SGR 2 is the least reliably implemented attribute there is,
+and a terminal that will not dim reaches for a palette entry instead,
+which many themes colour blue. A mark that arrives as a hue this
+console reserves for something else is worse than no mark.
+
+A mark goes on the cell it is about, never on the whole line: dressing
+a row would tint its value too, and say something about the value that
+was not meant. `table.rowAs` takes the column for exactly that reason.
+
+Neither axis may be the only carrier of an answer. A pipe gets no
+escapes at all, so whatever a colour or a weight says, some column
+must still say in words.
+
 One class earns its keep above the others: `cUnres` marks a word the
 console has **not resolved** — it names nothing, or it still names
 several things. That is not decoration, it is the console answering

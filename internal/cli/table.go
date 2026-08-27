@@ -14,6 +14,12 @@ import (
 // counting does not.
 type table struct {
 	rows [][]string
+	// weight carries each row's mark and the cell it lands on, kept
+	// apart from the cells themselves for the same reason the
+	// header's is: escape bytes occupy no terminal cells, and the
+	// width arithmetic must not count them.
+	weight    []string
+	weightCol []int
 	// head is the column names, kept apart from the rows: the width
 	// arithmetic runs on the plain text and the emphasis is added at
 	// the last moment, because escape bytes count for cells they do
@@ -27,7 +33,17 @@ type table struct {
 const columnGap = 2
 
 func (t *table) row(cells ...string) {
+	t.rowAs("", 0, cells...)
+}
+
+// rowAs adds a row where the cell at col carries a mark. The mark
+// sits on the one cell it is about — the column that answers the
+// question — rather than on the whole line, which would tint the
+// values as well and say something about them that is not meant.
+func (t *table) rowAs(mark string, col int, cells ...string) {
 	t.rows = append(t.rows, cells)
+	t.weight = append(t.weight, mark)
+	t.weightCol = append(t.weightCol, col)
 }
 
 // header names the columns. They are shown as typed — upper case is
@@ -48,6 +64,38 @@ func (t *table) flush(w io.Writer) error {
 		}
 		rows = append([][]string{t.head}, rows...)
 	}
+	widths := columnWidths(rows)
+	for n, r := range rows {
+		header := n == 0 && t.head != nil
+		var b strings.Builder
+		for i, c := range r {
+			shown := c
+			switch {
+			case header && t.bold:
+				// Cell by cell, so the gaps between columns stay bare.
+				shown = emphasis + c + cReset
+			case !header && t.bold:
+				if mark := t.markFor(n, i); mark != "" {
+					shown = mark + c + cReset
+				}
+			}
+			b.WriteString(shown)
+			if i < len(r)-1 {
+				b.WriteString(strings.Repeat(" ", widths[i]-runewidth.StringWidth(c)+columnGap))
+			}
+		}
+		line := strings.TrimRight(b.String(), " ")
+		if _, err := fmt.Fprintf(w, "%s\r\n", line); err != nil {
+			return err
+		}
+	}
+	t.rows, t.head, t.weight, t.weightCol = nil, nil, nil, nil
+	return nil
+}
+
+// columnWidths measures each column by the widest cell in it,
+// counting terminal cells rather than runes.
+func columnWidths(rows [][]string) []int {
 	var widths []int
 	for _, r := range rows {
 		for i, c := range r {
@@ -59,24 +107,20 @@ func (t *table) flush(w io.Writer) error {
 			}
 		}
 	}
-	for n, r := range rows {
-		var b strings.Builder
-		for i, c := range r {
-			shown := c
-			if n == 0 && t.head != nil && t.bold {
-				shown = emphasis + c + cReset
-			}
-			b.WriteString(shown)
-			if i < len(r)-1 {
-				b.WriteString(strings.Repeat(" ", widths[i]-runewidth.StringWidth(c)+columnGap))
-			}
-		}
-		if _, err := fmt.Fprintf(w, "%s\r\n", strings.TrimRight(b.String(), " ")); err != nil {
-			return err
-		}
+	return widths
+}
+
+// markFor returns the mark a cell carries, if it is the one the row's
+// mark was meant for. n counts the rendered lines, the header
+// included; the marks are indexed by row.
+func (t *table) markFor(n, col int) string {
+	if t.head != nil {
+		n-- // the header is not one of the rows
 	}
-	t.rows, t.head = nil, nil
-	return nil
+	if n < 0 || n >= len(t.weight) || t.weight[n] == "" || t.weightCol[n] != col {
+		return ""
+	}
+	return t.weight[n]
 }
 
 // printable neutralises what the mesh may try to type into the

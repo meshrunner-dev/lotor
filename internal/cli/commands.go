@@ -19,7 +19,7 @@ import (
 )
 
 func (s *session) status(ctx context.Context, _ input) error {
-	tb := &table{}
+	tb := s.table()
 	tb.row("daemon", "up "+uptime(s.deps.Started), "lotor "+s.deps.Version)
 	for _, r := range s.relays() {
 		tb.row("relay", r.Name, r.State(), "radio "+r.Radio,
@@ -73,7 +73,7 @@ func (s *session) relayStatus(ctx context.Context, in input) error {
 	if err != nil {
 		return err
 	}
-	tb := &table{}
+	tb := s.table()
 	tb.row("state", r.State())
 	if r.Err != nil {
 		if cause := r.Err(); cause != "" {
@@ -269,6 +269,7 @@ func (s *session) showTraces(key string) error {
 	secret := s.secretAttrs(key)
 	tb := s.table()
 	tb.header("ATTRIBUTE", "VALUE", "SOURCE")
+	const sourceColumn = 2
 	for _, t := range traces {
 		value := fmt.Sprintf("%v", t.Value)
 		if secret[t.Key] {
@@ -276,7 +277,8 @@ func (s *session) showTraces(key string) error {
 			// never — the read-only telnet listener sees this table.
 			value = maskedValue
 		}
-		tb.row(t.Key, value, t.Source)
+		// The mark lands on the source, which is the cell it is about.
+		tb.rowAs(weightOf(t.Source), sourceColumn, t.Key, value, t.Source)
 	}
 	return tb.flush(s.out)
 }
@@ -349,7 +351,7 @@ func (s *session) frames(ctx context.Context, in input) error {
 		fmt.Fprint(s.out, "no frames match\r\n")
 		return nil
 	}
-	tb := &table{}
+	tb := s.table()
 	for _, f := range slices.Backward(frames) { // oldest first, like a log
 		tb.row(f.At.Format("15:04:05"), f.Txn[:12], f.Type,
 			fmt.Sprintf("%s /%d", f.Route, f.PathLen), verdictWithChain(f), who(f))
@@ -816,7 +818,7 @@ func (s *session) tx(ctx context.Context, in input) error {
 		fmt.Fprint(s.out, "no emissions journalled yet\r\n")
 		return nil
 	}
-	tb := &table{}
+	tb := s.table()
 	for _, b := range buckets {
 		tb.row(b.At.Format("02/01 15:04"),
 			fmt.Sprintf("min %.1f s", b.Min), fmt.Sprintf("avg %.1f s", b.Avg),
@@ -877,7 +879,7 @@ func (s *session) noise(ctx context.Context, in input) error {
 		fmt.Fprint(s.out, "no history yet\r\n")
 		return nil
 	}
-	return noiseTable(buckets, spreads, starveds).flush(s.out)
+	return s.noiseTable(buckets, spreads, starveds).flush(s.out)
 }
 
 // noiseTable renders the floor buckets with their companion series.
@@ -885,7 +887,7 @@ func (s *session) noise(ctx context.Context, in input) error {
 // saw, avg(p50) is their consolidation — the telemetry idiom naming
 // the estimator and the fold separately. starved counts the batches
 // the channel was too busy to let converge.
-func noiseTable(buckets, spreads, starveds []sentinel.MetricBucket) *table {
+func (s *session) noiseTable(buckets, spreads, starveds []sentinel.MetricBucket) *table {
 	spreadAt := make(map[int64]float64, len(spreads))
 	for _, b := range spreads {
 		spreadAt[b.At.UnixMilli()] = b.Avg
@@ -894,7 +896,7 @@ func noiseTable(buckets, spreads, starveds []sentinel.MetricBucket) *table {
 	for _, b := range starveds {
 		starvedAt[b.At.UnixMilli()] = b.Avg * float64(b.N)
 	}
-	tb := &table{}
+	tb := s.table()
 	for _, b := range buckets {
 		tb.row(b.At.Format("02/01 15:04"),
 			fmt.Sprintf("min %.1f", b.Min), fmt.Sprintf("avg(p50) %.1f", b.Avg),

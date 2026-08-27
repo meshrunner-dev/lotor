@@ -924,3 +924,58 @@ func TestWhatCompletionProducesIsWhatEnterAccepts(t *testing.T) {
 		t.Errorf("%q completed to something the tree refuses", line)
 	}
 }
+
+func TestProvenanceMarksTheSourceCellAlone(t *testing.T) {
+	deps := testDeps(t)
+	deps.Traces["relay meshcore-868"] = []config.Trace{
+		{Key: "frequency_hz", Value: 869618000, Source: "profile:eu-868-narrow"},
+		{Key: "node_name", Value: "lab", Source: "override:eu-868-narrow"},
+		{Key: "protocol", Value: "meshcore", Source: "config"},
+	}
+	var b strings.Builder
+	s := &session{deps: deps, colors: true, out: &b}
+	if err := s.showTraces("relay meshcore-868"); err != nil {
+		t.Fatal(err)
+	}
+	got := b.String()
+
+	// The mark sits on the cell it is about. Wrapping the line would
+	// tint the value too, saying something about it that is not meant.
+	for _, c := range []struct{ mark, source string }{
+		{chosen, "override:eu-868-narrow"},
+		{recede, "profile:eu-868-narrow"},
+	} {
+		if !strings.Contains(got, c.mark+c.source+cReset) {
+			t.Errorf("%q does not carry its mark on the source cell:\n%q", c.source, got)
+		}
+	}
+	// The attribute names and the values stay bare.
+	for _, bare := range []string{"node_name", "frequency_hz", "lab", "869618000"} {
+		for _, mark := range []string{chosen, recede, emphasis} {
+			if strings.Contains(got, mark+bare) {
+				t.Errorf("%q was marked, and only the source should be:\n%q", bare, got)
+			}
+		}
+	}
+	// What the store simply holds wears nothing.
+	for line := range strings.SplitSeq(got, "\r\n") {
+		if strings.Contains(line, "protocol") && strings.Contains(line, "\x1b[3") {
+			t.Errorf("the store's own word was marked: %q", line)
+		}
+	}
+	// A pipe loses every mark, so the source column has to carry the
+	// whole answer on its own — and does.
+	var plain strings.Builder
+	p := &session{deps: deps, out: &plain}
+	if err := p.showTraces("relay meshcore-868"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain.String(), "\x1b") {
+		t.Errorf("a pipe got escapes: %q", plain.String())
+	}
+	for _, want := range []string{"profile:eu-868-narrow", "override:eu-868-narrow", "config"} {
+		if !strings.Contains(plain.String(), want) {
+			t.Errorf("the plain table lost %q", want)
+		}
+	}
+}

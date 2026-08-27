@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 
@@ -76,5 +77,43 @@ func TestMeshNameIsTheOneDoor(t *testing.T) {
 	}
 	if got != `"evil?[2Jname\" end"` {
 		t.Errorf("meshName = %s", got)
+	}
+}
+
+func TestWeightAvoidsTheAttributeNobodyImplements(t *testing.T) {
+	// SGR 2 is the least reliably implemented attribute there is: a
+	// terminal that will not dim reaches for a palette entry instead,
+	// and plenty of themes colour that one blue — so the row meant to
+	// step back arrives shouting, in a hue this console reserves for
+	// something else. Grey needs no interpretation.
+	if strings.Contains(recede, "[2m") {
+		t.Errorf("recede uses faint: %q", recede)
+	}
+	// The sixteen base colours are a theme's to redefine; the cube is
+	// not, which is the whole reason to name a grey from it.
+	if !strings.HasPrefix(recede, "\x1b[38;5;") {
+		t.Errorf("recede is not named from the 256-colour cube: %q", recede)
+	}
+	// And it borrows no class hue, since it says how firmly a value
+	// was chosen rather than what kind of word it is.
+	for _, hue := range []string{cPath, cVerb, cAttr, cPunct} {
+		if recede == hue {
+			t.Errorf("recede took the hue %q", hue)
+		}
+	}
+}
+
+func TestEveryTableKnowsWhetherItMayEmphasise(t *testing.T) {
+	// A table built without its session silently loses emphasis the
+	// day someone gives it a header — and nothing would fail. The
+	// constructor is the one place that answer is decided.
+	for _, file := range []string{"commands.go", "tree.go"} {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(b, []byte("&table{}")) {
+			t.Errorf("%s builds a table outside s.table()", file)
+		}
 	}
 }
