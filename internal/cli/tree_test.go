@@ -71,8 +71,8 @@ func TestTreeAbsoluteCommandFromInsideAContext(t *testing.T) {
 func TestTreeMountedVerbTellsTheRelay(t *testing.T) {
 	deps := testDeps(t)
 	deps.Relays[0].Neighbours = func() []Neighbour { return nil }
-	out := run(t, deps, "/relay meshcore-868 neighbours")
-	if !strings.Contains(out, "nobody heard directly yet") {
+	out := run(t, deps, "/relay meshcore-868 scopes")
+	if !strings.Contains(out, "carries no scopes") {
 		t.Errorf("the mounted verb did not reach the relay:\n%s", out)
 	}
 }
@@ -1133,7 +1133,7 @@ func TestAFlagNamedAfterAKindCompletesItsNames(t *testing.T) {
 	s := &session{deps: testDeps(t)}
 	// relay= wants a relay, and the flag needs no declaration to say
 	// so: it is called relay because a relay is what it takes.
-	for _, line := range []string{"advert relay=", "frames relay=", "neighbours relay="} {
+	for _, line := range []string{"advert relay=", "frames relay=", "discover relay="} {
 		if add, _ := s.complete(line); add != "meshcore-868 " {
 			t.Errorf("%q completed to %q", line, add)
 		}
@@ -1150,7 +1150,7 @@ func TestACommandThatTakesARelayIsReachableFromInsideOne(t *testing.T) {
 	// command that asks it works here — not a hand-kept subset of
 	// them, which is how frames and tx came to be missing.
 	verbs := s.verbsAt(s.curPath())
-	for _, want := range []string{cmdNeighbours, cmdDiscover, cmdAdvert, cmdFrames, "tx", "noise"} {
+	for _, want := range []string{cmdDiscover, cmdAdvert, cmdFrames, "tx", "noise"} {
 		if !slices.Contains(verbs, want) {
 			t.Errorf("%q is not reachable from inside a relay: %v", want, verbs)
 		}
@@ -1212,5 +1212,69 @@ func TestIntervalNeedsATerminalAndARealDuration(t *testing.T) {
 	s.setPath([]string{"relay", "meshcore-868"})
 	if add, _ := s.complete("print i"); add != "nterval=" {
 		t.Errorf("interval does not complete to its value: %q", add)
+	}
+}
+
+// withNeighbour gives the test relay one neighbour to hold.
+func withNeighbour(t *testing.T) Deps {
+	t.Helper()
+	deps := testDeps(t)
+	var key [32]byte
+	copy(key[:], []byte{0x0d, 0x13, 0x9b, 0x64, 0x21, 0xd0})
+	deps.Relays[0].Neighbours = func() []Neighbour {
+		return []Neighbour{{PubKey: key, Name: "Radio-Club", SNR: 12.25, Heard: time.Now()}}
+	}
+	return deps
+}
+
+func TestADrawerIsSomewhereToStand(t *testing.T) {
+	deps := withNeighbour(t)
+	// The listing names each one and little else; detail opens them
+	// out; and one of them is a place of its own.
+	out := run(t, deps, "/relay/meshcore-868/neighbours/print")
+	if !strings.Contains(out, "0d139b6421d0") || !strings.Contains(out, "Radio-Club") {
+		t.Errorf("the drawer did not list its neighbour:\n%s", out)
+	}
+	if d := run(t, deps, "/relay/meshcore-868/neighbours/print detail"); !strings.Contains(d, "name=") {
+		t.Errorf("detail did not unfold the drawer:\n%s", d)
+	}
+	one := run(t, deps, "/relay/meshcore-868/neighbours/0d139b6421d0/print")
+	if !strings.Contains(one, "Radio-Club") || !strings.Contains(one, "snr") {
+		t.Errorf("standing in one showed nothing of it:\n%s", one)
+	}
+}
+
+func TestADrawerHoldsNothingThatWasConfigured(t *testing.T) {
+	deps := withNeighbour(t)
+	// Nothing here was set, so a drawer answers to none of the verbs
+	// that read or write configuration — and it refuses them the way
+	// it refuses any word it does not list.
+	for _, c := range []struct{ line, want string }{
+		{"/relay/meshcore-868/neighbours/export", `no "export" here`},
+		{"/relay/meshcore-868/neighbours/set name=x", `no "set" here`},
+		{"/relay/meshcore-868/neighbours/print show-secrets", "nothing in a neighbours is masked"},
+	} {
+		if out := run(t, deps, c.line); !strings.Contains(out, c.want) {
+			t.Errorf("%q did not say %q:\n%s", c.line, c.want, out)
+		}
+	}
+}
+
+func TestADrawerIsOfferedAndItsKeysAre(t *testing.T) {
+	s := &session{deps: withNeighbour(t)}
+	s.setPath([]string{scopeRelay, "meshcore-868"})
+	// The drawer is grammar — every relay has it — so it completes to
+	// its separator, the way a context does.
+	if add, _ := s.complete("neigh"); add != "bours/" {
+		t.Errorf("the drawer does not complete as a place: %q", add)
+	}
+	s.setPath([]string{scopeRelay, "meshcore-868", drawerNeighbours})
+	if add, _ := s.complete("0d13"); add != "9b6421d0 " {
+		t.Errorf("a key inside the drawer does not complete: %q", add)
+	}
+	// A key is content: print lists them, so help does not name them
+	// twice.
+	if help := s.treeHelp(s.curPath()); strings.Contains(help, "0d139b") {
+		t.Errorf("help listed what print already lists:\n%s", help)
 	}
 }

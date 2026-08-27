@@ -42,15 +42,18 @@ const (
 
 	// The relay-scoped commands, named once: the flat table and the
 	// context tree both mount them.
-	cmdScopes     = "scopes"
-	cmdDiscover   = "discover"
-	cmdNeighbours = "neighbours"
-	cmdAdvert     = "advert"
-	cmdUndo       = "undo"
-	verbList      = "list"
-	cmdJournal    = "journal"
+	cmdScopes   = "scopes"
+	cmdDiscover = "discover"
+	cmdAdvert   = "advert"
+	cmdUndo     = "undo"
+	verbList    = "list"
+	cmdJournal  = "journal"
 	// helpWord asks about whatever it follows.
 	helpWord = "?"
+	// wordHelp and wordExit are the spelled-out halves of the two
+	// questions every place answers: what is here, and how to leave.
+	wordHelp = "help"
+	wordExit = "exit"
 )
 
 // Privilege is what a session may do; the transport determines it.

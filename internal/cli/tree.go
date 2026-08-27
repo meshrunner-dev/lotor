@@ -230,6 +230,13 @@ func (s *session) walkPiece(path []string, piece string) ([]string, bool) {
 			return nil, false
 		}
 		return append(path, piece), true
+	case len(path) == 2 && drawerOn(path[0], piece) != nil:
+		return append(path, piece), true
+	case len(path) == 3:
+		if _, ok := s.drawerKeys(path)[piece]; !ok {
+			return nil, false
+		}
+		return append(path, piece), true
 	}
 	return nil, false
 }
@@ -287,15 +294,22 @@ func (s *session) tree(ctx context.Context, line string) {
 func (s *session) treeVerb(ctx context.Context, path []string,
 	verb string, args, rest []string,
 ) error {
+	// A place answers to the verbs it lists and no others, so what
+	// help prints and what the dispatcher honours cannot drift apart.
+	// The root is the exception it has always been: the flat commands
+	// live there too, and they are not the tree's to list.
+	if !s.answersHere(path, verb) {
+		return &unknownVerbError{verb: verb}
+	}
 	switch {
-	case verb == helpWord || verb == "help":
+	case verb == helpWord || verb == wordHelp:
 		fmt.Fprint(s.out, s.treeHelp(path))
 	case slices.Contains(args, helpWord):
 		// A verb asked about answers what it takes, whether the
 		// question arrives as the key or as a word on the line. The
 		// tree's verbs owe that as much as the flat commands do.
 		fmt.Fprint(s.out, s.renderTerms(verb, s.argTermsFor(path, rest)))
-	case verb == cmdQuit || verb == "exit":
+	case verb == cmdQuit || verb == wordExit:
 		s.dispatch(ctx, rest)
 	case verb == verbExport:
 		// Every depth answers export — the root's is the whole
@@ -322,6 +336,19 @@ func (s *session) treeVerb(ctx context.Context, path []string,
 		return &unknownVerbError{verb: verb}
 	}
 	return nil
+}
+
+// answersHere reports whether a place answers to a verb. Every place
+// answers the two ways to ask what is here and the two ways to leave;
+// beyond those it answers to what it lists and nothing else. The root
+// is the exception it has always been: the flat commands live there
+// too, and they are not the tree's to list.
+func (s *session) answersHere(path []string, verb string) bool {
+	switch verb {
+	case helpWord, wordHelp, cmdQuit, wordExit:
+		return true
+	}
+	return s.placeAt(path) == atRoot || slices.Contains(s.verbNamesAt(path), verb)
 }
 
 // unknownVerb carries the word a place did not answer to, so the
@@ -675,20 +702,24 @@ func (s *session) treePrint(ctx context.Context, path []string, args []string) e
 		return err
 	}
 	detail, secrets, every := want.detail, want.secrets, want.every
-	collection := len(path) == 1 && !s.isSingleton(path)
+	at := s.placeAt(path)
+	summarises := at == atCollection || at == atDrawer
 	switch {
-	case detail && !collection:
-		// Only a summary can be unfolded, and a collection is the one
+	case detail && !summarises:
+		// Only a summary can be unfolded, and a listing is the one
 		// view that summarises. Everywhere else print already shows
 		// every attribute there is.
 		return fmt.Errorf("nothing here to %s: %s already shows every attribute",
 			argDetail, verbPrint)
-	case secrets && len(path) == 0:
+	case secrets && (at == atDrawer || at == atDrawerItem):
+		return fmt.Errorf("nothing in a %s is masked: it holds what the mesh is doing, "+
+			"not what it was told to do", path[2])
+	case secrets && at == atRoot:
 		return errors.New("the root holds no values, secret or otherwise")
-	case secrets && collection && !detail:
+	case secrets && at == atCollection && !detail:
 		return fmt.Errorf("this listing shows no attributes — add %s", argDetail)
 	}
-	draw := func() error { return s.printOnce(path, detail, secrets) }
+	draw := func() error { return s.printOnce(ctx, path, detail, secrets) }
 	if every > 0 {
 		return s.repaint(ctx, every, draw)
 	}
@@ -697,7 +728,7 @@ func (s *session) treePrint(ctx context.Context, path []string, args []string) e
 
 // printOnce draws the view one time. It is the whole of print when no
 // interval was asked for, and one frame of it when there was.
-func (s *session) printOnce(path []string, detail, secrets bool) error {
+func (s *session) printOnce(ctx context.Context, path []string, detail, secrets bool) error {
 	if len(path) == 0 {
 		// The root holds no values of its own: what it can show is
 		// what stands below it.
@@ -727,7 +758,14 @@ func (s *session) printOnce(path []string, detail, secrets bool) error {
 		}
 		return s.radioList()
 	}
-	return s.showTraces(path[0]+" "+path[1], secrets)
+	switch s.placeAt(path) {
+	case atDrawer:
+		return s.printDrawer(ctx, path, detail)
+	case atDrawerItem:
+		return s.printDrawerItem(ctx, path)
+	default:
+		return s.showTraces(path[0]+" "+path[1], secrets)
+	}
 }
 
 // repaint draws a view over and over in the same place: the cursor
@@ -892,7 +930,7 @@ func (s *session) treeHelp(path []string) string {
 	}
 	// A collection holds things the grammar does not name; say how to
 	// reach them rather than listing what print already lists.
-	if len(path) == 1 && !s.isSingleton(path) {
+	if at := s.placeAt(path); at == atCollection || at == atDrawer {
 		fmt.Fprintf(&b, "%s%s%s\r\n",
 			s.color(cPath, "<name>"), s.color(cPunct, " -- "),
 			"go into one; "+verbPrint+" lists them")
@@ -1058,6 +1096,18 @@ func (s *session) termsAt(path []string) []term {
 		for name := range inst {
 			out = append(out, term{name: name, class: cPath, doc: inst[name], content: true})
 		}
+	case len(path) == 2:
+		// A drawer is grammar, not content: every instance of the kind
+		// has the same ones, and they are named rather than listed by
+		// print the way an instance is.
+		for _, d := range drawersOn(path[0]) {
+			out = append(out, term{name: d.name, class: cPath, doc: d.doc, container: true})
+		}
+	case len(path) == 3:
+		held := s.drawerKeys(path)
+		for key := range held {
+			out = append(out, term{name: key, class: cPath, doc: held[key], content: true})
+		}
 	}
 	return dedupe(out)
 }
@@ -1084,7 +1134,7 @@ func (s *session) verbNamesAt(path []string) []string {
 		return []string{verbPrint, verbSet, verbUnset, verbExport, verbRemove}
 	case len(path) == 1:
 		return []string{verbPrint, verbAdd, verbRemove, verbExport}
-	default:
+	case len(path) == 2:
 		verbs := []string{verbPrint, verbStatus, verbSet, verbUnset, verbExport}
 		for _, v := range commandNames() {
 			if s.mountedVerb(path[0], v) {
@@ -1092,6 +1142,10 @@ func (s *session) verbNamesAt(path []string) []string {
 			}
 		}
 		return verbs
+	default:
+		// A drawer holds what the mesh is doing. There is nothing to
+		// set and nothing to export, so reading is all it answers to.
+		return []string{verbPrint}
 	}
 }
 
@@ -1236,23 +1290,29 @@ func (s *session) argTermsFor(path, rest []string) []term {
 // offered where it would work: unfolding needs a summary to unfold,
 // and lifting the mask needs values to lift it from.
 func (s *session) printTerms(path []string) []term {
-	if len(path) == 0 {
-		return nil
+	unfold := term{
+		name: argDetail, class: cAttr,
+		doc: "open each one out into its attributes",
 	}
-	var out []term
-	if len(path) == 1 && !s.isSingleton(path) {
-		out = append(out, term{
-			name: argDetail, class: cAttr,
-			doc: "open each one out into its attributes",
-		})
-	}
-	return append(out, term{
+	unmask := term{
 		name: argSecrets, class: cAttr,
 		doc: "show what " + verbPrint + " masks",
-	}, term{
+	}
+	again := term{
 		name: argInterval, class: cAttr, container: true,
 		doc: "draw it again this often, in place",
-	})
+	}
+	switch s.placeAt(path) {
+	case atCollection:
+		return []term{unfold, unmask, again}
+	case atSingleton, atInstance:
+		return []term{unmask, again}
+	case atDrawer:
+		// Nothing here was configured, so nothing here is masked.
+		return []term{unfold, again}
+	default:
+		return []term{again}
+	}
 }
 
 // humanList joins words the way a refusal reads them out.

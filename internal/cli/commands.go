@@ -624,39 +624,6 @@ func (s *session) advert(_ context.Context, in input) error {
 }
 
 // neighbours renders the direct neighbourhood: who we hear with no
-// relay in between, at what SNR, and how long ago.
-func (s *session) neighbours(ctx context.Context, in input) error {
-	r, err := s.oneRelay(in.opts[scopeRelay])
-	if err != nil {
-		return err
-	}
-	if err := working(r); err != nil {
-		return err
-	}
-	if r.Neighbours == nil {
-		return fmt.Errorf("relay %q does not keep a neighbourhood", r.Name)
-	}
-	rows := r.Neighbours()
-	if len(rows) == 0 {
-		fmt.Fprint(s.out, "nobody heard directly yet\r\n")
-		return nil
-	}
-	named := s.nodeNames(ctx)
-	tb := s.table()
-	tb.header("KEY", "NAME", "SNR", "HEARD")
-	for _, n := range rows {
-		key := hex.EncodeToString(n.PubKey[:6])
-		name := n.Name
-		if name == "" {
-			// The engine only ever learns a name from an advert heard
-			// zero-hop. The journal heard the flooded ones too, so it
-			// can put a name to a node that only ever answered a scan.
-			name = named[key]
-		}
-		tb.row(key, meshName(name), fmt.Sprintf("snr %+.2f dB", n.SNR), ago(n.Heard))
-	}
-	return tb.flush(s.out)
-}
 
 // undoCmd inverts the newest configuration change.
 func (s *session) undoCmd(ctx context.Context, _ input) error {

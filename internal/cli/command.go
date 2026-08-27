@@ -126,13 +126,6 @@ func relayCommands() []*command {
 			run:   (*session).discover,
 		},
 		{
-			name:   cmdNeighbours,
-			forms:  []form{{cmdNeighbours, "repeaters heard with no relay in between"}},
-			detail: []string{"neighbours [relay=<name>]"},
-			flags:  []flagSpec{{name: scopeRelay, valued: true, doc: docRelay}},
-			run:    (*session).neighbours,
-		},
-		{
 			name: cmdAdvert,
 			forms: []form{
 				{"advert [flood]", "announce this node now: zero-hop, or flood the mesh"},

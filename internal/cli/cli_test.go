@@ -494,7 +494,8 @@ func TestADownRelaySaysWhyRatherThanWhatIsMissing(t *testing.T) {
 	// A relay that never configured has no scopes, no neighbourhood
 	// and no scan — every command must name the cause, not the
 	// consequence it happens to trip over.
-	for _, cmd := range []string{"scopes", "neighbours", "discover", "advert"} {
+	for _, cmd := range []string{"scopes", "discover", "advert",
+		"/relay/meshcore-868/neighbours/print"} {
 		out := run(t, deps, cmd)
 		if !strings.Contains(out, "cannot unmarshal") {
 			t.Errorf("%q said %q — the operator never learns why", cmd, strings.TrimSpace(out))
@@ -505,9 +506,9 @@ func TestADownRelaySaysWhyRatherThanWhatIsMissing(t *testing.T) {
 func TestARunningRelayStillReportsWhatItLacks(t *testing.T) {
 	// The cause guard must not swallow the honest answer of a relay
 	// that is up and simply keeps no neighbourhood.
-	out := run(t, testDeps(t), "neighbours")
+	out := run(t, testDeps(t), "/relay/meshcore-868/neighbours/print")
 	if !strings.Contains(out, "does not keep a neighbourhood") {
-		t.Errorf("neighbours said %q", strings.TrimSpace(out))
+		t.Errorf("the drawer said %q", strings.TrimSpace(out))
 	}
 }
 
@@ -590,7 +591,7 @@ func TestNeighboursBorrowNamesFromTheJournal(t *testing.T) {
 			{PubKey: unknown, SNR: 9, Heard: time.Now()},
 		}
 	}
-	out := run(t, deps, "neighbours")
+	out := run(t, deps, "/relay/meshcore-868/neighbours/print")
 	if !strings.Contains(out, "quatre-vingt-huit") {
 		t.Errorf("the engine's own name never reached the table:\n%s", out)
 	}
