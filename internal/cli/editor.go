@@ -43,8 +43,13 @@ type editor struct {
 	// goroutine — the session guards its own state against the REPL's.
 	prompt   func(search string) string                     // what to repaint before the line
 	complete func(line string) (add string, hints []string) // TAB
-	helpFor  func(line string) string                       // the '?' key
+	helpFor  func(line string, level int) string            // the help key
 	paint    func(line string) string                       // colours, same width
+
+	// helpLevel is where the help cycle stands. Any other keystroke
+	// puts it back to the start, so the cycle only ever runs while
+	// the operator is pressing the key.
+	helpLevel int
 }
 
 func newEditor(r io.Reader, w io.Writer) *editor {
@@ -91,6 +96,7 @@ func (e *editor) key(c byte) (done bool, line string, err error) {
 	if e.search != nil {
 		return e.searchKey(c)
 	}
+	e.trackHelpCycle(c)
 	switch {
 	case c == '\r' || c == '\n':
 		e.crSeen = c == '\r'
@@ -121,6 +127,15 @@ func (e *editor) key(c byte) (done bool, line string, err error) {
 		}
 	}
 	return false, "", nil
+}
+
+// trackHelpCycle keeps the help cycle to consecutive presses: any
+// other keystroke puts it back to the start, so pressing the key twice
+// an hour apart asks the same question twice.
+func (e *editor) trackHelpCycle(c byte) {
+	if c != 0x1b && c != '?' {
+		e.helpLevel = 0
+	}
 }
 
 // control handles the shell's editing keys. It reports whether the
@@ -378,7 +393,9 @@ func (e *editor) help() {
 		return
 	}
 	e.search = nil
-	fmt.Fprint(e.out, "\r\n"+e.helpFor(string(e.buf)))
+	text := e.helpFor(string(e.buf), e.helpLevel)
+	e.helpLevel++
+	fmt.Fprint(e.out, "\r\n"+text)
 	e.render()
 }
 

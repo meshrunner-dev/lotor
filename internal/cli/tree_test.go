@@ -525,3 +525,76 @@ func TestCompletionOffersExportEverywhere(t *testing.T) {
 		t.Errorf("complete(pri) at the root = %q", add)
 	}
 }
+
+func TestListingsNameTheirColumns(t *testing.T) {
+	deps := testDeps(t)
+	for _, c := range []struct{ cmd, want string }{
+		{"/radio print", "NAME"},
+		{"/relay print", "PROTOCOL"},
+		{"/relay meshcore-868 print", "ATTRIBUTE"},
+		{"print", "CONTEXT"},
+	} {
+		out := run(t, deps, c.cmd)
+		if !strings.Contains(out, c.want) {
+			t.Errorf("%q names no columns (%q missing):\n%s", c.cmd, c.want, out)
+		}
+	}
+}
+
+func TestColumnNamesAreWeightNotColour(t *testing.T) {
+	// Column names have no class of their own — they name the classes
+	// below them — so they take emphasis, never a hue. And the width
+	// arithmetic must run on the plain text: escape bytes occupy no
+	// cells.
+	var b strings.Builder
+	tb := (&session{colors: true}).table()
+	tb.header("NAME", "DRIVER")
+	tb.row("slot1", "sx126x-spi")
+	tb.row("a-much-longer-name", "x")
+	if err := tb.flush(&b); err != nil {
+		t.Fatal(err)
+	}
+	got := b.String()
+	if !strings.Contains(got, emphasis+"NAME"+cReset) {
+		t.Errorf("the header is not emphasised:\n%q", got)
+	}
+	for _, hue := range []string{cPath, cVerb, cAttr} {
+		if strings.Contains(got, hue) {
+			t.Errorf("a column name was given a hue:\n%q", got)
+		}
+	}
+	// The second column starts at the same cell on every line.
+	lines := strings.Split(strings.TrimRight(got, "\r\n"), "\r\n")
+	col := -1
+	for _, l := range lines {
+		plain := strings.ReplaceAll(strings.ReplaceAll(l, emphasis, ""), cReset, "")
+		at := strings.Index(plain, strings.Fields(plain)[1])
+		if col == -1 {
+			col = at
+		} else if at != col {
+			t.Errorf("column drifted to %d (want %d): %q", at, col, plain)
+		}
+	}
+	// A plain session gets the names with nothing around them.
+	var p strings.Builder
+	pt := (&session{}).table()
+	pt.header("NAME")
+	pt.row("slot1")
+	_ = pt.flush(&p)
+	if strings.Contains(p.String(), "\x1b") {
+		t.Errorf("a plain session got escapes: %q", p.String())
+	}
+}
+
+func TestEmptyListingSaysSoInsteadOfShowingColumns(t *testing.T) {
+	deps := testDeps(t)
+	deps.Relays = nil
+	deps.LiveRelays = func() []RelayInfo { return nil }
+	out := run(t, deps, "/relay print")
+	if strings.Contains(out, "PROTOCOL") {
+		t.Errorf("column names described an empty room:\n%s", out)
+	}
+	if !strings.Contains(out, "no relays configured") {
+		t.Errorf("nothing said the room was empty:\n%s", out)
+	}
+}

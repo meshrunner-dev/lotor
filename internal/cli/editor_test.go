@@ -268,6 +268,30 @@ func TestReverseSearchBackspaceWidens(t *testing.T) {
 	}
 }
 
+func TestTheHelpKeyCyclesThroughItsLevels(t *testing.T) {
+	// Pressed again it moves on rather than repeating itself, and any
+	// other keystroke puts the cycle back to the start.
+	var out bytes.Buffer
+	ed := newEditor(strings.NewReader("\x1bOP\x1bOP\x1bOPx\x1bOP\r"), &out)
+	var levels []int
+	ed.helpFor = func(_ string, level int) string {
+		levels = append(levels, level)
+		return "L\r\n"
+	}
+	if _, err := ed.readLine(); err != nil {
+		t.Fatal(err)
+	}
+	want := []int{0, 1, 2, 0}
+	if len(levels) != len(want) {
+		t.Fatalf("levels = %v", levels)
+	}
+	for i := range want {
+		if levels[i] != want[i] {
+			t.Fatalf("levels = %v, want %v", levels, want)
+		}
+	}
+}
+
 func TestF1AsksTheSameQuestionAsTheHelpKey(t *testing.T) {
 	// Both keys reach the same answer: '?' is the one a hand finds,
 	// F1 the one a console operator expects.
@@ -275,7 +299,7 @@ func TestF1AsksTheSameQuestionAsTheHelpKey(t *testing.T) {
 		var out bytes.Buffer
 		ed := newEditor(strings.NewReader(keys), &out)
 		asked := ""
-		ed.helpFor = func(line string) string { asked = line; return "HELP\r\n" }
+		ed.helpFor = func(line string, _ int) string { asked = line; return "HELP\r\n" }
 		if _, err := ed.readLine(); err != nil {
 			t.Fatalf("%q: %v", keys, err)
 		}

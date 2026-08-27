@@ -46,9 +46,14 @@ func (s *session) status(ctx context.Context, _ input) error {
 func (s *session) relay(ctx context.Context, in input) error {
 	args := in.pos
 	if len(args) == 0 || args[0] == verbList {
-		tb := &table{}
+		tb := s.table()
+		tb.header("NAME", "PROTOCOL", "STATE", "RADIO")
 		for _, r := range s.relays() {
-			tb.row(r.Name, r.Protocol, r.State(), "radio "+r.Radio)
+			tb.row(r.Name, r.Protocol, r.State(), r.Radio)
+		}
+		if len(s.relays()) == 0 {
+			fmt.Fprint(s.out, "no relays configured\r\n")
+			return nil
 		}
 		return tb.flush(s.out)
 	}
@@ -149,9 +154,18 @@ func (s *session) relayJournal(ctx context.Context, tb *table, r RelayInfo) {
 func (s *session) radio(_ context.Context, in input) error {
 	args := in.pos
 	if len(args) == 0 || args[0] == verbList {
-		tb := &table{}
+		tb := s.table()
+		tb.header("NAME", "DRIVER", "ENVELOPE", "OWNER")
 		for _, r := range s.radios() {
-			tb.row(r.Name, r.Driver, envelopeText(r.Envelope), "relay "+r.Relay)
+			owner := "unclaimed"
+			if r.Relay != "" {
+				owner = r.Relay
+			}
+			tb.row(r.Name, r.Driver, envelopeText(r.Envelope), owner)
+		}
+		if len(s.radios()) == 0 {
+			fmt.Fprint(s.out, "no radios configured\r\n")
+			return nil
 		}
 		return tb.flush(s.out)
 	}
@@ -241,8 +255,8 @@ func (s *session) showTraces(key string) error {
 		return fmt.Errorf("no %q (known: %v)", key, keys)
 	}
 	secret := s.secretAttrs(key)
-	tb := &table{}
-	tb.row("key", "value", "source")
+	tb := s.table()
+	tb.header("ATTRIBUTE", "VALUE", "SOURCE")
 	for _, t := range traces {
 		value := fmt.Sprintf("%v", t.Value)
 		if secret[t.Key] {
@@ -631,7 +645,8 @@ func (s *session) neighbours(ctx context.Context, in input) error {
 		return nil
 	}
 	named := s.nodeNames(ctx)
-	tb := &table{}
+	tb := s.table()
+	tb.header("KEY", "NAME", "SNR", "HEARD")
 	for _, n := range rows {
 		key := hex.EncodeToString(n.PubKey[:6])
 		name := n.Name
@@ -705,8 +720,8 @@ func (s *session) nodes(ctx context.Context, in input) error {
 	if opts[optJSON] == optOn {
 		return s.printJSON(nodes)
 	}
-	tb := &table{}
-	tb.row("name", "type", "pubkey", "heard", "last", "best rssi", "drift")
+	tb := s.table()
+	tb.header("NAME", "TYPE", "PUBKEY", "HEARD", "LAST", "BEST RSSI", "DRIFT")
 	for _, n := range nodes {
 		drift := "—"
 		if n.DriftHz != 0 {

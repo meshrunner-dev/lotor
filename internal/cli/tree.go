@@ -546,7 +546,8 @@ func (s *session) treePrint(ctx context.Context, path []string) {
 	if len(path) == 0 {
 		// The root holds no values of its own: what it can show is
 		// what stands below it.
-		tb := &table{}
+		tb := s.table()
+		tb.header("CONTEXT", "HOLDS", "WHAT IT IS")
 		for i := range s.deps.Kinds {
 			k := s.deps.Kinds[i]
 			held := "one block"
@@ -569,11 +570,12 @@ func (s *session) treePrint(ctx context.Context, path []string) {
 			s.dispatch(ctx, []string{scopeRelay, verbList})
 			return
 		}
-		tb := &table{}
+		tb := s.table()
+		tb.header("NAME", "DRIVER", "OWNER")
 		for _, r := range s.radios() {
 			owner := "unclaimed"
 			if r.Relay != "" {
-				owner = "relay " + r.Relay
+				owner = r.Relay
 			}
 			tb.row(r.Name, r.Driver, owner)
 		}
@@ -806,11 +808,34 @@ func (s *session) attrsForAddLine(kind string, rest []string) []schema.Attr {
 	return k.AttrsFor(choice)
 }
 
-// helpForLine is the '?' key: describe where the typed line stands.
-func (s *session) helpForLine(line string) string {
+// helpForLine answers the help key. Pressed again it moves on rather
+// than repeating itself: what a place offers, then how to work the
+// console, then back — because the second question is the one an
+// operator has once the first is answered.
+func (s *session) helpForLine(line string, level int) string {
+	if level%2 == 1 {
+		return keyHelp
+	}
 	path, _ := s.resolveTree(splitArgs(line))
-	return s.treeHelp(path)
+	return s.treeHelp(path) + "\r\npress it again for the keys\r\n"
 }
+
+// keyHelp is what the console itself answers to.
+const keyHelp = "" +
+	"F1 or ?         what this place offers; again for these keys\r\n" +
+	"[Tab]           complete the word; again to list the candidates\r\n" +
+	"Ctrl-R          search the session's history, newest first\r\n" +
+	"Up / Down       walk the history\r\n" +
+	"Left / Right    move the cursor\r\n" +
+	"Ctrl-A / Ctrl-E start and end of the line\r\n" +
+	"Ctrl-W          delete the word before the cursor\r\n" +
+	"Ctrl-U          delete to the start of the line\r\n" +
+	"Ctrl-C          abandon the line\r\n" +
+	"Ctrl-D          leave, on an empty line\r\n" +
+	"\r\n" +
+	"/               a place, from the root\r\n" +
+	"..              one place up\r\n" +
+	"/command        run a flat command from anywhere\r\n"
 
 // The console's colours, named by the class of symbol they carry
 // rather than by their hue: what matters is that a place, an action,
@@ -832,7 +857,16 @@ const (
 	cQuery  = "\x1b[33;1m" // the history search's own brackets
 	cSystem = "\x1b[32m"   // this installation's name
 	cUser   = "\x1b[36m"   // who is holding the session
+
+	// emphasis is weight rather than hue: a table's column names have
+	// no class of their own — they name the classes below them — so
+	// giving them a colour would claim something untrue.
+	emphasis = "\x1b[1m"
 )
+
+// table starts one aligned table that knows whether this session can
+// show emphasis.
+func (s *session) table() *table { return &table{bold: s.colors} }
 
 func (s *session) color(code, text string) string {
 	if !s.colors {

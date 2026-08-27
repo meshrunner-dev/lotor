@@ -14,6 +14,14 @@ import (
 // counting does not.
 type table struct {
 	rows [][]string
+	// head is the column names, kept apart from the rows: the width
+	// arithmetic runs on the plain text and the emphasis is added at
+	// the last moment, because escape bytes count for cells they do
+	// not occupy.
+	head []string
+	// bold says the transport renders emphasis; a pipe gets the same
+	// names with nothing around them.
+	bold bool
 }
 
 const columnGap = 2
@@ -22,9 +30,26 @@ func (t *table) row(cells ...string) {
 	t.rows = append(t.rows, cells)
 }
 
+// header names the columns. They are shown as typed — upper case is
+// the caller's choice — and are laid out with the rows so a name
+// wider than its column still widens it.
+func (t *table) header(cells ...string) {
+	t.head = cells
+}
+
 func (t *table) flush(w io.Writer) error {
+	rows := t.rows
+	if t.head != nil {
+		if len(rows) == 0 {
+			// Column names over nothing describe an empty room rather
+			// than showing one; the caller says what empty means.
+			t.rows, t.head = nil, nil
+			return nil
+		}
+		rows = append([][]string{t.head}, rows...)
+	}
 	var widths []int
-	for _, r := range t.rows {
+	for _, r := range rows {
 		for i, c := range r {
 			if i >= len(widths) {
 				widths = append(widths, 0)
@@ -34,10 +59,14 @@ func (t *table) flush(w io.Writer) error {
 			}
 		}
 	}
-	for _, r := range t.rows {
+	for n, r := range rows {
 		var b strings.Builder
 		for i, c := range r {
-			b.WriteString(c)
+			shown := c
+			if n == 0 && t.head != nil && t.bold {
+				shown = emphasis + c + cReset
+			}
+			b.WriteString(shown)
 			if i < len(r)-1 {
 				b.WriteString(strings.Repeat(" ", widths[i]-runewidth.StringWidth(c)+columnGap))
 			}
@@ -46,7 +75,7 @@ func (t *table) flush(w io.Writer) error {
 			return err
 		}
 	}
-	t.rows = nil
+	t.rows, t.head = nil, nil
 	return nil
 }
 
