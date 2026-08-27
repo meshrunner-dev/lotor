@@ -148,7 +148,8 @@ func relayCommands() []*command {
 			},
 			detail: []string{
 				"advert [flood] [--relay R]",
-				"admin only; no limiter of its own — the duty budget has the last word",
+				"admin only; one order per ten seconds, and the duty budget",
+				"has the last word on all of them",
 			},
 			flags:  []flagSpec{{name: scopeRelay, valued: true}},
 			maxPos: 1,

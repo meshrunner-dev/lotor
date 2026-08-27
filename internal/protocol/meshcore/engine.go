@@ -184,7 +184,13 @@ type engine struct {
 	sweepAsk     chan *sweep
 	pendingSweep *sweep
 	wakeMu       sync.Mutex
-	wakeRx       context.CancelFunc
+	// askMu guards the state an operator's orders keep between them.
+	// Those orders arrive on whatever goroutine served the console or
+	// the web, never the pipeline's, so the guard cannot live in the
+	// pipeline where the rest of this engine's state does.
+	askMu           sync.Mutex
+	lastAskedAdvert time.Time
+	wakeRx          context.CancelFunc
 }
 
 // paramsFrom is the strict decode both build and the config checker

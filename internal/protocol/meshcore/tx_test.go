@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strings"
 	"testing"
 	"time"
 
@@ -749,6 +750,13 @@ func TestOperatorAdvertWakesTheReceiver(t *testing.T) {
 		t.Fatal("the operator's default advert must be zero-hop")
 	}
 
+	// What is being checked here is the two shapes, not the spacing
+	// between orders — that has a test of its own. Let the clock
+	// forget the one just served.
+	e.askMu.Lock()
+	e.lastAskedAdvert = time.Time{}
+	e.askMu.Unlock()
+
 	if err := e.RequestAdvert(true); err != nil {
 		t.Fatal(err)
 	}
@@ -952,4 +960,34 @@ func TestMultipartUnwrapsToOneAck(t *testing.T) {
 		t.Error("the collapsed copy left no duplicate witness")
 	}
 	_ = dev
+}
+
+func TestOrderedAdvertsAreSpaced(t *testing.T) {
+	// The guard lives on the engine, not on the console: every door
+	// into it — the console today, a web button tomorrow — asks the
+	// same question of the same clock.
+	e := armedEngine(t, "on-air")
+	now := time.Now()
+	if err := e.chargeAdvertAsk(now); err != nil {
+		t.Fatalf("the first order was refused: %v", err)
+	}
+	err := e.chargeAdvertAsk(now.Add(3 * time.Second))
+	if err == nil {
+		t.Fatal("a second order three seconds later went through")
+	}
+	// The refusal has to be actionable: how long, not just no.
+	if !strings.Contains(err.Error(), "7s to wait") {
+		t.Fatalf("refusal said %q", err)
+	}
+	if err := e.chargeAdvertAsk(now.Add(advertAskGap)); err != nil {
+		t.Fatalf("an order a full gap later was refused: %v", err)
+	}
+}
+
+func TestTheFirstOrderedAdvertIsNotHeldBack(t *testing.T) {
+	// A zero clock means nothing was ever ordered, not that something
+	// was ordered at the epoch.
+	if err := armedEngine(t, "on-air").chargeAdvertAsk(time.Now()); err != nil {
+		t.Fatalf("the first order of a fresh relay was refused: %v", err)
+	}
 }

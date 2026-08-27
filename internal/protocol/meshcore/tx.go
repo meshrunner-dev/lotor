@@ -422,12 +422,19 @@ func (e *engine) dueAdverts(dev radio.Device, now time.Time) {
 }
 
 // RequestAdvert queues one operator-triggered announcement: zero-hop
-// by default, routable when flood. Safe from any goroutine. It has no
-// limiter of its own — an explicit operator order answers to the duty
-// budget alone, like every emission.
+// by default, routable when flood. Safe from any goroutine.
+//
+// The guard against ordering them faster than anyone means to lives
+// here rather than in the console, because the console is not the only
+// caller: a web button, and later a question arriving over the air,
+// come through this same door, and a rule written at one of those
+// doors is a rule the others never learn.
 func (e *engine) RequestAdvert(flood bool) error {
 	if !e.txEnabled() {
 		return errors.New("the transmit gate is dry — nothing may be sent")
+	}
+	if err := e.chargeAdvertAsk(time.Now()); err != nil {
+		return err
 	}
 	if time.Now().Before(clockEpoch) {
 		return errors.New("wall clock implausible — neighbours keep the newest advert timestamp, " +
@@ -447,6 +454,33 @@ func (e *engine) RequestAdvert(flood bool) error {
 		e.wakeRx() // close the receive window: serve the order now
 	}
 	e.wakeMu.Unlock()
+	return nil
+}
+
+// advertAskGap is the least time between two ordered announcements.
+// Short enough that no deliberate act is blocked — a flood advert
+// costs well under a second of air, and the duty ledger is what
+// actually bounds the spending — and long enough that a stuck key or
+// a double-clicked button does not become a burst the neighbourhood
+// has to dedup its way out of.
+const advertAskGap = 10 * time.Second
+
+// chargeAdvertAsk admits one order and refuses the ones that crowd it,
+// saying how long is left rather than only that the answer is no. The
+// clock is stamped on the order, not on the emission: what is being
+// bounded is how often anyone may ask.
+//
+// The scheduler's own announcements do not come through here. They are
+// paced by their configured intervals, and an operator's order is not
+// evidence about when the next scheduled one is due.
+func (e *engine) chargeAdvertAsk(now time.Time) error {
+	e.askMu.Lock()
+	defer e.askMu.Unlock()
+	if wait := advertAskGap - now.Sub(e.lastAskedAdvert); wait > 0 && !e.lastAskedAdvert.IsZero() {
+		return fmt.Errorf("an advert was ordered %s ago — %s to wait",
+			now.Sub(e.lastAskedAdvert).Round(time.Second), wait.Round(time.Second))
+	}
+	e.lastAskedAdvert = now
 	return nil
 }
 
