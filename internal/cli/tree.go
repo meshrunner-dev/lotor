@@ -40,7 +40,11 @@ func (s *session) treeLine(line string) bool {
 	// it — which only holds because no context shares a name with a
 	// flat command.
 	first, _, _ := strings.Cut(line, " ")
-	return isTreeVerb(first) || s.kindByName(first) != nil
+	// The word may already carry its path: "radio/" and
+	// "radio/slot1" name the same place the bare word does, and
+	// completion produces exactly those shapes.
+	head, _, _ := strings.Cut(first, "/")
+	return isTreeVerb(first) || s.kindByName(head) != nil
 }
 
 // isTreeVerb reports whether a word is one of the tree's own. None of
@@ -720,8 +724,19 @@ func (s *session) complete(line string) (add string, hints []string) {
 	if len(rest) > 0 {
 		return s.completeArgs(path, rest, last)
 	}
-	cands := s.candidatesAt(path)
+	// The word under construction may carry path steps of its own:
+	// "radio/" stands inside radio, and what follows it is a verb.
+	// Only the word still being read as path is split, so a value
+	// carrying slashes never is.
 	prefix := strings.TrimPrefix(last, "/")
+	if i := strings.LastIndex(prefix, "/"); i >= 0 {
+		next, ok := s.walkStep(path, prefix[:i])
+		if !ok {
+			return "", nil // the steps so far name nowhere
+		}
+		path, prefix = next, prefix[i+1:]
+	}
+	cands := s.candidatesAt(path)
 	matched, common := match(prefix, names(cands))
 	switch len(matched) {
 	case 0:

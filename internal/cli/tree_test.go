@@ -855,3 +855,72 @@ func TestStatusIsTheRunningView(t *testing.T) {
 		t.Errorf("print stopped showing provenance:\n%s", cfg)
 	}
 }
+
+func TestCompletionFollowsSlashesInTheWordItself(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	// A trailing slash stands inside the place it names: what comes
+	// next is a verb or a name there, not a candidate called "radio/".
+	add, hints := s.complete("radio/")
+	if add != "" || len(hints) == 0 {
+		t.Fatalf("radio/ offered add=%q hints=%v", add, hints)
+	}
+	for _, want := range []string{verbPrint, verbAdd, "slot1"} {
+		if !slices.Contains(hints, want) {
+			t.Errorf("radio/ does not offer %q — got %v", want, hints)
+		}
+	}
+	// And it completes through the slash, at every depth.
+	for _, c := range []struct{ line, add string }{
+		{"radio/sl", "ot1 "},
+		{"/relay/mesh", "core-868 "},
+		{"/relay/meshcore-868/pri", "nt "},
+		{"relay/meshcore-868/set", " "},
+	} {
+		if add, _ := s.complete(c.line); add != c.add {
+			t.Errorf("complete(%q) = %q, want %q", c.line, add, c.add)
+		}
+	}
+	// Steps that name nowhere offer nothing rather than guessing.
+	if add, hints := s.complete("nowhere/"); add != "" || hints != nil {
+		t.Errorf("a path to nowhere offered %q %v", add, hints)
+	}
+	// A value carrying slashes is never mistaken for a path.
+	s.setPath([]string{"radio", "slot1"})
+	if add, _ := s.complete("set spi=/dev/sp"); add != "" {
+		t.Errorf("a value was walked as a path: %q", add)
+	}
+}
+
+func TestWhatCompletionProducesIsWhatEnterAccepts(t *testing.T) {
+	deps := testDeps(t)
+	// TAB finishes a context with its separator, so the line it hands
+	// back must be a line the console runs. Anything else makes
+	// completion a trap.
+	for _, c := range []struct{ line, prompt string }{
+		{"radio", "] /radio> "},
+		{"radio/", "] /radio> "},
+		{"radio/slot1", "] /radio/slot1> "},
+		{"/radio/", "] /radio> "},
+		{"/radio/slot1", "] /radio/slot1> "},
+		{"radio/slot1/", "] /radio/slot1> "},
+	} {
+		out := run(t, deps, c.line)
+		if strings.Contains(out, "error:") {
+			t.Errorf("%q was refused:\n%s", c.line, out)
+		}
+		if !strings.Contains(out, c.prompt) {
+			t.Errorf("%q did not land at %q:\n%s", c.line, c.prompt, out)
+		}
+	}
+	// And the pairing holds end to end: whatever TAB appends, Enter
+	// accepts.
+	s := &session{deps: deps}
+	add, _ := s.complete("rad")
+	line := "rad" + add
+	if strings.TrimSpace(line) != "radio/" {
+		t.Fatalf("completion produced %q", line)
+	}
+	if !s.treeLine(strings.TrimSpace(line)) {
+		t.Errorf("%q completed to something the tree refuses", line)
+	}
+}
