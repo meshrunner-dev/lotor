@@ -1163,6 +1163,19 @@ func (s *session) completeArgs(path, rest []string, last string) (add string, hi
 				return s.finishPlain(val, a.Enum, cAttr)
 			}
 		}
+		// A flag named after a kind takes that kind's names — relay=
+		// wants a relay — so the names are what completes it. The
+		// flag needs no declaration for this: it is called relay
+		// because a relay is what it takes.
+		if k := s.kindByName(attr); k != nil && !k.Singleton {
+			held := s.instances(attr)
+			words := make([]string, 0, len(held))
+			for name := range held {
+				words = append(words, name)
+			}
+			sort.Strings(words)
+			return s.finishPlain(val, words, cPath)
+		}
 		return "", nil
 	}
 	// A term that takes a value completes up to its '=', the way a
@@ -1366,6 +1379,10 @@ type lineWalk struct {
 	phase int // 0 walking the path, 1 expecting the verb, 2 its arguments
 	verb  string
 	args  []string // what the verb accepts, whether switch or pair
+	// takesValue says the verb reads a word of the operator's own
+	// choosing here — a new instance's name, a key prefix. Such a
+	// word is not one this console names, so it claims nothing.
+	takesValue bool
 }
 
 func (w *lineWalk) paint(token string) string {
@@ -1394,6 +1411,7 @@ func (w *lineWalk) paintRest(token string) string {
 	case 1:
 		w.phase, w.verb = 2, token
 		w.args = names(w.s.argTermsFor(w.path, []string{token}))
+		w.takesValue = takesValue(token)
 		cands := w.s.verbsAt(w.path)
 		if len(w.path) == 0 {
 			cands = append(cands, commandNames()...)
@@ -1437,10 +1455,26 @@ func (w *lineWalk) paintArg(token string) string {
 	if !ok {
 		// A bare word is a switch, or the name a verb like unset
 		// takes: both are words the verb knows, so both are marked
-		// against the one list that says what it accepts.
+		// against the one list that says what it accepts. What is
+		// left is a value, and marking a value unresolved would say
+		// the console expected to recognise it.
+		if !slices.Contains(w.args, token) && w.takesValue {
+			return token
+		}
 		return w.s.mark(cAttr, w.args, token)
 	}
 	return w.s.mark(cAttr, w.args, name) + w.s.color(cPunct, "=") + value
+}
+
+// takesValue reports whether a verb reads a word the operator chose
+// rather than one this console names: the instance a creation or a
+// removal is about, or a command's own positional.
+func takesValue(verb string) bool {
+	if verb == verbAdd || verb == verbRemove {
+		return true
+	}
+	c := lookup(verb)
+	return c != nil && c.maxPos > 0
 }
 
 // mark paints a word in its class when it names exactly one candidate,

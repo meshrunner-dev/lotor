@@ -35,6 +35,7 @@ const (
 	optOn      = "true"
 	optJSON    = "json"
 	optWatch   = "watch"
+	optFlood   = "flood"
 	optLast    = "last"
 	cmdFrames  = "frames"
 	cmdQuit    = "quit"

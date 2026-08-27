@@ -1099,3 +1099,44 @@ func TestExportRendersEveryListTheWaySetReadsItBack(t *testing.T) {
 		t.Errorf("what export wrote does not parse back: %s", err)
 	}
 }
+
+func TestABareWordIsASwitchOrAValue(t *testing.T) {
+	s := &session{deps: testDeps(t), colors: true}
+	// Every command spells a bare argument the same way, so every one
+	// of them paints it the same way: a switch the command declared.
+	for _, line := range []string{"discover watch", "advert flood", "frames watch"} {
+		word := line[strings.LastIndex(line, " ")+1:]
+		if painted := s.paintLine(line); !strings.Contains(painted, cAttr+word+cReset) {
+			t.Errorf("%q: the switch is not marked: %q", line, painted)
+		}
+	}
+	// A word no command declares is still refused out loud.
+	if painted := s.paintLine("advert zz"); !strings.Contains(painted, cUnres+"zz"+cReset) {
+		t.Errorf("an undeclared word was not marked: %q", painted)
+	}
+	// And a word the operator chose is not one this console names, so
+	// it claims nothing about it rather than calling it unresolved.
+	for _, line := range []string{"/radio add slot1 driver=x", "/relay remove meshcore-868"} {
+		word := "slot1"
+		if strings.Contains(line, "remove") {
+			word = "meshcore-868"
+		}
+		if painted := s.paintLine(line); strings.Contains(painted, cUnres+word) {
+			t.Errorf("%q: a chosen name was marked unresolved: %q", line, painted)
+		}
+	}
+}
+
+func TestAFlagNamedAfterAKindCompletesItsNames(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	// relay= wants a relay, and the flag needs no declaration to say
+	// so: it is called relay because a relay is what it takes.
+	for _, line := range []string{"advert relay=", "frames relay=", "neighbours relay="} {
+		if add, _ := s.complete(line); add != "meshcore-868 " {
+			t.Errorf("%q completed to %q", line, add)
+		}
+	}
+	if add, _ := s.complete("advert relay=mesh"); add != "core-868 " {
+		t.Errorf("a partial name did not finish: %q", add)
+	}
+}

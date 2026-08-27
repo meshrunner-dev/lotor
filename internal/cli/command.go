@@ -23,6 +23,7 @@ const (
 	docJSON  = "machine-readable output instead of a table"
 	docLast  = "how far back to reach"
 	docWatch = "stay and print each answer as it lands"
+	docFlood = "flood the mesh rather than announcing zero-hop"
 )
 
 type flagSpec struct {
@@ -84,12 +85,6 @@ func daemonCommands() []*command {
 			forms: []form{{"status", "daemon overview"}},
 			run:   (*session).status,
 		},
-		{
-			name:   "config",
-			forms:  []form{{"config show relay|radio <name>", "effective config with provenance"}},
-			maxPos: 3,
-			run:    (*session).config,
-		},
 	}
 }
 
@@ -147,10 +142,12 @@ func relayCommands() []*command {
 				"admin only; one order per ten seconds, and the duty budget",
 				"has the last word on all of them",
 			},
-			flags:  []flagSpec{{name: scopeRelay, valued: true, doc: docRelay}},
-			maxPos: 1,
-			admin:  true,
-			run:    (*session).advert,
+			flags: []flagSpec{
+				{name: scopeRelay, valued: true, doc: docRelay},
+				{name: optFlood, doc: docFlood},
+			},
+			admin: true,
+			run:   (*session).advert,
 		},
 	}
 }
@@ -171,10 +168,9 @@ func journalCommands() []*command {
 			flags: []flagSpec{
 				{name: optLast, valued: true, doc: docLast}, {name: scopeRelay, valued: true, doc: docRelay},
 				{name: "type", valued: true}, {name: "verdict", valued: true},
-				{name: optJSON, doc: docJSON},
+				{name: optJSON, doc: docJSON}, {name: optWatch, doc: docWatch},
 			},
-			maxPos: 1,
-			run:    (*session).frames,
+			run: (*session).frames,
 		},
 		{
 			name:   "txn",

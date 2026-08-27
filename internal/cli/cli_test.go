@@ -132,12 +132,13 @@ func seed(t *testing.T, deps Deps) (orig, dup txn.ID) {
 func TestStatusAndHelp(t *testing.T) {
 	out := run(t, testDeps(t), "status", "help")
 	for _, want := range []string{"Lotor test", "meshcore-868", "running", "869.618 MHz",
-		"journalling", "config show", "frames watch"} {
+		"journalling", "frames watch"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("transcript lacks %q:\n%s", want, out)
 		}
 	}
-	// The listing is a table of contents: flags live in --help.
+	// The listing is a table of contents: flags live in each
+	// command's own help.
 	if strings.Contains(out, "--") {
 		t.Errorf("top-level help leaks flags:\n%s", out)
 	}
@@ -206,8 +207,8 @@ func TestPerCommandFlagsAreEnforced(t *testing.T) {
 	}
 }
 
-func TestConfigShowProvenance(t *testing.T) {
-	out := run(t, testDeps(t), "config show radio slot1")
+func TestPrintShowsProvenance(t *testing.T) {
+	out := run(t, testDeps(t), "/radio/slot1/print")
 	if !strings.Contains(out, "override:rak6421-13300x-slot1") ||
 		!strings.Contains(out, "profile:rak6421-13300x-slot1") {
 		t.Errorf("provenance missing:\n%s", out)

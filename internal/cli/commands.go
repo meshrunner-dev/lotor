@@ -248,14 +248,6 @@ func envelopeText(e radio.Envelope) string {
 	return strings.Join(parts, ", ")
 }
 
-func (s *session) config(_ context.Context, in input) error {
-	args := in.pos
-	if len(args) < 3 || args[0] != verbShow || (args[1] != scopeRelay && args[1] != scopeRadio) {
-		return errors.New("usage: config show relay|radio <name>")
-	}
-	return s.showTraces(args[1]+" "+args[2], false)
-}
-
 func (s *session) showTraces(key string, secrets bool) error {
 	traces, ok := s.traces()[key]
 	if !ok {
@@ -307,11 +299,8 @@ func (s *session) secretAttrs(key string) map[string]bool {
 }
 
 func (s *session) frames(ctx context.Context, in input) error {
-	pos, opts := in.pos, in.opts
-	if len(pos) > 0 {
-		if pos[0] != "watch" {
-			return fmt.Errorf("unknown argument %q — try frames --help", pos[0])
-		}
+	opts := in.opts
+	if opts[optWatch] == optOn {
 		if _, ok := opts[optLast]; ok {
 			return errors.New("last= is for the journal, not the live feed — try \"frames ?\"")
 		}
@@ -612,13 +601,7 @@ func (s *session) scopes(_ context.Context, in input) error {
 // advert queues one operator announcement: the reference CLI's
 // gesture — zero-hop by default, "flood" to address the mesh.
 func (s *session) advert(_ context.Context, in input) error {
-	flood := false
-	if len(in.pos) == 1 {
-		if in.pos[0] != "flood" {
-			return fmt.Errorf("unknown argument %q — try advert --help", in.pos[0])
-		}
-		flood = true
-	}
+	flood := in.opts[optFlood] == optOn
 	r, err := s.oneRelay(in.opts[scopeRelay])
 	if err != nil {
 		return err
