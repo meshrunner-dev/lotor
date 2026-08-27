@@ -1,6 +1,7 @@
 package meshcore
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -217,5 +218,39 @@ func TestReplyScopeFollowsTheReference(t *testing.T) {
 	// the reference's default, not openHop's plain reply.
 	if got := e.replyScope(ask(meshcore.RouteDirect, false)); got != speak {
 		t.Error("a direct question was not answered in the default scope")
+	}
+}
+
+func TestScopeNameRecordsWhatItKnows(t *testing.T) {
+	// The journal names a scope we carry, admits the raw code of one
+	// we do not, calls a plain flood the wildcard, and says nothing
+	// about direct traffic, where a relay acts on no scope at all.
+	e, _, _, peer := txRig(t, "shadow")
+	e.scopes = newScopeTable(params{AcceptScopes: []string{"fr"}})
+
+	build := func(route meshcore.RouteType, key string) *reception {
+		pkt, err := meshcore.BuildAdvert(peer, time.Now(), &meshcore.AdvertData{Name: "p"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pkt.Header = meshcore.MakeHeader(route, meshcore.PayloadTypeAdvert, meshcore.PayloadVer1)
+		if key != "" {
+			meshcore.TransportKeyForName(key).Scope(pkt)
+		}
+		return rxOf(e, pkt)
+	}
+	if got := e.scopeName(build(meshcore.RouteFlood, "fr")); got != "#fr" {
+		t.Errorf("a carried scope = %q, want its name", got)
+	}
+	foreign := build(meshcore.RouteFlood, "de")
+	want := fmt.Sprintf("%#04x", foreign.pkt.TransportCodes[0])
+	if got := e.scopeName(foreign); got != want {
+		t.Errorf("an uncarried scope = %q, want the raw code %q", got, want)
+	}
+	if got := e.scopeName(build(meshcore.RouteFlood, "")); got != wildcardScope {
+		t.Errorf("a plain flood = %q, want the wildcard", got)
+	}
+	if got := e.scopeName(build(meshcore.RouteDirect, "")); got != "" {
+		t.Errorf("direct traffic = %q, want nothing", got)
 	}
 }
