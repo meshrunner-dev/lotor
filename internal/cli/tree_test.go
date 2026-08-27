@@ -494,7 +494,7 @@ func TestEveryVerbAPlaceAnswersIsAlsoOffered(t *testing.T) {
 		if len(verbs) == 0 {
 			t.Errorf("%s answers nothing", where)
 		}
-		offered := names(s.candidatesAt(path, true))
+		offered := names(s.candidatesAt(path))
 		for _, v := range verbs {
 			if !slices.Contains(offered, v) {
 				t.Errorf("%s answers %q but never offers it", where, v)
@@ -660,29 +660,26 @@ func TestContainersCompleteToTheirSeparator(t *testing.T) {
 
 func TestRefusalsPointAtTheWord(t *testing.T) {
 	out := run(t, testDeps(t), "/relay meshcore-868 dance")
-	if !strings.Contains(out, `no "dance" here (column 21)`) {
+	if !strings.Contains(out, `no "dance" here — "?" says what this context offers (column 21)`) {
 		t.Errorf("the refusal does not point at the word:\n%s", out)
 	}
 }
 
 func TestCompletionOffersOnlyWhatWouldRun(t *testing.T) {
 	s := &session{deps: testDeps(t)}
-	// A context needs its slash: written bare the word reaches the
-	// flat command table, so offering it there would complete to
-	// something that does not run.
-	if add, _ := s.complete("sys"); add != "" {
-		t.Errorf("a bare prefix completed to a context: %q", add)
+	// A context reaches its place with or without the slash, so both
+	// spellings complete — and both run.
+	for _, line := range []string{"sys", "/sys"} {
+		if add, _ := s.complete(line); add != "tem " {
+			t.Errorf("complete(%q) = %q", line, add)
+		}
 	}
-	if add, _ := s.complete("/sys"); add != "tem " {
-		t.Errorf("an absolute prefix did not reach the context: %q", add)
-	}
-	// And a name that is both a place and a command is offered once,
-	// as the place the parser makes of it.
+	// Every name is offered once, and as the one thing it means.
 	seen := map[string]int{}
-	for _, c := range s.candidatesAt(nil, true) {
+	for _, c := range s.candidatesAt(nil) {
 		seen[c.name]++
 		if c.name == scopeRelay && c.class != cPath {
-			t.Errorf("relay was offered as %q, not as the place it leads to", c.class)
+			t.Errorf("relay was offered as %q, not as the place it names", c.class)
 		}
 	}
 	if seen[scopeRelay] != 1 {
@@ -741,7 +738,7 @@ func TestHelpNamesTheGrammarNotTheContents(t *testing.T) {
 	}
 	// But completion still offers the instances, because typing one
 	// is exactly what the grammar allows.
-	if !slices.Contains(names(s.termsAt([]string{"relay"}, true)), "meshcore-868") {
+	if !slices.Contains(names(s.termsAt([]string{"relay"})), "meshcore-868") {
 		t.Error("completion lost the instances")
 	}
 }
@@ -757,5 +754,104 @@ func TestHelpColoursEachEntryByItsClass(t *testing.T) {
 	}
 	if !strings.Contains(got, cAttr+"node_name"+cReset+cPunct+" -- "+cReset) {
 		t.Errorf("an attribute is not an attribute: %q", got)
+	}
+}
+
+func TestAVerbSaysWhatItTakes(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	// The regression this closes: nothing named the argument that
+	// makes discover wait, so nobody could find it.
+	got := s.helpForLine("/relay meshcore-868 discover ", 0)
+	if !strings.Contains(got, "watch -- stay and print each answer as it lands\r\n") {
+		t.Errorf("discover does not name its argument:\n%s", got)
+	}
+	// Standing inside a relay, the relay argument is already answered.
+	if strings.Contains(got, "relay=") {
+		t.Errorf("help offered a relay to a session already in one:\n%s", got)
+	}
+	// A mutation verb answers about the attributes it acts on, and
+	// says which of them want a value.
+	set := s.helpForLine("/relay meshcore-868 set ", 0)
+	if !strings.Contains(set, "node_name= -- the name on the air\r\n") {
+		t.Errorf("set does not name its attributes:\n%s", set)
+	}
+	// unset names them without the '=': it takes a name, not a value.
+	un := s.helpForLine("/relay meshcore-868 unset ", 0)
+	if !strings.Contains(un, "node_name -- the name on the air\r\n") {
+		t.Errorf("unset asked for a value:\n%s", un)
+	}
+}
+
+func TestCompletionReachesAVerbsArguments(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	// TAB after a verb finishes its arguments, and a switch completes
+	// with a space where a parameter completes to its '='.
+	if add, _ := s.complete("/relay meshcore-868 discover wat"); add != "ch " {
+		t.Errorf("a switch completed with %q", add)
+	}
+	if add, _ := s.complete("/relay meshcore-868 set node_"); add != "name=" {
+		t.Errorf("a parameter completed with %q", add)
+	}
+	if add, _ := s.complete("/relay meshcore-868 unset node_"); add != "name " {
+		t.Errorf("unset completed with %q", add)
+	}
+}
+
+func TestOneNameMeansOneThing(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	// Every context is typeable bare at the root, so a context name
+	// must not also be a flat command: the word would mean two things
+	// and the console could only ever paint one of them.
+	flat := map[string]bool{}
+	for _, c := range commands {
+		flat[c.name] = true
+		for _, a := range c.aliases {
+			flat[a] = true
+		}
+	}
+	for i := range s.deps.Kinds {
+		if name := s.deps.Kinds[i].Name; flat[name] {
+			t.Errorf("%q is both a context and a flat command", name)
+		}
+	}
+	// And so the listing tells them apart: a place is a place.
+	byName := map[string]string{}
+	for _, term := range s.termsAt(nil) {
+		byName[term.name] = term.class
+	}
+	if byName[scopeRadio] != cPath {
+		t.Errorf("radio is offered as %q, not as a place", byName[scopeRadio])
+	}
+	if byName[cmdUndo] != cVerb {
+		t.Errorf("undo is offered as %q, not as an action", byName[cmdUndo])
+	}
+	if byName[scopeRadio] == byName[cmdUndo] {
+		t.Error("a place and an action read the same at the root")
+	}
+}
+
+func TestABareContextNavigatesFromTheRoot(t *testing.T) {
+	deps := testDeps(t)
+	// Typed without its slash, from the root, a context is still the
+	// place it names — the operator should not have to know which
+	// grammar a word belongs to before typing it.
+	out := run(t, deps, "radio", "print")
+	if !strings.Contains(out, "] /radio> ") {
+		t.Errorf("a bare context did not navigate:\n%s", out)
+	}
+	if !strings.Contains(out, "DRIVER") {
+		t.Errorf("print did not reach the collection:\n%s", out)
+	}
+}
+
+func TestStatusIsTheRunningView(t *testing.T) {
+	out := run(t, testDeps(t), "/relay meshcore-868 status")
+	if !strings.Contains(out, "state") || !strings.Contains(out, "waveform") {
+		t.Errorf("status does not show the relay as it runs:\n%s", out)
+	}
+	// print stays the configured view, with its provenance.
+	cfg := run(t, testDeps(t), "/relay meshcore-868 print")
+	if !strings.Contains(cfg, "SOURCE") {
+		t.Errorf("print stopped showing provenance:\n%s", cfg)
 	}
 }

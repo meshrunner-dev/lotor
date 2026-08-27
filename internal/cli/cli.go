@@ -47,6 +47,9 @@ const (
 	cmdAdvert     = "advert"
 	cmdUndo       = "undo"
 	verbList      = "list"
+	cmdJournal    = "journal"
+	// helpWord asks about whatever it follows.
+	helpWord = "?"
 )
 
 // Privilege is what a session may do; the transport determines it.
@@ -423,7 +426,10 @@ func (s *session) dispatch(ctx context.Context, args []string) {
 	switch c := lookup(name); {
 	case c == nil:
 		err = unknownCommand(name)
-	case slices.Contains(rest, "--help") || slices.Contains(rest, "-h"):
+	case slices.Contains(rest, helpWord):
+		// "?" asks about a command in a line the way the key asks
+		// about it under the fingers — one question, two ways to put
+		// it, and no punctuation to remember for either.
 		err = s.helpFor(name)
 	case c.admin && s.deps.Privilege != Admin:
 		err = fmt.Errorf("%s is an admin command — use the local console socket", name)

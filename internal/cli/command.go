@@ -16,9 +16,22 @@ type form struct {
 
 // flagSpec declares one flag a command accepts; a valued flag consumes
 // the word that follows it.
+// The one-line descriptions the shared arguments carry, written once
+// so seven commands cannot describe the same argument seven ways.
+const (
+	docRelay = "which relay, when several run"
+	docJSON  = "machine-readable output instead of a table"
+	docLast  = "how far back to reach"
+	docWatch = "stay and print each answer as it lands"
+)
+
 type flagSpec struct {
 	name   string
 	valued bool
+	// doc is the one line the help gives it. An argument nobody can
+	// discover is an argument nobody uses, which is what the "--"
+	// spelling used to guarantee.
+	doc string
 }
 
 // command declares one shell command completely: grammar, help and
@@ -29,7 +42,7 @@ type command struct {
 	name    string
 	aliases []string
 	// forms is the top-level listing: positional shapes and purpose,
-	// no flags. detail is what --help prints — the full forms, flags
+	// no flags. detail is what "?" prints — the full forms, arguments
 	// included; when empty, the forms' calls stand in.
 	forms  []form
 	detail []string
@@ -72,24 +85,6 @@ func daemonCommands() []*command {
 			run:   (*session).status,
 		},
 		{
-			name: scopeRelay,
-			forms: []form{
-				{"relay list", "relays and their detail"},
-				{"relay show <name>", "one relay in full"},
-			},
-			maxPos: 2,
-			run:    (*session).relay,
-		},
-		{
-			name: scopeRadio,
-			forms: []form{
-				{"radio list", "radios and their envelope"},
-				{"radio show <name>", "one radio in full"},
-			},
-			maxPos: 2,
-			run:    (*session).radio,
-		},
-		{
 			name:   "config",
 			forms:  []form{{"config show relay|radio <name>", "effective config with provenance"}},
 			maxPos: 3,
@@ -109,12 +104,12 @@ func relayCommands() []*command {
 				{"scopes ask <pubkey>", "ask a neighbour which it carries"},
 			},
 			detail: []string{
-				"scopes [--relay R]",
-				"scopes ask <pubkey-prefix> [--relay R]",
+				"scopes [relay=<name>]",
+				"scopes ask <pubkey-prefix> [relay=<name>]",
 				"asking emits — admin only, one question at a time, and the",
 				"answer comes from the neighbour itself, not from a directory",
 			},
-			flags:  []flagSpec{{name: scopeRelay, valued: true}},
+			flags:  []flagSpec{{name: scopeRelay, valued: true, doc: docRelay}},
 			maxPos: 2,
 			run:    (*session).scopes,
 		},
@@ -124,22 +119,22 @@ func relayCommands() []*command {
 				{cmdDiscover, "ask the neighbourhood who is there"},
 			},
 			detail: []string{
-				"discover [--watch] [--relay R]",
+				"discover [watch] [relay=<name>]",
 				"admin only. It emits and returns; answers arrive spread",
 				"out over the following minute, on purpose, and join the",
 				"neighbourhood as they land — \"neighbours\" reads them,",
-				"freshest first. --watch waits there and prints them live;",
+				"freshest first. \"watch\" waits there and prints them live;",
 				"enter stops watching, and the scan carries on without you.",
 			},
-			flags: []flagSpec{{name: scopeRelay, valued: true}, {name: optWatch}},
+			flags: []flagSpec{{name: scopeRelay, valued: true, doc: docRelay}, {name: optWatch, doc: docWatch}},
 			admin: true,
 			run:   (*session).discover,
 		},
 		{
 			name:   cmdNeighbours,
 			forms:  []form{{cmdNeighbours, "repeaters heard with no relay in between"}},
-			detail: []string{"neighbours [--relay R]"},
-			flags:  []flagSpec{{name: scopeRelay, valued: true}},
+			detail: []string{"neighbours [relay=<name>]"},
+			flags:  []flagSpec{{name: scopeRelay, valued: true, doc: docRelay}},
 			run:    (*session).neighbours,
 		},
 		{
@@ -148,11 +143,11 @@ func relayCommands() []*command {
 				{"advert [flood]", "announce this node now: zero-hop, or flood the mesh"},
 			},
 			detail: []string{
-				"advert [flood] [--relay R]",
+				"advert [flood] [relay=<name>]",
 				"admin only; one order per ten seconds, and the duty budget",
 				"has the last word on all of them",
 			},
-			flags:  []flagSpec{{name: scopeRelay, valued: true}},
+			flags:  []flagSpec{{name: scopeRelay, valued: true, doc: docRelay}},
 			maxPos: 1,
 			admin:  true,
 			run:    (*session).advert,
@@ -170,13 +165,13 @@ func journalCommands() []*command {
 				{"frames watch", "live feed (enter stops)"},
 			},
 			detail: []string{
-				"frames [--last N] [--relay R] [--type T] [--verdict V] [--json]",
-				"frames watch [--relay R] [--type T] [--verdict V] [--json]",
+				"frames [last=<n>] [relay=<name>] [type=<type>] [verdict=<verdict>] [json]",
+				"frames watch [relay=<name>] [type=<type>] [verdict=<verdict>] [json]",
 			},
 			flags: []flagSpec{
-				{name: optLast, valued: true}, {name: scopeRelay, valued: true},
+				{name: optLast, valued: true, doc: docLast}, {name: scopeRelay, valued: true, doc: docRelay},
 				{name: "type", valued: true}, {name: "verdict", valued: true},
-				{name: optJSON},
+				{name: optJSON, doc: docJSON},
 			},
 			maxPos: 1,
 			run:    (*session).frames,
@@ -190,33 +185,33 @@ func journalCommands() []*command {
 		{
 			name:   "nodes",
 			forms:  []form{{"nodes", "the directory the mesh writes about itself"}},
-			detail: []string{"nodes [--json]"},
-			flags:  []flagSpec{{name: optJSON}},
+			detail: []string{"nodes [json]"},
+			flags:  []flagSpec{{name: optJSON, doc: docJSON}},
 			run:    (*session).nodes,
 		},
 		{
 			name:   "tx",
 			forms:  []form{{"tx", "transmit-airtime history, consolidated"}},
-			detail: []string{"tx [--relay R] [--last 24h|7d] [--json]"},
+			detail: []string{"tx [relay=<name>] [last=24h|7d] [json]"},
 			flags: []flagSpec{
-				{name: scopeRelay, valued: true}, {name: optLast, valued: true},
-				{name: optJSON},
+				{name: scopeRelay, valued: true, doc: docRelay}, {name: optLast, valued: true, doc: docLast},
+				{name: optJSON, doc: docJSON},
 			},
 			run: (*session).tx,
 		},
 		{
 			name:   "noise",
 			forms:  []form{{"noise", "noise-floor history, consolidated"}},
-			detail: []string{"noise [--relay R] [--last 24h|7d] [--json]"},
+			detail: []string{"noise [relay=<name>] [last=24h|7d] [json]"},
 			flags: []flagSpec{
-				{name: scopeRelay, valued: true}, {name: optLast, valued: true},
-				{name: optJSON},
+				{name: scopeRelay, valued: true, doc: docRelay}, {name: optLast, valued: true, doc: docLast},
+				{name: optJSON, doc: docJSON},
 			},
 			run: (*session).noise,
 		},
 		{
-			name:  "sentinel",
-			forms: []form{{"sentinel", "journal status"}},
+			name:  cmdJournal,
+			forms: []form{{cmdJournal, "the journal's own state"}},
 			run:   (*session).sentinelStatus,
 		},
 	}
@@ -272,30 +267,39 @@ func unknownCommand(name string) error {
 
 // parse validates a raw argument list against the declaration: only
 // declared flags, no more positional words than any form takes.
+// parse reads a command's words the way the console speaks: a bare
+// name is a switch, name=value is a parameter, and anything else is a
+// positional word. There is no punctuation to remember, which is what
+// lets an argument be completed and described like everything else.
 func (c *command) parse(args []string) (input, error) {
 	in := input{opts: map[string]string{}}
-	for i := 0; i < len(args); i++ {
+	for i := range args {
 		a := args[i]
-		if !strings.HasPrefix(a, "--") {
+		key, value, hasValue := strings.Cut(a, "=")
+		spec := c.flag(key)
+		if spec == nil {
+			if hasValue {
+				return in, fmt.Errorf("no argument %q here — try %q", key, c.name+" ?")
+			}
 			in.pos = append(in.pos, a)
 			continue
 		}
-		key := strings.TrimPrefix(a, "--")
-		spec := c.flag(key)
+		if hasValue {
+			if !spec.valued {
+				return in, fmt.Errorf("%s takes no value", key)
+			}
+			in.opts[key] = value
+			continue
+		}
 		switch {
-		case spec == nil:
-			return in, fmt.Errorf("unknown flag --%s — try %s --help", key, c.name)
 		case !spec.valued:
 			in.opts[key] = optOn
-		case i+1 >= len(args):
-			return in, fmt.Errorf("--%s wants a value", key)
 		default:
-			i++
-			in.opts[key] = args[i] //nolint:gosec // the case above proves i+1 < len(args)
+			return in, fmt.Errorf("%s wants a value — %s=…", key, key)
 		}
 	}
 	if len(in.pos) > c.maxPos {
-		return in, fmt.Errorf("unknown argument %q — try %s --help", in.pos[c.maxPos], c.name)
+		return in, fmt.Errorf("unknown argument %q — try %q", in.pos[c.maxPos], c.name+" ?")
 	}
 	return in, nil
 }

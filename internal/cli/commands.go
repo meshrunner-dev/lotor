@@ -43,24 +43,33 @@ func (s *session) status(ctx context.Context, _ input) error {
 	return tb.flush(s.out)
 }
 
-func (s *session) relay(ctx context.Context, in input) error {
-	args := in.pos
-	if len(args) == 0 || args[0] == verbList {
-		tb := s.table()
-		tb.header("NAME", "PROTOCOL", "STATE", "RADIO")
-		for _, r := range s.relays() {
-			tb.row(r.Name, r.Protocol, r.State(), r.Radio)
-		}
-		if len(s.relays()) == 0 {
-			fmt.Fprint(s.out, "no relays configured\r\n")
-			return nil
-		}
-		return tb.flush(s.out)
+// relayList renders the relays as a table — the tree's print at the
+// collection.
+func (s *session) relayList() error {
+	if len(s.relays()) == 0 {
+		fmt.Fprint(s.out, "no relays configured\r\n")
+		return nil
 	}
-	if args[0] != verbShow || len(args) < 2 {
-		return errors.New("usage: relay list | relay show <name>")
+	tb := s.table()
+	tb.header("NAME", "PROTOCOL", "STATE", "RADIO")
+	for _, r := range s.relays() {
+		tb.row(r.Name, r.Protocol, r.State(), r.Radio)
 	}
-	r, err := s.findRelay(args[1])
+	return tb.flush(s.out)
+}
+
+// relayStatus is one relay as it is running — what print does not
+// show, because print answers about the configuration.
+func (s *session) relayStatus(ctx context.Context, in input) error {
+	name := in.opts[scopeRelay]
+	if name == "" {
+		one, err := s.oneRelay("")
+		if err != nil {
+			return err
+		}
+		name = one.Name
+	}
+	r, err := s.findRelay(name)
 	if err != nil {
 		return err
 	}
@@ -151,40 +160,43 @@ func (s *session) relayJournal(ctx context.Context, tb *table, r RelayInfo) {
 	}
 }
 
-func (s *session) radio(_ context.Context, in input) error {
-	args := in.pos
-	if len(args) == 0 || args[0] == verbList {
+// radioList renders the radios as a table — the tree's print at the
+// collection.
+func (s *session) radioList() error {
+	if len(s.radios()) == 0 {
+		fmt.Fprint(s.out, "no radios configured\r\n")
+		return nil
+	}
+	tb := s.table()
+	tb.header("NAME", "DRIVER", "ENVELOPE", "OWNER")
+	for _, r := range s.radios() {
+		owner := "unclaimed"
+		if r.Relay != "" {
+			owner = r.Relay
+		}
+		tb.row(r.Name, r.Driver, envelopeText(r.Envelope), owner)
+	}
+	return tb.flush(s.out)
+}
+
+// radioStatus is one radio as it is attached.
+func (s *session) radioStatus(_ context.Context, in input) error {
+	name := in.opts[scopeRadio]
+	for _, r := range s.radios() {
+		if r.Name != name {
+			continue
+		}
 		tb := s.table()
-		tb.header("NAME", "DRIVER", "ENVELOPE", "OWNER")
-		for _, r := range s.radios() {
-			owner := "unclaimed"
-			if r.Relay != "" {
-				owner = r.Relay
-			}
-			tb.row(r.Name, r.Driver, envelopeText(r.Envelope), owner)
+		tb.row("driver", r.Driver)
+		tb.row("envelope", envelopeText(r.Envelope))
+		owner := "unclaimed"
+		if r.Relay != "" {
+			owner = r.Relay
 		}
-		if len(s.radios()) == 0 {
-			fmt.Fprint(s.out, "no radios configured\r\n")
-			return nil
-		}
+		tb.row("owner", owner)
 		return tb.flush(s.out)
 	}
-	if args[0] != verbShow || len(args) < 2 {
-		return errors.New("usage: radio list | radio show <name>")
-	}
-	for _, r := range s.radios() {
-		if r.Name == args[1] {
-			tb := &table{}
-			tb.row("driver", r.Driver)
-			tb.row("envelope", envelopeText(r.Envelope))
-			tb.row("relay", r.Relay)
-			if err := tb.flush(s.out); err != nil {
-				return err
-			}
-			break
-		}
-	}
-	return s.showTraces("radio " + args[1])
+	return fmt.Errorf("no radio %q", name)
 }
 
 // dutyText compacts the duty gauge for the status row; empty when
@@ -299,7 +311,7 @@ func (s *session) frames(ctx context.Context, in input) error {
 			return fmt.Errorf("unknown argument %q — try frames --help", pos[0])
 		}
 		if _, ok := opts[optLast]; ok {
-			return errors.New("--last is for the journal, not the live feed — try frames --help")
+			return errors.New("last= is for the journal, not the live feed — try \"frames ?\"")
 		}
 		return s.watch(ctx, opts)
 	}
@@ -313,7 +325,7 @@ func (s *session) frames(ctx context.Context, in input) error {
 	limit := 20
 	if v, ok := opts[optLast]; ok {
 		if limit, err = strconv.Atoi(v); err != nil || limit < 1 || limit > maxLast {
-			return fmt.Errorf("--last wants 1..%d", maxLast)
+			return fmt.Errorf("last= wants 1..%d", maxLast)
 		}
 	}
 	if v, ok := opts[scopeRelay]; ok {
@@ -456,7 +468,7 @@ func working(r RelayInfo) error {
 // discover asks the neighbourhood who is there. It emits and returns:
 // the answers are recorded as they land, whether or not anyone is
 // still watching, so blocking the console for the window buys nothing
-// the neighbourhood does not already keep. --watch waits there and
+// the neighbourhood does not already keep. "watch" waits there and
 // prints them live, which is worth having when what you want to know
 // is who answers fast and who answers at all.
 //
@@ -704,7 +716,7 @@ func (s *session) oneRelay(name string) (RelayInfo, error) {
 	if len(s.relays()) == 1 {
 		return s.relays()[0], nil
 	}
-	return RelayInfo{}, errors.New("several relays — say which with --relay")
+	return RelayInfo{}, errors.New("several relays — say which with relay=<name>")
 }
 
 func (s *session) nodes(ctx context.Context, in input) error {
@@ -768,7 +780,7 @@ func (s *session) tx(ctx context.Context, in input) error {
 	name := opts[scopeRelay]
 	if name == "" {
 		if len(s.relays()) != 1 {
-			return errors.New("--relay is needed when several relays run")
+			return errors.New("relay=<name> is needed when several relays run")
 		}
 		name = s.relays()[0].Name
 	}
@@ -818,7 +830,7 @@ func (s *session) noise(ctx context.Context, in input) error {
 	name := opts[scopeRelay]
 	if name == "" {
 		if len(s.relays()) != 1 {
-			return errors.New("--relay is needed when several relays run")
+			return errors.New("relay=<name> is needed when several relays run")
 		}
 		name = s.relays()[0].Name
 	}
@@ -940,13 +952,13 @@ func (s *session) relayFilterError(ctx context.Context, name string) error {
 func parseSpan(v string) (time.Duration, error) {
 	if days, err := strconv.Atoi(strings.TrimSuffix(v, "d")); err == nil && strings.HasSuffix(v, "d") {
 		if days < 1 {
-			return 0, errors.New("--last wants a duration like 24h or 7d")
+			return 0, errors.New("last= wants a duration like 24h or 7d")
 		}
 		return time.Duration(days) * 24 * time.Hour, nil
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil || d <= 0 {
-		return 0, errors.New("--last wants a duration like 24h or 7d")
+		return 0, errors.New("last= wants a duration like 24h or 7d")
 	}
 	return d, nil
 }

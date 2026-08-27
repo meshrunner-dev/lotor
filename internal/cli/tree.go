@@ -33,12 +33,14 @@ func (s *session) treeLine(line string) bool {
 	if line == "?" || strings.HasPrefix(line, "/") || len(s.curPath()) > 0 {
 		return true
 	}
-	// The tree's own verbs work from the root without a slash. Standing
-	// at the root is standing somewhere, so "export" there means what
-	// "/export" means, and an operator should not have to know which
-	// grammar a word belongs to before typing it.
+	// At the root, the tree's own words work without a slash: standing
+	// there is standing somewhere, so "export" means what "/export"
+	// means and "radio" is the context it names. An operator should
+	// not have to know which grammar a word belongs to before typing
+	// it — which only holds because no context shares a name with a
+	// flat command.
 	first, _, _ := strings.Cut(line, " ")
-	return isTreeVerb(first)
+	return isTreeVerb(first) || s.kindByName(first) != nil
 }
 
 // isTreeVerb reports whether a word is one of the tree's own. None of
@@ -239,27 +241,41 @@ func (s *session) tree(ctx context.Context, line string) {
 		return
 	}
 	verb, args := rest[0], rest[1:]
+	err := s.treeVerb(ctx, path, verb, args, rest)
+	if err == nil {
+		return
+	}
+	// A word the place did not answer to is pointed at, not merely
+	// described: the operator sees which one was meant.
+	if _, ok := errors.AsType[*unknownVerbError](err); ok {
+		fmt.Fprintf(s.out, "error: %s (column %d)\r\n", err, at)
+		return
+	}
+	fmt.Fprintf(s.out, "error: %s\r\n", err)
+}
+
+// treeVerb runs one verb at one place, and reports what to say when
+// the place does not answer to it.
+func (s *session) treeVerb(ctx context.Context, path []string,
+	verb string, args, rest []string,
+) error {
 	switch {
-	case verb == "?" || verb == "help":
+	case verb == helpWord || verb == "help":
 		fmt.Fprint(s.out, s.treeHelp(path))
 	case verb == cmdQuit || verb == "exit":
 		s.dispatch(ctx, rest)
 	case verb == verbExport:
 		// Every depth answers export — the root's is the whole
 		// configuration, the backup an operator can read.
-		if err := s.treeExport(path); err != nil {
-			fmt.Fprintf(s.out, "error: %s\r\n", err)
-		}
+		return s.treeExport(path)
 	case verb == verbPrint:
 		s.treePrint(ctx, path)
+	case verb == verbStatus && len(path) == 2:
+		return s.treeStatus(ctx, path)
 	case verb == verbSet || verb == verbUnset:
-		if err := s.treeSet(ctx, path, verb, args); err != nil {
-			fmt.Fprintf(s.out, "error: %s\r\n", err)
-		}
+		return s.treeSet(ctx, path, verb, args)
 	case verb == verbAdd || verb == verbRemove:
-		if err := s.treeCreateRemove(ctx, path, verb, args); err != nil {
-			fmt.Fprintf(s.out, "error: %s\r\n", err)
-		}
+		return s.treeCreateRemove(ctx, path, verb, args)
 	case len(path) == 0:
 		// Anything else at the root is a flat command — "/status" from
 		// a context lands here with the path emptied. The tree's own
@@ -268,12 +284,19 @@ func (s *session) tree(ctx context.Context, line string) {
 		s.dispatch(ctx, rest)
 	case len(path) == 2 && s.mountedVerb(path[0], verb):
 		// The flat command runs as itself, told which instance asked.
-		s.dispatch(ctx, append(append([]string{verb}, args...), "--"+scopeRelay, path[1]))
+		s.dispatch(ctx, append(append([]string{verb}, args...), path[0]+"="+path[1]))
 	default:
-		fmt.Fprintf(s.out,
-			"error: no %q here (column %d) — \"?\" says what this context offers\r\n",
-			verb, at)
+		return &unknownVerbError{verb: verb}
 	}
+	return nil
+}
+
+// unknownVerb carries the word a place did not answer to, so the
+// caller can say where on the line it was.
+type unknownVerbError struct{ verb string }
+
+func (e *unknownVerbError) Error() string {
+	return fmt.Sprintf("no %q here — \"?\" says what this context offers", e.verb)
 }
 
 // The mutation verbs.
@@ -283,6 +306,11 @@ const (
 	verbExport = "export"
 	verbAdd    = "add"
 	verbRemove = "remove"
+	// verbStatus is an instance as it is running, where print is the
+	// instance as it was configured. It lives in the tree rather than
+	// in the flat table because it only ever answers about the thing
+	// the session is standing in.
+	verbStatus = "status"
 )
 
 // treeCreateRemove serves add and remove, from a kind's collection —
@@ -547,9 +575,18 @@ func (s *session) mountedVerb(kind, verb string) bool {
 	return false
 }
 
+// treeStatus shows the instance the session stands in, as it runs.
+func (s *session) treeStatus(ctx context.Context, path []string) error {
+	in := input{opts: map[string]string{path[0]: path[1]}}
+	if path[0] == scopeRelay {
+		return s.relayStatus(ctx, in)
+	}
+	return s.radioStatus(ctx, in)
+}
+
 // treePrint shows a context: a kind lists its instances, an instance
 // shows its effective configuration with provenance.
-func (s *session) treePrint(ctx context.Context, path []string) {
+func (s *session) treePrint(_ context.Context, path []string) {
 	if len(path) == 0 {
 		// The root holds no values of its own: what it can show is
 		// what stands below it.
@@ -573,21 +610,14 @@ func (s *session) treePrint(ctx context.Context, path []string) {
 		return
 	}
 	if len(path) == 1 {
+		var err error
 		if path[0] == scopeRelay {
-			s.dispatch(ctx, []string{scopeRelay, verbList})
-			return
+			err = s.relayList()
+		} else {
+			err = s.radioList()
 		}
-		tb := s.table()
-		tb.header("NAME", "DRIVER", "OWNER")
-		for _, r := range s.radios() {
-			owner := "unclaimed"
-			if r.Relay != "" {
-				owner = r.Relay
-			}
-			tb.row(r.Name, r.Driver, owner)
-		}
-		if err := tb.flush(s.out); err == nil && len(s.radios()) == 0 {
-			fmt.Fprint(s.out, "no radios\r\n")
+		if err != nil {
+			fmt.Fprintf(s.out, "error: %s\r\n", err)
 		}
 		return
 	}
@@ -608,7 +638,7 @@ func (s *session) treeHelp(path []string) string {
 	// prompt it came from.
 	b.WriteString("\r\n")
 	var terms []term
-	for _, t := range s.termsAt(path, true) {
+	for _, t := range s.termsAt(path) {
 		if !t.content {
 			terms = append(terms, t)
 		}
@@ -690,7 +720,7 @@ func (s *session) complete(line string) (add string, hints []string) {
 	if len(rest) > 0 {
 		return s.completeArgs(path, rest, last)
 	}
-	cands := s.candidatesAt(path, strings.HasPrefix(line, "/"))
+	cands := s.candidatesAt(path)
 	prefix := strings.TrimPrefix(last, "/")
 	matched, common := match(prefix, names(cands))
 	switch len(matched) {
@@ -735,6 +765,7 @@ type term struct {
 // the help gives it.
 var verbDoc = map[string]string{
 	verbPrint:  "show what is here",
+	verbStatus: "show it as it is running",
 	verbExport: "print the lines that would recreate this",
 	verbSet:    "change an attribute",
 	verbUnset:  "clear an attribute, back to what the preset says",
@@ -742,10 +773,8 @@ var verbDoc = map[string]string{
 	verbRemove: "take one out of existence",
 }
 
-// termsAt lists everything typeable at one place. absolute says the
-// line began with a slash, which is what lets a context be named: a
-// bare word at the root reaches the flat command table instead.
-func (s *session) termsAt(path []string, absolute bool) []term {
+// termsAt lists everything typeable at one place.
+func (s *session) termsAt(path []string) []term {
 	var out []term
 	if len(path) > 0 {
 		out = append(out, term{name: "..", class: cPath, doc: "go up to " + s.parentOf(path)})
@@ -761,13 +790,14 @@ func (s *session) termsAt(path []string, absolute bool) []term {
 	}
 	switch {
 	case len(path) == 0:
-		if absolute {
-			for i := range s.deps.Kinds {
-				k := s.deps.Kinds[i]
-				out = append(out, term{
-					name: k.Name, class: cPath, doc: k.Doc, container: !k.Singleton,
-				})
-			}
+		// A context is typeable at the root with or without its
+		// slash, so it is offered either way — which only holds
+		// because no context shares a name with a flat command.
+		for i := range s.deps.Kinds {
+			k := s.deps.Kinds[i]
+			out = append(out, term{
+				name: k.Name, class: cPath, doc: k.Doc, container: !k.Singleton,
+			})
 		}
 		for _, c := range commands {
 			doc := ""
@@ -808,8 +838,10 @@ func (s *session) verbNamesAt(path []string) []string {
 	case len(path) == 1:
 		return []string{verbPrint, verbAdd, verbRemove, verbExport}
 	default:
-		verbs := []string{verbPrint, verbSet, verbUnset, verbExport}
-		for _, v := range []string{cmdNeighbours, cmdScopes, cmdDiscover, cmdAdvert} {
+		verbs := []string{verbPrint, verbStatus, verbSet, verbUnset, verbExport}
+		for _, v := range []string{
+			cmdNeighbours, cmdScopes, cmdDiscover, cmdAdvert,
+		} {
 			if s.mountedVerb(path[0], v) {
 				verbs = append(verbs, v)
 			}
@@ -848,9 +880,7 @@ func names(terms []term) []string {
 }
 
 // candidatesAt lists what may legally come next at one place.
-func (s *session) candidatesAt(path []string, absolute bool) []term {
-	return s.termsAt(path, absolute)
-}
+func (s *session) candidatesAt(path []string) []term { return s.termsAt(path) }
 
 // listing orders and colours the candidates for the screen: places
 // before actions, alphabetical within each, so an operator sees at a
@@ -910,39 +940,81 @@ func (s *session) attrsForAddLine(kind string, rest []string) []schema.Attr {
 	return k.AttrsFor(choice)
 }
 
-// completeArgs finishes what comes after a verb: attribute names for
-// set, unset and add — and, past the '=', an enum's values.
-func (s *session) completeArgs(path, rest []string, last string) (add string, hints []string) {
+// argTermsFor is what may still be written after a verb: the
+// attributes a mutation acts on, or the arguments a command takes.
+// Help and completion both read it, so an argument nobody can
+// discover cannot exist.
+func (s *session) argTermsFor(path, rest []string) []term {
 	verb := rest[0]
-	if verb != verbSet && verb != verbUnset && verbAdd != verb {
-		return "", nil
+	switch verb {
+	case verbSet, verbUnset, verbAdd:
+		attrs := s.attrsAt(path)
+		if verb == verbAdd && len(path) == 1 && !s.isSingleton(path) {
+			// The choice is on the line, not in the store yet.
+			attrs = s.attrsForAddLine(path[0], rest)
+		}
+		out := make([]term, 0, len(attrs))
+		for _, a := range attrs {
+			doc := a.Doc
+			if a.Secret {
+				doc += " (secret: never echoed)"
+			}
+			// unset names an attribute; the others give it a value.
+			out = append(out, term{
+				name: a.Name, class: cAttr, doc: doc,
+				container: verb != verbUnset,
+			})
+		}
+		return out
+	default:
+		c := lookup(verb)
+		if c == nil {
+			return nil
+		}
+		out := make([]term, 0, len(c.flags))
+		for _, f := range c.flags {
+			// A relay is already chosen when standing inside one.
+			if f.name == scopeRelay && len(path) == 2 {
+				continue
+			}
+			out = append(out, term{
+				name: f.name, class: cAttr, doc: f.doc, container: f.valued,
+			})
+		}
+		return out
 	}
-	attrs := s.attrsAt(path)
-	if verb == verbAdd && len(path) == 1 && !s.isSingleton(path) {
-		// completing "add <name> attr=…": the choice is on the line.
-		attrs = s.attrsForAddLine(path[0], rest)
-	}
-	if attrs == nil {
+}
+
+// completeArgs finishes what comes after a verb, and — past the '=' —
+// the values a closed set allows.
+func (s *session) completeArgs(path, rest []string, last string) (add string, hints []string) {
+	terms := s.argTermsFor(path, rest)
+	if len(terms) == 0 {
 		return "", nil
 	}
 	if attr, val, has := strings.Cut(last, "="); has {
-		a, ok := schema.Find(attrs, attr)
-		if !ok || len(a.Enum) == 0 {
-			return "", nil
+		for _, a := range s.attrsAt(path) {
+			if a.Name == attr && len(a.Enum) > 0 {
+				return s.finishPlain(val, a.Enum, cAttr)
+			}
 		}
-		return s.finishPlain(val, a.Enum, cAttr)
+		return "", nil
 	}
-	names := make([]string, 0, len(attrs))
-	for _, a := range attrs {
-		if verb == verbUnset {
-			names = append(names, a.Name)
-			continue
+	// A term that takes a value completes up to its '=', the way a
+	// context completes up to its slash: the operator is mid-argument,
+	// not mid-word.
+	words := make([]string, 0, len(terms))
+	takesValue := map[string]bool{}
+	for _, t := range terms {
+		word := t.name
+		if t.container {
+			word += "="
 		}
-		names = append(names, a.Name+"=")
+		takesValue[word] = t.container
+		words = append(words, word)
 	}
-	add, hints = s.finishPlain(last, names, cAttr)
-	if verb != verbUnset {
-		// The '=' is the boundary: nothing to append after it yet.
+	add, hints = s.finishPlain(last, words, cAttr)
+	if strings.HasSuffix(strings.TrimSuffix(add, " "), "=") {
 		add = strings.TrimSuffix(add, " ")
 	}
 	return add, hints
@@ -977,8 +1049,36 @@ func (s *session) helpForLine(line string, level int) string {
 	if level%2 == 1 {
 		return "\r\n" + keyHelp + "\r\npress it again for what this place offers\r\n"
 	}
-	path, _ := s.resolveTree(splitArgs(line))
+	path, rest := s.resolveTree(splitArgs(line))
+	// A verb already typed changes the question: not "what can I do
+	// here" but "what does this take". The line asked it, so answer
+	// that one.
+	if len(rest) > 0 {
+		if terms := s.argTermsFor(path, rest); len(terms) > 0 {
+			return s.renderTerms(rest[0], terms) + "\r\npress it again for the keys\r\n"
+		}
+	}
 	return s.treeHelp(path) + "\r\npress it again for the keys\r\n"
+}
+
+// renderTerms lists what a verb takes, one entry per line, headed by
+// the verb so the answer says what it is about.
+func (s *session) renderTerms(verb string, terms []term) string {
+	var b strings.Builder
+	b.WriteString("\r\n")
+	sorted := append([]term(nil), terms...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].name < sorted[j].name })
+	for _, t := range sorted {
+		name := t.name
+		if t.container {
+			name += "=" // it wants a value, and says so where it is read
+		}
+		s.writeTerm(&b, term{name: name, class: t.class, doc: t.doc})
+	}
+	if len(sorted) == 0 {
+		fmt.Fprintf(&b, "%s takes no arguments\r\n", s.color(cVerb, verb))
+	}
+	return b.String()
 }
 
 // keyHelp is what the console itself answers to.

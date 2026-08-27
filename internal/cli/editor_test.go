@@ -204,7 +204,7 @@ func TestEnterVariantsYieldOneLineEach(t *testing.T) {
 
 func TestShellKillsAndMotions(t *testing.T) {
 	// Ctrl+W eats the last word (and its separator), shell-style.
-	got := edit(t, "frames --last 5\x17\x1750\r")
+	got := edit(t, "frames last=5 json\x17\x1750\r")
 	if len(got) != 1 || got[0] != "frames 50" {
 		t.Fatalf("ctrl+w = %q", got)
 	}

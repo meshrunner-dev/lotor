@@ -145,8 +145,8 @@ func TestStatusAndHelp(t *testing.T) {
 
 func TestHelpKnowsEachCommand(t *testing.T) {
 	deps := testDeps(t)
-	out := run(t, deps, "noise --help", "help noise", "noise help", "status extra")
-	if strings.Count(out, "noise [--relay R]") != 2 {
+	out := run(t, deps, "noise ?", "help noise", "noise help", "status extra")
+	if strings.Count(out, "noise [relay=<name>]") != 2 {
 		t.Errorf("per-command help missing:\n%s", out)
 	}
 	if strings.Contains(out, "daemon overview") {
@@ -155,7 +155,7 @@ func TestHelpKnowsEachCommand(t *testing.T) {
 	if !strings.Contains(out, `unknown argument "help"`) {
 		t.Errorf("stray positional swallowed:\n%s", out)
 	}
-	if !strings.Contains(out, `unknown argument "extra" — try status --help`) {
+	if !strings.Contains(out, `unknown argument "extra" — try "status ?"`) {
 		t.Errorf("status accepted stray arguments:\n%s", out)
 	}
 	if bad := run(t, deps, "help nope"); !strings.Contains(bad, `unknown command "nope"`) {
@@ -185,9 +185,9 @@ func TestCommandTableIsCoherent(t *testing.T) {
 		if len(c.forms) == 0 {
 			t.Errorf("command %q has no help forms", c.name)
 		}
-		out := run(t, deps, c.name+" --help")
+		out := run(t, deps, c.name+" ?")
 		if strings.Contains(out, "error:") || !strings.Contains(out, c.name) {
-			t.Errorf("%s --help misbehaves:\n%s", c.name, out)
+			t.Errorf("%s ? misbehaves:\n%s", c.name, out)
 		}
 	}
 }
@@ -195,9 +195,9 @@ func TestCommandTableIsCoherent(t *testing.T) {
 func TestPerCommandFlagsAreEnforced(t *testing.T) {
 	// The flag grammar is per command now: a flag another command owns
 	// is an error here, never silently swallowed.
-	out := run(t, testDeps(t), "nodes --last 5", "noise --type ADVERT", "exit")
-	if !strings.Contains(out, "unknown flag --last — try nodes --help") ||
-		!strings.Contains(out, "unknown flag --type — try noise --help") {
+	out := run(t, testDeps(t), "nodes last=5", "noise type=ADVERT", "exit")
+	if !strings.Contains(out, `no argument "last" here — try "nodes ?"`) ||
+		!strings.Contains(out, `no argument "type" here — try "noise ?"`) {
 		t.Errorf("foreign flags swallowed:\n%s", out)
 	}
 	// exit is quit's alias, table-driven like everything else.
@@ -246,7 +246,7 @@ func TestErrorsAreOneLiners(t *testing.T) {
 	deps := testDeps(t)
 	out := run(t, deps,
 		"nope",
-		"frames --relay meshcore-433",
+		"frames relay=meshcore-433",
 		"txn ffff",
 	)
 	for _, want := range []string{
@@ -262,9 +262,9 @@ func TestErrorsAreOneLiners(t *testing.T) {
 
 func TestNoiseFloorIsShown(t *testing.T) {
 	deps := testDeps(t)
-	out := run(t, deps, "status", "relay show meshcore-868")
+	out := run(t, deps, "status", "/relay meshcore-868 status")
 	if strings.Count(out, "p50 -104 dBm (p90-p50 0.0 dB, 3s ago)") != 2 {
-		t.Errorf("noise floor missing from status or relay show:\n%s", out)
+		t.Errorf("noise floor missing from status or status:\n%s", out)
 	}
 	// Before the first measurement converges, the shell says so.
 	deps.Relays[0].NoiseFloor = func() (radio.NoiseFloor, bool) { return radio.NoiseFloor{}, false }
@@ -283,7 +283,7 @@ func TestNoiseHistoryCommand(t *testing.T) {
 	}
 	deps.Sentinel.Process(context.Background(), bus.NoiseStarved{
 		Relay: "meshcore-868", At: at, Aborted: 2})
-	out := run(t, deps, "noise", "noise --last 7d")
+	out := run(t, deps, "noise", "noise last=7d")
 	if !strings.Contains(out, "current  p50 -104 dBm (p90-p50 0.0 dB, 3s ago)") {
 		t.Errorf("noise lacks the live value:\n%s", out)
 	}
@@ -291,16 +291,16 @@ func TestNoiseHistoryCommand(t *testing.T) {
 		!strings.Contains(out, "p90-p50 1.5") || !strings.Contains(out, "starved 2") {
 		t.Errorf("noise lacks the consolidated bucket:\n%s", out)
 	}
-	if bad := run(t, deps, "noise --last nope"); !strings.Contains(bad, "--last wants a duration") {
+	if bad := run(t, deps, "noise last=nope"); !strings.Contains(bad, "last= wants a duration") {
 		t.Errorf("bad span accepted:\n%s", bad)
 	}
 }
 
 func TestWatchValidatesItsRelayFilter(t *testing.T) {
-	// A typo'd --relay must error like the query path does, not stream
+	// A typo'd relay=must error like the query path does, not stream
 	// nothing forever.
 	deps := testDeps(t)
-	out := run(t, deps, "frames watch --relay meshcor-868")
+	out := run(t, deps, "frames watch relay=meshcor-868")
 	if !strings.Contains(out, `error: no relay "meshcor-868"`) {
 		t.Errorf("watch accepted an unknown relay:\n%s", out)
 	}
@@ -310,7 +310,7 @@ func TestNoiseIsVisible(t *testing.T) {
 	deps := testDeps(t)
 	deps.Sentinel.Process(context.Background(), bus.FrameCorrupt{
 		Relay: "meshcore-868", At: time.Now(), Err: "sx126x: crc mismatch"})
-	out := run(t, deps, "sentinel", "relay show meshcore-868")
+	out := run(t, deps, "journal", "/relay meshcore-868 status")
 	if !strings.Contains(out, "noise") || !strings.Contains(out, "1 corrupt reception") {
 		t.Errorf("corrupt receptions invisible:\n%s", out)
 	}
@@ -330,7 +330,7 @@ func TestArchivedRelayStaysAddressable(t *testing.T) {
 	deps.Sentinel.Process(ctx, bus.NoiseFloor{
 		Relay: "meshcore-433", At: time.Now(), DBm: -101})
 
-	out := run(t, deps, "frames --relay meshcore-433", "noise --relay meshcore-433")
+	out := run(t, deps, "frames relay=meshcore-433", "noise relay=meshcore-433")
 	if !strings.Contains(out, "would-relay-flood") {
 		t.Errorf("archived relay's frames unreachable:\n%s", out)
 	}
@@ -338,10 +338,10 @@ func TestArchivedRelayStaysAddressable(t *testing.T) {
 		!strings.Contains(out, "avg(p50) -101.0") {
 		t.Errorf("archived relay's noise history unreachable:\n%s", out)
 	}
-	if w := run(t, deps, "frames watch --relay meshcore-433"); !strings.Contains(w, `no relay "meshcore-433"`) {
+	if w := run(t, deps, "frames watch relay=meshcore-433"); !strings.Contains(w, `no relay "meshcore-433"`) {
 		t.Errorf("watch accepted an archived relay:\n%s", w)
 	}
-	if bad := run(t, deps, "frames --relay nope"); !strings.Contains(bad,
+	if bad := run(t, deps, "frames relay=nope"); !strings.Contains(bad,
 		"running: meshcore-868; archived: meshcore-433") {
 		t.Errorf("error should name both worlds:\n%s", bad)
 	}
@@ -362,8 +362,8 @@ func TestNoSentinelIsHonest(t *testing.T) {
 }
 
 func TestSplitArgsHonoursQuotes(t *testing.T) {
-	got := splitArgs(`node "FR91 🦝 Wanadoo" --json`)
-	want := []string{"node", "FR91 🦝 Wanadoo", "--json"}
+	got := splitArgs(`node "FR91 🦝 Wanadoo" json`)
+	want := []string{"node", "FR91 🦝 Wanadoo", "json"}
 	if len(got) != len(want) {
 		t.Fatalf("splitArgs = %q", got)
 	}
@@ -398,7 +398,7 @@ func TestTXModeIsShown(t *testing.T) {
 		t.Errorf("dry gate hidden:\n%s", out)
 	}
 	deps.Relays[0].TXMode = "shadow"
-	if out := run(t, deps, "relay show meshcore-868"); !strings.Contains(out, "tx mode") ||
+	if out := run(t, deps, "/relay meshcore-868 status"); !strings.Contains(out, "tx mode") ||
 		!strings.Contains(out, "shadow") {
 		t.Errorf("shadow gate hidden:\n%s", out)
 	}
@@ -424,9 +424,9 @@ func TestOriginatedEmissionIsAddressable(t *testing.T) {
 }
 
 func TestWatchRefusesTheJournalFlag(t *testing.T) {
-	out := run(t, testDeps(t), "frames watch --last 5")
-	if !strings.Contains(out, "--last is for the journal") {
-		t.Errorf("--last swallowed by the live feed:\n%s", out)
+	out := run(t, testDeps(t), "frames watch last=5")
+	if !strings.Contains(out, "last= is for the journal") {
+		t.Errorf("last= swallowed by the live feed:\n%s", out)
 	}
 }
 
@@ -536,14 +536,14 @@ func TestDiscoverAsksAndReturns(t *testing.T) {
 		t.Fatalf("the scan was asked for %d times", asked)
 	}
 
-	// --watch stays and prints what lands.
+	// watch stays and prints what lands.
 	var key [32]byte
 	key[0], key[1] = 0x88, 0x2f
 	found <- Neighbour{PubKey: key, SNR: 12.25}
 	close(found)
-	if out := run(t, deps, "discover --watch"); !strings.Contains(out, "882f") ||
+	if out := run(t, deps, "discover watch"); !strings.Contains(out, "882f") ||
 		!strings.Contains(out, "12.2 dB") {
-		t.Errorf("--watch said %q", strings.TrimSpace(out))
+		t.Errorf("watch said %q", strings.TrimSpace(out))
 	}
 }
 
@@ -557,7 +557,7 @@ func TestWatchingDiscoverGivesTheConsoleBackOnALine(t *testing.T) {
 	}
 
 	done := make(chan string, 1)
-	go func() { done <- run(t, deps, "discover --watch", "status") }()
+	go func() { done <- run(t, deps, "discover watch", "status") }()
 	select {
 	case out := <-done:
 		if !strings.Contains(out, "enter stops") {
