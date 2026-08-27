@@ -11,29 +11,30 @@ import (
 // judgement, each "would-drop-…" names the reference gate that stops
 // it. Reference: Mesh::onRecvPacket / Mesh::routeRecvPacket.
 const (
-	verdictRelayFlood    = "would-relay-flood"
-	verdictRelayDirect   = "would-relay-direct"         // our hash heads the path: the reference relays and consumes it
-	verdictRelayTrace    = "would-relay-trace"          // our hash is the trace's next target hop
-	verdictDropFloodType = "would-drop-flood-type"      // the reference never re-floods this payload type
-	verdictDropBadAdvert = "would-drop-invalid-advert"  // flood advert whose signature fails
-	verdictDropPathFull  = "would-drop-flood-path-full" // appending our hash would exceed the path
-	verdictDropFloodHops = "would-drop-flood-hops"      // the flood travelled past its hop limit
-	verdictDropLoop      = "would-drop-flood-loop"      // our hash already rides the path: we relayed this already
-	verdictDropScoped    = "would-drop-flood-scoped"    // transport-scoped flood, and no scoping exists here
-	verdictSelfAdvert    = "self-advert"                // our own advert echoing back
-	verdictZeroHop       = "heard-zero-hop"             // direct, empty path: addressed to whoever hears it
-	verdictNotAddressed  = "direct-not-addressed"       // the path's next hop is not us (or no identity exists)
-	verdictDiscover      = "discover-request"           // a zero-hop neighbourhood scan asking who hears it
-	verdictAnon          = "anon-request"               // a question sealed to our key, asker named in the clear
-	verdictScopeAnswer   = "scopes-answer"              // a neighbour telling us what it carries, for our own question
-	verdictRequest       = "authenticated-request"      // a question from a client whose session we hold
-	verdictTraceTransit  = "trace-transit"              // trace walking its target path, next hop unjudgeable
-	verdictTraceNotUs    = "trace-not-addressed"        // trace walking its target path, next hop is not us
-	verdictTraceArrived  = "trace-arrived"              // trace consumed its whole target path
-	verdictBadVersion    = "unsupported-version"        // the reference dispatcher rejects it at parse
-	verdictIgnored       = "ignored"
-	verdictMalformed     = "malformed"
-	verdictDuplicate     = "duplicate"
+	verdictRelayFlood     = "would-relay-flood"
+	verdictRelayDirect    = "would-relay-direct"         // our hash heads the path: the reference relays and consumes it
+	verdictRelayTrace     = "would-relay-trace"          // our hash is the trace's next target hop
+	verdictDropFloodType  = "would-drop-flood-type"      // the reference never re-floods this payload type
+	verdictDropBadAdvert  = "would-drop-invalid-advert"  // flood advert whose signature fails
+	verdictDropPathFull   = "would-drop-flood-path-full" // appending our hash would exceed the path
+	verdictDropFloodHops  = "would-drop-flood-hops"      // the flood travelled past its hop limit
+	verdictDropLoop       = "would-drop-flood-loop"      // our hash already rides the path: we relayed this already
+	verdictDropScoped     = "would-drop-flood-scoped"    // transport-scoped flood, and no scoping exists here
+	verdictSelfAdvert     = "self-advert"                // our own advert echoing back
+	verdictZeroHop        = "heard-zero-hop"             // direct, empty path: addressed to whoever hears it
+	verdictNotAddressed   = "direct-not-addressed"       // the path's next hop is not us (or no identity exists)
+	verdictDiscover       = "discover-request"           // a zero-hop neighbourhood scan asking who hears it
+	verdictAnon           = "anon-request"               // a question sealed to our key, asker named in the clear
+	verdictDiscoverAnswer = "discover-answer"            // a neighbour answering a scan this node sent
+	verdictScopeAnswer    = "scopes-answer"              // a neighbour telling us what it carries, for our own question
+	verdictRequest        = "authenticated-request"      // a question from a client whose session we hold
+	verdictTraceTransit   = "trace-transit"              // trace walking its target path, next hop unjudgeable
+	verdictTraceNotUs     = "trace-not-addressed"        // trace walking its target path, next hop is not us
+	verdictTraceArrived   = "trace-arrived"              // trace consumed its whole target path
+	verdictBadVersion     = "unsupported-version"        // the reference dispatcher rejects it at parse
+	verdictIgnored        = "ignored"
+	verdictMalformed      = "malformed"
+	verdictDuplicate      = "duplicate"
 )
 
 // maxPathBytes is the reference's path capacity (MAX_PATH_SIZE), and
@@ -151,7 +152,7 @@ func (e *engine) verdict(rx *reception) (string, string) {
 			return e.traceVerdict(pkt)
 		}
 		if pkt.PayloadType() == meshcore.PayloadTypeControl {
-			return e.controlVerdict(pkt)
+			return e.controlVerdict(rx)
 		}
 		if pkt.PathHashCount() == 0 {
 			return verdictZeroHop, ""

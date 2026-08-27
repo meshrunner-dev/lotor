@@ -420,6 +420,7 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		Duty:          dutyOf(eng),
 		Scopes:        scopesOf(eng),
 		AskScopes:     askScopesOf(eng),
+		Discover:      discoverOf(eng),
 		TriggerAdvert: advertTrigger(eng),
 		Neighbours:    neighboursOf(eng),
 		Identity:      eng.Identity(),
@@ -482,6 +483,33 @@ func askScopesOf(eng protocol.Engine) func(prefix []byte) ([]string, error) {
 			return nil, err
 		}
 		return a.AskScopes(peer)
+	}
+}
+
+// discoverOf exposes the neighbourhood scan, when the protocol has
+// one to run.
+func discoverOf(eng protocol.Engine) func() (<-chan cli.Neighbour, time.Time, error) {
+	d, ok := eng.(interface {
+		Discover() (<-chan enginemc.Neighbour, time.Time, error)
+	})
+	if !ok {
+		return nil
+	}
+	return func() (<-chan cli.Neighbour, time.Time, error) {
+		found, until, err := d.Discover()
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		// The console has its own row type; translate as answers land
+		// rather than making it wait for the whole window.
+		out := make(chan cli.Neighbour, cap(found))
+		go func() {
+			defer close(out)
+			for n := range found {
+				out <- cli.Neighbour{PubKey: n.PubKey, SNR: n.SNR, Heard: n.Heard}
+			}
+		}()
+		return out, until, nil
 	}
 }
 

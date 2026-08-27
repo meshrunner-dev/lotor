@@ -74,9 +74,13 @@ func newLimits() limits {
 // controlVerdict judges a direct CONTROL packet. The reference admits
 // only the zero-hop, high-bit subset (Mesh::onRecvPacket: "just
 // zero-hop control packets allowed"); anything else is released.
-func (e *engine) controlVerdict(pkt *meshcore.Packet) (string, string) {
+func (e *engine) controlVerdict(rx *reception) (string, string) {
+	pkt := rx.pkt
 	if pkt.PathHashCount() != 0 || len(pkt.Payload) == 0 || pkt.Payload[0]&0x80 == 0 {
 		return verdictIgnored, "control outside the zero-hop subset"
+	}
+	if v, why, handled := e.sweepAnswer(rx); handled {
+		return v, why
 	}
 	if req, err := meshcore.ParseDiscoverReq(pkt); err == nil {
 		return verdictDiscover, fmt.Sprintf("filter %#02x tag %08x", byte(req.Filter), req.Tag)

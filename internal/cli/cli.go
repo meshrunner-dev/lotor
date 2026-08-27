@@ -80,6 +80,10 @@ type RelayInfo struct {
 	// prefix, and waits for its answer; nil when the protocol has no
 	// scopes to ask about.
 	AskScopes func(prefix []byte) ([]string, error)
+	// Discover runs a neighbourhood scan, yielding each answer as it
+	// lands and closing when the window ends; nil when the protocol
+	// has no scan to run.
+	Discover func() (<-chan Neighbour, time.Time, error)
 	// TriggerAdvert queues one operator announcement (flood or
 	// zero-hop); nil when the engine has no transmit pipeline.
 	TriggerAdvert func(flood bool) error

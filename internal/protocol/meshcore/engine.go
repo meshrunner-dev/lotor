@@ -176,6 +176,10 @@ type engine struct {
 	// scopes; pendingScope is the one in flight, engine-goroutine only.
 	scopeAsk     chan *scopeQuery
 	pendingScope *scopeQuery
+	// sweepAsk carries an operator's neighbourhood scan; pendingSweep
+	// is the window currently open, engine-goroutine only.
+	sweepAsk     chan *sweep
+	pendingSweep *sweep
 	wakeMu       sync.Mutex
 	wakeRx       context.CancelFunc
 }
@@ -402,7 +406,7 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 	var rctx context.Context
 	var cancel context.CancelFunc
 	switch wait, ok := e.txWait(time.Now()); {
-	case len(e.advertAsk) > 0 || len(e.scopeAsk) > 0:
+	case len(e.advertAsk) > 0 || len(e.scopeAsk) > 0 || len(e.sweepAsk) > 0:
 		rctx, cancel = context.WithDeadline(ctx, time.Now())
 	case ok:
 		rctx, cancel = context.WithDeadline(ctx, time.Now().Add(wait))

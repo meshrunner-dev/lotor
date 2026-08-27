@@ -388,6 +388,45 @@ func (s *session) printSent(sent []sentinel.Sent) {
 	}
 }
 
+// discover scans the neighbourhood and prints each answer as it
+// lands. The window is the protocol's, not ours: responders spread
+// themselves deliberately, so a scan that gave up early would report
+// a smaller room than it is standing in.
+func (s *session) discover(ctx context.Context, in input) error {
+	r, err := s.oneRelay(in.opts[scopeRelay])
+	if err != nil {
+		return err
+	}
+	if r.Discover == nil {
+		return fmt.Errorf("relay %q has no neighbourhood to scan", r.Name)
+	}
+	found, until, err := r.Discover()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(s.out, "listening %s…\r\n", time.Until(until).Round(time.Second))
+	answered := 0
+	for {
+		select {
+		case n, ok := <-found:
+			if !ok {
+				if answered == 0 {
+					fmt.Fprint(s.out, "nobody answered\r\n")
+				}
+				return nil
+			}
+			answered++
+			fmt.Fprintf(s.out, "%s  %.1f dB\r\n",
+				hex.EncodeToString(n.PubKey[:6]), n.SNR)
+		case <-time.After(time.Until(until) + time.Second):
+			fmt.Fprintf(s.out, "%d answered\r\n", answered)
+			return nil
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
 // scopes shows what this relay carries, or asks a neighbour what it
 // does. The asking half emits, so it is admin-gated at the table.
 func (s *session) scopes(_ context.Context, in input) error {

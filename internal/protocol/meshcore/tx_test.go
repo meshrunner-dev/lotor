@@ -156,6 +156,13 @@ func runEngine(t *testing.T, e *engine, dev *fakeDevice) {
 	t.Cleanup(func() { cancel(); <-done })
 }
 
+// armedEngine is txRig for tests with no radio to script.
+func armedEngine(t *testing.T, mode string) *engine {
+	t.Helper()
+	e, _, _, _ := txRig(t, mode) //nolint:dogsled // the rig answers four things; this needs one
+	return e
+}
+
 // rxTestSNR is the signal every hand-built reception is heard at.
 const rxTestSNR = 8
 

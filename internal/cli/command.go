@@ -119,6 +119,20 @@ func relayCommands() []*command {
 			run:    (*session).scopes,
 		},
 		{
+			name: "discover",
+			forms: []form{
+				{"discover", "ask the neighbourhood who is there"},
+			},
+			detail: []string{
+				"discover [--relay R]",
+				"admin only; it emits, then listens for a minute — the",
+				"answers arrive spread out, on purpose",
+			},
+			flags: []flagSpec{{name: scopeRelay, valued: true}},
+			admin: true,
+			run:   (*session).discover,
+		},
+		{
 			name:   "neighbours",
 			forms:  []form{{"neighbours", "repeaters heard with no relay in between"}},
 			detail: []string{"neighbours [--relay R]"},
