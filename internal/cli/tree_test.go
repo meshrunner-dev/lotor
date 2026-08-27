@@ -20,7 +20,7 @@ func TestTreeNavigationChangesThePrompt(t *testing.T) {
 		t.Errorf("the prompt never showed the context:\n%s", out)
 	}
 	// The root wears the same shape, only without a path.
-	if !strings.Contains(out, "[read-only@lab-pi]> ") {
+	if !strings.Contains(out, "[read-only@lab-pi] > ") {
 		t.Errorf("the root prompt lost its shape:\n%s", out)
 	}
 	// Context help names the instances and what each one speaks.
@@ -109,19 +109,71 @@ func TestTreeCompletion(t *testing.T) {
 func TestPaintClassifiesTokens(t *testing.T) {
 	s := &session{deps: testDeps(t), colors: true}
 	painted := s.paintLine("/relay meshcore-868 print node_name=x")
-	if !strings.Contains(painted, cCyan+"/relay"+cReset) ||
-		!strings.Contains(painted, cCyan+"meshcore-868"+cReset) {
-		t.Errorf("path tokens not cyan: %q", painted)
+	for _, want := range []string{
+		cPath + "/" + cReset,            // the slash names the root
+		cPath + "relay" + cReset,        // a place
+		cPath + "meshcore-868" + cReset, // a place
+		cVerb + "print" + cReset,        // an action
+		cAttr + "node_name" + cReset,    // an attribute
+		cPunct + "=" + cReset,           // what joins the pair
+	} {
+		if !strings.Contains(painted, want) {
+			t.Errorf("missing %q in %q", want, painted)
+		}
 	}
-	if !strings.Contains(painted, cGreen+"print"+cReset) {
-		t.Errorf("verb not green: %q", painted)
-	}
-	if !strings.Contains(painted, cYellow+"node_name"+cReset) {
-		t.Errorf("attribute not yellow: %q", painted)
+	// The value carries no colour of its own.
+	if strings.Contains(painted, cReset+"x"+cReset) {
+		t.Errorf("the value was painted: %q", painted)
 	}
 	// Without colors the line passes through untouched.
 	if plain := (&session{deps: s.deps}).paintLine("/relay print"); plain != "/relay print" {
 		t.Errorf("plain session painted anyway: %q", plain)
+	}
+}
+
+func TestPaintMarksWhatItHasNotResolved(t *testing.T) {
+	// The useful half: a word stays in the unresolved colour while it
+	// names nothing — or several things — and takes its class colour
+	// the moment it names exactly one.
+	s := &session{deps: testDeps(t), colors: true}
+	for _, c := range []struct {
+		line, word, colour, why string
+	}{
+		{"/relay", "relay", cPath, "names exactly one context"},
+		{"/zz", "zz", cUnres, "names nothing"},
+		{"/relay meshcore-868 print", "print", cVerb, "a whole verb"},
+		{"/relay meshcore-868 pri", "pri", cUnres, "a prefix is not a name — TAB makes it one"},
+		{"/relay meshcore-868 zz", "zz", cUnres, "no verb answers to it"},
+		{"/relay meshcore-868 set node_name=x", "node_name", cAttr, "a real attribute"},
+		{"/relay meshcore-868 set zz=x", "zz", cUnres, "no attribute answers to it"},
+	} {
+		painted := s.paintLine(c.line)
+		if !strings.Contains(painted, c.colour+c.word+cReset) {
+			t.Errorf("paint(%q): %q should read as %s — got %q",
+				c.line, c.word, c.why, painted)
+		}
+	}
+	// The promise has to match what Enter would do: this console's
+	// parser takes whole names, so a prefix stays marked even when
+	// only one candidate could complete it.
+	partial := s.paintLine("/rel")
+	if !strings.Contains(partial, cUnres+"rel"+cReset) {
+		t.Errorf("a prefix was passed off as resolved: %q", partial)
+	}
+}
+
+func TestSlashJoinedPathsReachTheSamePlace(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	for _, line := range []string{"/relay meshcore-868", "/relay/meshcore-868"} {
+		path, rest := s.resolveTree(splitArgs(line))
+		if len(path) != 2 || path[0] != "relay" || path[1] != "meshcore-868" || rest != nil {
+			t.Errorf("%q resolved to %v (rest %v)", line, path, rest)
+		}
+	}
+	// A value carrying slashes is never mistaken for a path.
+	path, rest := s.resolveTree(splitArgs("/radio slot1 set spi=/dev/spidev0.0"))
+	if len(path) != 2 || len(rest) != 2 || rest[1] != "spi=/dev/spidev0.0" {
+		t.Errorf("path %v rest %v", path, rest)
 	}
 }
 
@@ -344,15 +396,15 @@ func TestExportColoursItsSymbolClasses(t *testing.T) {
 	s.out = &b
 	s.exportInstance(scopeRelay, "meshcore-868")
 	got := b.String()
-	if !strings.Contains(got, cCyan+"/relay"+cReset) ||
-		!strings.Contains(got, cGreen+"add"+cReset) ||
-		!strings.Contains(got, cCyan+"meshcore-868"+cReset) {
+	if !strings.Contains(got, cPath+"/relay"+cReset) ||
+		!strings.Contains(got, cVerb+"add"+cReset) ||
+		!strings.Contains(got, cPath+"meshcore-868"+cReset) {
 		t.Errorf("path and verb are not coloured:\n%q", got)
 	}
-	if !strings.Contains(got, cYellow+"node_name"+cReset) {
+	if !strings.Contains(got, cAttr+"node_name"+cReset) {
 		t.Errorf("attribute names are not coloured:\n%q", got)
 	}
-	if !strings.Contains(got, cDim+"# ") {
+	if !strings.Contains(got, "# ") {
 		t.Errorf("the secret comment is not dimmed:\n%q", got)
 	}
 	// A pipe reads the same text with nothing in it: an export is also
@@ -372,11 +424,11 @@ func TestPromptNamesWhoAndWhere(t *testing.T) {
 	deps := testDeps(t)
 	deps.SystemName = func() string { return "lab-pi" }
 	s := &session{deps: deps}
-	if got := s.prompt(); got != "[read-only@lab-pi]> " {
+	if got := s.prompt(); got != "[read-only@lab-pi] > " {
 		t.Errorf("root prompt = %q", got)
 	}
 	s.setPath([]string{"relay", "meshcore-868"})
-	if got := s.prompt(); got != "[read-only@lab-pi] /relay meshcore-868> " {
+	if got := s.prompt(); got != "[read-only@lab-pi] /relay/meshcore-868> " {
 		t.Errorf("context prompt = %q", got)
 	}
 	// The privilege is part of the answer: an operator reads what they
@@ -387,14 +439,19 @@ func TestPromptNamesWhoAndWhere(t *testing.T) {
 	}
 	// A daemon that names no system still prompts.
 	bare := &session{deps: testDeps(t)}
-	if got := bare.prompt(); got != "[read-only@lotor]> " {
+	if got := bare.prompt(); got != "[read-only@lotor] > " {
 		t.Errorf("nameless prompt = %q", got)
 	}
 	// Coloured sessions paint the two halves by their classes.
 	s.colors = true
-	if got := s.prompt(); !strings.Contains(got, cGreen+"[admin@lab-pi]"+cReset) ||
-		!strings.Contains(got, cCyan+" /relay meshcore-868"+cReset) {
-		t.Errorf("coloured prompt = %q", got)
+	// Who is cyan, the system green, the path cyan — the brackets and
+	// the caret carry no colour of their own.
+	got := s.prompt()
+	if !strings.Contains(got, "["+cUser+"admin"+cReset+"@"+cSystem+"lab-pi"+cReset+"] ") {
+		t.Errorf("coloured head = %q", got)
+	}
+	if !strings.Contains(got, cPath+"/relay/meshcore-868"+cReset+"> ") {
+		t.Errorf("coloured path = %q", got)
 	}
 }
 

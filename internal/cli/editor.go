@@ -41,7 +41,7 @@ type editor struct {
 
 	// The session's hooks, all optional. They run on the transport's
 	// goroutine — the session guards its own state against the REPL's.
-	prompt   func() string                                  // what to repaint before the line
+	prompt   func(search string) string                     // what to repaint before the line
 	complete func(line string) (add string, hints []string) // TAB
 	helpFor  func(line string) string                       // the '?' key
 	paint    func(line string) string                       // colours, same width
@@ -111,11 +111,10 @@ func (e *editor) key(c byte) (done bool, line string, err error) {
 			return true, line, err
 		}
 	case c == '?' && e.helpFor != nil && e.cur == len(e.buf) && !insideQuote(e.buf):
-		// The console family's help key: describe where the line
-		// stands, then hand the draft back untouched. A '?' inside
-		// quotes is text — a password may carry one.
-		fmt.Fprint(e.out, "\r\n"+e.helpFor(string(e.buf)))
-		e.render()
+		// '?' asks the same question F1 does, and is the one a hand
+		// finds without knowing the console. Inside quotes it is text —
+		// a password may carry one.
+		e.help()
 	default: // printable byte; multi-byte runes assemble
 		if err := e.insertByte(c); err != nil {
 			return true, "", err
@@ -246,18 +245,15 @@ func (e *editor) findBack(from int) {
 // acceptSearch leaves search mode, keeping whatever the buffer holds.
 func (e *editor) acceptSearch() { e.search = nil }
 
-// renderSearch paints the search line: the query, the match, and a
-// word when nothing matches.
+// renderSearch draws the search through the one painter: the prompt
+// carries the query, the draft below stays a command line with its own
+// colours. A query that matches nothing is marked in the prompt rather
+// than by silently keeping the last find.
 func (e *editor) renderSearch() {
 	if e.search == nil {
 		return
 	}
-	state := ""
-	if !e.search.found {
-		state = "failing "
-	}
-	fmt.Fprintf(e.out, "\r\x1b[K(%sreverse-search)'%s': %s",
-		state, string(e.search.query), string(e.buf))
+	e.render()
 }
 
 // completeLine asks the session what the last word could become. One
@@ -354,16 +350,36 @@ func (e *editor) escape() error {
 	}
 	// CSI parameter (0x30-0x3F) and intermediate (0x20-0x2F) bytes run
 	// until a final byte; drain them so mouse reports and private-mode
-	// answers neither edit nor leak into the line.
+	// answers neither edit nor leak into the line — but keep the
+	// parameters, since a function key is told apart by them.
+	var params []byte
 	if intro == '[' {
 		for c >= 0x20 && c <= 0x3F {
+			params = append(params, c)
 			if c, err = e.in.ReadByte(); err != nil {
 				return err
 			}
 		}
 	}
+	// F1 the way every console family sends it: SS3 P, and the CSI
+	// form older terminals use.
+	if (intro == 'O' && c == 'P') || (intro == '[' && c == '~' && string(params) == "11") {
+		e.help()
+		return nil
+	}
 	e.arrow(c)
 	return nil
+}
+
+// help answers the help key, whichever one was pressed: describe
+// where the line stands, then hand the draft back untouched.
+func (e *editor) help() {
+	if e.helpFor == nil {
+		return
+	}
+	e.search = nil
+	fmt.Fprint(e.out, "\r\n"+e.helpFor(string(e.buf)))
+	e.render()
 }
 
 // arrow applies a sequence's final byte when it names an arrow.
@@ -482,7 +498,11 @@ func (e *editor) set(line string) {
 func (e *editor) render() {
 	prompt := "> "
 	if e.prompt != nil {
-		prompt = e.prompt()
+		query := ""
+		if e.search != nil {
+			query = string(e.search.query)
+		}
+		prompt = e.prompt(query)
 	}
 	line := string(e.buf)
 	shown := line

@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -71,20 +72,32 @@ func (s *session) setPath(p []string) {
 // path outside them, the caret last. It says the same thing at the
 // root as anywhere else — a prompt that changes shape with depth
 // makes an operator read it twice.
-func (s *session) prompt() string {
+func (s *session) prompt() string { return s.promptWith("") }
+
+// promptWith is the prompt carrying a history search's query, which
+// lives inside it rather than on a line of its own: the draft below
+// stays a command line, and the prompt is what says the session is
+// searching.
+func (s *session) promptWith(query string) string {
 	priv := s.deps.Privilege
 	if priv == "" {
 		priv = ReadOnly
 	}
-	who := "[" + string(priv) + "@" + s.systemName() + "]"
-	path := ""
+	head := "[" + s.color(cUser, string(priv)) + "@" +
+		s.color(cSystem, s.systemName()) + "] "
+	body := ""
 	if p := s.curPath(); len(p) > 0 {
-		path = " /" + strings.Join(p, " ")
+		body = s.color(cPath, "/"+strings.Join(p, "/"))
 	}
-	if s.colors {
-		return cGreen + who + cReset + cCyan + path + cReset + "> "
+	if query != "" {
+		if body != "" {
+			body += " "
+		}
+		body += s.color(cQuery, "[") + query + s.color(cQuery, "]")
 	}
-	return who + path + "> "
+	// The space after the bracket stays at every depth, the root
+	// included: a prompt that changes shape with depth is read twice.
+	return head + body + "> "
 }
 
 // systemName is what this installation calls itself.
@@ -172,28 +185,43 @@ func (s *session) resolveTree(tokens []string) (path, rest []string) {
 		}
 	}
 	for len(tokens) > 0 {
-		t := tokens[0]
-		switch {
-		case t == "..":
-			if len(path) > 0 {
-				path = path[:len(path)-1]
-			}
-		case len(path) == 0:
-			if s.kindByName(t) == nil {
-				return path, tokens
-			}
-			path = append(path, t)
-		case len(path) == 1:
-			if _, ok := s.instances(path[0])[t]; !ok {
-				return path, tokens
-			}
-			path = append(path, t)
-		default:
+		// A step may be written slash-joined or spaced — /relay/x and
+		// /relay x name the same place. Only tokens still being read as
+		// path are split, so a value carrying slashes is never touched.
+		next, ok := s.walkStep(path, tokens[0])
+		if !ok {
 			return path, tokens
 		}
+		path = next
 		tokens = tokens[1:]
 	}
 	return path, nil
+}
+
+// walkStep consumes one token as path steps, all of them or none: a
+// half-consumed token would leave the session somewhere nobody typed.
+func (s *session) walkStep(path []string, token string) ([]string, bool) {
+	next := append([]string(nil), path...)
+	for piece := range strings.SplitSeq(token, "/") {
+		switch {
+		case piece == "":
+			continue // a doubled or trailing slash says nothing
+		case piece == "..":
+			if len(next) > 0 {
+				next = next[:len(next)-1]
+			}
+		case len(next) == 0 && s.kindByName(piece) != nil:
+			next = append(next, piece)
+		case len(next) == 1 && !s.isSingleton(next):
+			if _, ok := s.instances(next[0])[piece]; !ok {
+				return nil, false
+			}
+			next = append(next, piece)
+		default:
+			return nil, false
+		}
+	}
+	return next, true
 }
 
 // tree runs one line of the context grammar.
@@ -455,13 +483,13 @@ func (s *session) exportSingleton(kind string) {
 // also something machines read.
 func (s *session) exportLine(kind, verb, name string, pairs [][2]string) {
 	var b strings.Builder
-	b.WriteString(s.color(cCyan, "/"+kind))
-	b.WriteString(" " + s.color(cGreen, verb))
+	b.WriteString(s.color(cPath, "/"+kind))
+	b.WriteString(" " + s.color(cVerb, verb))
 	if name != "" {
-		b.WriteString(" " + s.color(cCyan, name))
+		b.WriteString(" " + s.color(cPath, name))
 	}
 	for _, p := range pairs {
-		b.WriteString(" " + s.color(cYellow, p[0]) + s.color(cDim, "=") + p[1])
+		b.WriteString(" " + s.color(cAttr, p[0]) + s.color(cPunct, "=") + p[1])
 	}
 	fmt.Fprintf(s.out, "%s\r\n", b.String())
 }
@@ -469,7 +497,7 @@ func (s *session) exportLine(kind, verb, name string, pairs [][2]string) {
 // exportComment writes a line the paste ignores, dimmed so it reads as
 // an aside rather than as configuration.
 func (s *session) exportComment(text string) {
-	fmt.Fprintf(s.out, "%s\r\n", s.color(cDim, "# "+text))
+	fmt.Fprintf(s.out, "# %s\r\n", text)
 }
 
 // exportValue renders one value the way set accepts it back.
@@ -570,7 +598,8 @@ func (s *session) treeHelp(path []string) string {
 		b.WriteString("contexts:\r\n")
 		for i := range s.deps.Kinds {
 			k := s.deps.Kinds[i]
-			fmt.Fprintf(&b, "  %-10s %s\r\n", s.color(cCyan, "/"+k.Name), k.Doc)
+			fmt.Fprintf(&b, "  %-10s%s %s\r\n", s.color(cPath, "/"+k.Name),
+				s.color(cPunct, " --"), k.Doc)
 		}
 		b.WriteString("the flat commands work here too — \"help\" lists them\r\n")
 	case 1:
@@ -578,7 +607,7 @@ func (s *session) treeHelp(path []string) string {
 		if s.isSingleton(path) {
 			b.WriteString("attributes:\r\n")
 			for _, a := range s.attrsAt(path) {
-				fmt.Fprintf(&b, "  %-24s %s\r\n", s.color(cYellow, a.Name), a.Doc)
+				fmt.Fprintf(&b, "  %-24s%s %s\r\n", s.color(cAttr, a.Name), s.color(cPunct, " --"), a.Doc)
 			}
 			break
 		}
@@ -589,7 +618,7 @@ func (s *session) treeHelp(path []string) string {
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			fmt.Fprintf(&b, "  %-16s %s\r\n", s.color(cCyan, name), inst[name])
+			fmt.Fprintf(&b, "  %-16s%s %s\r\n", s.color(cPath, name), s.color(cPunct, " --"), inst[name])
 		}
 	case 2: //nolint:mnd // the tree is two levels deep by design
 		s.writeVerbs(&b, path)
@@ -599,7 +628,7 @@ func (s *session) treeHelp(path []string) string {
 			if a.Secret {
 				doc += " (secret: never echoed)"
 			}
-			fmt.Fprintf(&b, "  %-24s %s\r\n", s.color(cYellow, a.Name), doc)
+			fmt.Fprintf(&b, "  %-24s%s %s\r\n", s.color(cAttr, a.Name), s.color(cPunct, " --"), doc)
 		}
 	}
 	return b.String()
@@ -607,7 +636,7 @@ func (s *session) treeHelp(path []string) string {
 
 // writeVerbs names what this place answers.
 func (s *session) writeVerbs(b *strings.Builder, path []string) {
-	fmt.Fprintf(b, "verbs: %s\r\n", s.color(cGreen, strings.Join(s.verbsAt(path), " ")))
+	fmt.Fprintf(b, "verbs: %s\r\n", s.color(cVerb, strings.Join(s.verbsAt(path), " ")))
 }
 
 // attrsAt resolves the attribute set a context offers: an instance's
@@ -783,15 +812,26 @@ func (s *session) helpForLine(line string) string {
 	return s.treeHelp(path)
 }
 
-// The console's colours, one per class of symbol: contexts and
-// instances, verbs, attributes. Applied only when the transport is a
-// raw terminal — piped sessions read plain text.
+// The console's colours, named by the class of symbol they carry
+// rather than by their hue: what matters is that a place, an action,
+// an attribute and a value never look alike, and that a word the
+// console has not resolved says so before it is submitted. Applied
+// only when the transport is a raw terminal — piped sessions read
+// plain text.
 const (
-	cReset  = "\x1b[0m"
-	cCyan   = "\x1b[36m"
-	cGreen  = "\x1b[32m"
-	cYellow = "\x1b[33m"
-	cDim    = "\x1b[2m"
+	// cReset is the short form: terminals treat an empty parameter as
+	// zero, and the shorter sequence is three bytes lighter on every
+	// repaint of every keystroke.
+	cReset = "\x1b[m"
+
+	cPath   = "\x1b[36m"   // a place: a context or an instance
+	cVerb   = "\x1b[35m"   // an action
+	cAttr   = "\x1b[32m"   // an attribute's name
+	cPunct  = "\x1b[33m"   // what joins them: the '=' of a pair
+	cUnres  = "\x1b[31m"   // a word that names nothing yet
+	cQuery  = "\x1b[33;1m" // the history search's own brackets
+	cSystem = "\x1b[32m"   // this installation's name
+	cUser   = "\x1b[36m"   // who is holding the session
 )
 
 func (s *session) color(code, text string) string {
@@ -801,36 +841,26 @@ func (s *session) color(code, text string) string {
 	return code + text + cReset
 }
 
-// paintLine colours the line under the operator's fingers, token
-// class by token class, as the tree understands what was typed so
-// far.
+// paintLine colours the line under the operator's fingers by what the
+// console has made of it: places, actions, attribute names and values
+// never look alike, and a word that names nothing yet — or names
+// several things at once — stays red until it resolves. That last
+// part is the useful half: it answers "have you understood me?"
+// before the line is ever submitted.
 func (s *session) paintLine(line string) string {
 	if !s.colors {
 		return line
 	}
+	w := &lineWalk{s: s, path: s.curPath()}
+	if strings.HasPrefix(line, "/") {
+		w.path = nil
+	}
 	var b strings.Builder
 	rest := line
-	path := s.curPath()
-	if strings.HasPrefix(rest, "/") {
-		path = nil
-	}
-	walking := true
 	for rest != "" {
 		token, after, _ := strings.Cut(rest, " ")
-		switch {
-		case token == "":
-			// a run of spaces
-		case walking && s.tokenInPath(&path, token):
-			b.WriteString(cCyan + token + cReset)
-		case strings.Contains(token, "="):
-			name, val, _ := strings.Cut(token, "=")
-			walking = false
-			b.WriteString(cYellow + name + cReset + cDim + "=" + cReset + val)
-		case walking:
-			walking = false
-			b.WriteString(cGreen + token + cReset)
-		default:
-			b.WriteString(token)
+		if token != "" {
+			b.WriteString(w.paint(token))
 		}
 		if after != "" || strings.HasSuffix(rest, " ") {
 			b.WriteString(" ")
@@ -840,26 +870,126 @@ func (s *session) paintLine(line string) string {
 	return b.String()
 }
 
-// tokenInPath advances the walk when the token names a place.
-func (s *session) tokenInPath(path *[]string, token string) bool {
-	t := strings.TrimPrefix(token, "/")
-	if t == ".." {
-		if len(*path) > 0 {
-			*path = (*path)[:len(*path)-1]
+// lineWalk follows a line the way the grammar does, so the painter and
+// the parser agree about what each word is.
+type lineWalk struct {
+	s     *session
+	path  []string
+	phase int // 0 walking the path, 1 expecting the verb, 2 its arguments
+	verb  string
+	attrs []schema.Attr
+}
+
+func (w *lineWalk) paint(token string) string {
+	// A leading slash is itself resolved — it names the root — so it
+	// keeps its colour even when what follows names nothing yet.
+	lead := ""
+	if w.phase == 0 && strings.HasPrefix(token, "/") {
+		lead, token = w.s.color(cPath, "/"), token[1:]
+		if token == "" {
+			w.path = nil
+			return lead
 		}
-		return true
 	}
-	switch len(*path) {
+	return lead + w.paintRest(token)
+}
+
+func (w *lineWalk) paintRest(token string) string {
+	switch w.phase {
 	case 0:
-		if s.kindByName(t) != nil {
-			*path = append(*path, t)
-			return true
+		if painted, ok := w.paintPath(token); ok {
+			return painted
 		}
+		w.phase = 1
+		fallthrough
 	case 1:
-		if _, ok := s.instances((*path)[0])[t]; ok {
-			*path = append(*path, t)
-			return true
+		w.phase, w.verb = 2, token
+		w.attrs = w.s.attrsForLine(w.path, token)
+		cands := w.s.verbsAt(w.path)
+		if len(w.path) == 0 {
+			cands = append(cands, commandNames()...)
+		}
+		return w.s.mark(cVerb, cands, token)
+	default:
+		return w.paintArg(token)
+	}
+}
+
+// paintPath consumes a token that names a place, slash-joined or not,
+// and reports whether it was one.
+func (w *lineWalk) paintPath(token string) (string, bool) {
+	next := append([]string(nil), w.path...)
+	for piece := range strings.SplitSeq(token, "/") {
+		if piece == "" {
+			continue
+		}
+		switch {
+		case piece == "..":
+			if len(next) > 0 {
+				next = next[:len(next)-1]
+			}
+		case len(next) == 0 && w.s.kindByName(piece) != nil:
+			next = append(next, piece)
+		case len(next) == 1 && !w.s.isSingleton(next) && w.s.instances(next[0])[piece] != "":
+			next = append(next, piece)
+		default:
+			return "", false
 		}
 	}
-	return token == "/"
+	w.path = next
+	return w.s.color(cPath, token), true
+}
+
+// paintArg colours one argument: a pair reads as name, joiner, value;
+// a bare word is a name the operator is choosing, so nothing is
+// claimed about it.
+func (w *lineWalk) paintArg(token string) string {
+	name, value, ok := strings.Cut(token, "=")
+	if !ok {
+		return token
+	}
+	names := make([]string, 0, len(w.attrs))
+	for _, a := range w.attrs {
+		names = append(names, a.Name)
+	}
+	return w.s.mark(cAttr, names, name) + w.s.color(cPunct, "=") + value
+}
+
+// mark paints a word in its class when it names exactly one candidate,
+// and in the unresolved colour while it still names none or several.
+func (s *session) mark(class string, cands []string, word string) string {
+	if resolves(cands, word) {
+		return s.color(class, word)
+	}
+	return s.color(cUnres, word)
+}
+
+// resolves reports whether a word names something this console would
+// actually accept. It asks exactly the question the parser asks — a
+// whole name, not a prefix — because the colour is a promise about
+// what will happen on Enter, and a promise the parser will not keep is
+// worse than no colour at all. Completion is the other half: TAB is
+// what turns a prefix into a name.
+func resolves(cands []string, word string) bool {
+	return slices.Contains(cands, word)
+}
+
+// attrsForLine resolves which attributes a verb may name at a place —
+// a creation line takes them from the choice typed on it, everything
+// else from the instance standing there.
+func (s *session) attrsForLine(path []string, verb string) []schema.Attr {
+	if verb == verbAdd && len(path) == 1 {
+		return s.kindAttrs(path[0], "")
+	}
+	return s.attrsAt(path)
+}
+
+// kindAttrs is a kind's attributes for one choice, choice-less when
+// the line has not made it yet.
+func (s *session) kindAttrs(kind, choice string) []schema.Attr {
+	k := s.kindByName(kind)
+	if k == nil {
+		return nil
+	}
+	return k.AttrsFor(choice)
 }

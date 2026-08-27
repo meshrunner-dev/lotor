@@ -267,3 +267,47 @@ func TestReverseSearchBackspaceWidens(t *testing.T) {
 		t.Fatalf("lines = %q", got)
 	}
 }
+
+func TestF1AsksTheSameQuestionAsTheHelpKey(t *testing.T) {
+	// Both keys reach the same answer: '?' is the one a hand finds,
+	// F1 the one a console operator expects.
+	for _, keys := range []string{"/relay\x1bOP\r", "/relay\x1b[11~\r", "/relay?\r"} {
+		var out bytes.Buffer
+		ed := newEditor(strings.NewReader(keys), &out)
+		asked := ""
+		ed.helpFor = func(line string) string { asked = line; return "HELP\r\n" }
+		if _, err := ed.readLine(); err != nil {
+			t.Fatalf("%q: %v", keys, err)
+		}
+		if asked != "/relay" {
+			t.Errorf("%q asked for help on %q", keys, asked)
+		}
+		if !strings.Contains(out.String(), "HELP") {
+			t.Errorf("%q printed no help", keys)
+		}
+	}
+}
+
+func TestSearchQueryRidesInThePrompt(t *testing.T) {
+	var out bytes.Buffer
+	ed := newEditor(strings.NewReader("scopes\r\x12sco\r"), &out)
+	ed.prompt = func(search string) string {
+		if search != "" {
+			return "[me@host] [" + search + "]> "
+		}
+		return "[me@host] > "
+	}
+	for range 2 {
+		if _, err := ed.readLine(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := out.String()
+	// The query is in the prompt, and the draft below is the command.
+	if !strings.Contains(got, "[me@host] [sco]> scopes") {
+		t.Errorf("the search did not ride in the prompt:\n%q", got)
+	}
+	if strings.Contains(got, "reverse-search") {
+		t.Errorf("the search still writes a line of its own:\n%q", got)
+	}
+}

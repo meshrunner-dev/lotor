@@ -75,6 +75,22 @@ overrides — quotes the result so its bounds are unmistakable, and shows
 a placeholder when there is no name at all. Format one yourself and you
 have written the view that eventually forgets.
 
+## Colour is a claim about meaning
+
+The console paints by symbol class, never by taste: a place, an action,
+an attribute name, the `=` that joins a pair, and a value must never
+look alike. The constants in `internal/cli/tree.go` are named for those
+classes rather than their hues — reach for `cVerb`, not "magenta" —
+so a palette change stays one edit.
+
+One class earns its keep above the others: `cUnres` marks a word the
+console has **not resolved** — it names nothing, or it still names
+several things. That is not decoration, it is the console answering
+"have you understood me?" before the line is ever submitted, and it is
+why the painter walks the grammar rather than pattern-matching the
+text. Whatever you add to the grammar, keep that property: a word the
+parser could not place must look different from one it could.
+
 ## Orders from outside, and why the mutex count stays flat
 
 The console, a web UI and an API are three callers of the same

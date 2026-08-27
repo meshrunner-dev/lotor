@@ -212,7 +212,7 @@ func ServeEdited(ctx context.Context, rw io.ReadWriter, deps Deps) {
 	ed := newEditor(rw, rw)
 	// The editor's hooks read the session's context from the transport
 	// goroutine; the session guards that state itself.
-	ed.prompt = s.prompt
+	ed.prompt = s.promptWith
 	ed.complete = s.complete
 	ed.helpFor = s.helpForLine
 	ed.paint = s.paintLine
