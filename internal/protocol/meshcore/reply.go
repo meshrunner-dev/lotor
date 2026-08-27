@@ -17,6 +17,9 @@ type answer struct {
 	secret   []byte // what seals the content to them alone
 	tag      uint32 // the timestamp the asker matches answers by
 	body     []byte // the content, after the tag
+	// scope is the transport scope this answer travels under; a zero
+	// key travels plain.
+	scope meshcore.TransportKey
 	// supplied says the question carried its own route home, and
 	// pathLen/path are it. A supplied path of zero hops is not the
 	// same as no path at all: the first names the asker as adjacent
@@ -42,7 +45,9 @@ type answer struct {
 // reference buys its way out of that last case with a stored
 // out-path, which this engine does not learn yet.
 //
-// Every reply inherits the hash width the asker's mesh uses: a
+// The scope is stamped last, once the payload is final: the code is
+// computed over it. Every reply inherits the hash width the asker's
+// mesh uses: a
 // narrower one collides more often for the repeaters carrying it.
 func (e *engine) reply(inbound *meshcore.Packet, a answer, origin txn.ID) {
 	srcHash := e.id.PubKey[:meshcore.PathHashSize]
@@ -57,6 +62,7 @@ func (e *engine) reply(inbound *meshcore.Packet, a answer, origin txn.ID) {
 			return
 		}
 		pkt.SetPathHashSizeAndCount(inbound.PathHashSize(), 0)
+		a.scope.Scope(pkt)
 		e.enqueueAfter(pkt, a.kind, origin, prioPathReturn, serverResponseDelay)
 		return
 	}
@@ -70,11 +76,13 @@ func (e *engine) reply(inbound *meshcore.Packet, a answer, origin txn.ID) {
 		pkt.Header = meshcore.MakeHeader(meshcore.RouteDirect,
 			meshcore.PayloadTypeResponse, meshcore.PayloadVer1)
 		pkt.Path, pkt.PathLen = a.path, a.pathLen
+		a.scope.Scope(pkt)
 		e.enqueueAfter(pkt, a.kind, origin, prioDirect, serverResponseDelay)
 		return
 	}
 	pkt.Header = meshcore.MakeHeader(meshcore.RouteFlood,
 		meshcore.PayloadTypeResponse, meshcore.PayloadVer1)
 	pkt.SetPathHashSizeAndCount(inbound.PathHashSize(), 0)
+	a.scope.Scope(pkt)
 	e.enqueueAfter(pkt, a.kind, origin, prioFloodReply, serverResponseDelay)
 }

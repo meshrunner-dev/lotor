@@ -51,11 +51,11 @@ func TestScopeTableMatchesWhatItCarries(t *testing.T) {
 		Header:  meshcore.MakeHeader(meshcore.RouteFlood, meshcore.PayloadTypeTxtMsg, meshcore.PayloadVer1),
 		Payload: []byte("hello"),
 	}
-	if name, carried := table.match(plain); name != wildcardScope || !carried {
+	if name, _, carried := table.match(plain); name != wildcardScope || !carried {
 		t.Fatalf("plain flood = %q/%v, want the wildcard carried", name, carried)
 	}
 	shut := newScopeTable(params{AcceptScopes: []string{"fr"}, AcceptUnscoped: &off})
-	if _, carried := shut.match(plain); carried {
+	if _, _, carried := shut.match(plain); carried {
 		t.Fatal("plain flood carried with accept_unscoped false")
 	}
 
@@ -68,7 +68,7 @@ func TestScopeTableMatchesWhatItCarries(t *testing.T) {
 	if !scoped.HasTransportCodes() {
 		t.Fatal("scoping left the packet unscoped")
 	}
-	if name, carried := table.match(scoped); name != "#be" || !carried {
+	if name, _, carried := table.match(scoped); name != "#be" || !carried {
 		t.Fatalf("scoped flood = %q/%v, want #be carried", name, carried)
 	}
 
@@ -78,7 +78,7 @@ func TestScopeTableMatchesWhatItCarries(t *testing.T) {
 		Payload: []byte("hello"),
 	}
 	meshcore.TransportKeyForName("de").Scope(foreign)
-	if name, carried := table.match(foreign); carried {
+	if name, _, carried := table.match(foreign); carried {
 		t.Fatalf("a foreign scope was carried as %q", name)
 	}
 }
@@ -161,5 +161,61 @@ func TestUnscopedHopLimitBitesPlainFloodsAlone(t *testing.T) {
 	}
 	if v, _ := e.floodVerdict(build(true, 3), true); v != verdictRelayFlood {
 		t.Errorf("scoped flood at 3 hops = %q, want the unscoped limit not to touch it", v)
+	}
+}
+
+func TestOriginatedTrafficSpeaksInItsScope(t *testing.T) {
+	// A routable announcement travels in the scope this relay speaks;
+	// the zero-hop one stays plain, as the reference's does.
+	e, dev, _, _ := txRig(t, "shadow")
+	e.scopes = newScopeTable(params{DefaultScope: "fr", AcceptScopes: []string{"fr"}})
+	e.queue.depth = 8
+
+	e.advert(dev, time.Now(), "advert-flood", false)
+	e.advert(dev, time.Now(), "advert-local", true)
+	if len(e.queue.entries) != 2 {
+		t.Fatalf("%d adverts queued", len(e.queue.entries))
+	}
+	flood, local := e.queue.entries[0].pkt, e.queue.entries[1].pkt
+	if flood.Route() != meshcore.RouteTransportFlood {
+		t.Errorf("flood advert route = %v, want the scope stamped", flood.Route())
+	}
+	if flood.TransportCodes[0] != meshcore.TransportKeyForName("fr").Code(flood) {
+		t.Error("the flood advert's code is not this relay's scope")
+	}
+	if local.Route() != meshcore.RouteDirect || local.HasTransportCodes() {
+		t.Errorf("zero-hop advert route = %v, want it plain", local.Route())
+	}
+}
+
+func TestReplyScopeFollowsTheReference(t *testing.T) {
+	e, _, _, peer := txRig(t, "shadow")
+	e.scopes = newScopeTable(params{DefaultScope: "fr", AcceptScopes: []string{"fr"}})
+	speak := meshcore.TransportKeyForName("fr")
+
+	ask := func(route meshcore.RouteType, scoped bool) *reception {
+		pkt, err := meshcore.BuildAdvert(peer, time.Now(), &meshcore.AdvertData{Name: "p"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pkt.Header = meshcore.MakeHeader(route, meshcore.PayloadTypeAdvert, meshcore.PayloadVer1)
+		if scoped {
+			speak.Scope(pkt)
+		}
+		return rxOf(e, pkt)
+	}
+	// A question we matched a scope for is answered inside it.
+	if got := e.replyScope(ask(meshcore.RouteFlood, true)); got != speak {
+		t.Error("a scoped question was not answered in its own scope")
+	}
+	// A plain flood is answered plainly — never pulled into a scope
+	// its asker may not hold.
+	if got := e.replyScope(ask(meshcore.RouteFlood, false)); !got.IsZero() {
+		t.Error("a plain flood was answered inside a scope")
+	}
+	// A direct question carries no scope to match, so it gets ours —
+	// the reference's default, not openHop's plain reply.
+	if got := e.replyScope(ask(meshcore.RouteDirect, false)); got != speak {
+		t.Error("a direct question was not answered in the default scope")
 	}
 }

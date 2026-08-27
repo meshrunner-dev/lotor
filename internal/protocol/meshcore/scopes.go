@@ -62,14 +62,14 @@ func newScopeTable(p params) *scopeTable {
 // carries it. A plain flood is the wildcard, carried or not as the
 // operator said; a scoped flood is carried only when one of our keys
 // recomputes its code.
-func (t *scopeTable) match(pkt *meshcore.Packet) (name string, carried bool) {
+func (t *scopeTable) match(pkt *meshcore.Packet) (name string, key meshcore.TransportKey, carried bool) {
 	if !pkt.HasTransportCodes() {
-		return wildcardScope, t.unscoped
+		return wildcardScope, meshcore.TransportKey{}, t.unscoped
 	}
 	if i := meshcore.MatchTransportRegion(pkt, t.accept); i >= 0 {
-		return t.acceptNames[i], true
+		return t.acceptNames[i], t.accept[i], true
 	}
-	return "", false
+	return "", meshcore.TransportKey{}, false
 }
 
 // served lists the scopes this relay carries, the reference's own
@@ -150,8 +150,26 @@ func checkScopeName(name string) error {
 // scopeOf resolves a frame's scope once and remembers the answer.
 func (e *engine) scopeOf(rx *reception) (name string, carried bool) {
 	if !rx.scopeKnown {
-		rx.scope, rx.scopeCarried = e.scopes.match(rx.pkt)
+		rx.scope, rx.scopeKey, rx.scopeCarried = e.scopes.match(rx.pkt)
 		rx.scopeKnown = true
 	}
 	return rx.scope, rx.scopeCarried
+}
+
+// replyScope picks the scope an answer travels under — the
+// reference's chooseReplyScope, in its order. A question we matched a
+// scope for is answered inside it. A plain flood is answered plainly,
+// never pulled into a scope its asker may not hold. Anything else —
+// every direct question, since a direct packet carries no scope we
+// could have matched, and a scoped one whose scope we do not carry —
+// is answered in the scope this relay speaks, which is nothing when
+// it speaks unscoped.
+func (e *engine) replyScope(rx *reception) meshcore.TransportKey {
+	if _, carried := e.scopeOf(rx); carried && rx.pkt.HasTransportCodes() {
+		return rx.scopeKey
+	}
+	if rx.pkt.IsRouteFlood() && !rx.pkt.HasTransportCodes() {
+		return meshcore.TransportKey{}
+	}
+	return e.scopes.speak
 }

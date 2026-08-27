@@ -327,8 +327,13 @@ func (e *engine) forwardMultipart(cp *meshcore.Packet, origin txn.ID) {
 		e.abandon(origin, "malformed", "multipart ack rebuild failed", err)
 		return
 	}
-	ack.Header = meshcore.MakeHeader(meshcore.RouteDirect,
+	// The unwrapped ACK travels the way its multipart did, scope
+	// included: the reference copies the inbound header rather than
+	// composing a fresh one, and dropping the scope mid-relay would
+	// strand the answer outside the mesh that asked for it.
+	ack.Header = meshcore.MakeHeader(cp.Route(),
 		meshcore.PayloadTypeAck, meshcore.PayloadVer1)
+	ack.TransportCodes = cp.TransportCodes
 	ack.Path = append([]byte(nil), cp.Path...)
 	ack.PathLen = cp.PathLen
 	e.enqueueAfter(ack, "relay-ack", origin, prioDirect,
@@ -509,6 +514,13 @@ func (e *engine) advert(dev radio.Device, now time.Time, kind string, local bool
 	if local {
 		pkt.Header = meshcore.MakeHeader(meshcore.RouteDirect,
 			meshcore.PayloadTypeAdvert, meshcore.PayloadVer1)
+	} else {
+		// A routable announcement travels in the scope this relay
+		// speaks, so the mesh that carries it is the one that agreed
+		// to. The zero-hop one stays plain, as the reference's own
+		// zero-hop send does: whoever hears it directly hears it
+		// whatever they carry.
+		e.scopes.speak.Scope(pkt)
 	}
 	id := txn.New()
 	e.seen.witness(pkt.Hash(), id, now)

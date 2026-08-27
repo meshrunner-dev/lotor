@@ -34,6 +34,7 @@ type reception struct {
 	// we carry it, resolved once: matching costs an HMAC over the
 	// whole payload per scope carried.
 	scope        string
+	scopeKey     meshcore.TransportKey
 	scopeCarried bool
 	scopeKnown   bool
 }

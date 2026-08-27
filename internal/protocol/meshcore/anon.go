@@ -117,7 +117,7 @@ func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 		// A password: the login path, which the reference accepts by
 		// flood as well as direct — a stranger logging in from across
 		// the mesh has no path to us yet.
-		e.respondLogin(pkt, sender, secret, plain, origin)
+		e.respondLogin(rx, sender, secret, plain, origin)
 		return
 	}
 	if !pkt.IsRouteDirect() {
@@ -160,6 +160,7 @@ func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 		secret:   secret,
 		tag:      binary.LittleEndian.Uint32(plain[0:4]),
 		body:     body,
+		scope:    e.replyScope(rx),
 		supplied: true,
 		pathLen:  pathLen,
 		path:     path,

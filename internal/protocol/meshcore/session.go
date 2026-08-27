@@ -80,7 +80,8 @@ const (
 // respondLogin answers a password attempt. Unlike the other anonymous
 // questions this one is served whatever the inbound route — a
 // companion that has not found a path yet floods it.
-func (e *engine) respondLogin(pkt *meshcore.Packet, senderPub, secret, plain []byte, origin txn.ID) {
+func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, origin txn.ID) {
+	pkt := rx.pkt
 	// Named permissively or not at all: an access mode nobody resolved
 	// is a door nobody opened.
 	if e.p.GuestAccess != guestPassword && e.p.GuestAccess != guestOpen {
@@ -146,6 +147,7 @@ func (e *engine) respondLogin(pkt *meshcore.Packet, senderPub, secret, plain []b
 	e.reply(pkt, answer{
 		destHash: c.pubKey[:meshcore.PathHashSize], secret: c.secret,
 		tag: binary.LittleEndian.Uint32(body[:4]), body: body[4:], kind: "login-resp",
+		scope: e.replyScope(rx),
 	}, origin)
 }
 
@@ -229,6 +231,7 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 	e.reply(pkt, answer{
 		destHash: c.pubKey[:meshcore.PathHashSize], secret: c.secret,
 		tag: ts, body: body, kind: "req-resp",
+		scope: e.replyScope(rx),
 	}, origin)
 }
 
