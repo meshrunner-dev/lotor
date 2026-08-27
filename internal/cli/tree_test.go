@@ -2,9 +2,11 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/schema"
@@ -1156,5 +1158,59 @@ func TestACommandThatTakesARelayIsReachableFromInsideOne(t *testing.T) {
 	// A command that names no relay stays where it was.
 	if slices.Contains(verbs, cmdUndo) {
 		t.Errorf("a command with no relay to act on was mounted: %v", verbs)
+	}
+}
+
+func TestIntervalRedrawsWhereItStood(t *testing.T) {
+	lines := make(chan string, 1)
+	var b strings.Builder
+	s := &session{deps: testDeps(t), colors: true, out: &b, lines: lines}
+	frames := 0
+	err := s.repaint(t.Context(), time.Millisecond, func() error {
+		frames++
+		if frames == 2 {
+			lines <- "" // an empty line stops it after the second draw
+		}
+		fmt.Fprint(s.out, "one\r\nlonger\r\n")
+		return nil
+	})
+	if err != nil || frames != 2 {
+		t.Fatalf("repaint: %v after %d frames", err, frames)
+	}
+	got := b.String()
+	// The second frame climbs back over the first rather than
+	// scrolling past it.
+	if !strings.Contains(got, "\x1b[2A") {
+		t.Errorf("the frame did not redraw in place: %q", got)
+	}
+	// Every line is erased to its end, so a value that shrank leaves
+	// nothing of the longer one behind.
+	if strings.Count(got, "\x1b[K\r\n") < 4 {
+		t.Errorf("lines are not erased as they are rewritten: %q", got)
+	}
+	if !strings.Contains(got, "-- ["+intervalStop+"]") {
+		t.Errorf("the frame does not say what stops it: %q", got)
+	}
+}
+
+func TestIntervalNeedsATerminalAndARealDuration(t *testing.T) {
+	// Drawing in place is cursor movement, and a pipe has no cursor.
+	if out := run(t, testDeps(t), "/relay meshcore-868 print interval=2s"); !strings.Contains(out, "terminal") {
+		t.Errorf("a pipe was given a repainting view:\n%s", out)
+	}
+	for _, line := range []string{
+		"/relay meshcore-868 print interval",
+		"/relay meshcore-868 print interval=zz",
+		"/relay meshcore-868 print interval=10ms",
+	} {
+		if out := run(t, testDeps(t), line); !strings.Contains(out, "error") {
+			t.Errorf("%q was accepted:\n%s", line, out)
+		}
+	}
+	// And it is discoverable where print is.
+	s := &session{deps: testDeps(t)}
+	s.setPath([]string{"relay", "meshcore-868"})
+	if add, _ := s.complete("print i"); add != "nterval=" {
+		t.Errorf("interval does not complete to its value: %q", add)
 	}
 }

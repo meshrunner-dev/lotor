@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/schema"
@@ -591,7 +592,17 @@ const (
 	// scrollback does not end up carrying a private key by accident;
 	// asking for it by name is the deliberate act.
 	argSecrets = "show-secrets"
+	// argInterval draws the same view over and over in place. It says
+	// nothing about what the view holds — only how often it is asked
+	// again.
+	argInterval = "interval"
 )
+
+// intervalStop is what the status line under a repainting frame says.
+// A live view here ends on a line, not a keystroke: the editor owns
+// the keys, and every other live view in this console ends the same
+// way.
+const intervalStop = "enter stops"
 
 // detailWidth is the column a detail paragraph wraps at. The console
 // never measures the terminal — its probe asks whether one is there,
@@ -624,19 +635,46 @@ func (s *session) treeStatus(ctx context.Context, path []string) error {
 
 // treePrint shows a context: a kind lists its instances, an instance
 // shows its effective configuration with provenance.
-func (s *session) treePrint(_ context.Context, path []string, args []string) error {
-	var detail, secrets bool
+// printArgs is what one print line asked for: how the answer should
+// be shaped, what it may leave out, and how often to ask again.
+type printArgs struct {
+	detail, secrets bool
+	every           time.Duration
+}
+
+// printArgsFrom reads print's arguments, and refuses a word by naming
+// the ones that would have worked where it was written.
+func (s *session) printArgsFrom(path, args []string) (printArgs, error) {
+	var want printArgs
 	for _, a := range args {
-		switch a {
-		case argDetail:
-			detail = true
-		case argSecrets:
-			secrets = true
+		key, value, valued := strings.Cut(a, "=")
+		switch {
+		case key == argDetail && !valued:
+			want.detail = true
+		case key == argSecrets && !valued:
+			want.secrets = true
+		case key == argInterval && !valued:
+			return want, fmt.Errorf("%s wants a value — %s=2s", argInterval, argInterval)
+		case key == argInterval:
+			d, err := time.ParseDuration(value)
+			if err != nil || d < time.Second {
+				return want, fmt.Errorf("%s wants a duration of a second or more, like 2s", argInterval)
+			}
+			want.every = d
 		default:
-			return fmt.Errorf("%s takes %s, not %q",
-				verbPrint, humanList(names(s.printTerms(path))), a)
+			return want, fmt.Errorf("%s takes %s, not %q",
+				verbPrint, humanList(names(s.printTerms(path))), key)
 		}
 	}
+	return want, nil
+}
+
+func (s *session) treePrint(ctx context.Context, path []string, args []string) error {
+	want, err := s.printArgsFrom(path, args)
+	if err != nil {
+		return err
+	}
+	detail, secrets, every := want.detail, want.secrets, want.every
 	collection := len(path) == 1 && !s.isSingleton(path)
 	switch {
 	case detail && !collection:
@@ -650,6 +688,16 @@ func (s *session) treePrint(_ context.Context, path []string, args []string) err
 	case secrets && collection && !detail:
 		return fmt.Errorf("this listing shows no attributes — add %s", argDetail)
 	}
+	draw := func() error { return s.printOnce(path, detail, secrets) }
+	if every > 0 {
+		return s.repaint(ctx, every, draw)
+	}
+	return draw()
+}
+
+// printOnce draws the view one time. It is the whole of print when no
+// interval was asked for, and one frame of it when there was.
+func (s *session) printOnce(path []string, detail, secrets bool) error {
 	if len(path) == 0 {
 		// The root holds no values of its own: what it can show is
 		// what stands below it.
@@ -680,6 +728,77 @@ func (s *session) treePrint(_ context.Context, path []string, args []string) err
 		return s.radioList()
 	}
 	return s.showTraces(path[0]+" "+path[1], secrets)
+}
+
+// repaint draws a view over and over in the same place: the cursor
+// goes back up by the frame's own height, and every line is rewritten
+// and erased to its end, so a value that shrank leaves nothing of the
+// longer one behind. A status line sits under the frame, which is
+// where the cursor waits between draws.
+func (s *session) repaint(ctx context.Context, every time.Duration, draw func() error) error {
+	if !s.colors {
+		return fmt.Errorf("%s draws in place, which needs a terminal", argInterval)
+	}
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	height := 0
+	frame := func() error {
+		body, err := s.capture(draw)
+		if err != nil {
+			return err
+		}
+		if height > 0 {
+			fmt.Fprintf(s.out, "\x1b[%dA", height)
+		}
+		lines := strings.Split(strings.TrimSuffix(body, "\r\n"), "\r\n")
+		for _, line := range lines {
+			fmt.Fprintf(s.out, "\r%s\x1b[K\r\n", line)
+		}
+		// A frame that shrank leaves rows of the taller one below it,
+		// so they are blanked and stay counted: the next draw has to
+		// climb over them to reach the top.
+		for i := len(lines); i < height; i++ {
+			fmt.Fprint(s.out, "\r\x1b[K\r\n")
+		}
+		height = max(len(lines), height)
+		fmt.Fprintf(s.out, "-- [%s]\x1b[K\r", intervalStop)
+		return nil
+	}
+	done := func() { fmt.Fprint(s.out, "\x1b[K\r\n") }
+	if err := frame(); err != nil {
+		return err
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			done()
+			return nil
+		case line, ok := <-s.lines:
+			// The line that stopped the view still runs, so a session
+			// never loses the command that ended it.
+			done()
+			if ok && line != "" {
+				s.command(ctx, line)
+			}
+			return nil
+		case <-tick.C:
+			if err := frame(); err != nil {
+				done()
+				return err
+			}
+		}
+	}
+}
+
+// capture runs a draw against a buffer instead of the transport, so a
+// frame can be measured before any of it is sent.
+func (s *session) capture(draw func() error) (string, error) {
+	var b strings.Builder
+	was := s.out
+	s.out = &b
+	err := draw()
+	s.out = was
+	return b.String(), err
 }
 
 // printDetail unfolds a collection: one paragraph per instance, every
@@ -1130,6 +1249,9 @@ func (s *session) printTerms(path []string) []term {
 	return append(out, term{
 		name: argSecrets, class: cAttr,
 		doc: "show what " + verbPrint + " masks",
+	}, term{
+		name: argInterval, class: cAttr, container: true,
+		doc: "draw it again this often, in place",
 	})
 }
 
