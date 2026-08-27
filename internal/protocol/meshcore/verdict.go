@@ -28,6 +28,7 @@ const (
 	verdictDiscoverAnswer = "discover-answer"            // a neighbour answering a scan this node sent
 	verdictScopeAnswer    = "scopes-answer"              // a neighbour telling us what it carries, for our own question
 	verdictRequest        = "authenticated-request"      // a question from a client whose session we hold
+	verdictClientPath     = "client-route-home"          // a client teaching us how to reach it directly
 	verdictTraceTransit   = "trace-transit"              // trace walking its target path, next hop unjudgeable
 	verdictTraceNotUs     = "trace-not-addressed"        // trace walking its target path, next hop is not us
 	verdictTraceArrived   = "trace-arrived"              // trace consumed its whole target path
@@ -113,6 +114,10 @@ func (e *engine) addressedToUs(rx *reception) (verdict, why string, handled bool
 	case meshcore.PayloadTypeReq:
 		// Only a live session's MAC can claim an authenticated one.
 		return e.reqVerdict(rx)
+	case meshcore.PayloadTypePath:
+		// A client teaching us its route home; anything else routes
+		// on.
+		return e.pathVerdict(rx)
 	case meshcore.PayloadTypeResponse:
 		// An answer to a question this node asked; anything else
 		// routes on.

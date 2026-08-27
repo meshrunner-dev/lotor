@@ -9,11 +9,28 @@ import (
 	"meshrunner.dev/pkg/meshcore"
 )
 
+// outPath is a route home a client taught us, so an answer can travel
+// straight there instead of costing the whole mesh a flood.
+type outPath struct {
+	// pathLen is the encoded descriptor, path the bytes it describes.
+	pathLen uint8
+	path    []byte
+	learned time.Time
+}
+
 // client is one logged-in companion.
 type client struct {
 	pubKey [meshcore.PubKeySize]byte
 	secret []byte
 	perms  byte
+	// out is the way back to this client, when it has told us one. A
+	// nil pointer means it has not: that is the reference's
+	// OUT_PATH_UNKNOWN, and it is not the same as a route of zero
+	// hops, which says the client is adjacent. The route lives and
+	// dies with the session — a companion that has to log in again
+	// will teach us its path again, and one that moved would have
+	// taught us a stale route otherwise.
+	out *outPath
 	// lastTimestamp is the newest request instant this client has
 	// signed: anything at or before it is a replay.
 	lastTimestamp uint32

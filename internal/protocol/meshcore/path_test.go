@@ -1,0 +1,170 @@
+package meshcore
+
+import (
+	"testing"
+	"time"
+
+	"meshrunner.dev/pkg/meshcore"
+
+	"meshrunner.dev/lotor/internal/radio"
+	"meshrunner.dev/lotor/internal/txn"
+)
+
+// teachPath builds the PATH a client sends to say how to reach it: a
+// route return sealed to the server, carrying the client's own route
+// home and no extra payload.
+func teachPath(t *testing.T, self, peer *meshcore.LocalIdentity,
+	pathLen uint8, path []byte,
+) radio.Frame {
+	t.Helper()
+	secret, err := peer.SharedSecret(self.PubKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt, err := meshcore.BuildPathReturn(self.PubKey[:meshcore.PathHashSize],
+		peer.PubKey[:meshcore.PathHashSize], secret, pathLen, path, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt.Header = meshcore.MakeHeader(meshcore.RouteDirect,
+		meshcore.PayloadTypePath, meshcore.PayloadVer1)
+	raw, err := pkt.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return radio.Frame{Payload: raw, At: time.Now(), SNR: rxTestSNR}
+}
+
+// drive judges one frame on the caller's goroutine, the way the
+// pipeline would. The engine is not running in these tests: the ACL
+// belongs to the engine's goroutine, and a test that reads it must be
+// the one that wrote it.
+func drive(t *testing.T, e *engine, f radio.Frame) string {
+	t.Helper()
+	pkt, err := meshcore.ParsePacket(f.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rx := rxOf(e, pkt)
+	v, _ := e.verdict(rx)
+	if v == verdictAnon {
+		e.respondAnon(rx, txn.New())
+	}
+	return v
+}
+
+// guestIn opens a session the way a companion does, and returns it.
+func guestIn(t *testing.T, e *engine, peer *meshcore.LocalIdentity) *client {
+	t.Helper()
+	e.p.GuestAccess = guestOpen
+	frame, _ := login(t, e.id, peer, nowTS(100), "", false)
+	drive(t, e, frame)
+	c := e.acl.get(peer.PubKey[:])
+	if c == nil {
+		t.Fatal("the login opened no session")
+	}
+	return c
+}
+
+func TestClientRouteHomeIsLearnedAndUsed(t *testing.T) {
+	e, dev, sub, peer := txRig(t, "on-air")
+	e.p.GuestAccess = guestOpen
+	runEngine(t, e, dev)
+
+	frame, _ := login(t, e.id, peer, nowTS(100), "", false)
+	dev.frames <- frame
+	if sent := awaitSent(t, sub); sent.Kind != "login-resp" {
+		t.Fatalf("sent = %+v", sent)
+	}
+	<-dev.sent
+
+	// The client teaches us a two-hop route home, then asks again.
+	dev.frames <- teachPath(t, e.id, peer, 2, []byte{0xAA, 0xBB})
+	dev.frames <- request(t, e.id, peer, nowTS(101), []byte{meshcore.ReqGetStatus, 0, 0, 0, 0})
+
+	if sent := awaitSent(t, sub); sent.Kind != "req-resp" {
+		t.Fatalf("sent = %+v", sent)
+	}
+	pkt, err := meshcore.ParsePacket(<-dev.sent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pkt.IsRouteDirect() {
+		t.Fatalf("the answer routed %v — a known route home earns a direct reply", pkt.Route())
+	}
+	if pkt.PathLen != 2 || string(pkt.Path) != string([]byte{0xAA, 0xBB}) {
+		t.Fatalf("answer path: len %d, % x", pkt.PathLen, pkt.Path)
+	}
+}
+
+func TestWithoutARouteHomeTheAnswerFloods(t *testing.T) {
+	e, dev, sub, peer := txRig(t, "on-air")
+	e.p.GuestAccess = guestOpen
+	runEngine(t, e, dev)
+
+	frame, _ := login(t, e.id, peer, nowTS(100), "", false)
+	dev.frames <- frame
+	awaitSent(t, sub)
+	<-dev.sent
+
+	dev.frames <- request(t, e.id, peer, nowTS(101), []byte{meshcore.ReqGetStatus, 0, 0, 0, 0})
+	awaitSent(t, sub)
+	pkt, err := meshcore.ParsePacket(<-dev.sent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pkt.IsRouteFlood() {
+		t.Fatalf("the answer routed %v — with nowhere to send it, only a flood reaches both "+
+			"the adjacent and the distant", pkt.Route())
+	}
+}
+
+func TestRouteHomeIsLearnedAndTheNewestWins(t *testing.T) {
+	e, _, _, peer := txRig(t, "shadow")
+	c := guestIn(t, e, peer)
+	if c.out != nil {
+		t.Fatal("a fresh session already knows a route home")
+	}
+
+	if v := drive(t, e, teachPath(t, e.id, peer, 2, []byte{0xAA, 0xBB})); v != verdictClientPath {
+		t.Fatalf("verdict = %q, want the route to be learned", v)
+	}
+	if c.out == nil || c.out.pathLen != 2 || string(c.out.path) != string([]byte{0xAA, 0xBB}) {
+		t.Fatalf("route home = %+v", c.out)
+	}
+
+	// The client moved, and says so: the older route no longer reaches.
+	if v := drive(t, e, teachPath(t, e.id, peer, 1, []byte{0xCC})); v != verdictClientPath {
+		t.Fatalf("verdict = %q", v)
+	}
+	if c.out.pathLen != 1 || string(c.out.path) != string([]byte{0xCC}) {
+		t.Fatalf("route home = %+v, want the one it just taught us", c.out)
+	}
+}
+
+func TestARouteFromAStrangerIsNotLearned(t *testing.T) {
+	e, _, _, peer := txRig(t, "shadow")
+	// No login: nothing here opens it, and it is not ours to read.
+	if v := drive(t, e, teachPath(t, e.id, peer, 2, []byte{0xAA, 0xBB})); v == verdictClientPath {
+		t.Fatal("a stranger taught us a route home")
+	}
+	if e.acl.get(peer.PubKey[:]) != nil {
+		t.Fatal("a route home conjured a session out of nothing")
+	}
+}
+
+func TestASuppliedPathOutranksTheStoredOne(t *testing.T) {
+	// A route carried by this very question is fresher than one
+	// remembered from an earlier exchange.
+	stored := &outPath{pathLen: 2, path: []byte{0xAA, 0xBB}}
+	home := answer{supplied: true, pathLen: 1, path: []byte{0x11}, out: stored}.routeHome()
+	if home == nil || home.pathLen != 1 || home.path[0] != 0x11 {
+		t.Fatalf("route home = %+v, want the one the question carried", home)
+	}
+	if home := (answer{out: stored}).routeHome(); home == nil || home.pathLen != 2 {
+		t.Fatalf("stored route ignored: %+v", home)
+	}
+	if home := (answer{}).routeHome(); home != nil {
+		t.Fatalf("invented a route out of nothing: %+v", home)
+	}
+}

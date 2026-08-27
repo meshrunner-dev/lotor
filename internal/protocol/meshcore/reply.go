@@ -8,6 +8,15 @@ import (
 	"meshrunner.dev/lotor/internal/txn"
 )
 
+// routeHome picks the direct route this answer should take, or nil
+// when it has none and must flood.
+func (a answer) routeHome() *outPath {
+	if a.supplied {
+		return &outPath{pathLen: a.pathLen, path: a.path}
+	}
+	return a.out
+}
+
 // answer is one reply looking for its way home: what to say, to whom,
 // sealed under what, and any return path the question itself carried.
 type answer struct {
@@ -27,21 +36,27 @@ type answer struct {
 	supplied bool
 	pathLen  uint8
 	path     []byte
-	kind     string // what the journal calls this emission
+	// out is the route the asker taught us in an earlier PATH, when
+	// there is one. Consulted only after a supplied path: a route
+	// carried by this very question is fresher than one remembered
+	// from an earlier exchange.
+	out  *outPath
+	kind string // what the journal calls this emission
 }
 
 // reply routes one answer the way the reference chooses (its
 // chooseReplyRoute), and is the only place in this engine that does.
 //
-// A flooded question earns a path return: the answer travels inside a
-// packet whose whole purpose is to teach the asker how to reach us
-// directly next time. A question that carried its own return path is
-// answered along it. Anything else floods — a direct question arrives
-// with its path already spent, every hop having consumed its own
-// entry, so an empty path says nothing about how far the asker is,
-// and only a flood reaches both the adjacent and the distant. The
-// reference buys its way out of that last case with a stored
-// out-path, which this engine does not learn yet.
+// Four routes, in the order the reference tries them. A flooded
+// question earns a path return: the answer travels inside a packet
+// whose whole purpose is to teach the asker how to reach us directly
+// next time. A question that carried its own return path is answered
+// along it. Failing that, the route the asker taught us in an earlier
+// PATH. And only when none of those exists, a flood — because a direct
+// question arrives with its path already spent, every hop having
+// consumed its own entry, so an empty path says nothing about how far
+// the asker is, and a flood is the one thing that reaches both the
+// adjacent and the distant.
 //
 // The scope is stamped last, once the payload is final: the code is
 // computed over it. Every reply inherits the hash width the asker's
@@ -69,10 +84,10 @@ func (e *engine) reply(inbound *meshcore.Packet, a answer, origin txn.ID) {
 		e.log.Warn("response build failed", zap.String("kind", a.kind), zap.Error(err))
 		return
 	}
-	if a.supplied {
+	if home := a.routeHome(); home != nil {
 		pkt.Header = meshcore.MakeHeader(meshcore.RouteDirect,
 			meshcore.PayloadTypeResponse, meshcore.PayloadVer1)
-		pkt.Path, pkt.PathLen = a.path, a.pathLen
+		pkt.Path, pkt.PathLen = home.path, home.pathLen
 		a.scope.Scope(pkt)
 		e.enqueueAfter(pkt, a.kind, origin, prioDirect, serverResponseDelay)
 		return

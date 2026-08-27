@@ -39,12 +39,14 @@ const (
 	// session makes room for a new one.
 	maxClients = 32
 
-	// A logged-in guest gets its own budget. The reference needs none
-	// — it answers along a stored out-path, straight back to the one
-	// who asked — but this engine has no out-path to store yet, so
-	// every answer floods, and one companion polling in a loop would
-	// spend the whole mesh's airtime. Generous enough for a status
-	// page and a neighbourhood query in the same breath.
+	// A logged-in guest gets its own budget, which the reference does
+	// without. Two reasons to keep it. A client is answered directly
+	// only once it has taught us a route home, and until then — for a
+	// companion that never sends one, always — every answer floods and
+	// one poller in a loop would spend the whole mesh's airtime. And
+	// even a direct answer costs an emission at every repeater along
+	// the way, so unbounded questioning is never free. Generous enough
+	// for a status page and a neighbourhood query in the same breath.
 	sessionLimitMax    = 6
 	sessionLimitWindow = time.Minute
 
@@ -144,7 +146,7 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	e.reply(pkt, answer{
 		destHash: c.pubKey[:meshcore.PathHashSize], secret: c.secret,
 		tag: clock, body: rest, kind: "login-resp",
-		scope: e.replyScope(rx),
+		scope: e.replyScope(rx), out: c.out,
 	}, origin)
 }
 
@@ -204,9 +206,9 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 		e.log.Debug("request replay refused", zap.String("txn", origin.Short()))
 		return
 	}
-	// A live session still costs the mesh something: every answer
-	// floods. Charged before the answer is built, like every other
-	// limiter here.
+	// A live session still costs the mesh something, whether the
+	// answer floods or walks a route home. Charged before the answer
+	// is built, like every other limiter here.
 	if !c.asks.allow(time.Now()) {
 		e.log.Debug("session rate-limited", zap.String("txn", origin.Short()))
 		e.dropRateLimited(origin)
@@ -226,7 +228,7 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 	e.reply(pkt, answer{
 		destHash: c.pubKey[:meshcore.PathHashSize], secret: c.secret,
 		tag: ts, body: body, kind: "req-resp",
-		scope: e.replyScope(rx),
+		scope: e.replyScope(rx), out: c.out,
 	}, origin)
 }
 
