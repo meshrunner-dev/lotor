@@ -150,6 +150,8 @@ func TestPaintMarksWhatItHasNotResolved(t *testing.T) {
 		{"/relay meshcore-868 zz", "zz", cUnres, "no verb answers to it"},
 		{"/relay meshcore-868 set node_name=x", "node_name", cAttr, "a real attribute"},
 		{"/relay meshcore-868 set zz=x", "zz", cUnres, "no attribute answers to it"},
+		{"/relay/meshcore-868/print", "relay/meshcore-868/", cPath, "the place, and the separator it closes"},
+		{"/relay/meshcore-868/print", "print", cVerb, "a verb joined by slashes is still a verb"},
 	} {
 		painted := s.paintLine(c.line)
 		if !strings.Contains(painted, c.colour+c.word+cReset) {
@@ -178,6 +180,28 @@ func TestSlashJoinedPathsReachTheSamePlace(t *testing.T) {
 	path, rest := s.resolveTree(splitArgs("/radio slot1 set spi=/dev/spidev0.0"))
 	if len(path) != 2 || len(rest) != 2 || rest[1] != "spi=/dev/spidev0.0" {
 		t.Errorf("path %v rest %v", path, rest)
+	}
+	// A token may name a place and then ask something of it: every
+	// spelling of the same request reaches the same verb at the same
+	// place, so all of the configuration is one line away.
+	for _, line := range []string{
+		"/relay meshcore-868 set node_name=x",
+		"/relay/meshcore-868 set node_name=x",
+		"/relay/meshcore-868/set node_name=x",
+	} {
+		path, rest := s.resolveTree(splitArgs(line))
+		if len(path) != 2 || len(rest) != 2 || rest[0] != "set" || rest[1] != "node_name=x" {
+			t.Errorf("%q resolved to %v (rest %v)", line, path, rest)
+		}
+	}
+	// A step that names nowhere ends the path rather than swallowing
+	// the rest of the token, so the refusal names the word that failed.
+	if path, rest := s.resolveTree(splitArgs("/relay/zz/print")); len(path) != 1 || len(rest) != 1 || rest[0] != "zz/print" {
+		t.Errorf("path %v rest %v", path, rest)
+	}
+	// And completion refuses to guess past it.
+	if add, hints := s.complete("/relay/zz/pri"); add != "" || len(hints) > 0 {
+		t.Errorf("completed past a step that names nowhere: %q %v", add, hints)
 	}
 }
 

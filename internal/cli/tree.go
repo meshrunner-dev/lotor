@@ -192,42 +192,61 @@ func (s *session) resolveTree(tokens []string) (path, rest []string) {
 	}
 	for len(tokens) > 0 {
 		// A step may be written slash-joined or spaced — /relay/x and
-		// /relay x name the same place. Only tokens still being read as
-		// path are split, so a value carrying slashes is never touched.
-		next, ok := s.walkStep(path, tokens[0])
+		// /relay x name the same place, and /relay/x/print asks
+		// something of it without a space anywhere. Only tokens still
+		// being read as path are split, so a value carrying slashes is
+		// never touched.
+		next, leftover, ok := s.walkStep(path, tokens[0])
 		if !ok {
 			return path, tokens
 		}
 		path = next
+		if leftover != "" {
+			return path, append([]string{leftover}, tokens[1:]...)
+		}
 		tokens = tokens[1:]
 	}
 	return path, nil
 }
 
-// walkStep consumes one token as path steps, all of them or none: a
-// half-consumed token would leave the session somewhere nobody typed.
-func (s *session) walkStep(path []string, token string) ([]string, bool) {
-	next := append([]string(nil), path...)
-	for piece := range strings.SplitSeq(token, "/") {
-		switch {
-		case piece == "":
-			continue // a doubled or trailing slash says nothing
-		case piece == "..":
-			if len(next) > 0 {
-				next = next[:len(next)-1]
-			}
-		case len(next) == 0 && s.kindByName(piece) != nil:
-			next = append(next, piece)
-		case len(next) == 1 && !s.isSingleton(next):
-			if _, ok := s.instances(next[0])[piece]; !ok {
-				return nil, false
-			}
-			next = append(next, piece)
-		default:
+// walkPiece takes one piece of a slash-joined token as a step of the
+// path. It is the only place that answers "is this word a place from
+// here", so the parser and the painter cannot disagree about it.
+func (s *session) walkPiece(path []string, piece string) ([]string, bool) {
+	switch {
+	case piece == "":
+		return path, true // a doubled or trailing slash says nothing
+	case piece == "..":
+		if len(path) > 0 {
+			return path[:len(path)-1], true
+		}
+		return path, true
+	case len(path) == 0 && s.kindByName(piece) != nil:
+		return append(path, piece), true
+	case len(path) == 1 && !s.isSingleton(path):
+		if _, ok := s.instances(path[0])[piece]; !ok {
 			return nil, false
 		}
+		return append(path, piece), true
 	}
-	return next, true
+	return nil, false
+}
+
+// walkStep consumes the leading path steps of one token and hands back
+// what is left of it, because a token may name a place and then ask
+// something of it in the same breath. ok is false when the first piece
+// is not a step at all, which leaves the token to be read as a word.
+func (s *session) walkStep(path []string, token string) (next []string, leftover string, ok bool) {
+	next = append([]string(nil), path...)
+	pieces := strings.Split(token, "/")
+	for i, piece := range pieces {
+		step, took := s.walkPiece(next, piece)
+		if !took {
+			return next, strings.Join(pieces[i:], "/"), i > 0
+		}
+		next = step
+	}
+	return next, "", true
 }
 
 // tree runs one line of the context grammar.
@@ -237,7 +256,10 @@ func (s *session) tree(ctx context.Context, line string) {
 	// Where the leftovers begin, so a refusal can point at the word.
 	at := 1
 	if consumed := len(tokens) - len(rest); consumed < len(columns) {
-		at = columns[consumed]
+		// The leftover is a suffix of the token it came out of, so the
+		// difference in length is how far into it the word sits: a
+		// refusal of /relay/x/zz points at zz, not at the path.
+		at = columns[consumed] + len(tokens[consumed]) - len(rest[0])
 	}
 	if len(rest) == 0 {
 		// A pure path is navigation.
@@ -732,8 +754,8 @@ func (s *session) complete(line string) (add string, hints []string) {
 	// carrying slashes never is.
 	prefix := strings.TrimPrefix(last, "/")
 	if i := strings.LastIndex(prefix, "/"); i >= 0 {
-		next, ok := s.walkStep(path, prefix[:i])
-		if !ok {
+		next, leftover, ok := s.walkStep(path, prefix[:i])
+		if !ok || leftover != "" {
 			return "", nil // the steps so far name nowhere
 		}
 		path, prefix = next, prefix[i+1:]
@@ -1237,11 +1259,12 @@ func (w *lineWalk) paint(token string) string {
 func (w *lineWalk) paintRest(token string) string {
 	switch w.phase {
 	case 0:
-		if painted, ok := w.paintPath(token); ok {
+		painted, leftover := w.paintPath(token)
+		if leftover == "" {
 			return painted
 		}
 		w.phase = 1
-		fallthrough
+		return painted + w.paintRest(leftover)
 	case 1:
 		w.phase, w.verb = 2, token
 		w.attrs = w.s.attrsForLine(w.path, token)
@@ -1255,29 +1278,30 @@ func (w *lineWalk) paintRest(token string) string {
 	}
 }
 
-// paintPath consumes a token that names a place, slash-joined or not,
-// and reports whether it was one.
-func (w *lineWalk) paintPath(token string) (string, bool) {
+// paintPath consumes the leading pieces of a token that name a place
+// and hands back what is left, so the two halves of /relay/x/print
+// each read in their own class. The separator belongs to the path it
+// closes.
+func (w *lineWalk) paintPath(token string) (painted, leftover string) {
 	next := append([]string(nil), w.path...)
-	for piece := range strings.SplitSeq(token, "/") {
-		if piece == "" {
-			continue
+	pieces := strings.Split(token, "/")
+	took := 0
+	for _, piece := range pieces {
+		step, ok := w.s.walkPiece(next, piece)
+		if !ok {
+			break
 		}
-		switch {
-		case piece == "..":
-			if len(next) > 0 {
-				next = next[:len(next)-1]
-			}
-		case len(next) == 0 && w.s.kindByName(piece) != nil:
-			next = append(next, piece)
-		case len(next) == 1 && !w.s.isSingleton(next) && w.s.instances(next[0])[piece] != "":
-			next = append(next, piece)
-		default:
-			return "", false
-		}
+		next, took = step, took+1
+	}
+	if took == 0 {
+		return "", token
 	}
 	w.path = next
-	return w.s.color(cPath, token), true
+	head := strings.Join(pieces[:took], "/")
+	if took == len(pieces) {
+		return w.s.color(cPath, head), ""
+	}
+	return w.s.color(cPath, head+"/"), strings.Join(pieces[took:], "/")
 }
 
 // paintArg colours one argument: a pair reads as name, joiner, value;
