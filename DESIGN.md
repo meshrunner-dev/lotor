@@ -88,8 +88,20 @@ hardware, never take the whole daemon down for one sick relay.
 
 ## Configuration
 
-One reusable layering mechanism — a named **profile** plus overrides
-scoped *by profile name* — instantiated twice:
+The configuration lives in **one SQLite file** — `config.db` in the
+daemon's state directory, created 0600 because the node identity (the
+private key) is in it. Copying that file backs up the whole relay;
+putting it back restores it. The journal is deliberately a different
+database: it churns, gets pruned, and may live in RAM, none of which a
+backup target may do. Every mutation is recorded in a `revisions`
+table — who, when, what, and the value it replaced — so the audit
+trail travels inside the backup. The daemon is the store's only
+writer; `lotor config import <yaml>` migrates a legacy file into it,
+whole, and refuses to run beside a live daemon.
+
+Within the store, one reusable layering mechanism — a named
+**profile** plus overrides scoped *by profile name* — instantiated
+twice:
 
 - **hardware profiles** on radios (board presets: pins, TCXO, RF
   switch, PA caps);
@@ -99,40 +111,13 @@ scoped *by profile name* — instantiated twice:
   scope (see the Vocabulary entry), which is a mesh agreement, not a
   radio fact.
 
-```yaml
-radios:
-  slot1:
-    driver: sx126x-spi
-    profile: rak6421-13300x-slot1     # or "custom" = empty base
-    overrides:
-      rak6421-13300x-slot1:
-        # this board needs nothing beyond the preset
-      custom:
-        spi: /dev/spidev0.0
-        reset_pin: 16
-        busy_pin: 24
-        max_tx_power_dbm: 20      # envelope, not a choice
-        frequency_range: [863e6, 870e6]
-
-relays:
-  meshcore-868:
-    protocol: meshcore
-    radio: slot1
-    profile: eu-868-narrow
-    overrides:
-      eu-868-narrow:
-        tx_power_dbm: 5
-      custom:
-        frequency_hz: 433500000
-        spreading_factor: 10
-```
-
-Properties this buys:
+Profiles themselves are code, shipped with the daemon; the store holds
+only what the operator chose. Properties this buys:
 
 - **Switching profiles is non-destructive.** Overrides live under the
   profile they patch; flipping the `profile` knob carries nothing over
   from the previous choice, and several tuned profiles coexist in the
-  same file.
+  same store.
 - **Strict validation.** Unknown keys are rejected, not ignored — a
   typo is an error at load time, in the driver-parameter spirit of the
   radio library.

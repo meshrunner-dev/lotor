@@ -207,8 +207,14 @@ func Load(path string) (*File, error) {
 	return &f, nil
 }
 
-func (f *File) validate() error {
-	if len(f.Relays) == 0 {
+func (f *File) validate() error { return f.Validate(true) }
+
+// Validate cross-checks an assembled configuration, wherever it was
+// assembled. A file with no relays is a mistake — nobody writes one
+// to run nothing — but a database may honestly hold none yet: a
+// daemon comes up with its console and waits to be configured.
+func (f *File) Validate(requireRelays bool) error {
+	if requireRelays && len(f.Relays) == 0 {
 		return errors.New("no relays declared")
 	}
 	owner := make(map[string]string, len(f.Radios))

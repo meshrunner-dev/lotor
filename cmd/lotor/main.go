@@ -37,6 +37,7 @@ import (
 	"meshrunner.dev/lotor/internal/sentinel"
 	"meshrunner.dev/lotor/internal/single"
 
+	"meshrunner.dev/lotor/internal/confdb"
 	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 	_ "meshrunner.dev/lotor/internal/radio/sx126x"
 	lotorversion "meshrunner.dev/lotor/internal/version"
@@ -52,6 +53,7 @@ type commandLine struct {
 	Run      runCmd           `cmd:""                              help:"Run the relay daemon in the foreground (what the systemd unit does)."`
 	Console  consoleCmd       `cmd:""                              help:"Open the console of a running daemon."`
 	Attach   consoleCmd       `cmd:""                              help:"Alias of console."                                                    hidden:""`
+	Config   configCmd        `cmd:""                              help:"Configuration database tools."`
 	Identity identityCmd      `cmd:""                              help:"Node identity tools."`
 	Version  kong.VersionFlag `help:"Print the version and leave."`
 }
@@ -79,11 +81,64 @@ func (c *identityNewCmd) Run() error {
 }
 
 type runCmd struct {
-	Config   string `default:"/etc/lotor/config.yaml" help:"Configuration file."`
-	LogLevel string `default:"info"                   help:"Zap level: debug, info, warn, error."`
+	DB       string `default:"${default_db}" help:"Configuration database."`
+	LogLevel string `default:"info"          help:"Zap level: debug, info, warn, error."`
 }
 
-func (c *runCmd) Run() error { return run(c.Config, c.LogLevel) }
+func (c *runCmd) Run() error { return run(c.DB, c.LogLevel) }
+
+type configCmd struct {
+	Import configImportCmd `cmd:"" help:"Migrate a YAML configuration file into the database, whole."`
+}
+
+type configImportCmd struct {
+	Path  string `arg:""                                                     help:"The YAML configuration to import."`
+	DB    string `default:"${default_db}"                                    help:"Configuration database."`
+	Force bool   `help:"Replace a configuration the database already holds."`
+}
+
+// Run migrates a file into the store. The file's own validation runs
+// first — a configuration that would not have booted must not become
+// one that will not boot from the database instead.
+func (c *configImportCmd) Run() error {
+	f, err := config.Load(c.Path)
+	if err != nil {
+		return err
+	}
+	// The daemon reads the store at boot and holds the instance lock
+	// while it runs; importing behind its back would change nothing
+	// until the next restart and surprise everyone then.
+	release, err := acquireInstanceLock(c.DB)
+	if err != nil {
+		return fmt.Errorf("%w — stop it, import, start it again", err)
+	}
+	defer release()
+
+	ctx := context.Background()
+	store, err := confdb.Open(ctx, c.DB)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }()
+	if empty, err := store.Empty(ctx); err != nil {
+		return err
+	} else if !empty && !c.Force {
+		return fmt.Errorf("%w (%s) — --force replaces it", confdb.ErrNotEmpty, c.DB)
+	}
+	if err := store.ImportFile(ctx, f, "import:"+c.Path); err != nil {
+		return err
+	}
+	fmt.Printf("imported into %s: %d radio(s), %d relay(s)", c.DB, len(f.Radios), len(f.Relays))
+	if f.Sentinel != nil {
+		fmt.Print(", sentinel")
+	}
+	if f.CLI != nil {
+		fmt.Print(", cli")
+	}
+	fmt.Println()
+	fmt.Println("the YAML file is no longer read — keep it as a keepsake or delete it")
+	return nil
+}
 
 type consoleCmd struct {
 	Addr string `arg:"" help:"CLI address (default ${default_cli})." optional:""`
@@ -99,6 +154,7 @@ func main() {
 		kong.Vars{
 			"version":     version,
 			"default_cli": config.DefaultCLIListen,
+			"default_db":  confdb.DefaultPath,
 		},
 		kong.UsageOnError(),
 	)
@@ -162,22 +218,35 @@ func console(addr string) error {
 	return nil
 }
 
-func run(configPath, logLevel string) error {
+func run(dbPath, logLevel string) error {
 	log, err := newLogger(logLevel)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = log.Sync() }()
 
-	release, err := acquireInstanceLock(configPath)
+	release, err := acquireInstanceLock(dbPath)
 	if err != nil {
 		return err
 	}
 	defer release()
 
-	f, err := config.Load(configPath)
+	ctx0 := context.Background()
+	store, err := confdb.Open(ctx0, dbPath)
 	if err != nil {
 		return err
+	}
+	f, err := store.Load(ctx0)
+	// The daemon does not write configuration yet, so holding the
+	// store open would guard nothing; the instance lock is what keeps
+	// an import from racing a running daemon.
+	_ = store.Close()
+	if err != nil {
+		return err
+	}
+	if len(f.Relays) == 0 {
+		log.Warn("no relays configured — the console is up, waiting to be told what to run",
+			zap.String("db", dbPath))
 	}
 
 	b := bus.New()

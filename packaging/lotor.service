@@ -1,16 +1,17 @@
 # Lotor mesh relay daemon.
 #
 # Runs as the dedicated lotor user: the radio needs nothing but the
-# spi and gpio groups, the journal lives in StateDirectory, the admin
-# console socket in RuntimeDirectory. /etc/lotor stays writable — the
-# CLI and web interface mutate the configuration in place.
+# spi and gpio groups, the configuration database and the journal live
+# in StateDirectory, the admin console socket in RuntimeDirectory.
+# Nothing outside those is written — ProtectSystem=strict holds with
+# no carve-outs.
 [Unit]
 Description=Lotor mesh relay daemon
 Documentation=https://meshrunner.dev/lotor
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/lotor run --config /etc/lotor/config.yaml
+ExecStart=/usr/local/bin/lotor run
 Restart=on-failure
 RestartSec=5
 
@@ -28,7 +29,6 @@ RuntimeDirectoryMode=0750
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 ProtectSystem=strict
-ReadWritePaths=/etc/lotor
 ProtectHome=yes
 PrivateTmp=yes
 DevicePolicy=closed
