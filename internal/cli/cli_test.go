@@ -507,3 +507,32 @@ func TestDiscoverAsksAndReturns(t *testing.T) {
 		t.Errorf("--watch said %q", strings.TrimSpace(out))
 	}
 }
+
+func TestWatchingDiscoverGivesTheConsoleBackOnALine(t *testing.T) {
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	// A window that never fills and never expires: only the operator's
+	// line can end this, which is the point.
+	deps.Relays[0].Discover = func() (<-chan Neighbour, time.Time, error) {
+		return make(chan Neighbour), time.Now().Add(time.Hour), nil
+	}
+
+	done := make(chan string, 1)
+	go func() { done <- run(t, deps, "discover --watch", "status") }()
+	select {
+	case out := <-done:
+		if !strings.Contains(out, "enter stops") {
+			t.Error("the watch never said how to leave it")
+		}
+		if !strings.Contains(out, "the scan runs on") {
+			t.Error("leaving the watch did not say the scan continues")
+		}
+		// The line that stopped it ran as a command, so the console is
+		// genuinely back rather than merely unblocked.
+		if !strings.Contains(out, "meshcore-868") {
+			t.Errorf("the line after the watch never ran:\n%s", out)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a line did not take the console back")
+	}
+}

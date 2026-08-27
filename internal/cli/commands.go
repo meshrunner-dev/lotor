@@ -439,10 +439,31 @@ func (s *session) discover(ctx context.Context, in input) error {
 			time.Until(until).Round(time.Second))
 		return nil
 	}
-	fmt.Fprintf(s.out, "listening %s…\r\n", time.Until(until).Round(time.Second))
+	// A watch holds the console, so a line has to be able to take it
+	// back — and the line that does is itself a command, which could
+	// be another watch. One at a time, as the frame stream does it.
+	if s.watching {
+		return errors.New("already watching")
+	}
+	s.watching = true
+	defer func() { s.watching = false }()
+
+	fmt.Fprintf(s.out, "listening %s (enter stops)…\r\n", time.Until(until).Round(time.Second))
 	answered := 0
 	for {
 		select {
+		case line, ok := <-s.lines:
+			// Answers already in hand are printed before leaving: they
+			// arrived, and dropping them on the way out would be the
+			// one thing watching was for. Stopping the watch does not
+			// stop the scan — the rest keep landing in the
+			// neighbourhood behind us.
+			answered += s.drainAnswers(found)
+			fmt.Fprintf(s.out, "%d answered so far — the scan runs on\r\n", answered)
+			if ok && line != "" {
+				s.command(ctx, line)
+			}
+			return nil
 		case n, ok := <-found:
 			if !ok {
 				if answered == 0 {
@@ -451,13 +472,35 @@ func (s *session) discover(ctx context.Context, in input) error {
 				return nil
 			}
 			answered++
-			fmt.Fprintf(s.out, "%s  %.1f dB\r\n",
-				hex.EncodeToString(n.PubKey[:6]), n.SNR)
+			s.printNeighbour(n)
 		case <-time.After(time.Until(until) + time.Second):
 			fmt.Fprintf(s.out, "%d answered\r\n", answered)
 			return nil
 		case <-ctx.Done():
 			return nil
+		}
+	}
+}
+
+// printNeighbour renders one answer: who, and how well we hear them.
+func (s *session) printNeighbour(n Neighbour) {
+	fmt.Fprintf(s.out, "%s  %.1f dB\r\n", hex.EncodeToString(n.PubKey[:6]), n.SNR)
+}
+
+// drainAnswers prints what has already landed without waiting for
+// more, and reports how many that was.
+func (s *session) drainAnswers(found <-chan Neighbour) int {
+	printed := 0
+	for {
+		select {
+		case n, ok := <-found:
+			if !ok {
+				return printed
+			}
+			s.printNeighbour(n)
+			printed++
+		default:
+			return printed
 		}
 	}
 }
