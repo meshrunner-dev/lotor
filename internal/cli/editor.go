@@ -35,6 +35,10 @@ type editor struct {
 	// line without a newline is still delivered before it.
 	pending error
 
+	// search, when non-nil, is a reverse history search in progress:
+	// keystrokes build the query instead of the line.
+	search *searchState
+
 	// The session's hooks, all optional. They run on the transport's
 	// goroutine — the session guards its own state against the REPL's.
 	prompt   func() string                                  // what to repaint before the line
@@ -83,6 +87,9 @@ func (e *editor) key(c byte) (done bool, line string, err error) {
 		if c == '\n' || c == 0 {
 			return false, "", nil // the \r's partner, already handled
 		}
+	}
+	if e.search != nil {
+		return e.searchKey(c)
 	}
 	switch {
 	case c == '\r' || c == '\n':
@@ -145,8 +152,112 @@ func (e *editor) control(c byte) (finished bool) {
 		e.render()
 	case 0x09: // TAB: completion, at the end of the line only
 		e.completeLine()
+	case 0x12: // Ctrl+R: reverse history search
+		e.search = &searchState{}
+		e.findBack(0)
+		e.renderSearch()
 	}
 	return false
+}
+
+// searchState is one reverse search: the query so far and where in
+// the history the current match sits.
+type searchState struct {
+	query []rune
+	at    int  // history index of the match
+	found bool // whether anything matches the query
+}
+
+// searchKey applies one keystroke to the search. Enter takes the
+// match and finishes the line — the shell family's behaviour, where a
+// found command runs. Escape keeps it for editing instead, Ctrl+C or
+// Ctrl+G abandons, another Ctrl+R walks to an older match, and any
+// other control key leaves the search and applies normally.
+func (e *editor) searchKey(c byte) (done bool, line string, err error) {
+	switch {
+	case c == '\r' || c == '\n':
+		e.crSeen = c == '\r'
+		e.acceptSearch()
+		line, err = e.finishLine()
+		return true, line, err
+	case c == 0x12: // older match
+		if e.search.found {
+			e.findBack(e.search.at + 1)
+		}
+	case c == 0x03 || c == 0x07: // Ctrl+C, Ctrl+G: abandon
+		e.search = nil
+		e.buf, e.cur = e.buf[:0], 0
+		e.render()
+		return false, "", nil
+	case c == 0x7f || c == 0x08: // backspace: shrink the query
+		if n := len(e.search.query); n > 0 {
+			e.search.query = e.search.query[:n-1]
+		}
+		e.findBack(0)
+	case c == 0x1b: // escape: keep the match, back to editing
+		e.acceptSearch()
+		if err := e.escape(); err != nil {
+			return true, "", err
+		}
+		e.render()
+		return false, "", nil
+	case c < 0x20:
+		// Any other control key ends the search and applies to the
+		// accepted line — Ctrl+A lands at its start, and so on.
+		e.acceptSearch()
+		e.render()
+		return e.key(c)
+	default:
+		raw := []byte{c}
+		for n := runeLen(c) - 1; n > 0; n-- {
+			b, err := e.in.ReadByte()
+			if err != nil {
+				break
+			}
+			raw = append(raw, b)
+		}
+		r, _ := utf8.DecodeRune(raw)
+		e.search.query = append(e.search.query, r)
+		e.findBack(0)
+	}
+	e.renderSearch()
+	return false, "", nil
+}
+
+// findBack looks for the newest history line at or after index from
+// that contains the query, and puts it in the buffer.
+func (e *editor) findBack(from int) {
+	q := string(e.search.query)
+	for i := from; ; i++ {
+		line, ok := e.hist.at(i)
+		if !ok {
+			e.search.found = false
+			return
+		}
+		if strings.Contains(line, q) {
+			e.search.at, e.search.found = i, true
+			e.buf = []rune(line)
+			e.cur = len(e.buf)
+			return
+		}
+	}
+}
+
+// acceptSearch leaves search mode, keeping whatever the buffer holds.
+func (e *editor) acceptSearch() { e.search = nil }
+
+// renderSearch paints the search line: the query, the match, and a
+// word when nothing matches.
+func (e *editor) renderSearch() {
+	if e.search == nil {
+		return
+	}
+	state := ""
+	if !e.search.found {
+		state = "failing "
+	}
+	fmt.Fprintf(e.out, "\r\x1b[K(%sreverse-search)'%s': %s",
+		state, string(e.search.query), string(e.buf))
 }
 
 // completeLine asks the session what the last word could become. One

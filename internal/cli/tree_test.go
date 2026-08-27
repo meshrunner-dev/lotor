@@ -171,14 +171,35 @@ func TestTreeSetIsAdminOnly(t *testing.T) {
 
 func TestTreeExportIsPasteableAndKeepsSecrets(t *testing.T) {
 	out := run(t, testDeps(t), "/relay meshcore-868 export")
-	if !strings.Contains(out, `set node_name="test 🦝"`) {
-		t.Errorf("export lost the spaced value's quotes:\n%s", out)
+	// The line is absolute — pasteable from anywhere — and quoted
+	// values keep their quotes.
+	if !strings.Contains(out, "/relay add meshcore-868 ") ||
+		!strings.Contains(out, `node_name="test 🦝"`) {
+		t.Errorf("export is not a recreating line:\n%s", out)
 	}
 	if strings.Contains(out, "b5445dd625d531fc") {
 		t.Fatalf("export carried the private key:\n%s", out)
 	}
 	if !strings.Contains(out, "identity is secret") {
 		t.Errorf("export does not say what it cannot carry:\n%s", out)
+	}
+}
+
+func TestRootExportCoversEverything(t *testing.T) {
+	deps := testDeps(t)
+	deps.Traces["sentinel"] = []config.Trace{
+		{Key: "journal", Value: "/var/lib/lotor/journal.db", Source: "config"},
+	}
+	out := run(t, deps, "/export")
+	// Radios come before the relays that claim them: the paste has to
+	// work in order.
+	radioAt := strings.Index(out, "/radio add slot1")
+	relayAt := strings.Index(out, "/relay add meshcore-868")
+	if radioAt == -1 || relayAt == -1 || radioAt > relayAt {
+		t.Errorf("export order or coverage wrong (radio %d, relay %d):\n%s", radioAt, relayAt, out)
+	}
+	if !strings.Contains(out, "/sentinel set journal=/var/lib/lotor/journal.db") {
+		t.Errorf("the singleton block is missing:\n%s", out)
 	}
 }
 
@@ -269,5 +290,71 @@ func TestCompletionReachesAttributesAndEnums(t *testing.T) {
 	add, _ = s.complete("/relay add r2 protocol=meshcore node_")
 	if add != "name=" {
 		t.Fatalf("add completion = %q", add)
+	}
+}
+
+func TestTheRootIsAContextLikeAnyOther(t *testing.T) {
+	deps := testDeps(t)
+	deps.Traces["sentinel"] = []config.Trace{
+		{Key: "journal", Value: "/var/lib/lotor/journal.db", Source: "config"},
+	}
+	// The tree's own verbs answer at the root, with or without the
+	// slash — an operator should not have to know which grammar a word
+	// belongs to before typing it.
+	for _, cmd := range []string{"export", "/export"} {
+		out := run(t, deps, cmd)
+		if !strings.Contains(out, "/radio add slot1") {
+			t.Errorf("%q exported nothing:\n%s", cmd, out)
+		}
+	}
+	for _, cmd := range []string{"print", "/print"} {
+		out := run(t, deps, cmd)
+		if !strings.Contains(out, "/relay") || !strings.Contains(out, "/sentinel") {
+			t.Errorf("%q listed no contexts:\n%s", cmd, out)
+		}
+	}
+	// A flat command at the root still is one.
+	if out := run(t, deps, "status"); !strings.Contains(out, "daemon") {
+		t.Errorf("the flat commands stopped working:\n%s", out)
+	}
+	// And a mutation verb with nowhere to work says so usefully.
+	deps.Privilege = Admin
+	deps.Mutate = func(context.Context, string, string, map[string]string, []string, string) (string, error) {
+		t.Fatal("a rootless set reached the manager")
+		return "", nil
+	}
+	if out := run(t, deps, "set node_name=x"); !strings.Contains(out, "needs somewhere to work") {
+		t.Errorf("a rootless set said %q", strings.TrimSpace(out))
+	}
+}
+
+func TestExportColoursItsSymbolClasses(t *testing.T) {
+	deps := testDeps(t)
+	s := &session{deps: deps, colors: true, out: &strings.Builder{}}
+	var b strings.Builder
+	s.out = &b
+	s.exportInstance(scopeRelay, "meshcore-868")
+	got := b.String()
+	if !strings.Contains(got, cCyan+"/relay"+cReset) ||
+		!strings.Contains(got, cGreen+"add"+cReset) ||
+		!strings.Contains(got, cCyan+"meshcore-868"+cReset) {
+		t.Errorf("path and verb are not coloured:\n%q", got)
+	}
+	if !strings.Contains(got, cYellow+"node_name"+cReset) {
+		t.Errorf("attribute names are not coloured:\n%q", got)
+	}
+	if !strings.Contains(got, cDim+"# ") {
+		t.Errorf("the secret comment is not dimmed:\n%q", got)
+	}
+	// A pipe reads the same text with nothing in it: an export is also
+	// something machines read.
+	var plain strings.Builder
+	p := &session{deps: deps, out: &plain}
+	p.exportInstance(scopeRelay, "meshcore-868")
+	if strings.Contains(plain.String(), "\x1b[") {
+		t.Errorf("a plain session got escape codes:\n%q", plain.String())
+	}
+	if !strings.Contains(plain.String(), "/relay add meshcore-868 ") {
+		t.Errorf("the plain line lost its shape:\n%q", plain.String())
 	}
 }

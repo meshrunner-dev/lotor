@@ -60,9 +60,14 @@ func testDeps(t *testing.T) Deps {
 			},
 		}},
 		Sentinel: sen,
+		Radios: []RadioInfo{{
+			Name: "slot1", Driver: "sx126x-spi", Relay: "meshcore-868",
+		}},
 		Traces: map[string][]config.Trace{
 			"radio slot1": {
 				{Key: "busy_pin", Source: "profile:rak6421-13300x-slot1", Value: 24},
+				{Key: "driver", Source: "config", Value: "sx126x-spi"},
+				{Key: "profile", Source: "config", Value: "rak6421-13300x-slot1"},
 				{Key: "spi", Source: "override:rak6421-13300x-slot1", Value: "/dev/spidev0.0"},
 			},
 			"relay meshcore-868": {

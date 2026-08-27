@@ -128,8 +128,9 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 		r = asm.relay
 		m.infos[name] = asm.info
 		m.radios[rc.Radio] = asm.radio
-		m.traces["radio "+rc.Radio] = asm.radioTraces
-		m.traces["relay "+name] = asm.relayTraces
+		m.traces["radio "+rc.Radio] = withStructural(asm.radioTraces,
+			radioStructural(m.file.Radios[rc.Radio]))
+		m.traces["relay "+name] = withStructural(asm.relayTraces, relayStructural(rc))
 	}
 	rctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -173,6 +174,13 @@ func (m *manager) RadioInfos() []cli.RadioInfo {
 	for _, i := range m.radios {
 		out = append(out, i)
 	}
+	// The configured-but-unclaimed radios: real objects, no envelope
+	// to show yet.
+	for name, rd := range m.file.Radios {
+		if _, live := m.radios[name]; !live {
+			out = append(out, cli.RadioInfo{Name: name, Driver: rd.Driver})
+		}
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
@@ -182,6 +190,21 @@ func (m *manager) Traces() map[string][]config.Trace {
 	defer m.mu.Unlock()
 	out := make(map[string][]config.Trace, len(m.traces)+2)
 	maps.Copy(out, m.traces)
+	// A radio nobody claims yet has no assembly to trace, but it is
+	// configuration all the same: resolve its layers without hardware
+	// so print and export see it like any other.
+	for name, rd := range m.file.Radios {
+		if _, live := out["radio "+name]; live {
+			continue
+		}
+		rows := radioStructural(rd)
+		if drv, err := radio.Lookup(rd.Driver); err == nil {
+			if _, traces, rerr := rd.Layered.Resolve(drv.Presets); rerr == nil {
+				rows = withStructural(traces, rows)
+			}
+		}
+		out["radio "+name] = rows
+	}
 	// The singletons have no layering, so their "provenance" is the
 	// store itself — synthesised here so print works the same way
 	// everywhere.
@@ -202,6 +225,55 @@ func (m *manager) Traces() map[string][]config.Trace {
 		}
 		out[confdb.KindCLI] = rows
 	}
+	return out
+}
+
+// The structural rows: what an object IS, rendered beside what its
+// layers resolved, so print and export see one coherent surface.
+
+func relayStructural(rc config.Relay) []config.Trace {
+	rows := []config.Trace{
+		{Key: attrProtocol, Value: rc.Protocol, Source: sourceConfig},
+		{Key: attrRadio, Value: rc.Radio, Source: sourceConfig},
+		{Key: attrProfile, Value: profileName(rc.Layered), Source: sourceConfig},
+	}
+	if rc.NoiseHistory != nil {
+		rows = append(rows, config.Trace{Key: attrNoiseHistory, Value: *rc.NoiseHistory, Source: sourceConfig})
+	}
+	if rc.TX != nil {
+		rows = append(rows,
+			config.Trace{Key: attrTXMode, Value: rc.TX.Mode, Source: sourceConfig},
+			config.Trace{Key: attrTXExhausted, Value: rc.TX.LBTExhausted, Source: sourceConfig},
+			config.Trace{Key: attrTXQueueDepth, Value: rc.TX.QueueDepth, Source: sourceConfig},
+		)
+		if rc.TX.LBTThresholdDB != 0 {
+			rows = append(rows, config.Trace{Key: attrTXThreshold, Value: rc.TX.LBTThresholdDB, Source: sourceConfig})
+		}
+	}
+	return rows
+}
+
+func radioStructural(rd config.Radio) []config.Trace {
+	return []config.Trace{
+		{Key: attrDriver, Value: rd.Driver, Source: sourceConfig},
+		{Key: attrProfile, Value: profileName(rd.Layered), Source: sourceConfig},
+	}
+}
+
+func profileName(l config.Layered) string {
+	if l.Profile == "" {
+		return config.CustomProfile
+	}
+	return l.Profile
+}
+
+// withStructural merges the structural rows into a resolved trace
+// set, sorted like the rest.
+func withStructural(traces, structural []config.Trace) []config.Trace {
+	out := make([]config.Trace, 0, len(traces)+len(structural))
+	out = append(out, traces...)
+	out = append(out, structural...)
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out
 }
 

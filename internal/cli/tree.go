@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"meshrunner.dev/lotor/internal/config"
@@ -28,7 +29,26 @@ import (
 // absolute path from anywhere, or anything at all once the session
 // stands inside a context.
 func (s *session) treeLine(line string) bool {
-	return line == "?" || strings.HasPrefix(line, "/") || len(s.curPath()) > 0
+	if line == "?" || strings.HasPrefix(line, "/") || len(s.curPath()) > 0 {
+		return true
+	}
+	// The tree's own verbs work from the root without a slash. Standing
+	// at the root is standing somewhere, so "export" there means what
+	// "/export" means, and an operator should not have to know which
+	// grammar a word belongs to before typing it.
+	first, _, _ := strings.Cut(line, " ")
+	return isTreeVerb(first)
+}
+
+// isTreeVerb reports whether a word is one of the tree's own. None of
+// them names a flat command, which is what lets the root serve both
+// vocabularies without either shadowing the other.
+func isTreeVerb(word string) bool {
+	switch word {
+	case verbPrint, verbSet, verbUnset, verbAdd, verbRemove, verbExport:
+		return true
+	}
+	return false
 }
 
 // curPath returns the session's context, safe from any goroutine —
@@ -174,10 +194,12 @@ func (s *session) tree(ctx context.Context, line string) {
 		fmt.Fprint(s.out, s.treeHelp(path))
 	case verb == cmdQuit || verb == "exit":
 		s.dispatch(ctx, rest)
-	case len(path) == 0:
-		// A verb at the root is a flat command — "/status" from a
-		// context lands here with path emptied.
-		s.dispatch(ctx, rest)
+	case verb == verbExport:
+		// Every depth answers export — the root's is the whole
+		// configuration, the backup an operator can read.
+		if err := s.treeExport(path); err != nil {
+			fmt.Fprintf(s.out, "error: %s\r\n", err)
+		}
 	case verb == verbPrint:
 		s.treePrint(ctx, path)
 	case verb == verbSet || verb == verbUnset:
@@ -188,10 +210,12 @@ func (s *session) tree(ctx context.Context, line string) {
 		if err := s.treeCreateRemove(ctx, path, verb, args); err != nil {
 			fmt.Fprintf(s.out, "error: %s\r\n", err)
 		}
-	case verb == verbExport:
-		if err := s.treeExport(path); err != nil {
-			fmt.Fprintf(s.out, "error: %s\r\n", err)
-		}
+	case len(path) == 0:
+		// Anything else at the root is a flat command — "/status" from
+		// a context lands here with the path emptied. The tree's own
+		// verbs are answered above, so the root is a context like any
+		// other rather than a place where they stop working.
+		s.dispatch(ctx, rest)
 	case len(path) == 2 && s.mountedVerb(path[0], verb):
 		// The flat command runs as itself, told which instance asked.
 		s.dispatch(ctx, append(append([]string{verb}, args...), "--"+scopeRelay, path[1]))
@@ -218,8 +242,12 @@ func (s *session) treeCreateRemove(ctx context.Context, path []string, verb stri
 	if s.deps.Privilege != Admin {
 		return fmt.Errorf("%s is an admin verb — use the local console socket", verb)
 	}
+	if len(path) == 0 {
+		return fmt.Errorf("%s needs a collection — /relay %s <name> …, or \"?\" for the contexts",
+			verb, verb)
+	}
 	if len(path) != 1 {
-		return fmt.Errorf("%s works from the collection — /relay %s <name> …", verb, verb)
+		return fmt.Errorf("%s works from the collection — /%s %s <name> …", verb, path[0], verb)
 	}
 	kind := path[0]
 	if s.isSingleton(path) {
@@ -274,8 +302,12 @@ func (s *session) treeSet(ctx context.Context, path []string, verb string, args 
 	if s.deps.Privilege != Admin {
 		return fmt.Errorf("%s is an admin verb — use the local console socket", verb)
 	}
+	if len(path) == 0 {
+		return fmt.Errorf("%s needs somewhere to work — /relay <name> %s …, or \"?\" for the contexts",
+			verb, verb)
+	}
 	if len(path) != 2 && !s.isSingleton(path) {
-		return fmt.Errorf("%s works on an instance — /relay <name> %s …", verb, verb)
+		return fmt.Errorf("%s works on an instance — /%s <name> %s …", verb, path[0], verb)
 	}
 	if len(args) == 0 {
 		return fmt.Errorf("usage: %s attr=value … | unset attr …", verbSet)
@@ -308,31 +340,119 @@ func (s *session) treeSet(ctx context.Context, path []string, verb string, args 
 	return nil
 }
 
-// treeExport prints an instance's explicit configuration as the set
-// lines that would recreate it — pasteable, which is not scripting.
-// Secrets stay masked: an export is for reading and diffing, and a
-// private key does not belong in either.
+// treeExport prints configuration as the absolute lines that would
+// recreate it — pasteable anywhere, which is not scripting. From the
+// root it exports everything, from a collection its instances, from
+// an instance itself. Secrets stay masked: an export is for reading
+// and diffing, and a private key does not belong in either.
 func (s *session) treeExport(path []string) error {
-	if len(path) != 2 {
-		return errors.New("export works on an instance")
+	switch len(path) {
+	case 0:
+		// Radios before the relays that claim them: the paste has to
+		// work in order.
+		for _, kind := range []string{scopeRadio, scopeRelay} {
+			names := make([]string, 0, 2)
+			for name := range s.instances(kind) {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				s.exportInstance(kind, name)
+			}
+		}
+		for i := range s.deps.Kinds {
+			if k := s.deps.Kinds[i]; k.Singleton {
+				s.exportSingleton(k.Name)
+			}
+		}
+		return nil
+	case 1:
+		if s.isSingleton(path) {
+			s.exportSingleton(path[0])
+			return nil
+		}
+		names := make([]string, 0, 2)
+		for name := range s.instances(path[0]) {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			s.exportInstance(path[0], name)
+		}
+		return nil
+	default:
+		if _, ok := s.traces()[path[0]+" "+path[1]]; !ok {
+			return fmt.Errorf("no configuration recorded for %s %s", path[0], path[1])
+		}
+		s.exportInstance(path[0], path[1])
+		return nil
 	}
-	traces, ok := s.traces()[path[0]+" "+path[1]]
+}
+
+// exportInstance prints one add line that recreates the object: the
+// structural attributes and the explicit overrides, never the
+// preset's own values.
+func (s *session) exportInstance(kind, name string) {
+	traces, ok := s.traces()[kind+" "+name]
 	if !ok {
-		return fmt.Errorf("no configuration recorded for %s %s", path[0], path[1])
+		return
 	}
-	secret := s.secretAttrs(path[0] + " " + path[1])
-	fmt.Fprintf(s.out, "# /%s %s\r\n", path[0], path[1])
+	secret := s.secretAttrs(kind + " " + name)
+	var pairs [][2]string
+	var masked []string
 	for _, t := range traces {
-		if !strings.HasPrefix(t.Source, "override:") {
-			continue // the preset's own values need no restating
+		if strings.HasPrefix(t.Source, "profile:") {
+			continue // the preset restates itself
 		}
 		if secret[t.Key] {
-			fmt.Fprintf(s.out, "# %s is secret — an export cannot carry it\r\n", t.Key)
+			masked = append(masked, t.Key)
 			continue
 		}
-		fmt.Fprintf(s.out, "set %s=%s\r\n", t.Key, exportValue(t.Value))
+		pairs = append(pairs, [2]string{t.Key, exportValue(t.Value)})
 	}
-	return nil
+	s.exportLine(kind, verbAdd, name, pairs)
+	for _, key := range masked {
+		s.exportComment(fmt.Sprintf("%s %s: %s is secret — an export cannot carry it",
+			kind, name, key))
+	}
+}
+
+// exportSingleton prints one set line for a block that exists.
+func (s *session) exportSingleton(kind string) {
+	traces, ok := s.traces()[kind]
+	if !ok {
+		return
+	}
+	pairs := make([][2]string, 0, len(traces))
+	for _, t := range traces {
+		pairs = append(pairs, [2]string{t.Key, exportValue(t.Value)})
+	}
+	s.exportLine(kind, verbSet, "", pairs)
+}
+
+// exportLine writes one recreating line, coloured by symbol class the
+// way the line under the operator's fingers is: the context and the
+// instance name read as places, the verb as a verb, the attribute
+// names as attributes. A terminal shows the structure at a glance; a
+// pipe gets the same text with nothing in it, because an export is
+// also something machines read.
+func (s *session) exportLine(kind, verb, name string, pairs [][2]string) {
+	var b strings.Builder
+	b.WriteString(s.color(cCyan, "/"+kind))
+	b.WriteString(" " + s.color(cGreen, verb))
+	if name != "" {
+		b.WriteString(" " + s.color(cCyan, name))
+	}
+	for _, p := range pairs {
+		b.WriteString(" " + s.color(cYellow, p[0]) + s.color(cDim, "=") + p[1])
+	}
+	fmt.Fprintf(s.out, "%s\r\n", b.String())
+}
+
+// exportComment writes a line the paste ignores, dimmed so it reads as
+// an aside rather than as configuration.
+func (s *session) exportComment(text string) {
+	fmt.Fprintf(s.out, "%s\r\n", s.color(cDim, "# "+text))
 }
 
 // exportValue renders one value the way set accepts it back.
@@ -378,6 +498,21 @@ func (s *session) mountedVerb(kind, verb string) bool {
 // treePrint shows a context: a kind lists its instances, an instance
 // shows its effective configuration with provenance.
 func (s *session) treePrint(ctx context.Context, path []string) {
+	if len(path) == 0 {
+		// The root holds no values of its own: what it can show is
+		// what stands below it.
+		tb := &table{}
+		for i := range s.deps.Kinds {
+			k := s.deps.Kinds[i]
+			held := "one block"
+			if !k.Singleton {
+				held = strconv.Itoa(len(s.instances(k.Name)))
+			}
+			tb.row("/"+k.Name, held, k.Doc)
+		}
+		_ = tb.flush(s.out)
+		return
+	}
 	if s.isSingleton(path) {
 		if err := s.showTraces(path[0]); err != nil {
 			fmt.Fprintf(s.out, "error: %s\r\n", err)
@@ -391,7 +526,11 @@ func (s *session) treePrint(ctx context.Context, path []string) {
 		}
 		tb := &table{}
 		for _, r := range s.radios() {
-			tb.row(r.Name, r.Driver, "relay "+r.Relay)
+			owner := "unclaimed"
+			if r.Relay != "" {
+				owner = "relay " + r.Relay
+			}
+			tb.row(r.Name, r.Driver, owner)
 		}
 		if err := tb.flush(s.out); err == nil && len(s.radios()) == 0 {
 			fmt.Fprint(s.out, "no radios\r\n")
@@ -506,6 +645,7 @@ func (s *session) candidatesAt(path []string, absolute bool) []string {
 		for i := range s.deps.Kinds {
 			cands = append(cands, s.deps.Kinds[i].Name)
 		}
+		cands = append(cands, verbExport)
 		if !absolute {
 			cands = append(cands, commandNames()...)
 		}
@@ -517,7 +657,7 @@ func (s *session) candidatesAt(path []string, absolute bool) []string {
 		for name := range s.instances(path[0]) {
 			cands = append(cands, name)
 		}
-		cands = append(cands, verbPrint, verbAdd, verbRemove)
+		cands = append(cands, verbPrint, verbAdd, verbRemove, verbExport)
 	case 2:
 		cands = append(cands, verbPrint, verbSet, verbUnset, verbExport,
 			cmdNeighbours, cmdScopes, cmdDiscover, cmdAdvert)

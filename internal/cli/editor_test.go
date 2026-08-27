@@ -225,3 +225,45 @@ func TestShellKillsAndMotions(t *testing.T) {
 		t.Fatalf("ctrl+w mid-line = %q", got)
 	}
 }
+
+func TestReverseSearchFindsAndRuns(t *testing.T) {
+	// Two commands in history; Ctrl+R, a query, Enter runs the match.
+	got := edit(t, "scopes\rstatus\r\x12sco\r")
+	if len(got) != 3 || got[2] != "scopes" {
+		t.Fatalf("lines = %q, want the search to yield scopes", got)
+	}
+}
+
+func TestReverseSearchWalksOlder(t *testing.T) {
+	// Two matches for "s": Ctrl+R twice reaches the older one.
+	got := edit(t, "scopes\rstatus\r\x12s\x12\r")
+	if len(got) != 3 || got[2] != "scopes" {
+		t.Fatalf("lines = %q, want the second Ctrl+R to reach scopes", got)
+	}
+}
+
+func TestReverseSearchArrowKeepsTheMatchForEditing(t *testing.T) {
+	// An arrow leaves search mode with the match in the buffer —
+	// cursor keys mean "I want to edit this one" — and typing then
+	// appends to it.
+	got := edit(t, "scopes\r\x12sco"+keyRight+"!\r")
+	if len(got) != 2 || got[1] != "scopes!" {
+		t.Fatalf("lines = %q, want scopes! after the arrow and an edit", got)
+	}
+}
+
+func TestReverseSearchAbandons(t *testing.T) {
+	// Ctrl+G abandons: the line comes back empty and Enter sends it.
+	got := edit(t, "scopes\r\x12sco\x07quit\r")
+	if len(got) != 2 || got[1] != "quit" {
+		t.Fatalf("lines = %q, want the search abandoned", got)
+	}
+}
+
+func TestReverseSearchBackspaceWidens(t *testing.T) {
+	// A too-narrow query fails; backspace widens it back to a match.
+	got := edit(t, "scopes\r\x12scoz\x7f\r")
+	if len(got) != 2 || got[1] != "scopes" {
+		t.Fatalf("lines = %q", got)
+	}
+}
