@@ -75,6 +75,22 @@ type params struct {
 	// announces no position.
 	NodeLat float64 `yaml:"node_lat"`
 	NodeLon float64 `yaml:"node_lon"`
+	// DefaultScope is the transport scope this relay speaks in: what
+	// it stamps on the adverts it originates and on a reply whose
+	// question named no scope. Empty speaks unscoped, which is what a
+	// relay does on a mesh that has no scopes. See the Vocabulary —
+	// this is not a radio region.
+	DefaultScope string `yaml:"default_scope"`
+	// AcceptScopes lists the scopes whose floods this relay carries.
+	// A scoped flood matching none of them is somebody else's
+	// business, exactly as the reference treats one whose code it
+	// cannot match.
+	AcceptScopes []string `yaml:"accept_scopes"`
+	// AcceptUnscoped decides whether plain floods are relayed at all —
+	// the reference's wildcard and its deny-flood bit. Unset relays
+	// them, which is what every mesh without scopes needs.
+	AcceptUnscoped *bool `yaml:"accept_unscoped"`
+
 	// GuestAccess decides whether a stranger may open a read-only
 	// session at all — status, telemetry, the neighbourhood, nothing
 	// that changes anything. Blocked by default: a repeater owes the
@@ -137,6 +153,7 @@ type engine struct {
 	nextFloodAdvert time.Time
 	nextLocalAdvert time.Time
 	limits          limits
+	scopes          *scopeTable
 	discoverySince  time.Time
 	clockWarned     bool
 	acl             *acl
@@ -171,6 +188,9 @@ func paramsFrom(cfg map[string]any) (params, error) {
 	if err := normalizeGuest(&p); err != nil {
 		return p, err
 	}
+	if err := normalizeScopes(&p); err != nil {
+		return p, err
+	}
 	// The reference's own field sizes (char[32] / char[120]); past
 	// them an owner answer no longer fits a packet and the node goes
 	// quiet on a question it should serve.
@@ -189,6 +209,12 @@ func paramsFrom(cfg map[string]any) (params, error) {
 			"meshcore params: advert_flood_interval %s — the reference accepts 3..168 hours; negative disables", v)
 	}
 	return p, nil
+}
+
+// acceptUnscoped resolves the wildcard default: a relay carries plain
+// floods unless told otherwise.
+func (p params) acceptUnscoped() bool {
+	return p.AcceptUnscoped == nil || *p.AcceptUnscoped
 }
 
 // How a stranger may open a session.
@@ -283,6 +309,7 @@ func newEngine(relayName string, p params, id *meshcore.LocalIdentity,
 		neighbours: newNeighbourTable(),
 		acl:        newACL(),
 		limits:     newLimits(),
+		scopes:     newScopeTable(p),
 	}
 }
 
