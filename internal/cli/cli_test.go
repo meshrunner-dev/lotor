@@ -14,6 +14,7 @@ import (
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/relay"
+	"meshrunner.dev/lotor/internal/schema"
 	"meshrunner.dev/lotor/internal/sentinel"
 	"meshrunner.dev/lotor/internal/txn"
 )
@@ -44,6 +45,7 @@ func testDeps(t *testing.T) Deps {
 		Version: "test",
 		Started: time.Now().Add(-90 * time.Minute),
 		Bus:     b,
+		Kinds:   testKinds(),
 		Relays: []RelayInfo{{
 			Name: "meshcore-868", Protocol: "meshcore",
 			Radio: "slot1", Driver: "sx126x-spi",
@@ -63,7 +65,36 @@ func testDeps(t *testing.T) Deps {
 				{Key: "busy_pin", Source: "profile:rak6421-13300x-slot1", Value: 24},
 				{Key: "spi", Source: "override:rak6421-13300x-slot1", Value: "/dev/spidev0.0"},
 			},
+			"relay meshcore-868": {
+				{Key: "identity", Source: "override:eu-868-narrow", Value: "b5445dd625d531fc"},
+				{Key: "node_name", Source: "override:eu-868-narrow", Value: "test 🦝"},
+			},
 		},
+	}
+}
+
+// testKinds is a hand-rolled vocabulary: the shape the wiring builds,
+// without dragging the protocol and driver registries into CLI tests.
+func testKinds() []schema.Kind {
+	return []schema.Kind{
+		{
+			Name: "relay", Doc: "one protocol instance", ChoiceAttr: "protocol",
+			Attrs: []schema.Attr{{Name: "protocol", Type: schema.String, Doc: "the protocol"}},
+			Contributed: func(choice string) []schema.Attr {
+				if choice != "meshcore" {
+					return nil
+				}
+				return []schema.Attr{
+					{Name: "node_name", Type: schema.String, Doc: "the name on the air"},
+					{Name: "identity", Type: schema.String, Secret: true, Doc: "the private key"},
+				}
+			},
+		},
+		{
+			Name: "radio", Doc: "one transceiver", ChoiceAttr: "driver",
+			Attrs: []schema.Attr{{Name: "driver", Type: schema.String, Doc: "the driver"}},
+		},
+		{Name: "sentinel", Doc: "the journal", Singleton: true},
 	}
 }
 

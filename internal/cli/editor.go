@@ -34,6 +34,13 @@ type editor struct {
 	// pending holds the read error once the stream ends, so a final
 	// line without a newline is still delivered before it.
 	pending error
+
+	// The session's hooks, all optional. They run on the transport's
+	// goroutine — the session guards its own state against the REPL's.
+	prompt   func() string                                  // what to repaint before the line
+	complete func(line string) (add string, hints []string) // TAB
+	helpFor  func(line string) string                       // the '?' key
+	paint    func(line string) string                       // colours, same width
 }
 
 func newEditor(r io.Reader, w io.Writer) *editor {
@@ -96,6 +103,12 @@ func (e *editor) key(c byte) (done bool, line string, err error) {
 			line, err = e.finishLine()
 			return true, line, err
 		}
+	case c == '?' && e.helpFor != nil && e.cur == len(e.buf) && !insideQuote(e.buf):
+		// The console family's help key: describe where the line
+		// stands, then hand the draft back untouched. A '?' inside
+		// quotes is text — a password may carry one.
+		fmt.Fprint(e.out, "\r\n"+e.helpFor(string(e.buf)))
+		e.render()
 	default: // printable byte; multi-byte runes assemble
 		if err := e.insertByte(c); err != nil {
 			return true, "", err
@@ -130,8 +143,39 @@ func (e *editor) control(c byte) (finished bool) {
 	case 0x05: // Ctrl+E: end of line
 		e.cur = len(e.buf)
 		e.render()
+	case 0x09: // TAB: completion, at the end of the line only
+		e.completeLine()
 	}
 	return false
+}
+
+// completeLine asks the session what the last word could become. One
+// candidate finishes the word; several print below the line and the
+// draft comes back with whatever prefix they share.
+func (e *editor) completeLine() {
+	if e.complete == nil || e.cur != len(e.buf) {
+		return
+	}
+	add, hints := e.complete(string(e.buf))
+	if add != "" && e.byteLen()+len(add) <= maxLineBytes {
+		e.buf = append(e.buf, []rune(add)...)
+		e.cur = len(e.buf)
+	}
+	if len(hints) > 0 {
+		fmt.Fprint(e.out, "\r\n"+strings.Join(hints, "  ")+"\r\n")
+	}
+	e.render()
+}
+
+// insideQuote reports an unclosed double quote before the cursor.
+func insideQuote(buf []rune) bool {
+	open := false
+	for _, r := range buf {
+		if r == '"' {
+			open = !open
+		}
+	}
+	return open
 }
 
 // backspace removes the rune before the cursor; at the end of the
@@ -274,9 +318,11 @@ func (e *editor) insertByte(c byte) error {
 	atEnd := e.cur == len(e.buf)
 	e.buf = append(e.buf[:e.cur], append([]rune{r}, e.buf[e.cur:]...)...)
 	e.cur++
-	if atEnd {
+	if atEnd && e.paint == nil {
 		// Appending at the end just echoes the keystroke: terminals
-		// stay smooth and piped transcripts stay readable.
+		// stay smooth and piped transcripts stay readable. A painted
+		// line repaints instead — the keystroke may have changed what
+		// class every token belongs to.
 		fmt.Fprint(e.out, string(r))
 	} else {
 		e.render()
@@ -319,10 +365,20 @@ func (e *editor) set(line string) {
 }
 
 // render repaints the line and parks the cursor, width-aware — the
-// mesh's emoji count for the cells they occupy here too.
+// mesh's emoji count for the cells they occupy here too. The cursor
+// arithmetic runs on the plain text: colours change bytes, never
+// cells.
 func (e *editor) render() {
+	prompt := "> "
+	if e.prompt != nil {
+		prompt = e.prompt()
+	}
 	line := string(e.buf)
-	fmt.Fprintf(e.out, "\r\x1b[K> %s", line)
+	shown := line
+	if e.paint != nil {
+		shown = e.paint(line)
+	}
+	fmt.Fprintf(e.out, "\r\x1b[K%s%s", prompt, shown)
 	if back := runewidth.StringWidth(line) - runewidth.StringWidth(string(e.buf[:e.cur])); back > 0 {
 		fmt.Fprintf(e.out, "\x1b[%dD", back)
 	}

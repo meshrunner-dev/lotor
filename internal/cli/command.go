@@ -103,9 +103,9 @@ func daemonCommands() []*command {
 func relayCommands() []*command {
 	return []*command{
 		{
-			name: "scopes",
+			name: cmdScopes,
 			forms: []form{
-				{"scopes", "the transport scopes this relay carries"},
+				{cmdScopes, "the transport scopes this relay carries"},
 				{"scopes ask <pubkey>", "ask a neighbour which it carries"},
 			},
 			detail: []string{
@@ -119,9 +119,9 @@ func relayCommands() []*command {
 			run:    (*session).scopes,
 		},
 		{
-			name: "discover",
+			name: cmdDiscover,
 			forms: []form{
-				{"discover", "ask the neighbourhood who is there"},
+				{cmdDiscover, "ask the neighbourhood who is there"},
 			},
 			detail: []string{
 				"discover [--watch] [--relay R]",
@@ -136,14 +136,14 @@ func relayCommands() []*command {
 			run:   (*session).discover,
 		},
 		{
-			name:   "neighbours",
-			forms:  []form{{"neighbours", "repeaters heard with no relay in between"}},
+			name:   cmdNeighbours,
+			forms:  []form{{cmdNeighbours, "repeaters heard with no relay in between"}},
 			detail: []string{"neighbours [--relay R]"},
 			flags:  []flagSpec{{name: scopeRelay, valued: true}},
 			run:    (*session).neighbours,
 		},
 		{
-			name: "advert",
+			name: cmdAdvert,
 			forms: []form{
 				{"advert [flood]", "announce this node now: zero-hop, or flood the mesh"},
 			},
@@ -240,6 +240,15 @@ func sessionCommands() []*command {
 	}
 }
 
+// commandNames lists every flat command, for the tree's completion.
+func commandNames() []string {
+	out := make([]string, 0, len(commands))
+	for _, c := range commands {
+		out = append(out, c.name)
+	}
+	return out
+}
+
 // lookup resolves a command by name or alias.
 func lookup(name string) *command {
 	for _, c := range commands {
@@ -275,7 +284,7 @@ func (c *command) parse(args []string) (input, error) {
 			return in, fmt.Errorf("--%s wants a value", key)
 		default:
 			i++
-			in.opts[key] = args[i]
+			in.opts[key] = args[i] //nolint:gosec // the case above proves i+1 < len(args)
 		}
 	}
 	if len(in.pos) > c.maxPos {

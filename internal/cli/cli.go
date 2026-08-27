@@ -6,6 +6,8 @@
 package cli
 
 import (
+	"sync"
+
 	"meshrunner.dev/lotor/internal/schema"
 
 	"bufio"
@@ -35,6 +37,14 @@ const (
 	optLast    = "last"
 	cmdFrames  = "frames"
 	cmdQuit    = "quit"
+
+	// The relay-scoped commands, named once: the flat table and the
+	// context tree both mount them.
+	cmdScopes     = "scopes"
+	cmdDiscover   = "discover"
+	cmdNeighbours = "neighbours"
+	cmdAdvert     = "advert"
+	verbList      = "list"
 )
 
 // Privilege is what a session may do; the transport determines it.
@@ -147,6 +157,13 @@ type session struct {
 	quitting bool
 	// watching guards against nested watches piling subscriptions.
 	watching bool
+	// colors says the transport is a raw terminal that renders ANSI;
+	// piped sessions read plain text.
+	colors bool
+	// mu guards path: the editor's hooks read it from the transport
+	// goroutine while commands move it from the REPL's.
+	mu   sync.Mutex
+	path []string
 }
 
 // Serve runs the REPL on plain line input — pipes, scripts, tests.
@@ -155,7 +172,8 @@ func Serve(ctx context.Context, rw io.ReadWriter, deps Deps) {
 	done := make(chan struct{})
 	defer close(done)
 	go readLines(rw, lines, done)
-	repl(ctx, rw, deps, lines)
+	s := &session{deps: deps, lines: lines, out: rw}
+	s.repl(ctx)
 }
 
 // ServeEdited runs the REPL behind the character-mode line editor:
@@ -166,7 +184,14 @@ func ServeEdited(ctx context.Context, rw io.ReadWriter, deps Deps) {
 	lines := make(chan string)
 	done := make(chan struct{})
 	defer close(done)
+	s := &session{deps: deps, lines: lines, out: rw, colors: true}
 	ed := newEditor(rw, rw)
+	// The editor's hooks read the session's context from the transport
+	// goroutine; the session guards that state itself.
+	ed.prompt = s.prompt
+	ed.complete = s.complete
+	ed.helpFor = s.helpForLine
+	ed.paint = s.paintLine
 	go func() {
 		defer close(lines)
 		for {
@@ -181,21 +206,20 @@ func ServeEdited(ctx context.Context, rw io.ReadWriter, deps Deps) {
 			}
 		}
 	}()
-	repl(ctx, rw, deps, lines)
+	s.repl(ctx)
 }
 
 // repl is the loop both entrances share. It owns the prompt: printed
 // after the banner and after every command, so it always lands below
 // the output it follows.
-func repl(ctx context.Context, out io.Writer, deps Deps, lines <-chan string) {
-	s := &session{deps: deps, lines: lines, out: out}
-	banner(s.out, deps.Version, deps.Privilege)
+func (s *session) repl(ctx context.Context) {
+	banner(s.out, s.deps.Version, s.deps.Privilege)
 	for ctx.Err() == nil {
-		fmt.Fprint(s.out, "> ")
+		fmt.Fprint(s.out, s.prompt())
 		select {
 		case <-ctx.Done():
 			return
-		case line, ok := <-lines:
+		case line, ok := <-s.lines:
 			if !ok {
 				return
 			}
@@ -207,7 +231,16 @@ func repl(ctx context.Context, out io.Writer, deps Deps, lines <-chan string) {
 }
 
 // command runs one line; quit reports itself through s.quitting.
+// Lines the tree grammar claims — absolute paths, and everything once
+// the session stands in a context — go to it; the rest is the flat
+// command set, exactly as it always was.
 func (s *session) command(ctx context.Context, line string) {
+	if s.treeLine(line) {
+		if line != "" {
+			s.tree(ctx, line)
+		}
+		return
+	}
 	if args := splitArgs(line); len(args) > 0 {
 		s.dispatch(ctx, args)
 	}

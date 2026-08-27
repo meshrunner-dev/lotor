@@ -45,7 +45,7 @@ func (s *session) status(ctx context.Context, _ input) error {
 
 func (s *session) relay(ctx context.Context, in input) error {
 	args := in.pos
-	if len(args) == 0 || args[0] == "list" {
+	if len(args) == 0 || args[0] == verbList {
 		tb := &table{}
 		for _, r := range s.deps.Relays {
 			tb.row(r.Name, r.Protocol, r.State(), "radio "+r.Radio)
@@ -77,7 +77,7 @@ func (s *session) relay(ctx context.Context, in input) error {
 		r.Waveform.SyncWord, r.Waveform.CRC))
 	tb.row("noise floor", floorText(r))
 	if len(r.Scopes) > 0 {
-		tb.row("scopes", strings.Join(r.Scopes, ", "))
+		tb.row(cmdScopes, strings.Join(r.Scopes, ", "))
 	}
 	tb.row("tx mode", txModeText(r))
 	if r.Duty != nil {
@@ -148,7 +148,7 @@ func (s *session) relayJournal(ctx context.Context, tb *table, r RelayInfo) {
 
 func (s *session) radio(_ context.Context, in input) error {
 	args := in.pos
-	if len(args) == 0 || args[0] == "list" {
+	if len(args) == 0 || args[0] == verbList {
 		tb := &table{}
 		for _, r := range s.deps.Radios {
 			tb.row(r.Name, r.Driver, envelopeText(r.Envelope), "relay "+r.Relay)
@@ -240,12 +240,42 @@ func (s *session) showTraces(key string) error {
 		sort.Strings(keys)
 		return fmt.Errorf("no %q (known: %v)", key, keys)
 	}
+	secret := s.secretAttrs(key)
 	tb := &table{}
 	tb.row("key", "value", "source")
 	for _, t := range traces {
-		tb.row(t.Key, fmt.Sprintf("%v", t.Value), t.Source)
+		value := fmt.Sprintf("%v", t.Value)
+		if secret[t.Key] {
+			// The private key and the passwords: set here, echoed
+			// never — the read-only telnet listener sees this table.
+			value = maskedValue
+		}
+		tb.row(t.Key, value, t.Source)
 	}
 	return tb.flush(s.out)
+}
+
+// maskedValue stands in for what a secret attribute holds.
+const maskedValue = "<secret>"
+
+// secretAttrs resolves which of an object's attributes the schema
+// marks secret, from a traces key ("relay meshcore-868").
+func (s *session) secretAttrs(key string) map[string]bool {
+	kind, name, ok := strings.Cut(key, " ")
+	if !ok {
+		return nil
+	}
+	k := s.kindByName(kind)
+	if k == nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, a := range k.AttrsFor(s.instances(kind)[name]) {
+		if a.Secret {
+			out[a.Name] = true
+		}
+	}
+	return out
 }
 
 func (s *session) frames(ctx context.Context, in input) error {
