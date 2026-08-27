@@ -1140,3 +1140,21 @@ func TestAFlagNamedAfterAKindCompletesItsNames(t *testing.T) {
 		t.Errorf("a partial name did not finish: %q", add)
 	}
 }
+
+func TestACommandThatTakesARelayIsReachableFromInsideOne(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	s.setPath([]string{scopeRelay, "meshcore-868"})
+	// Standing in a relay answers the question relay= asks, so every
+	// command that asks it works here — not a hand-kept subset of
+	// them, which is how frames and tx came to be missing.
+	verbs := s.verbsAt(s.curPath())
+	for _, want := range []string{cmdNeighbours, cmdDiscover, cmdAdvert, cmdFrames, "tx", "noise"} {
+		if !slices.Contains(verbs, want) {
+			t.Errorf("%q is not reachable from inside a relay: %v", want, verbs)
+		}
+	}
+	// A command that names no relay stays where it was.
+	if slices.Contains(verbs, cmdUndo) {
+		t.Errorf("a command with no relay to act on was mounted: %v", verbs)
+	}
+}

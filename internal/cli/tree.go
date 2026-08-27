@@ -600,16 +600,17 @@ const (
 const detailWidth = 80
 
 // mountedVerb reports whether a flat command serves this kind's
-// instances directly.
+// instances directly. A command that declares a flag named after the
+// kind is a command that acts on one of them, so standing inside an
+// instance already answers which — the same reading that lets relay=
+// complete with the relays. Nothing has to be listed twice.
 func (s *session) mountedVerb(kind, verb string) bool {
-	if kind != scopeRelay {
+	c := lookup(verb)
+	if c == nil {
 		return false
 	}
-	switch verb {
-	case cmdNeighbours, cmdScopes, cmdDiscover, cmdAdvert:
-		return true
-	}
-	return false
+	spec := c.flag(kind)
+	return spec != nil && spec.valued
 }
 
 // treeStatus shows the instance the session stands in, as it runs.
@@ -966,9 +967,7 @@ func (s *session) verbNamesAt(path []string) []string {
 		return []string{verbPrint, verbAdd, verbRemove, verbExport}
 	default:
 		verbs := []string{verbPrint, verbStatus, verbSet, verbUnset, verbExport}
-		for _, v := range []string{
-			cmdNeighbours, cmdScopes, cmdDiscover, cmdAdvert,
-		} {
+		for _, v := range commandNames() {
 			if s.mountedVerb(path[0], v) {
 				verbs = append(verbs, v)
 			}
