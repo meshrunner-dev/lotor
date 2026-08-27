@@ -1049,6 +1049,13 @@ func TestDetailIsDiscoverable(t *testing.T) {
 	if help := s.helpForLine("print ", 0); !strings.Contains(help, argDetail) {
 		t.Errorf("the help after print does not name it:\n%s", help)
 	}
+	// The same question put the other way reaches the same answer.
+	if out := run(t, testDeps(t), "/relay meshcore-868 print ?"); !strings.Contains(out, argDetail) {
+		t.Errorf("\"print ?\" did not answer what print takes:\n%s", out)
+	}
+	if out := run(t, testDeps(t), "/relay meshcore-868 set ?"); !strings.Contains(out, "node_name") {
+		t.Errorf("\"set ?\" did not answer what set takes:\n%s", out)
+	}
 }
 
 func TestExportRendersEveryListTheWaySetReadsItBack(t *testing.T) {

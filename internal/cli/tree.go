@@ -289,6 +289,11 @@ func (s *session) treeVerb(ctx context.Context, path []string,
 	switch {
 	case verb == helpWord || verb == "help":
 		fmt.Fprint(s.out, s.treeHelp(path))
+	case slices.Contains(args, helpWord):
+		// A verb asked about answers what it takes, whether the
+		// question arrives as the key or as a word on the line. The
+		// tree's verbs owe that as much as the flat commands do.
+		fmt.Fprint(s.out, s.renderTerms(verb, s.argTermsFor(path, rest)))
 	case verb == cmdQuit || verb == "exit":
 		s.dispatch(ctx, rest)
 	case verb == verbExport:
