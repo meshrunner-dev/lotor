@@ -37,6 +37,18 @@ endorsed by the MeshCore project.
   all** — embedded hosts with tight RAM and CPU relay without
   observing, and nothing else may depend on a sentinel existing.
 
+- **scope** — a MeshCore *transport scope*: a named partition of the
+  mesh that a flood is confined to. A scope is a shared secret — a
+  16-byte key derived from its name — and a scoped flood carries a
+  two-byte code, recomputed per packet as `HMAC(key, type‖payload)`,
+  that only a node holding the key can match. It is a mesh agreement,
+  independent of the radio band, and the two words must not be
+  conflated: a *band* is what the radio is tuned to, a *scope* is which
+  slice of the traffic on that band a relay carries. A relay declares
+  one `default_scope` it originates under and a set of `accept_scopes`
+  it will relay; the reference calls the outgoing one the default
+  scope, and this follows that name.
+
 ## Architecture
 
 One process. N relays, each a supervised task tree. Each radio is owned
@@ -76,8 +88,11 @@ scoped *by profile name* — instantiated twice:
 
 - **hardware profiles** on radios (board presets: pins, TCXO, RF
   switch, PA caps);
-- **region/channel profiles** on relays (frequency plans, LoRa
-  parameters — e.g. a MeshCore EU narrow preset).
+- **band profiles** on relays (frequency plans, LoRa parameters —
+  e.g. a MeshCore EU narrow preset). Called *band* deliberately, not
+  *region*: on a MeshCore mesh "region" would collide with a transport
+  scope (see the Vocabulary entry), which is a mesh agreement, not a
+  radio fact.
 
 ```yaml
 radios:
