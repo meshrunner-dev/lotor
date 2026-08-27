@@ -399,10 +399,10 @@ func TestFloodHopLimitsFollowTheReference(t *testing.T) {
 		fill(pkt, hops)
 		return pkt
 	}
-	if v, _ := e.floodVerdict(advert(7), true); v != verdictRelayFlood {
+	if v, _ := e.floodVerdict(rxOf(e, advert(7)), true); v != verdictRelayFlood {
 		t.Errorf("advert at 7 hops = %q, want a relay", v)
 	}
-	if v, why := e.floodVerdict(advert(8), true); v != verdictDropFloodHops {
+	if v, why := e.floodVerdict(rxOf(e, advert(8)), true); v != verdictDropFloodHops {
 		t.Errorf("advert at 8 hops = %q (%s), want the advert limit to stop it", v, why)
 	}
 
@@ -412,7 +412,7 @@ func TestFloodHopLimitsFollowTheReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	fill(txt, 8)
-	if v, _ := e.floodVerdict(txt, false); v != verdictRelayFlood {
+	if v, _ := e.floodVerdict(rxOf(e, txt), false); v != verdictRelayFlood {
 		t.Errorf("text at 8 hops = %q, want a relay — only adverts stop that early", v)
 	}
 	// The reference's 64-hop ceiling is a belt: the 6-bit path count
@@ -420,11 +420,11 @@ func TestFloodHopLimitsFollowTheReference(t *testing.T) {
 	// never fire. A site that lowers the limit is what actually bites.
 	e.p.FloodMaxHops = 10
 	fill(txt, 10)
-	if v, _ := e.floodVerdict(txt, false); v != verdictDropFloodHops {
+	if v, _ := e.floodVerdict(rxOf(e, txt), false); v != verdictDropFloodHops {
 		t.Errorf("text at 10 hops = %q under a limit of 10, want it stopped", v)
 	}
 	fill(txt, 9)
-	if v, _ := e.floodVerdict(txt, false); v != verdictRelayFlood {
+	if v, _ := e.floodVerdict(rxOf(e, txt), false); v != verdictRelayFlood {
 		t.Errorf("text at 9 hops = %q under a limit of 10, want a relay", v)
 	}
 }
@@ -607,7 +607,7 @@ func TestSaturatedPathIsJudgedFull(t *testing.T) {
 	}
 	pkt.Path = make([]byte, maxPathHashes)
 	pkt.SetPathHashSizeAndCount(1, maxPathHashes)
-	if v, _ := e.floodVerdict(pkt, true); v != verdictDropPathFull {
+	if v, _ := e.floodVerdict(rxOf(e, pkt), true); v != verdictDropPathFull {
 		t.Fatalf("verdict = %q, want %q", v, verdictDropPathFull)
 	}
 }
@@ -855,7 +855,7 @@ func TestScopedFloodIsNotRelayed(t *testing.T) {
 	}
 	pkt.Header = meshcore.MakeHeader(meshcore.RouteTransportFlood,
 		meshcore.PayloadTypeAdvert, meshcore.PayloadVer1)
-	if v, _ := e.floodVerdict(pkt, true); v != verdictDropScoped {
+	if v, _ := e.floodVerdict(rxOf(e, pkt), true); v != verdictDropScoped {
 		t.Fatalf("verdict = %q, want %q", v, verdictDropScoped)
 	}
 }

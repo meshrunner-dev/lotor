@@ -146,3 +146,12 @@ func checkScopeName(name string) error {
 	}
 	return nil
 }
+
+// scopeOf resolves a frame's scope once and remembers the answer.
+func (e *engine) scopeOf(rx *reception) (name string, carried bool) {
+	if !rx.scopeKnown {
+		rx.scope, rx.scopeCarried = e.scopes.match(rx.pkt)
+		rx.scopeKnown = true
+	}
+	return rx.scope, rx.scopeCarried
+}

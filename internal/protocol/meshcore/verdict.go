@@ -42,31 +42,38 @@ const (
 	maxPathHashes = 63
 )
 
-// Flood hop limits, the reference repeater's active defaults
-// (flood_max, flood_max_advert). A flood that already carries this
-// many hashes is not forwarded again: adverts stop far earlier than
-// traffic, because every node emits them and the mesh would otherwise
-// drown in stale announcements. The reference's third knob,
-// flood_max_unscoped, distinguishes plain from transport-scoped
-// floods; both ship at the same value and this engine has no scoping
-// concept, so it is folded into referenceFloodMaxHops.
+// Flood hop limits, the reference repeater's active defaults. A flood
+// that already carries this many hashes is not forwarded again:
+// adverts stop far earlier than traffic, because every node emits them
+// and the mesh would otherwise drown in stale announcements.
+//
+// The unscoped limit is the reference's third knob, and it applies to
+// plain floods alone. It ships at the same value as the general one,
+// but lowering it is how an operator throttles the traffic that
+// belongs to no scope without touching the traffic that does.
 const (
-	referenceFloodMaxHops       = 64
-	referenceFloodMaxAdvertHops = 8
+	referenceFloodMaxHops         = 64
+	referenceFloodMaxUnscopedHops = 64
+	referenceFloodMaxAdvertHops   = 8
 )
 
 // floodHopCaps resolves the configured limits, falling back to the
 // reference defaults — an unconfigured engine judges like the
 // reference rather than dropping everything.
-func (e *engine) floodHopCaps() (maxHops, maxAdvertHops int) {
-	maxHops, maxAdvertHops = e.p.FloodMaxHops, e.p.FloodMaxAdvertHops
+func (e *engine) floodHopCaps() (maxHops, maxUnscopedHops, maxAdvertHops int) {
+	maxHops = e.p.FloodMaxHops
+	maxUnscopedHops = e.p.FloodMaxUnscopedHops
+	maxAdvertHops = e.p.FloodMaxAdvertHops
 	if maxHops <= 0 {
 		maxHops = referenceFloodMaxHops
+	}
+	if maxUnscopedHops <= 0 {
+		maxUnscopedHops = referenceFloodMaxUnscopedHops
 	}
 	if maxAdvertHops <= 0 {
 		maxAdvertHops = referenceFloodMaxAdvertHops
 	}
-	return maxHops, maxAdvertHops
+	return maxHops, maxUnscopedHops, maxAdvertHops
 }
 
 // floodRoutable holds the payload types Mesh::onRecvPacket hands to
@@ -125,7 +132,15 @@ func (e *engine) verdict(rx *reception) (string, string) {
 		// The reference releases its own adverts before any routing.
 		return verdictSelfAdvert, ""
 	case pkt.IsRouteFlood():
-		return e.floodVerdict(pkt, rx.advertOK)
+		v, why := e.floodVerdict(rx, rx.advertOK)
+		if scope, _ := e.scopeOf(rx); scope != "" && scope != wildcardScope {
+			if why == "" {
+				why = "scope " + scope
+			} else {
+				why += " (scope " + scope + ")"
+			}
+		}
+		return v, why
 	case pkt.IsRouteDirect():
 		if pkt.PayloadType() == meshcore.PayloadTypeTrace {
 			return e.traceVerdict(pkt)
@@ -147,12 +162,14 @@ func (e *engine) verdict(rx *reception) (string, string) {
 	}
 }
 
-func (e *engine) floodVerdict(pkt *meshcore.Packet, advertOK bool) (string, string) {
-	// The reference refuses to forward a scoped flood whose transport
-	// code it does not know (allowPacketForward: "unknown transport
-	// code"); with no region map at all, that is every one of them.
-	if pkt.Route() == meshcore.RouteTransportFlood {
-		return verdictDropScoped, "no transport scoping here"
+func (e *engine) floodVerdict(rx *reception, advertOK bool) (string, string) {
+	pkt := rx.pkt
+	// Whose flood is this, and do we carry it? A plain flood belongs
+	// to the wildcard and moves unless the operator shut it; a scoped
+	// one moves only when one of our keys recomputes its code. The
+	// reference refuses the rest as an unknown transport code.
+	if _, carried := e.scopeOf(rx); !carried {
+		return verdictDropScoped, "a scope this relay does not carry"
 	}
 	t := pkt.PayloadType()
 	if !floodRoutable[t] {
@@ -171,9 +188,13 @@ func (e *engine) floodVerdict(pkt *meshcore.Packet, advertOK bool) (string, stri
 	// allowPacketForward → isFloodHopLimitExceeded, in the same place:
 	// after the capacity check, before the loop scan.
 	hops := pkt.PathHashCount()
-	maxHops, maxAdvertHops := e.floodHopCaps()
+	maxHops, maxUnscopedHops, maxAdvertHops := e.floodHopCaps()
 	if hops >= maxHops {
 		return verdictDropFloodHops, fmt.Sprintf("%d hops, limit %d", hops, maxHops)
+	}
+	if !pkt.HasTransportCodes() && hops >= maxUnscopedHops {
+		return verdictDropFloodHops,
+			fmt.Sprintf("%d unscoped hops, limit %d", hops, maxUnscopedHops)
 	}
 	if t == meshcore.PayloadTypeAdvert && hops >= maxAdvertHops {
 		return verdictDropFloodHops, fmt.Sprintf("%d advert hops, limit %d", hops, maxAdvertHops)

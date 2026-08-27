@@ -48,8 +48,12 @@ type params struct {
 	// carried onward: a packet already holding this many path hashes
 	// is not re-flooded. Zero takes the reference repeater's defaults
 	// (64, and 8 for adverts).
-	FloodMaxHops       int `yaml:"flood_max_hops"`
-	FloodMaxAdvertHops int `yaml:"flood_max_advert_hops"`
+	FloodMaxHops int `yaml:"flood_max_hops"`
+	// FloodMaxUnscopedHops bounds plain floods alone — the reference's
+	// third knob, and the way to throttle traffic belonging to no
+	// scope without touching the traffic that does.
+	FloodMaxUnscopedHops int `yaml:"flood_max_unscoped_hops"`
+	FloodMaxAdvertHops   int `yaml:"flood_max_advert_hops"`
 
 	// DutyCyclePct is the band's regulatory ceiling on airtime, in
 	// percent per sliding hour; zero leaves emission unbudgeted. Band

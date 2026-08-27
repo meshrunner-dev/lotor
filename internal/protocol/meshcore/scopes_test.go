@@ -2,6 +2,7 @@ package meshcore
 
 import (
 	"testing"
+	"time"
 
 	"meshrunner.dev/pkg/meshcore"
 )
@@ -92,5 +93,73 @@ func TestServedNamesFollowTheReferenceShape(t *testing.T) {
 	quiet := newScopeTable(params{AcceptScopes: []string{"fr"}, AcceptUnscoped: &off})
 	if got := quiet.served(); len(got) != 1 || got[0] != "fr" {
 		t.Fatalf("served = %v, want no wildcard", got)
+	}
+}
+
+func TestACarriedScopeIsRelayed(t *testing.T) {
+	// The gate stopped being a blanket refusal: a flood in a scope
+	// this relay carries moves on, and one in a scope it does not
+	// still stops here.
+	e, dev, sub, peer := txRig(t, "on-air")
+	e.scopes = newScopeTable(params{
+		DefaultScope: "fr", AcceptScopes: []string{"fr"},
+	})
+	runEngine(t, e, dev)
+
+	frame := peerAdvert(t, peer, time.Now())
+	pkt, err := meshcore.ParsePacket(frame.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meshcore.TransportKeyForName("fr").Scope(pkt)
+	raw, err := pkt.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame.Payload = raw
+	dev.frames <- frame
+
+	sent := awaitSent(t, sub)
+	if sent.Kind != "relay-flood" {
+		t.Fatalf("sent = %+v, want the carried scope relayed", sent)
+	}
+	out, err := meshcore.ParsePacket(<-dev.sent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The scope survives the hop untouched: a relay copies, it never
+	// recomputes.
+	if out.Route() != meshcore.RouteTransportFlood ||
+		out.TransportCodes != pkt.TransportCodes {
+		t.Fatalf("relayed as %v with codes %v, want the scope preserved",
+			out.Route(), out.TransportCodes)
+	}
+}
+
+func TestUnscopedHopLimitBitesPlainFloodsAlone(t *testing.T) {
+	e, _, _, peer := txRig(t, "shadow")
+	e.scopes = newScopeTable(params{AcceptScopes: []string{"fr"}})
+	e.p.FloodMaxUnscopedHops = 3
+
+	build := func(scoped bool, hops int) *reception {
+		pkt, err := meshcore.BuildAdvert(peer, time.Now(), &meshcore.AdvertData{Name: "p"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pkt.Path = make([]byte, hops)
+		for i := range pkt.Path {
+			pkt.Path[i] = ^e.id.PubKey[0]
+		}
+		pkt.SetPathHashSizeAndCount(1, hops)
+		if scoped {
+			meshcore.TransportKeyForName("fr").Scope(pkt)
+		}
+		return rxOf(e, pkt)
+	}
+	if v, why := e.floodVerdict(build(false, 3), true); v != verdictDropFloodHops {
+		t.Errorf("plain flood at 3 hops = %q (%s), want the unscoped limit to stop it", v, why)
+	}
+	if v, _ := e.floodVerdict(build(true, 3), true); v != verdictRelayFlood {
+		t.Errorf("scoped flood at 3 hops = %q, want the unscoped limit not to touch it", v)
 	}
 }
