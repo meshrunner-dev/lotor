@@ -37,6 +37,12 @@ endorsed by the MeshCore project.
   all** — embedded hosts with tight RAM and CPU relay without
   observing, and nothing else may depend on a sentinel existing.
 
+- **region** — a radio band and its channel plan: frequency, spreading
+  factor, bandwidth, and the duty ceiling that band imposes. A region
+  is a fact about the air, and it names a profile (`eu-868-narrow`).
+  The reference's documentation calls a transport scope a region too;
+  here the two words stay apart.
+
 - **scope** — a MeshCore *transport scope*: a named partition of the
   mesh that a flood is confined to. A scope is a shared secret — a
   16-byte key derived from its name — and a scoped flood carries a
