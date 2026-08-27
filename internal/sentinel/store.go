@@ -534,17 +534,20 @@ type FrameQuery struct {
 	Relay     string
 	Type      string
 	Verdict   string
-	Limit     int
+	// Since and Until bound the window; zero means unbounded on that
+	// side. Both are inclusive: a frame stamped exactly on the edge
+	// was asked for.
+	Since time.Time
+	Until time.Time
+	Limit int
 }
 
-// RecentFrames returns the newest matching frames, newest first.
-// Filtering happens in SQL: a busy channel cannot starve a filtered
-// view, and the txn prefix is an index range, not a LIKE.
-func (s *store) RecentFrames(ctx context.Context, fq FrameQuery) ([]Frame, error) {
-	q := `SELECT txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms, signal_dbm, freq_err_hz,
-	             ptype, route, scope, path_len, verdict, duplicate_of, node, pubkey, detail
-	      FROM frames WHERE 1=1`
-	args := []any{}
+// query renders the filters as SQL onto a base statement, one place
+// for every query that takes them — the row query and the count that
+// confesses what the row query's cap left out must agree on what
+// "matching" means. Every fragment is a literal; values ride in args.
+func (fq FrameQuery) query(base string) (string, []any) {
+	q, args := base, []any{}
 	if fq.TxnPrefix != "" {
 		lo, hi := prefixRange(fq.TxnPrefix)
 		q += ` AND txn >= ? AND txn < ?`
@@ -562,6 +565,24 @@ func (s *store) RecentFrames(ctx context.Context, fq FrameQuery) ([]Frame, error
 		q += ` AND verdict = ?`
 		args = append(args, fq.Verdict)
 	}
+	if !fq.Since.IsZero() {
+		q += ` AND at_ms >= ?`
+		args = append(args, fq.Since.UnixMilli())
+	}
+	if !fq.Until.IsZero() {
+		q += ` AND at_ms <= ?`
+		args = append(args, fq.Until.UnixMilli())
+	}
+	return q, args
+}
+
+// RecentFrames returns the newest matching frames, newest first.
+// Filtering happens in SQL: a busy channel cannot starve a filtered
+// view, and the txn prefix is an index range, not a LIKE.
+func (s *store) RecentFrames(ctx context.Context, fq FrameQuery) ([]Frame, error) {
+	q, args := fq.query(`SELECT txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms, signal_dbm, freq_err_hz,
+	             ptype, route, scope, path_len, verdict, duplicate_of, node, pubkey, detail
+	      FROM frames WHERE 1=1`)
 	q += ` ORDER BY at_ms DESC LIMIT ?`
 	args = append(args, fq.Limit)
 
@@ -737,6 +758,15 @@ func (s *store) VerdictCounts(ctx context.Context, relay string) (map[string]int
 		out[v] = n
 	}
 	return out, rows.Err()
+}
+
+// CountFrames says how many rows match, the cap notwithstanding — the
+// number a capped listing owes its reader when the window held more.
+func (s *store) CountFrames(ctx context.Context, fq FrameQuery) (int, error) {
+	q, args := fq.query(`SELECT COUNT(*) FROM frames WHERE 1=1`)
+	var n int
+	err := s.db.QueryRowContext(ctx, q, args...).Scan(&n)
+	return n, err
 }
 
 // FrameVocabulary is what the journal actually holds in the two

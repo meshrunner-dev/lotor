@@ -301,8 +301,10 @@ func (s *session) secretAttrs(key string) map[string]bool {
 func (s *session) frames(ctx context.Context, in input) error {
 	opts := in.opts
 	if opts[optWatch] == optOn {
-		if _, ok := opts[optLast]; ok {
-			return errors.New("last= is for the journal, not the live feed — try \"frames ?\"")
+		for _, sel := range []string{optLast, optSince, optUntil, optAround, optSpan} {
+			if _, ok := opts[sel]; ok {
+				return fmt.Errorf("%s= reads the journal — watch is the live feed", sel)
+			}
 		}
 		return s.watch(ctx, opts)
 	}
@@ -310,26 +312,33 @@ func (s *session) frames(ctx context.Context, in input) error {
 	if err != nil {
 		return err
 	}
-	// The cap keeps one command from loading the whole journal; the
-	// filters run in SQL, so a busy channel cannot starve them.
-	const maxLast = 1000
-	limit := 20
-	if v, ok := opts[optLast]; ok {
-		if limit, err = strconv.Atoi(v); err != nil || limit < 1 || limit > maxLast {
-			return fmt.Errorf("last= wants 1..%d", maxLast)
+	w, err := parseFrameSelectors(opts, time.Now())
+	if err != nil {
+		return err
+	}
+	if w.aroundPrefix != "" {
+		if err := s.resolveAround(ctx, sen, &w); err != nil {
+			return err
 		}
+	}
+	limit, err := frameLimit(w)
+	if err != nil {
+		return err
 	}
 	if v, ok := opts[scopeRelay]; ok {
 		if _, err := s.relayFilter(ctx, v); err != nil {
 			return err
 		}
 	}
-	frames, err := sen.RecentFrames(ctx, sentinel.FrameQuery{
+	fq := sentinel.FrameQuery{
 		Relay:   opts[scopeRelay],
 		Type:    opts[optFrameType],
 		Verdict: opts[optVerdict],
+		Since:   w.since,
+		Until:   w.until,
 		Limit:   limit,
-	})
+	}
+	frames, err := sen.RecentFrames(ctx, fq)
 	if err != nil {
 		return err
 	}
@@ -342,7 +351,65 @@ func (s *session) frames(ctx context.Context, in input) error {
 		tb.row(f.At.Format("15:04:05"), f.Txn[:12], f.Type,
 			fmt.Sprintf("%s /%d", f.Route, f.PathLen), verdictWithChain(f), who(f))
 	}
-	return tb.flush(s.out)
+	if err := tb.flush(s.out); err != nil {
+		return err
+	}
+	s.confessCap(ctx, sen, fq, w, len(frames))
+	return nil
+}
+
+// frameLimit bounds what one command may load. The cap keeps a query
+// from reading the whole journal; a window defaults to the cap rather
+// than to a screenful, because the window is the ask and twenty rows
+// of it would be a sample pretending to be an answer.
+func frameLimit(w frameSelectors) (int, error) {
+	const maxLast = 1000
+	switch {
+	case w.count > maxLast:
+		return 0, fmt.Errorf("%s= wants 1..%d", optLast, maxLast)
+	case w.count > 0:
+		return w.count, nil
+	case w.windowed():
+		return maxLast, nil
+	default:
+		return 20, nil
+	}
+}
+
+// confessCap owns up when a window held more than the listing shows:
+// the total is part of the answer, and a truncation that says nothing
+// reads as "that was everything".
+func (s *session) confessCap(ctx context.Context, sen *sentinel.Sentinel,
+	fq sentinel.FrameQuery, w frameSelectors, shown int,
+) {
+	if !w.windowed() || shown < fq.Limit {
+		return
+	}
+	if n, err := sen.CountFrames(ctx, fq); err == nil && n > fq.Limit {
+		fmt.Fprintf(s.out, "newest %d of %d shown — narrow the window\r\n", fq.Limit, n)
+	}
+}
+
+// resolveAround turns a transaction prefix into the window either
+// side of the moment it was heard.
+func (s *session) resolveAround(ctx context.Context, sen *sentinel.Sentinel, w *frameSelectors) error {
+	anchors, err := sen.RecentFrames(ctx, sentinel.FrameQuery{TxnPrefix: w.aroundPrefix, Limit: 2})
+	if err != nil {
+		return err
+	}
+	switch len(anchors) {
+	case 0:
+		return fmt.Errorf("no transaction starts with %q", w.aroundPrefix)
+	case 1:
+	default:
+		return fmt.Errorf("%q names more than one transaction — give more of it", w.aroundPrefix)
+	}
+	span := w.span
+	if span == 0 {
+		span = time.Minute
+	}
+	w.since, w.until = anchors[0].At.Add(-span), anchors[0].At.Add(span)
+	return nil
 }
 
 func verdictWithChain(f sentinel.Frame) string {

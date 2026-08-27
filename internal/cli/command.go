@@ -166,29 +166,45 @@ func relayCommands() []*command {
 	}
 }
 
+// framesCommand is the journal reader, declared apart because its
+// grammar — filters, three window selectors and the live feed — is a
+// command's worth on its own.
+func framesCommand() *command {
+	return &command{
+		name: cmdFrames,
+		forms: []form{
+			{"frames", "journalled receptions"},
+			{"frames watch", "live feed (enter stops)"},
+		},
+		detail: []string{
+			"frames [last=<n|span>] [since=<moment>] [until=<moment>] [relay=] [type=] [verdict=]",
+			"frames around=<txn-prefix> [span=<duration>] [relay=] [type=] [verdict=]",
+			"frames watch [relay=<name>] [type=<type>] [verdict=<verdict>]",
+			"a moment is written the way the views write one: 00:52,",
+			"00:52:18, or \"2026-08-27 23:00\" — a bare clock means its",
+			"most recent occurrence",
+		},
+		flags: []flagSpec{
+			{name: optLast, valued: true, doc: "the newest slice — a count (50) or a span (15m)"},
+			{name: scopeRelay, valued: true, doc: docRelay},
+			{name: optFrameType, valued: true, doc: "keep one payload type",
+				values: (*session).frameTypes},
+			{name: optVerdict, valued: true, doc: "keep one judgement",
+				values: (*session).frameVerdicts},
+			{name: optSince, valued: true, doc: "from this moment on"},
+			{name: optUntil, valued: true, doc: "up to this moment"},
+			{name: optAround, valued: true, doc: "the window around one transaction, by id prefix"},
+			{name: optSpan, valued: true, doc: "how far around, each side (default 1m)"},
+			{name: optWatch, doc: docWatch},
+		},
+		run: (*session).frames,
+	}
+}
+
 // journalCommands read the sentinel's archive and the bus's live feed.
 func journalCommands() []*command {
 	return []*command{
-		{
-			name: cmdFrames,
-			forms: []form{
-				{"frames", "journalled receptions"},
-				{"frames watch", "live feed (enter stops)"},
-			},
-			detail: []string{
-				"frames [last=<n>] [relay=<name>] [type=<type>] [verdict=<verdict>]",
-				"frames watch [relay=<name>] [type=<type>] [verdict=<verdict>]",
-			},
-			flags: []flagSpec{
-				{name: optLast, valued: true, doc: docLast}, {name: scopeRelay, valued: true, doc: docRelay},
-				{name: optFrameType, valued: true, doc: "keep one payload type",
-					values: (*session).frameTypes},
-				{name: optVerdict, valued: true, doc: "keep one judgement",
-					values: (*session).frameVerdicts},
-				{name: optWatch, doc: docWatch},
-			},
-			run: (*session).frames,
-		},
+		framesCommand(),
 		{
 			name:  "txn",
 			forms: []form{{"txn <prefix>", "one transaction and its chain"}},

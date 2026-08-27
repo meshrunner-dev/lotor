@@ -424,10 +424,15 @@ func TestOriginatedEmissionIsAddressable(t *testing.T) {
 	}
 }
 
-func TestWatchRefusesTheJournalFlag(t *testing.T) {
-	out := run(t, testDeps(t), "frames watch last=5")
-	if !strings.Contains(out, "last= is for the journal") {
-		t.Errorf("last= swallowed by the live feed:\n%s", out)
+func TestWatchRefusesTheJournalSelectors(t *testing.T) {
+	// The live feed starts now: every word that names a slice of the
+	// past belongs to the journal, and each is refused by name.
+	for _, line := range []string{"frames watch last=5", "frames watch since=00:52",
+		"frames watch around=abcd"} {
+		out := run(t, testDeps(t), line)
+		if !strings.Contains(out, "reads the journal") {
+			t.Errorf("%q swallowed by the live feed:\n%s", line, out)
+		}
 	}
 }
 

@@ -105,6 +105,11 @@ func (s *Sentinel) RecentFrames(ctx context.Context, fq FrameQuery) ([]Frame, er
 	return s.store.RecentFrames(ctx, fq)
 }
 
+// CountFrames says how many rows match, the cap notwithstanding.
+func (s *Sentinel) CountFrames(ctx context.Context, fq FrameQuery) (int, error) {
+	return s.store.CountFrames(ctx, fq)
+}
+
 // Nodes lists the directory the mesh writes about itself.
 func (s *Sentinel) Nodes(ctx context.Context) ([]Node, error) { return s.store.Nodes(ctx) }
 
