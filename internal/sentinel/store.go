@@ -105,6 +105,11 @@ CREATE TABLE IF NOT EXISTS metrics_daily (
 const schemaIndexes = `CREATE INDEX IF NOT EXISTS frames_at ON frames(at_ms);
 CREATE INDEX IF NOT EXISTS frames_pubkey ON frames(pubkey, at_ms);
 CREATE INDEX IF NOT EXISTS frames_dup ON frames(duplicate_of);
+-- The two columns a reader filters frames by. Both hold a handful of
+-- distinct words over a journal that only grows, so the index is what
+-- keeps "which words are there" a question worth asking at all.
+CREATE INDEX IF NOT EXISTS frames_ptype ON frames(ptype);
+CREATE INDEX IF NOT EXISTS frames_verdict ON frames(verdict);
 CREATE INDEX IF NOT EXISTS relay_states_at ON relay_states(at_ms);
 CREATE INDEX IF NOT EXISTS tx_txn ON tx(txn);
 CREATE INDEX IF NOT EXISTS tx_at ON tx(at_ms);
@@ -730,6 +735,40 @@ func (s *store) VerdictCounts(ctx context.Context, relay string) (map[string]int
 			return nil, err
 		}
 		out[v] = n
+	}
+	return out, rows.Err()
+}
+
+// FrameVocabulary is what the journal actually holds in the two
+// columns a reader may filter on. A filter for a word nothing was
+// ever recorded with matches nothing, so this is the only list worth
+// offering to someone choosing one.
+func (s *store) FrameVocabulary(ctx context.Context) (types, verdicts []string, err error) {
+	if types, err = s.distinct(ctx,
+		`SELECT DISTINCT ptype FROM frames WHERE ptype != '' ORDER BY 1`); err != nil {
+		return nil, nil, err
+	}
+	if verdicts, err = s.distinct(ctx,
+		`SELECT DISTINCT verdict FROM frames WHERE verdict != '' ORDER BY 1`); err != nil {
+		return nil, nil, err
+	}
+	return types, verdicts, nil
+}
+
+// distinct reads one column of values.
+func (s *store) distinct(ctx context.Context, query string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
 	}
 	return out, rows.Err()
 }

@@ -37,6 +37,8 @@ const (
 	optWatch     = "watch"
 	optFlood     = "flood"
 	optNeighbour = "neighbour"
+	optFrameType = "type"
+	optVerdict   = "verdict"
 	optLast      = "last"
 	cmdFrames    = "frames"
 	cmdQuit      = "quit"

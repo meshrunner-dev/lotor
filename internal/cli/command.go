@@ -26,6 +26,13 @@ const (
 	docFlood = "flood the mesh rather than announcing zero-hop"
 )
 
+// positional is an argument a command reads by where it sits rather
+// than by name — one per command, and only where the command says so.
+type positional struct {
+	name string
+	doc  string
+}
+
 type flagSpec struct {
 	name   string
 	valued bool
@@ -33,6 +40,10 @@ type flagSpec struct {
 	// discover is an argument nobody uses, which is what the "--"
 	// spelling used to guarantee.
 	doc string
+	// values answers what this flag accepts, for the completion that
+	// offers them. A closed set says so here rather than in a second
+	// list somewhere else.
+	values func(*session) []string
 }
 
 // command declares one shell command completely: grammar, help and
@@ -48,10 +59,14 @@ type command struct {
 	forms  []form
 	detail []string
 	// flags a command does not declare are errors, not noise to
-	// swallow. maxPos bounds the positional words any form accepts;
+	// swallow.
 	// their meaning stays the command's business.
-	flags  []flagSpec
-	maxPos int
+	flags []flagSpec
+	// takes is the one word a command reads without naming it,
+	// declared like every other so help can describe it and the painter
+	// can tell a chosen value from a mistake. A command without one
+	// accepts no bare words at all.
+	takes *positional
 	// admin commands act on the daemon — they need the local console
 	// socket, whose file permissions are the authentication.
 	admin bool
@@ -161,21 +176,24 @@ func journalCommands() []*command {
 				{"frames watch", "live feed (enter stops)"},
 			},
 			detail: []string{
-				"frames [last=<n>] [relay=<name>] [type=<type>] [verdict=<verdict>] [json]",
-				"frames watch [relay=<name>] [type=<type>] [verdict=<verdict>] [json]",
+				"frames [last=<n>] [relay=<name>] [type=<type>] [verdict=<verdict>]",
+				"frames watch [relay=<name>] [type=<type>] [verdict=<verdict>]",
 			},
 			flags: []flagSpec{
 				{name: optLast, valued: true, doc: docLast}, {name: scopeRelay, valued: true, doc: docRelay},
-				{name: "type", valued: true}, {name: "verdict", valued: true},
-				{name: optJSON, doc: docJSON}, {name: optWatch, doc: docWatch},
+				{name: optFrameType, valued: true, doc: "keep one payload type",
+					values: (*session).frameTypes},
+				{name: optVerdict, valued: true, doc: "keep one judgement",
+					values: (*session).frameVerdicts},
+				{name: optWatch, doc: docWatch},
 			},
 			run: (*session).frames,
 		},
 		{
-			name:   "txn",
-			forms:  []form{{"txn <prefix>", "one transaction and its chain"}},
-			maxPos: 1,
-			run:    (*session).txn,
+			name:  "txn",
+			forms: []form{{"txn <prefix>", "one transaction and its chain"}},
+			takes: &positional{name: "prefix", doc: "a transaction id, or enough of one"},
+			run:   (*session).txn,
 		},
 		{
 			name:   "nodes",
@@ -216,10 +234,10 @@ func journalCommands() []*command {
 func sessionCommands() []*command {
 	return []*command{
 		{
-			name:   "help",
-			forms:  []form{{"help [command]", "all commands, or one command's usage"}},
-			maxPos: 1,
-			run:    (*session).help,
+			name:  "help",
+			forms: []form{{"help [command]", "all commands, or one command's usage"}},
+			takes: &positional{name: "command", doc: "one command, for its own usage"},
+			run:   (*session).help,
 		},
 		{
 			name:   cmdUndo,
@@ -293,8 +311,13 @@ func (c *command) parse(args []string) (input, error) {
 			return in, fmt.Errorf("%s wants a value — %s=…", key, key)
 		}
 	}
-	if len(in.pos) > c.maxPos {
-		return in, fmt.Errorf("unknown argument %q — try %q", in.pos[c.maxPos], c.name+" ?")
+	if allowed := 0; c.takes != nil {
+		allowed = 1
+		if len(in.pos) > allowed {
+			return in, fmt.Errorf("%s takes one %s — try %q", c.name, c.takes.name, c.name+" ?")
+		}
+	} else if len(in.pos) > allowed {
+		return in, fmt.Errorf("unknown argument %q — try %q", in.pos[0], c.name+" ?")
 	}
 	return in, nil
 }

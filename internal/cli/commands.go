@@ -326,15 +326,12 @@ func (s *session) frames(ctx context.Context, in input) error {
 	}
 	frames, err := sen.RecentFrames(ctx, sentinel.FrameQuery{
 		Relay:   opts[scopeRelay],
-		Type:    opts["type"],
-		Verdict: opts["verdict"],
+		Type:    opts[optFrameType],
+		Verdict: opts[optVerdict],
 		Limit:   limit,
 	})
 	if err != nil {
 		return err
-	}
-	if opts[optJSON] == optOn {
-		return s.printJSON(frames)
 	}
 	if len(frames) == 0 {
 		fmt.Fprint(s.out, "no frames match\r\n")
@@ -990,25 +987,19 @@ func (s *session) watchEvent(ev bus.Event, opts map[string]string) error {
 		if !watchMatch(e, opts) {
 			return nil
 		}
-		if opts[optJSON] == optOn {
-			return s.printJSON(e)
-		}
 		_, err := fmt.Fprintf(s.out, "%s\r\n", watchLine(e))
 		return err
 	case bus.FrameCorrupt:
 		// Corrupt receptions carry no type and no verdict: a watch
 		// filtered on either asked for judgements only.
-		if _, ok := opts["type"]; ok {
+		if _, ok := opts[optFrameType]; ok {
 			return nil
 		}
-		if _, ok := opts["verdict"]; ok {
+		if _, ok := opts[optVerdict]; ok {
 			return nil
 		}
 		if v, ok := opts[scopeRelay]; ok && e.Relay != v {
 			return nil
-		}
-		if opts[optJSON] == optOn {
-			return s.printJSON(e)
 		}
 		_, err := fmt.Fprintf(s.out, "corrupt reception — %s\r\n", e.Err)
 		return err
@@ -1017,13 +1008,13 @@ func (s *session) watchEvent(ev bus.Event, opts map[string]string) error {
 }
 
 func watchMatch(j bus.FrameJudged, opts map[string]string) bool {
-	if v, ok := opts["type"]; ok && j.Type != v {
+	if v, ok := opts[optFrameType]; ok && j.Type != v {
 		return false
 	}
 	if v, ok := opts[scopeRelay]; ok && j.Relay != v {
 		return false
 	}
-	if v, ok := opts["verdict"]; ok && j.Verdict != v {
+	if v, ok := opts[optVerdict]; ok && j.Verdict != v {
 		return false
 	}
 	return true
@@ -1051,4 +1042,35 @@ func (s *session) printJSON(v any) error {
 	}
 	_, err = fmt.Fprintf(s.out, "%s\r\n", raw)
 	return err
+}
+
+// completionBudget bounds how long a suggestion may take to gather. A
+// completion that hangs is worse than one that offers nothing: the
+// terminal is waiting on it with the operator's hand still on TAB.
+const completionBudget = 200 * time.Millisecond
+
+// frameTypes and frameVerdicts read the vocabulary out of the journal
+// rather than from a list kept beside it. What was never recorded
+// cannot be filtered for, and a console that offers it says otherwise.
+func (s *session) frameTypes() []string {
+	types, _ := s.frameVocabulary()
+	return types
+}
+
+func (s *session) frameVerdicts() []string {
+	_, verdicts := s.frameVocabulary()
+	return verdicts
+}
+
+func (s *session) frameVocabulary() (types, verdicts []string) {
+	if s.deps.Sentinel == nil {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), completionBudget)
+	defer cancel()
+	types, verdicts, err := s.deps.Sentinel.FrameVocabulary(ctx)
+	if err != nil {
+		return nil, nil
+	}
+	return types, verdicts
 }

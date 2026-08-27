@@ -1345,3 +1345,51 @@ func TestAskingANeighbourIsAVerbWhereTheNeighbourIs(t *testing.T) {
 		t.Errorf("the sub-verb still runs:\n%s", refused)
 	}
 }
+
+func TestAnUnnamedArgumentIsDeclaredLikeEveryOther(t *testing.T) {
+	s := &session{deps: testDeps(t), colors: true}
+	// It leads the help, in chevrons, because it is what comes first
+	// on the line — and a word nobody can discover does not exist.
+	if help := s.helpForLine("txn ", 0); !strings.Contains(help,
+		cPunct+"<"+cReset+cAttr+"prefix"+cReset+cPunct+">"+cReset) {
+		t.Errorf("the slot is not written as one:\n%s", help)
+	}
+	// Completion offers nothing for a word the operator invents.
+	if add, hints := s.complete("txn pre"); add != "" || len(hints) > 0 {
+		t.Errorf("a slot was offered as a word to type: %q %v", add, hints)
+	}
+	// The value carries no colour: this console has no opinion on it.
+	if painted := s.paintLine("txn abc123"); strings.Contains(painted, cUnres+"abc123") {
+		t.Errorf("a chosen value was marked unresolved: %q", painted)
+	}
+	// A command that declares no slot takes no bare word at all.
+	if out := run(t, testDeps(t), "nodes stray"); !strings.Contains(out, "stray") {
+		t.Errorf("an undeclared positional was swallowed:\n%s", out)
+	}
+	// And one that does takes exactly one.
+	if out := run(t, testDeps(t), "txn aa bb"); !strings.Contains(out, "one prefix") {
+		t.Errorf("a second positional was accepted:\n%s", out)
+	}
+}
+
+func TestAFilterCompletesFromWhatTheJournalHolds(t *testing.T) {
+	deps := testDeps(t)
+	seed(t, deps)
+	s := &session{deps: deps}
+	// The vocabulary is read out of the journal, not from a list kept
+	// beside it: what was never recorded cannot be filtered for.
+	if _, hints := s.complete("frames verdict="); !slices.Contains(hints, "would-relay-flood") {
+		t.Errorf("verdict= did not offer what the journal holds: %v", hints)
+	}
+	// One candidate finishes rather than listing.
+	if add, _ := s.complete("frames verdict=would"); add != "-relay-flood " {
+		t.Errorf("a lone verdict did not finish: %q", add)
+	}
+	if add, _ := s.complete("frames type=ADV"); add != "ERT " {
+		t.Errorf("type= did not complete from the journal: %q", add)
+	}
+	// And the json the frames views used to produce is gone.
+	if out := run(t, deps, "frames json"); !strings.Contains(out, "json") {
+		t.Errorf("frames still answers to json:\n%s", out)
+	}
+}

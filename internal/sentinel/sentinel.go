@@ -118,6 +118,12 @@ func (s *Sentinel) VerdictCounts(ctx context.Context, relay string) (map[string]
 	return s.store.VerdictCounts(ctx, relay)
 }
 
+// FrameVocabulary is what the journal holds in its filterable
+// columns, for a reader choosing what to filter on.
+func (s *Sentinel) FrameVocabulary(ctx context.Context) (types, verdicts []string, err error) {
+	return s.store.FrameVocabulary(ctx)
+}
+
 // FrameCount is the journal's current size.
 func (s *Sentinel) FrameCount(ctx context.Context) (int, error) {
 	return s.store.FrameCount(ctx)

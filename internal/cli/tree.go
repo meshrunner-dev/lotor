@@ -990,8 +990,13 @@ func (s *session) treeHelp(path []string) string {
 // writeTerm renders one entry: the word in its class, the separator
 // that joins it to its meaning, the meaning.
 func (s *session) writeTerm(b *strings.Builder, t term) {
-	fmt.Fprintf(b, "%s%s%s\r\n", s.color(t.class, t.name),
-		s.color(cPunct, " -- "), t.doc)
+	name := s.color(t.class, t.name)
+	if t.placeholder {
+		// Chevrons are punctuation, and they say the word is a slot
+		// rather than something to type as it stands.
+		name = s.color(cPunct, "<") + name + s.color(cPunct, ">")
+	}
+	fmt.Fprintf(b, "%s%s%s\r\n", name, s.color(cPunct, " -- "), t.doc)
 }
 
 // attrsAt resolves the attribute set a context offers: an instance's
@@ -1076,6 +1081,10 @@ type term struct {
 	// container says the term has things under it, so completing it
 	// leaves the operator mid-path rather than mid-word.
 	container bool
+	// placeholder says the term stands for a value rather than naming
+	// itself: help describes it, in chevrons, but completion has
+	// nothing to offer for a word the operator invents.
+	placeholder bool
 	// content says the term is a thing that exists rather than a
 	// word the grammar defines. Completion offers both; help stays
 	// with the grammar, because what exists is print's answer and
@@ -1322,7 +1331,12 @@ func (s *session) argTermsFor(path, rest []string) []term {
 		if c == nil {
 			return nil
 		}
-		out := make([]term, 0, len(c.flags))
+		out := make([]term, 0, len(c.flags)+1)
+		if c.takes != nil {
+			out = append(out, term{
+				name: c.takes.name, class: cAttr, doc: c.takes.doc, placeholder: true,
+			})
+		}
 		for _, f := range c.flags {
 			// A relay is already chosen when standing inside one.
 			if f.name == scopeRelay && len(path) == 2 {
@@ -1381,33 +1395,46 @@ func humanList(words []string) string {
 	}
 }
 
-// completeArgs finishes what comes after a verb, and — past the '=' —
-// the values a closed set allows.
+// completeValue finishes what comes after a '=': the closed set an
+// attribute allows, the values a flag declares for itself, or the
+// names of whatever a flag named after a kind takes.
+func (s *session) completeValue(path, rest []string, attr, val string) (string, []string) {
+	for _, a := range s.attrsAt(path) {
+		if a.Name == attr && len(a.Enum) > 0 {
+			return s.finishPlain(val, a.Enum, cAttr)
+		}
+	}
+	// A flag that knows its own values completes from them, declared
+	// beside the flag rather than in a second list.
+	if c := lookup(rest[0]); c != nil {
+		if f := c.flag(attr); f != nil && f.values != nil {
+			return s.finishPlain(val, f.values(s), cAttr)
+		}
+	}
+	// A flag named after a kind takes that kind's names — relay= wants
+	// a relay — so the names are what completes it. The flag needs no
+	// declaration for this: it is called relay because a relay is what
+	// it takes.
+	if k := s.kindByName(attr); k != nil && !k.Singleton {
+		held := s.instances(attr)
+		words := make([]string, 0, len(held))
+		for name := range held {
+			words = append(words, name)
+		}
+		sort.Strings(words)
+		return s.finishPlain(val, words, cPath)
+	}
+	return "", nil
+}
+
+// completeArgs finishes what comes after a verb.
 func (s *session) completeArgs(path, rest []string, last string) (add string, hints []string) {
 	terms := s.argTermsFor(path, rest)
 	if len(terms) == 0 {
 		return "", nil
 	}
 	if attr, val, has := strings.Cut(last, "="); has {
-		for _, a := range s.attrsAt(path) {
-			if a.Name == attr && len(a.Enum) > 0 {
-				return s.finishPlain(val, a.Enum, cAttr)
-			}
-		}
-		// A flag named after a kind takes that kind's names — relay=
-		// wants a relay — so the names are what completes it. The
-		// flag needs no declaration for this: it is called relay
-		// because a relay is what it takes.
-		if k := s.kindByName(attr); k != nil && !k.Singleton {
-			held := s.instances(attr)
-			words := make([]string, 0, len(held))
-			for name := range held {
-				words = append(words, name)
-			}
-			sort.Strings(words)
-			return s.finishPlain(val, words, cPath)
-		}
-		return "", nil
+		return s.completeValue(path, rest, attr, val)
 	}
 	// A term that takes a value completes up to its '=', the way a
 	// context completes up to its slash: the operator is mid-argument,
@@ -1415,6 +1442,9 @@ func (s *session) completeArgs(path, rest []string, last string) (add string, hi
 	words := make([]string, 0, len(terms))
 	takesValue := map[string]bool{}
 	for _, t := range terms {
+		if t.placeholder {
+			continue
+		}
 		word := t.name
 		if t.container {
 			word += "="
@@ -1476,13 +1506,18 @@ func (s *session) renderTerms(verb string, terms []term) string {
 	var b strings.Builder
 	b.WriteString("\r\n")
 	sorted := append([]term(nil), terms...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].name < sorted[j].name })
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].placeholder != sorted[j].placeholder {
+			return sorted[i].placeholder // the slot leads: it comes first on the line
+		}
+		return sorted[i].name < sorted[j].name
+	})
 	for _, t := range sorted {
 		name := t.name
 		if t.container {
 			name += "=" // it wants a value, and says so where it is read
 		}
-		s.writeTerm(&b, term{name: name, class: t.class, doc: t.doc})
+		s.writeTerm(&b, term{name: name, class: t.class, doc: t.doc, placeholder: t.placeholder})
 	}
 	if len(sorted) == 0 {
 		fmt.Fprintf(&b, "%s takes no arguments\r\n", s.color(cVerb, verb))
@@ -1705,7 +1740,7 @@ func takesValue(verb string) bool {
 		return true
 	}
 	c := lookup(verb)
-	return c != nil && c.maxPos > 0
+	return c != nil && c.takes != nil
 }
 
 // mark paints a word in its class when it names exactly one candidate,
