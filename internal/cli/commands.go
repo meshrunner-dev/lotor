@@ -409,8 +409,14 @@ func working(r RelayInfo) error {
 		r.Name, state, r.Name)
 }
 
-// discover scans the neighbourhood and prints each answer as it
-// lands. The window is the protocol's, not ours: responders spread
+// discover asks the neighbourhood who is there. It emits and returns:
+// the answers are recorded as they land, whether or not anyone is
+// still watching, so blocking the console for the window buys nothing
+// the neighbourhood does not already keep. --watch waits there and
+// prints them live, which is worth having when what you want to know
+// is who answers fast and who answers at all.
+//
+// The window itself is the protocol's, not ours: responders spread
 // themselves deliberately, so a scan that gave up early would report
 // a smaller room than it is standing in.
 func (s *session) discover(ctx context.Context, in input) error {
@@ -427,6 +433,11 @@ func (s *session) discover(ctx context.Context, in input) error {
 	found, until, err := r.Discover()
 	if err != nil {
 		return err
+	}
+	if in.opts[optWatch] != optOn {
+		fmt.Fprintf(s.out, "asked — answers land in the neighbourhood over the next %s\r\n",
+			time.Until(until).Round(time.Second))
+		return nil
 	}
 	fmt.Fprintf(s.out, "listening %s…\r\n", time.Until(until).Round(time.Second))
 	answered := 0

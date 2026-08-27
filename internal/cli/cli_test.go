@@ -470,3 +470,40 @@ func TestARunningRelayStillReportsWhatItLacks(t *testing.T) {
 		t.Errorf("neighbours said %q", strings.TrimSpace(out))
 	}
 }
+
+func TestDiscoverAsksAndReturns(t *testing.T) {
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	asked := 0
+	found := make(chan Neighbour, 1)
+	deps.Relays[0].Discover = func() (<-chan Neighbour, time.Time, error) {
+		asked++
+		return found, time.Now().Add(time.Minute), nil
+	}
+
+	// The default emits and hands the console back: the answers are
+	// recorded whether or not anyone is watching for them.
+	done := make(chan string, 1)
+	go func() { done <- run(t, deps, "discover") }()
+	select {
+	case out := <-done:
+		if !strings.Contains(out, "answers land in the neighbourhood") {
+			t.Errorf("discover said %q", strings.TrimSpace(out))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("discover held the console — the scan runs without it")
+	}
+	if asked != 1 {
+		t.Fatalf("the scan was asked for %d times", asked)
+	}
+
+	// --watch stays and prints what lands.
+	var key [32]byte
+	key[0], key[1] = 0x88, 0x2f
+	found <- Neighbour{PubKey: key, SNR: 12.25}
+	close(found)
+	if out := run(t, deps, "discover --watch"); !strings.Contains(out, "882f") ||
+		!strings.Contains(out, "12.2 dB") {
+		t.Errorf("--watch said %q", strings.TrimSpace(out))
+	}
+}

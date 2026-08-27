@@ -29,6 +29,7 @@ const (
 	verbShow   = "show"
 	optOn      = "true"
 	optJSON    = "json"
+	optWatch   = "watch"
 	optLast    = "last"
 	cmdFrames  = "frames"
 	cmdQuit    = "quit"
