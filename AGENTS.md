@@ -44,13 +44,35 @@ Step 2 is not a detour around the task. A format written here costs a
 second implementation, a second set of tests, and a refactor later;
 written there it costs one function and one test.
 
+## The hardware stops at the driver
+
+The same seam exists one layer down, and it is currently intact: one
+file in this repository touches chip, GPIO or ioctl code, and one names
+a concrete driver. Keep it that way.
+
+Above `internal/radio`, a radio is the `Device` interface and this
+daemon's own types — `Waveform`, `Envelope`, `Frame`, `TxReport`,
+`NoiseFloor`. Driver configuration crosses as an opaque
+`map[string]any` on purpose: the layers in between carry it without
+reading it. Lint denies `meshrunner.dev/pkg/lora`, GPIO and low-level
+OS packages everywhere but `internal/radio/sx126x`, and denies naming
+that driver package anywhere but the wiring in `cmd/`.
+
+**What the lint cannot see, and you must.** It reads imports, so it
+catches a chip type escaping upward. It does not catch the same leak
+expressed as a *shape*: `Device` growing a `SetPin`, `Waveform`
+acquiring an `SPISpeedHz`, `Envelope` learning what a chip select is.
+Nothing forbidden is imported and the seam is gone anyway. If a method
+or a field only makes sense for one chip on one bus, it belongs behind
+the driver, whatever the linter says.
+
 ## What does belong here
 
-Policy, not format. Who may ask, how often, at what priority, under
-what duty budget, in what order, with what jitter, and what the journal
-records about it. The rule of thumb: code that decides **whether** or
-**when** is a daemon concern; code that decides **what the bytes are**
-is not.
+Policy, not format; intent, not mechanism. Who may ask, how often, at
+what priority, under what duty budget, in what order, with what jitter,
+and what the journal records about it. The rule of thumb: code that
+decides **whether** or **when** is a daemon concern; code that decides
+**what the bytes are**, or **which register carries them**, is not.
 
 ## The rest
 

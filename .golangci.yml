@@ -64,6 +64,34 @@ linters:
           deny:
             - pkg: encoding/binary
               desc: "wire formats belong in meshrunner.dev/pkg/meshcore — add the codec there and consume it (see AGENTS.md)"
+        # The hardware world stops at the driver adapter. Everything
+        # above it speaks radio.Device and this daemon's own types; a
+        # chip config, a GPIO line or an ioctl surfacing in a protocol
+        # engine, a relay or the console is a seam giving way, however
+        # convenient the reading it was fetching.
+        hardware-stops-at-the-driver:
+          files:
+            - "$all"
+            - "!**/internal/radio/sx126x/*.go"
+          deny:
+            - pkg: meshrunner.dev/pkg/lora
+              desc: "chip and channel types stop at internal/radio/sx126x — upper layers speak radio.Device (see AGENTS.md)"
+            - pkg: github.com/warthog618/go-gpiocdev
+              desc: "GPIO belongs to the driver module, not to this daemon"
+            - pkg: periph.io
+              desc: "GPIO and SPI belong to the driver module, not to this daemon"
+            - pkg: golang.org/x/sys/unix
+              desc: "low-level OS calls belong to the driver module, not to this daemon"
+        # And the driver package itself is part of that world: only the
+        # wiring in cmd/ names a concrete driver, because everything
+        # else must keep working when a second one is registered.
+        only-the-wiring-names-a-driver:
+          files:
+            - "$all"
+            - "!**/cmd/lotor/*.go"
+          deny:
+            - pkg: meshrunner.dev/lotor/internal/radio/sx126x
+              desc: "depend on the radio.Driver registry, not on one driver (see AGENTS.md)"
     errcheck:
       # Best-effort writes to interactive streams (CLI sessions): a dead
       # transport surfaces on the next read, not on every print.
