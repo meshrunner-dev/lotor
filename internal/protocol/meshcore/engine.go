@@ -470,7 +470,8 @@ func (e *engine) observe(rx *reception) {
 			return
 		}
 		if rx.advert.Data != nil && rx.advert.Data.Type == meshcore.AdvTypeRepeater {
-			e.neighbours.put(rx.advert.Identity.PubKey, rx.frame.SNR, rx.frame.At)
+			e.neighbours.put(rx.advert.Identity.PubKey, rx.advert.Data.Name,
+				rx.frame.SNR, rx.frame.At)
 		}
 	// A discovery answer is not evidence for us: the reference learns
 	// from one only when it matches a scan it sent itself, and this

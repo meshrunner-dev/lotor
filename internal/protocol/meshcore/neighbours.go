@@ -27,21 +27,34 @@ func newNeighbourTable() *neighbourTable {
 
 // put records or refreshes a neighbour. When the table is full and
 // the node is new, the least-recently-heard entry makes room.
-func (nt *neighbourTable) put(pubKey [meshcore.PubKeySize]byte, snr float64, at time.Time) {
+//
+// An empty name leaves the one already held. Only an advert carries a
+// name; a discovery answer carries none, so a scan of a neighbourhood
+// we already know would otherwise strip every node back to its key.
+func (nt *neighbourTable) put(
+	pubKey [meshcore.PubKeySize]byte, name string, snr float64, at time.Time,
+) {
 	nt.mu.Lock()
 	defer nt.mu.Unlock()
-	if _, known := nt.by[pubKey]; !known {
+	known, seen := nt.by[pubKey]
+	if !seen {
 		evictOldest(nt.by, maxNeighbours, func(n Neighbour) time.Time { return n.Heard })
 	}
-	nt.by[pubKey] = Neighbour{PubKey: pubKey, SNR: snr, Heard: at}
+	if name == "" {
+		name = known.Name
+	}
+	nt.by[pubKey] = Neighbour{PubKey: pubKey, Name: name, SNR: snr, Heard: at}
 }
 
 // Neighbour is one node heard with no relay in between: the SNR we
 // last heard it at, and when.
 type Neighbour struct {
 	PubKey [meshcore.PubKeySize]byte
-	SNR    float64
-	Heard  time.Time
+	// Name is what the node calls itself, when it has told us — which
+	// an advert does and a discovery answer does not.
+	Name  string
+	SNR   float64
+	Heard time.Time
 }
 
 // snapshot returns the neighbourhood newest-heard first — any
@@ -73,4 +86,11 @@ func evictOldest[K comparable, V any](m map[K]V, maximum int, at func(V) time.Ti
 		}
 	}
 	delete(m, oldest)
+}
+
+// get returns one neighbour as the table now holds it — any goroutine.
+func (nt *neighbourTable) get(pubKey [meshcore.PubKeySize]byte) Neighbour {
+	nt.mu.Lock()
+	defer nt.mu.Unlock()
+	return nt.by[pubKey]
 }

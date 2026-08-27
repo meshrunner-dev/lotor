@@ -52,8 +52,10 @@ const (
 // Neighbour is one directly-heard repeater, as the console shows it.
 type Neighbour struct {
 	PubKey [32]byte
-	SNR    float64
-	Heard  time.Time
+	// Name is what the node calls itself, empty when it has not said.
+	Name  string
+	SNR   float64
+	Heard time.Time
 }
 
 // RelayInfo is what the CLI knows about one relay.

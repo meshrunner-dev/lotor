@@ -175,3 +175,27 @@ func TestAdvertsWaitForAPlausibleClock(t *testing.T) {
 		t.Fatalf("%d adverts queued with a sane clock, want 1 (never two a pass)", len(e.queue.entries))
 	}
 }
+
+func TestANameSurvivesAScanThatCarriesNone(t *testing.T) {
+	// An advert names a node; a discovery answer never does. A scan of
+	// a neighbourhood we already know must not strip it back to keys.
+	nt := newNeighbourTable()
+	var key [meshcore.PubKeySize]byte
+	key[0] = 0x88
+	now := time.Now()
+	nt.put(key, "quatre-vingt-huit", 11.5, now.Add(-time.Minute))
+	nt.put(key, "", 12.25, now) // as a scan answer refreshes it
+
+	got := nt.get(key)
+	if got.Name != "quatre-vingt-huit" {
+		t.Fatalf("name = %q — the scan erased what an advert taught", got.Name)
+	}
+	if got.SNR != 12.25 || !got.Heard.Equal(now) {
+		t.Fatalf("the fresher reading was lost: %+v", got)
+	}
+	// And a later advert may rename it.
+	nt.put(key, "88", 12.25, now)
+	if nt.get(key).Name != "88" {
+		t.Fatalf("a node that renamed itself was not followed")
+	}
+}

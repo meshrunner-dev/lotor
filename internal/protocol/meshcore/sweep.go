@@ -166,8 +166,11 @@ func (e *engine) sweepAnswer(rx *reception) (verdict, why string, handled bool) 
 	// The SNR we record is ours — how well WE hear THEM — while the
 	// one they sent is how well they hear us. Both are worth knowing
 	// and they are not the same number.
-	n := Neighbour{PubKey: key, SNR: rx.frame.SNR, Heard: rx.frame.At}
-	e.neighbours.put(key, rx.frame.SNR, rx.frame.At)
+	// A discovery answer names no node: the wire carries a type, an
+	// SNR and a key, and nothing else. Whatever name an advert taught
+	// us stays.
+	e.neighbours.put(key, "", rx.frame.SNR, rx.frame.At)
+	n := e.neighbours.get(key)
 	select {
 	case s.found <- n:
 	default:

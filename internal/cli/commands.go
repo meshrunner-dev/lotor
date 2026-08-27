@@ -484,7 +484,13 @@ func (s *session) discover(ctx context.Context, in input) error {
 
 // printNeighbour renders one answer: who, and how well we hear them.
 func (s *session) printNeighbour(n Neighbour) {
-	fmt.Fprintf(s.out, "%s  %.1f dB\r\n", hex.EncodeToString(n.PubKey[:6]), n.SNR)
+	// An answer names nobody; the name, when there is one, comes from
+	// an advert this relay heard earlier.
+	name := ""
+	if n.Name != "" {
+		name = "  " + n.Name
+	}
+	fmt.Fprintf(s.out, "%s  %.1f dB%s\r\n", hex.EncodeToString(n.PubKey[:6]), n.SNR, name)
 }
 
 // drainAnswers prints what has already landed without waiting for
@@ -581,7 +587,7 @@ func (s *session) advert(_ context.Context, in input) error {
 
 // neighbours renders the direct neighbourhood: who we hear with no
 // relay in between, at what SNR, and how long ago.
-func (s *session) neighbours(_ context.Context, in input) error {
+func (s *session) neighbours(ctx context.Context, in input) error {
 	r, err := s.oneRelay(in.opts[scopeRelay])
 	if err != nil {
 		return err
@@ -597,12 +603,44 @@ func (s *session) neighbours(_ context.Context, in input) error {
 		fmt.Fprint(s.out, "nobody heard directly yet\r\n")
 		return nil
 	}
+	named := s.nodeNames(ctx)
 	tb := &table{}
 	for _, n := range rows {
-		tb.row(hex.EncodeToString(n.PubKey[:6]),
-			fmt.Sprintf("snr %+.2f dB", n.SNR), ago(n.Heard))
+		key := hex.EncodeToString(n.PubKey[:6])
+		name := n.Name
+		if name == "" {
+			// The engine only ever learns a name from an advert heard
+			// zero-hop. The journal heard the flooded ones too, so it
+			// can put a name to a node that only ever answered a scan.
+			name = named[key]
+		}
+		if name == "" {
+			name = "—"
+		}
+		tb.row(key, name, fmt.Sprintf("snr %+.2f dB", n.SNR), ago(n.Heard))
 	}
 	return tb.flush(s.out)
+}
+
+// nodeNames indexes the journal's directory by key prefix, so a
+// neighbourhood row can borrow a name the engine never heard itself.
+// A daemon running without a journal gets an empty map and rows
+// without names, which is the point of the journal being optional.
+func (s *session) nodeNames(ctx context.Context) map[string]string {
+	if s.deps.Sentinel == nil {
+		return nil
+	}
+	nodes, err := s.deps.Sentinel.Nodes(ctx)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]string, len(nodes))
+	for _, n := range nodes {
+		if len(n.PubKey) >= 12 && n.Name != "" {
+			out[n.PubKey[:12]] = n.Name
+		}
+	}
+	return out
 }
 
 // oneRelay resolves a command's target: the named relay, or the only

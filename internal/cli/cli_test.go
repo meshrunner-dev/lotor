@@ -536,3 +536,27 @@ func TestWatchingDiscoverGivesTheConsoleBackOnALine(t *testing.T) {
 		t.Fatal("a line did not take the console back")
 	}
 }
+
+func TestNeighboursBorrowNamesFromTheJournal(t *testing.T) {
+	deps := testDeps(t)
+	var known, unknown [32]byte
+	known[0], known[1] = 0x88, 0x2f
+	unknown[0] = 0xAB
+	deps.Relays[0].Neighbours = func() []Neighbour {
+		return []Neighbour{
+			// Heard by advert: the engine knows the name itself.
+			{PubKey: known, Name: "quatre-vingt-huit", SNR: 12.25, Heard: time.Now()},
+			// Only ever answered a scan: no name on that wire.
+			{PubKey: unknown, SNR: 9, Heard: time.Now()},
+		}
+	}
+	out := run(t, deps, "neighbours")
+	if !strings.Contains(out, "quatre-vingt-huit") {
+		t.Errorf("the engine's own name never reached the table:\n%s", out)
+	}
+	// Nothing named the second one, so the row says so rather than
+	// inventing one.
+	if !strings.Contains(out, "—") {
+		t.Errorf("a nameless neighbour got no placeholder:\n%s", out)
+	}
+}

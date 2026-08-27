@@ -441,7 +441,7 @@ func neighboursOf(eng protocol.Engine) func() []cli.Neighbour {
 		}
 		out := make([]cli.Neighbour, len(rows))
 		for i, r := range rows {
-			out[i] = cli.Neighbour{PubKey: r.PubKey, SNR: r.SNR, Heard: r.Heard}
+			out[i] = cli.Neighbour{PubKey: r.PubKey, Name: r.Name, SNR: r.SNR, Heard: r.Heard}
 		}
 		return out
 	}
@@ -506,7 +506,7 @@ func discoverOf(eng protocol.Engine) func() (<-chan cli.Neighbour, time.Time, er
 		go func() {
 			defer close(out)
 			for n := range found {
-				out <- cli.Neighbour{PubKey: n.PubKey, SNR: n.SNR, Heard: n.Heard}
+				out <- cli.Neighbour{PubKey: n.PubKey, Name: n.Name, SNR: n.SNR, Heard: n.Heard}
 			}
 		}()
 		return out, until, nil

@@ -192,7 +192,7 @@ func TestNeighboursAnswerListsWhoWeHear(t *testing.T) {
 	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
 	var third [32]byte
 	third[0] = 0xAB
-	e.neighbours.put(third, 9.25, time.Now().Add(-90*time.Second))
+	e.neighbours.put(third, "", 9.25, time.Now().Add(-90*time.Second))
 	runEngine(t, e, dev)
 
 	frame, secret := login(t, e.id, peer, nowTS(400), "raccoon", false)
