@@ -21,7 +21,7 @@ import (
 func (s *session) status(ctx context.Context, _ input) error {
 	tb := &table{}
 	tb.row("daemon", "up "+uptime(s.deps.Started), "lotor "+s.deps.Version)
-	for _, r := range s.deps.Relays {
+	for _, r := range s.relays() {
 		tb.row("relay", r.Name, r.State(), "radio "+r.Radio,
 			fmt.Sprintf("%.3f MHz sf%d bw%.1fk",
 				float64(r.Waveform.FrequencyHz)/1e6, r.Waveform.SpreadingFactor,
@@ -47,7 +47,7 @@ func (s *session) relay(ctx context.Context, in input) error {
 	args := in.pos
 	if len(args) == 0 || args[0] == verbList {
 		tb := &table{}
-		for _, r := range s.deps.Relays {
+		for _, r := range s.relays() {
 			tb.row(r.Name, r.Protocol, r.State(), "radio "+r.Radio)
 		}
 		return tb.flush(s.out)
@@ -150,7 +150,7 @@ func (s *session) radio(_ context.Context, in input) error {
 	args := in.pos
 	if len(args) == 0 || args[0] == verbList {
 		tb := &table{}
-		for _, r := range s.deps.Radios {
+		for _, r := range s.radios() {
 			tb.row(r.Name, r.Driver, envelopeText(r.Envelope), "relay "+r.Relay)
 		}
 		return tb.flush(s.out)
@@ -158,7 +158,7 @@ func (s *session) radio(_ context.Context, in input) error {
 	if args[0] != verbShow || len(args) < 2 {
 		return errors.New("usage: radio list | radio show <name>")
 	}
-	for _, r := range s.deps.Radios {
+	for _, r := range s.radios() {
 		if r.Name == args[1] {
 			tb := &table{}
 			tb.row("driver", r.Driver)
@@ -231,10 +231,10 @@ func (s *session) config(_ context.Context, in input) error {
 }
 
 func (s *session) showTraces(key string) error {
-	traces, ok := s.deps.Traces[key]
+	traces, ok := s.traces()[key]
 	if !ok {
-		keys := make([]string, 0, len(s.deps.Traces))
-		for k := range s.deps.Traces {
+		keys := make([]string, 0, len(s.traces()))
+		for k := range s.traces() {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
@@ -646,6 +646,19 @@ func (s *session) neighbours(ctx context.Context, in input) error {
 	return tb.flush(s.out)
 }
 
+// undoCmd inverts the newest configuration change.
+func (s *session) undoCmd(ctx context.Context, _ input) error {
+	if s.deps.Undo == nil {
+		return errors.New("this daemon has no mutation channel")
+	}
+	msg, err := s.deps.Undo(ctx, "console")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(s.out, "%s\r\n", msg)
+	return nil
+}
+
 // nodeNames indexes the journal's directory by key prefix, so a
 // neighbourhood row can borrow a name the engine never heard itself.
 // A daemon running without a journal gets an empty map and rows
@@ -673,8 +686,8 @@ func (s *session) oneRelay(name string) (RelayInfo, error) {
 	if name != "" {
 		return s.findRelay(name)
 	}
-	if len(s.deps.Relays) == 1 {
-		return s.deps.Relays[0], nil
+	if len(s.relays()) == 1 {
+		return s.relays()[0], nil
 	}
 	return RelayInfo{}, errors.New("several relays — say which with --relay")
 }
@@ -739,10 +752,10 @@ func (s *session) tx(ctx context.Context, in input) error {
 	opts := in.opts
 	name := opts[scopeRelay]
 	if name == "" {
-		if len(s.deps.Relays) != 1 {
+		if len(s.relays()) != 1 {
 			return errors.New("--relay is needed when several relays run")
 		}
-		name = s.deps.Relays[0].Name
+		name = s.relays()[0].Name
 	}
 	live, err := s.relayFilter(ctx, name)
 	if err != nil {
@@ -789,10 +802,10 @@ func (s *session) noise(ctx context.Context, in input) error {
 	opts := in.opts
 	name := opts[scopeRelay]
 	if name == "" {
-		if len(s.deps.Relays) != 1 {
+		if len(s.relays()) != 1 {
 			return errors.New("--relay is needed when several relays run")
 		}
-		name = s.deps.Relays[0].Name
+		name = s.relays()[0].Name
 	}
 	live, err := s.relayFilter(ctx, name)
 	if err != nil {
@@ -885,8 +898,8 @@ func (s *session) relayFilter(ctx context.Context, name string) (live bool, err 
 // relayFilterError names both worlds when they differ: what runs, and
 // what only the archive remembers.
 func (s *session) relayFilterError(ctx context.Context, name string) error {
-	running := make([]string, 0, len(s.deps.Relays))
-	for _, r := range s.deps.Relays {
+	running := make([]string, 0, len(s.relays()))
+	for _, r := range s.relays() {
 		running = append(running, r.Name)
 	}
 	sort.Strings(running)

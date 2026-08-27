@@ -232,33 +232,10 @@ func run(dbPath, logLevel string) error {
 	}
 	defer release()
 
-	ctx0 := context.Background()
-	store, err := confdb.Open(ctx0, dbPath)
+	store, f, err := openConfig(dbPath, log)
 	if err != nil {
 		return err
 	}
-	f, err := store.Load(ctx0)
-	// The daemon does not write configuration yet, so holding the
-	// store open would guard nothing; the instance lock is what keeps
-	// an import from racing a running daemon.
-	_ = store.Close()
-	if err != nil {
-		return err
-	}
-	if len(f.Relays) == 0 {
-		log.Warn("no relays configured — the console is up, waiting to be told what to run",
-			zap.String("db", dbPath))
-	}
-
-	b := bus.New()
-	deps := cli.Deps{
-		Version: version,
-		Started: time.Now(),
-		Bus:     b,
-		Traces:  map[string][]config.Trace{},
-		Kinds:   buildKinds(),
-	}
-	relays := buildRelays(f, b, log, &deps)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -269,19 +246,32 @@ func run(dbPath, logLevel string) error {
 	journalCtx, journalDone := context.WithCancel(context.Background())
 	defer journalDone()
 
-	var producers, journal sync.WaitGroup
-	if err := startConsumers(ctx, journalCtx, f, &deps, b, &producers, &journal, log); err != nil {
+	b := bus.New()
+	var journal sync.WaitGroup
+	// The sentinel comes up before the relays so the duty ledgers can
+	// resume the sliding hour from the journal at arming.
+	sen, err := startSentinel(ctx, journalCtx, f, b, &journal, log)
+	if err != nil {
+		_ = store.Close()
 		return err
 	}
-	for _, r := range relays {
-		producers.Go(func() { r.Run(ctx) })
+
+	mgr := newManager(store, f, b, sen, buildKinds(), log)
+	deps := consoleDeps(mgr, b, sen)
+	mgr.Start(ctx)
+
+	var producers sync.WaitGroup
+	if err := startListeners(ctx, f, &deps, &producers, log); err != nil {
+		return err
 	}
-	log.Info("daemon up", zap.Int("relays", len(relays)))
+	log.Info("daemon up", zap.Int("relays", len(f.Relays)))
 	<-ctx.Done()
 	log.Info("shutting down")
 	producers.Wait()
+	mgr.Wait()
 	journalDone()
 	journal.Wait()
+	mgr.Close()
 	return nil
 }
 
@@ -310,8 +300,8 @@ func buildKinds() []schema.Kind {
 	}
 	return []schema.Kind{
 		{
-			Name: "relay", Doc: "one protocol instance, owning one radio",
-			Attrs: config.RelayAttrs(), ChoiceAttr: "protocol",
+			Name: confdb.KindRelay, Doc: "one protocol instance, owning one radio",
+			Attrs: config.RelayAttrs(), ChoiceAttr: attrProtocol,
 			Contributed: func(choice string) []schema.Attr {
 				b, err := protocol.Lookup(choice)
 				if err != nil {
@@ -328,8 +318,8 @@ func buildKinds() []schema.Kind {
 			},
 		},
 		{
-			Name: "radio", Doc: "one physical transceiver attachment",
-			Attrs: config.RadioAttrs(), ChoiceAttr: "driver",
+			Name: confdb.KindRadio, Doc: "one physical transceiver attachment",
+			Attrs: config.RadioAttrs(), ChoiceAttr: attrDriver,
 			Contributed: func(choice string) []schema.Attr {
 				d, err := radio.Lookup(choice)
 				if err != nil {
@@ -346,62 +336,81 @@ func buildKinds() []schema.Kind {
 			},
 		},
 		{
-			Name: "sentinel", Doc: "the observation journal", Singleton: true,
+			Name: confdb.KindSentinel, Doc: "the observation journal", Singleton: true,
 			Attrs: config.SentinelAttrs(),
 		},
 		{
-			Name: "cli", Doc: "the operator listener", Singleton: true,
+			Name: confdb.KindCLI, Doc: "the operator listener", Singleton: true,
 			Attrs: config.CLIAttrs(),
 		},
 	}
 }
 
-// buildRelays assembles every configured relay. A broken one is a
-// visible casualty, never a dead daemon: it exists, in the error
-// state, with its cause.
-func buildRelays(f *config.File, b *bus.Bus, log *zap.Logger, deps *cli.Deps) []*relay.Relay {
-	relays := make([]*relay.Relay, 0, len(f.Relays))
-	for name, rc := range f.Relays {
-		r, info, err := assemble(name, rc, f.Radios[rc.Radio], b, log, deps)
-		if err != nil {
-			log.Error("relay configuration failed",
-				zap.String("relay", name), zap.Error(err))
-			r = relay.Stillborn(name, err, b, log)
-			info = cli.RelayInfo{
-				Name: name, Protocol: rc.Protocol, Radio: rc.Radio,
-				State: r.State, Err: r.Err,
-				// The configured intent survives the failure: an
-				// operator reading "tx dry" next to an error would
-				// think the relay was meant to stay silent.
-				TXMode: rc.TXMode(),
-			}
-		}
-		relays = append(relays, r)
-		deps.Relays = append(deps.Relays, info)
+// openConfig opens the store the daemon will hold for its whole life
+// — the manager writes every configuration change through it — and
+// loads what it says. The instance lock keeps an import from racing a
+// running daemon.
+func openConfig(dbPath string, log *zap.Logger) (*confdb.Store, *config.File, error) {
+	ctx := context.Background()
+	store, err := confdb.Open(ctx, dbPath)
+	if err != nil {
+		return nil, nil, err
 	}
-	sort.Slice(deps.Relays, func(i, j int) bool { return deps.Relays[i].Name < deps.Relays[j].Name })
-	sort.Slice(deps.Radios, func(i, j int) bool { return deps.Radios[i].Name < deps.Radios[j].Name })
-	return relays
+	f, err := store.Load(ctx)
+	if err != nil {
+		_ = store.Close()
+		return nil, nil, err
+	}
+	if len(f.Relays) == 0 {
+		log.Warn("no relays configured — the console is up, waiting to be told what to run",
+			zap.String("db", dbPath))
+	}
+	return store, f, nil
 }
 
-// startConsumers brings up the optional bus consumers — sentinel and
-// CLI — that the configuration asked for. The sentinel runs on its
-// own context so it drains after every publisher has stopped.
-func startConsumers(ctx, journalCtx context.Context, f *config.File, deps *cli.Deps,
-	b *bus.Bus, producers, journal *sync.WaitGroup, log *zap.Logger,
-) error {
-	if f.Sentinel != nil {
-		sent, err := sentinel.Open(ctx, f.Sentinel.Journal, f.Sentinel.Retention,
-			f.Sentinel.MaxFrames, b, log.Named("sentinel"))
-		if err != nil {
-			return fmt.Errorf("sentinel: %w", err)
-		}
-		deps.Sentinel = sent
-		journal.Go(func() { sent.Run(journalCtx) })
-		log.Info("sentinel journalling",
-			zap.String("journal", f.Sentinel.Journal),
-			zap.Duration("retention", f.Sentinel.Retention))
+// consoleDeps is everything the operator surfaces may consult: the
+// live views and the mutation door, all of them the manager's.
+func consoleDeps(mgr *manager, b *bus.Bus, sen *sentinel.Sentinel) cli.Deps {
+	return cli.Deps{
+		Version:    version,
+		Started:    time.Now(),
+		Bus:        b,
+		Sentinel:   sen,
+		Kinds:      mgr.kinds,
+		LiveRelays: mgr.RelayInfos,
+		LiveRadios: mgr.RadioInfos,
+		LiveTraces: mgr.Traces,
+		Mutate:     mgr.Mutate,
+		Undo:       mgr.Undo,
 	}
+}
+
+// startSentinel brings up the observation journal when the
+// configuration asks for one. It runs on its own context so it drains
+// after every publisher has stopped.
+func startSentinel(ctx, journalCtx context.Context, f *config.File,
+	b *bus.Bus, journal *sync.WaitGroup, log *zap.Logger,
+) (*sentinel.Sentinel, error) {
+	if f.Sentinel == nil {
+		return nil, nil //nolint:nilnil // absence is the configured mode, not a fault
+	}
+	sent, err := sentinel.Open(ctx, f.Sentinel.Journal, f.Sentinel.Retention,
+		f.Sentinel.MaxFrames, b, log.Named("sentinel"))
+	if err != nil {
+		return nil, fmt.Errorf("sentinel: %w", err)
+	}
+	journal.Go(func() { sent.Run(journalCtx) })
+	log.Info("sentinel journalling",
+		zap.String("journal", f.Sentinel.Journal),
+		zap.Duration("retention", f.Sentinel.Retention))
+	return sent, nil
+}
+
+// startListeners brings up the operator surfaces the configuration
+// asked for.
+func startListeners(ctx context.Context, f *config.File, deps *cli.Deps,
+	producers *sync.WaitGroup, log *zap.Logger,
+) error {
 	if f.CLI != nil {
 		addr := f.CLI.Listen
 		d := *deps
@@ -471,67 +480,102 @@ func listenConsole(ctx context.Context, path string) (net.Listener, error) {
 // validates every override scope and the envelope at load time, and
 // logs every resolved key with its provenance, so a running config is
 // always explainable from the log alone.
-func assemble(name string, rc config.Relay, radioSpec config.Radio,
-	b *bus.Bus, log *zap.Logger, deps *cli.Deps,
-) (*relay.Relay, cli.RelayInfo, error) {
-	none := cli.RelayInfo{}
+// resolvedConfigs is everything the layers say before hardware gets
+// involved: the effective key sets, their provenance, and the checks
+// every override scope passed. The manager runs this alone to judge a
+// mutation; assemble runs it on the way to the radio.
+type resolvedConfigs struct {
+	drv         radio.Driver
+	builder     protocol.Builder
+	radioCfg    map[string]any
+	relayCfg    map[string]any
+	radioTraces []config.Trace
+	relayTraces []config.Trace
+}
+
+func resolveConfigs(rc config.Relay, radioSpec config.Radio) (*resolvedConfigs, error) {
 	drv, err := radio.Lookup(radioSpec.Driver)
 	if err != nil {
-		return nil, none, err
+		return nil, err
 	}
 	radioCfg, radioTraces, err := radioSpec.Layered.Resolve(drv.Presets)
 	if err != nil {
-		return nil, none, fmt.Errorf("radio %q: %w", rc.Radio, err)
+		return nil, fmt.Errorf("radio %q: %w", rc.Radio, err)
 	}
-
 	builder, err := protocol.Lookup(rc.Protocol)
 	if err != nil {
-		return nil, none, err
+		return nil, err
 	}
 	relayCfg, relayTraces, err := rc.Layered.Resolve(builder.Presets)
 	if err != nil {
-		return nil, none, err
+		return nil, err
 	}
-	deps.Traces["radio "+rc.Radio] = radioTraces
-	deps.Traces["relay "+name] = relayTraces
-
 	// Every override scope is checked, not just the selected one: a
 	// typo under tomorrow's profile fails today.
 	if err := checkScopes(radioSpec.Layered, drv.Presets,
 		func(cfg map[string]any) error { _, e := drv.Inspect(cfg); return e }); err != nil {
-		return nil, none, fmt.Errorf("radio %q: %w", rc.Radio, err)
+		return nil, fmt.Errorf("radio %q: %w", rc.Radio, err)
 	}
 	if err := checkScopes(rc.Layered, builder.Presets, builder.Check); err != nil {
-		return nil, none, err
+		return nil, err
+	}
+	return &resolvedConfigs{
+		drv: drv, builder: builder,
+		radioCfg: radioCfg, relayCfg: relayCfg,
+		radioTraces: radioTraces, relayTraces: relayTraces,
+	}, nil
+}
+
+// assembled is one relay ready to run, with everything the console
+// gets to know about it.
+type assembled struct {
+	relay       *relay.Relay
+	info        cli.RelayInfo
+	radio       cli.RadioInfo
+	radioTraces []config.Trace
+	relayTraces []config.Trace
+}
+
+func assemble(ctx context.Context, name string, rc config.Relay, radioSpec config.Radio,
+	b *bus.Bus, log *zap.Logger, sen *sentinel.Sentinel,
+) (*assembled, error) {
+	res, err := resolveConfigs(rc, radioSpec)
+	if err != nil {
+		return nil, err
 	}
 
 	rlog := log.With(zap.String("relay", name))
-	logTraces(rlog, "radio config", radioTraces)
-	logTraces(rlog, "relay config", relayTraces)
-	announceOverrides(rlog, radioTraces, relayTraces)
+	logTraces(rlog, "radio config", res.radioTraces)
+	logTraces(rlog, "relay config", res.relayTraces)
+	announceOverrides(rlog, res.radioTraces, res.relayTraces)
 
-	eng, err := builder.Build(name, relayCfg, b, rlog)
+	eng, err := res.builder.Build(name, res.relayCfg, b, rlog)
 	if err != nil {
-		return nil, none, err
+		return nil, err
 	}
-	env, err := bindEnvelope(drv, radioCfg, eng)
+	env, err := bindEnvelope(res.drv, res.radioCfg, eng)
 	if err != nil {
-		return nil, none, fmt.Errorf("radio %q: %w", rc.Radio, err)
+		return nil, fmt.Errorf("radio %q: %w", rc.Radio, err)
 	}
 
-	policy, err := resolveTX(rc, env, eng, drv, radioCfg)
+	policy, err := resolveTX(rc, env, eng, res.drv, res.radioCfg)
 	if err != nil {
-		return nil, none, err
+		return nil, err
 	}
-	seedDuty(&policy, name, deps)
+	seedDuty(ctx, &policy, name, sen)
 	if err := armEngine(rc.Protocol, policy, eng); err != nil {
-		return nil, none, err
+		return nil, err
 	}
-	r := relay.New(name, drv, radioCfg, eng, b, log, rc.NoiseHistory, policy.Mode)
-	deps.Radios = append(deps.Radios, cli.RadioInfo{
-		Name: rc.Radio, Driver: radioSpec.Driver, Envelope: env, Relay: name,
-	})
-	return r, relayInfo(name, rc, radioSpec, r, eng), nil
+	r := relay.New(name, res.drv, res.radioCfg, eng, b, log, rc.NoiseHistory, policy.Mode)
+	return &assembled{
+		relay: r,
+		info:  relayInfo(name, rc, radioSpec, r, eng),
+		radio: cli.RadioInfo{
+			Name: rc.Radio, Driver: radioSpec.Driver, Envelope: env, Relay: name,
+		},
+		radioTraces: res.radioTraces,
+		relayTraces: res.relayTraces,
+	}, nil
 }
 
 // relayInfo is what the CLI gets to know about an assembled relay.
@@ -660,11 +704,11 @@ func dutyOf(eng protocol.Engine) func() (time.Duration, time.Duration, bool) {
 // hour, when a journal runs at all: the budget must not restart with
 // the process, or a crash-loop would launder it. Best effort — a sick
 // journal degrades to an empty hour, never to a dead relay.
-func seedDuty(policy *protocol.TXPolicy, relay string, deps *cli.Deps) {
-	if policy.Mode == config.TXDry || deps.Sentinel == nil {
+func seedDuty(ctx context.Context, policy *protocol.TXPolicy, relay string, sen *sentinel.Sentinel) {
+	if policy.Mode == config.TXDry || sen == nil {
 		return
 	}
-	rows, err := deps.Sentinel.SpentAirtime(context.Background(), relay)
+	rows, err := sen.SpentAirtime(ctx, relay)
 	if err != nil {
 		return
 	}

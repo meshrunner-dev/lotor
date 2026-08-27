@@ -236,6 +236,74 @@ func (s *Store) ImportFile(ctx context.Context, f *config.File, principal string
 	return tx.Commit()
 }
 
+// Change is one attribute's before and after inside a revision. A nil
+// Old is an attribute that did not exist; a nil New is one removed.
+type Change struct {
+	Old any `json:"old,omitempty"`
+	New any `json:"new,omitempty"`
+}
+
+// Replace stores one object whole and records what changed in it, in
+// one transaction — the store never holds an object without the
+// revision that explains it.
+func (s *Store) Replace(ctx context.Context, kind, name string, section any,
+	principal, op string, change map[string]Change,
+) error {
+	attrs, err := toAttrs(section)
+	if err != nil {
+		return fmt.Errorf("config %s %q: %w", kind, name, err)
+	}
+	diff, err := json.Marshal(change)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO objects(kind, name, attrs) VALUES(?, ?, ?) "+
+			"ON CONFLICT(kind, name) DO UPDATE SET attrs = excluded.attrs",
+		kind, name, attrs); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO revisions(at, principal, kind, name, op, change) VALUES(?, ?, ?, ?, ?, ?)",
+		time.Now().UTC().Format(time.RFC3339), principal, kind, name, op, string(diff)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// LastMutation returns the newest revision an undo may invert — a set
+// or an unset, not an import, whose inverse would be a wipe nobody
+// asked for.
+func (s *Store) LastMutation(ctx context.Context) (*Revision, error) {
+	revs, err := s.Revisions(ctx, 50)
+	if err != nil {
+		return nil, err
+	}
+	for i := range revs {
+		switch revs[i].Op {
+		case "set", "unset", "undo":
+			return &revs[i], nil
+		case "import":
+			return nil, errors.New("nothing to undo — the last change is an import")
+		}
+	}
+	return nil, errors.New("nothing to undo")
+}
+
+// Changes decodes what a revision recorded.
+func (r *Revision) Changes() (map[string]Change, error) {
+	out := map[string]Change{}
+	if err := json.Unmarshal([]byte(r.Change), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // Revision is one recorded mutation, oldest first when listed.
 type Revision struct {
 	ID        int64

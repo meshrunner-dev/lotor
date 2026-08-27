@@ -232,6 +232,13 @@ func sessionCommands() []*command {
 			run:    (*session).help,
 		},
 		{
+			name:   cmdUndo,
+			forms:  []form{{cmdUndo, "invert the newest configuration change"}},
+			detail: []string{cmdUndo, "one step back, recorded like any other change"},
+			admin:  true,
+			run:    (*session).undoCmd,
+		},
+		{
 			name:    cmdQuit,
 			aliases: []string{"exit"},
 			forms:   []form{{cmdQuit, "leave the console"}},

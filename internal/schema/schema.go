@@ -8,6 +8,14 @@
 // stale in another.
 package schema
 
+import (
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+)
+
 // Type says what shape a value has — for parsing, for completion,
 // and one day for an API's specification.
 type Type int
@@ -87,4 +95,70 @@ func Find(attrs []Attr, name string) (Attr, bool) {
 		}
 	}
 	return Attr{}, false
+}
+
+// Parse turns the text an operator typed into the value an attribute
+// stores. Durations keep their text — "2h" is what the config dialect
+// speaks — after proving it parses.
+func Parse(a Attr, text string) (any, error) {
+	if len(a.Enum) > 0 {
+		if slices.Contains(a.Enum, text) {
+			return text, nil
+		}
+		return nil, fmt.Errorf("%s: %q — want one of %s", a.Name, text, strings.Join(a.Enum, ", "))
+	}
+	switch a.Type {
+	case Int:
+		v, err := strconv.ParseInt(text, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %q is not a whole number", a.Name, text)
+		}
+		return int(v), nil
+	case Float:
+		v, err := strconv.ParseFloat(text, 64)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %q is not a number", a.Name, text)
+		}
+		return v, nil
+	case Bool:
+		switch text {
+		case "true", "yes":
+			return true, nil
+		case "false", "no":
+			return false, nil
+		}
+		return nil, fmt.Errorf("%s: %q — want true or false", a.Name, text)
+	case Duration:
+		if _, err := time.ParseDuration(text); err != nil {
+			return nil, fmt.Errorf("%s: %q is not a duration (2h, 30m, 90s)", a.Name, text)
+		}
+		return text, nil
+	case Words, Ints:
+		return parseList(a, text)
+	case String:
+		return text, nil
+	}
+	return text, nil
+}
+
+// parseList reads a comma-joined list into its element type.
+func parseList(a Attr, text string) (any, error) {
+	var words []string
+	for part := range strings.SplitSeq(text, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			words = append(words, p)
+		}
+	}
+	if a.Type == Words {
+		return words, nil
+	}
+	out := make([]int, 0, len(words))
+	for _, w := range words {
+		v, err := strconv.ParseInt(w, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %q is not a list of whole numbers", a.Name, text)
+		}
+		out = append(out, int(v))
+	}
+	return out, nil
 }

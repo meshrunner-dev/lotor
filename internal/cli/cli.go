@@ -44,6 +44,7 @@ const (
 	cmdDiscover   = "discover"
 	cmdNeighbours = "neighbours"
 	cmdAdvert     = "advert"
+	cmdUndo       = "undo"
 	verbList      = "list"
 )
 
@@ -139,6 +140,20 @@ type Deps struct {
 	// its attributes and their docs — from which the console derives
 	// contexts, help and completion.
 	Kinds []schema.Kind
+	// The live views, set by a daemon whose relays can be rebuilt
+	// under a running session: they always name the current engine,
+	// where the plain fields above froze at startup. Optional — tests
+	// and static deployments use the fields.
+	LiveRelays func() []RelayInfo
+	LiveRadios func() []RadioInfo
+	LiveTraces func() map[string][]config.Trace
+	// Mutate applies configuration changes — parse, validate, persist,
+	// bounce the owning relay — and says what happened. Nil when this
+	// daemon has no mutation channel.
+	Mutate func(ctx context.Context, kind, name string, set map[string]string,
+		unset []string, principal string) (string, error)
+	// Undo inverts the newest recorded mutation.
+	Undo func(ctx context.Context, principal string) (string, error)
 }
 
 // maxLineBytes bounds one command line: a client that never sends a
@@ -310,8 +325,8 @@ func (s *session) dispatch(ctx context.Context, args []string) {
 }
 
 func (s *session) findRelay(name string) (RelayInfo, error) {
-	names := make([]string, 0, len(s.deps.Relays))
-	for _, r := range s.deps.Relays {
+	names := make([]string, 0, len(s.relays()))
+	for _, r := range s.relays() {
 		if r.Name == name {
 			return r, nil
 		}

@@ -183,3 +183,49 @@ func TestTheFileIsNobodyElsesToRead(t *testing.T) {
 		}
 	}
 }
+
+func TestReplaceRecordsItsRevision(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if err := s.ImportFile(ctx, sample(), "migration"); err != nil {
+		t.Fatal(err)
+	}
+	// A set lands with its before and after.
+	f := sample()
+	rc := f.Relays["meshcore-868"]
+	rc.Layered.Overrides["eu-868-narrow"]["node_name"] = "renamed"
+	if err := s.Replace(ctx, KindRelay, "meshcore-868", rc, "console", "set",
+		map[string]Change{"node_name": {Old: "test 🦝", New: "renamed"}}); err != nil {
+		t.Fatal(err)
+	}
+	rev, err := s.LastMutation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev.Op != "set" || rev.Principal != "console" {
+		t.Fatalf("revision = %+v", rev)
+	}
+	ch, err := rev.Changes()
+	if err != nil || ch["node_name"].Old != "test 🦝" || ch["node_name"].New != "renamed" {
+		t.Fatalf("changes = %v (%v)", ch, err)
+	}
+	// And the object really changed.
+	loaded, err := s.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Relays["meshcore-868"].Layered.Overrides["eu-868-narrow"]["node_name"] != "renamed" {
+		t.Fatal("the object kept its old value")
+	}
+}
+
+func TestUndoStopsAtAnImport(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if err := s.ImportFile(ctx, sample(), "migration"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LastMutation(ctx); err == nil {
+		t.Fatal("an import offered itself to undo — its inverse is a wipe")
+	}
+}

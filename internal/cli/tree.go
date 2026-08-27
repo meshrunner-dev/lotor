@@ -15,10 +15,12 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
+	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/schema"
 )
 
@@ -58,6 +60,30 @@ func (s *session) prompt() string {
 	return label + " > "
 }
 
+// relays is the live view when the daemon serves one.
+func (s *session) relays() []RelayInfo {
+	if s.deps.LiveRelays != nil {
+		return s.deps.LiveRelays()
+	}
+	return s.deps.Relays
+}
+
+// radios is the live view when the daemon serves one.
+func (s *session) radios() []RadioInfo {
+	if s.deps.LiveRadios != nil {
+		return s.deps.LiveRadios()
+	}
+	return s.deps.Radios
+}
+
+// traces is the live view when the daemon serves one.
+func (s *session) traces() map[string][]config.Trace {
+	if s.deps.LiveTraces != nil {
+		return s.deps.LiveTraces()
+	}
+	return s.deps.Traces
+}
+
 // kindByName resolves a kind the tree serves. Singletons hold no
 // values a session could show yet, so they stay out of the tree until
 // the daemon carries the store.
@@ -76,11 +102,11 @@ func (s *session) instances(kind string) map[string]string {
 	out := map[string]string{}
 	switch kind {
 	case scopeRelay:
-		for _, r := range s.deps.Relays {
+		for _, r := range s.relays() {
 			out[r.Name] = r.Protocol
 		}
 	case scopeRadio:
-		for _, r := range s.deps.Radios {
+		for _, r := range s.radios() {
 			out[r.Name] = r.Driver
 		}
 	}
@@ -147,12 +173,117 @@ func (s *session) tree(ctx context.Context, line string) {
 		s.dispatch(ctx, rest)
 	case verb == verbPrint:
 		s.treePrint(ctx, path)
+	case verb == verbSet || verb == verbUnset:
+		if err := s.treeSet(ctx, path, verb, args); err != nil {
+			fmt.Fprintf(s.out, "error: %s\r\n", err)
+		}
+	case verb == verbExport:
+		if err := s.treeExport(path); err != nil {
+			fmt.Fprintf(s.out, "error: %s\r\n", err)
+		}
 	case len(path) == 2 && s.mountedVerb(path[0], verb):
 		// The flat command runs as itself, told which instance asked.
 		s.dispatch(ctx, append(append([]string{verb}, args...), "--"+scopeRelay, path[1]))
 	default:
 		fmt.Fprintf(s.out, "error: no %q here — \"?\" says what this context offers\r\n", verb)
 	}
+}
+
+// The mutation verbs.
+const (
+	verbSet    = "set"
+	verbUnset  = "unset"
+	verbExport = "export"
+)
+
+// treeSet applies one line of changes: every attr=value on it lands
+// in one transaction, so a retune touching three attributes bounces
+// the relay once, not three times.
+func (s *session) treeSet(ctx context.Context, path []string, verb string, args []string) error {
+	if s.deps.Mutate == nil {
+		return errors.New("this daemon has no mutation channel")
+	}
+	if s.deps.Privilege != Admin {
+		return fmt.Errorf("%s is an admin verb — use the local console socket", verb)
+	}
+	if len(path) != 2 {
+		return fmt.Errorf("%s works on an instance — /relay <name> %s …", verb, verb)
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("usage: %s attr=value … | unset attr …", verbSet)
+	}
+	set := map[string]string{}
+	var unset []string
+	for _, a := range args {
+		name, value, has := strings.Cut(a, "=")
+		switch {
+		case verb == verbUnset:
+			if has {
+				return fmt.Errorf("unset takes attribute names, not %q", a)
+			}
+			unset = append(unset, name)
+		case !has:
+			return fmt.Errorf("%q — set wants attr=value", a)
+		default:
+			set[name] = value
+		}
+	}
+	msg, err := s.deps.Mutate(ctx, path[0], path[1], set, unset, "console")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(s.out, "%s\r\n", msg)
+	return nil
+}
+
+// treeExport prints an instance's explicit configuration as the set
+// lines that would recreate it — pasteable, which is not scripting.
+// Secrets stay masked: an export is for reading and diffing, and a
+// private key does not belong in either.
+func (s *session) treeExport(path []string) error {
+	if len(path) != 2 {
+		return errors.New("export works on an instance")
+	}
+	traces, ok := s.traces()[path[0]+" "+path[1]]
+	if !ok {
+		return fmt.Errorf("no configuration recorded for %s %s", path[0], path[1])
+	}
+	secret := s.secretAttrs(path[0] + " " + path[1])
+	fmt.Fprintf(s.out, "# /%s %s\r\n", path[0], path[1])
+	for _, t := range traces {
+		if !strings.HasPrefix(t.Source, "override:") {
+			continue // the preset's own values need no restating
+		}
+		if secret[t.Key] {
+			fmt.Fprintf(s.out, "# %s is secret — an export cannot carry it\r\n", t.Key)
+			continue
+		}
+		fmt.Fprintf(s.out, "set %s=%s\r\n", t.Key, exportValue(t.Value))
+	}
+	return nil
+}
+
+// exportValue renders one value the way set accepts it back.
+func exportValue(v any) string {
+	switch vv := v.(type) {
+	case []any:
+		parts := make([]string, len(vv))
+		for i, p := range vv {
+			parts[i] = fmt.Sprintf("%v", p)
+		}
+		return quoteIfSpaced(strings.Join(parts, ","))
+	case []string:
+		return quoteIfSpaced(strings.Join(vv, ","))
+	default:
+		return quoteIfSpaced(fmt.Sprintf("%v", v))
+	}
+}
+
+func quoteIfSpaced(s string) string {
+	if strings.ContainsAny(s, " \t") {
+		return `"` + s + `"`
+	}
+	return s
 }
 
 // verbPrint is the tree's one universal verb, the console family's
@@ -181,10 +312,10 @@ func (s *session) treePrint(ctx context.Context, path []string) {
 			return
 		}
 		tb := &table{}
-		for _, r := range s.deps.Radios {
+		for _, r := range s.radios() {
 			tb.row(r.Name, r.Driver, "relay "+r.Relay)
 		}
-		if err := tb.flush(s.out); err == nil && len(s.deps.Radios) == 0 {
+		if err := tb.flush(s.out); err == nil && len(s.radios()) == 0 {
 			fmt.Fprint(s.out, "no radios\r\n")
 		}
 		return
@@ -222,7 +353,7 @@ func (s *session) treeHelp(path []string) string {
 			fmt.Fprintf(&b, "  %-16s %s\r\n", s.color(cCyan, name), inst[name])
 		}
 	case 2:
-		verbs := []string{verbPrint}
+		verbs := []string{verbPrint, verbSet, verbUnset, verbExport}
 		for _, v := range []string{cmdNeighbours, cmdScopes, cmdDiscover, cmdAdvert} {
 			if s.mountedVerb(path[0], v) {
 				verbs = append(verbs, v)
@@ -297,7 +428,8 @@ func (s *session) candidatesAt(path []string, absolute bool) []string {
 		}
 		cands = append(cands, verbPrint)
 	case 2:
-		cands = append(cands, verbPrint, cmdNeighbours, cmdScopes, cmdDiscover, cmdAdvert)
+		cands = append(cands, verbPrint, verbSet, verbUnset, verbExport,
+			cmdNeighbours, cmdScopes, cmdDiscover, cmdAdvert)
 	}
 	return cands
 }

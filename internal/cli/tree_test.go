@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -109,5 +110,71 @@ func TestPaintClassifiesTokens(t *testing.T) {
 	// Without colors the line passes through untouched.
 	if plain := (&session{deps: s.deps}).paintLine("/relay print"); plain != "/relay print" {
 		t.Errorf("plain session painted anyway: %q", plain)
+	}
+}
+
+func TestTreeSetGoesThroughTheOneDoor(t *testing.T) {
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	var got struct {
+		kind, name string
+		set        map[string]string
+		unset      []string
+	}
+	deps.Mutate = func(_ context.Context, kind, name string, set map[string]string,
+		unset []string, principal string,
+	) (string, error) {
+		got.kind, got.name, got.set, got.unset = kind, name, set, unset
+		if principal != "console" {
+			t.Errorf("principal = %q", principal)
+		}
+		return "applied — relay meshcore-868 restarting", nil
+	}
+	out := run(t, deps, `/relay meshcore-868 set node_name="new name" session_limit=12`)
+	if got.kind != "relay" || got.name != "meshcore-868" {
+		t.Fatalf("mutation aimed at %s %s", got.kind, got.name)
+	}
+	if got.set["node_name"] != "new name" || got.set["session_limit"] != "12" {
+		t.Fatalf("set = %v", got.set)
+	}
+	if !strings.Contains(out, "restarting") {
+		t.Errorf("the answer never reached the operator:\n%s", out)
+	}
+
+	out = run(t, deps, "/relay meshcore-868 unset node_name")
+	if len(got.unset) != 1 || got.unset[0] != "node_name" {
+		t.Fatalf("unset = %v", got.unset)
+	}
+	_ = out
+}
+
+func TestTreeSetIsAdminOnly(t *testing.T) {
+	deps := testDeps(t)
+	called := false
+	deps.Mutate = func(_ context.Context, _, _ string, _ map[string]string,
+		_ []string, _ string,
+	) (string, error) {
+		called = true
+		return "", nil
+	}
+	out := run(t, deps, "/relay meshcore-868 set node_name=x")
+	if called {
+		t.Fatal("a read-only session mutated the configuration")
+	}
+	if !strings.Contains(out, "admin") {
+		t.Errorf("the refusal does not say why:\n%s", out)
+	}
+}
+
+func TestTreeExportIsPasteableAndKeepsSecrets(t *testing.T) {
+	out := run(t, testDeps(t), "/relay meshcore-868 export")
+	if !strings.Contains(out, `set node_name="test 🦝"`) {
+		t.Errorf("export lost the spaced value's quotes:\n%s", out)
+	}
+	if strings.Contains(out, "b5445dd625d531fc") {
+		t.Fatalf("export carried the private key:\n%s", out)
+	}
+	if !strings.Contains(out, "identity is secret") {
+		t.Errorf("export does not say what it cannot carry:\n%s", out)
 	}
 }
