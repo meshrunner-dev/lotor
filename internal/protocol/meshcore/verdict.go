@@ -25,6 +25,7 @@ const (
 	verdictNotAddressed  = "direct-not-addressed"       // the path's next hop is not us (or no identity exists)
 	verdictDiscover      = "discover-request"           // a zero-hop neighbourhood scan asking who hears it
 	verdictAnon          = "anon-request"               // a question sealed to our key, asker named in the clear
+	verdictScopeAnswer   = "scopes-answer"              // a neighbour telling us what it carries, for our own question
 	verdictRequest       = "authenticated-request"      // a question from a client whose session we hold
 	verdictTraceTransit  = "trace-transit"              // trace walking its target path, next hop unjudgeable
 	verdictTraceNotUs    = "trace-not-addressed"        // trace walking its target path, next hop is not us
@@ -111,6 +112,10 @@ func (e *engine) addressedToUs(rx *reception) (verdict, why string, handled bool
 	case meshcore.PayloadTypeReq:
 		// Only a live session's MAC can claim an authenticated one.
 		return e.reqVerdict(rx)
+	case meshcore.PayloadTypeResponse:
+		// An answer to a question this node asked; anything else
+		// routes on.
+		return e.scopeAnswer(rx)
 	default:
 		return "", "", false
 	}

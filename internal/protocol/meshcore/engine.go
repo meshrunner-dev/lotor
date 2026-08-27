@@ -172,8 +172,12 @@ type engine struct {
 	// pipeline's goroutine; wakeRx interrupts a blocked Receive so the
 	// order is served now, not at the next scheduled duty.
 	advertAsk chan string
-	wakeMu    sync.Mutex
-	wakeRx    context.CancelFunc
+	// scopeAsk carries an operator's question about a neighbour's
+	// scopes; pendingScope is the one in flight, engine-goroutine only.
+	scopeAsk     chan *scopeQuery
+	pendingScope *scopeQuery
+	wakeMu       sync.Mutex
+	wakeRx       context.CancelFunc
 }
 
 // paramsFrom is the strict decode both build and the config checker
@@ -398,7 +402,7 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 	var rctx context.Context
 	var cancel context.CancelFunc
 	switch wait, ok := e.txWait(time.Now()); {
-	case len(e.advertAsk) > 0:
+	case len(e.advertAsk) > 0 || len(e.scopeAsk) > 0:
 		rctx, cancel = context.WithDeadline(ctx, time.Now())
 	case ok:
 		rctx, cancel = context.WithDeadline(ctx, time.Now().Add(wait))

@@ -161,6 +161,7 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 	e.duty = dl
 	e.started = time.Now()
 	e.advertAsk = make(chan string, 1)
+	e.scopeAsk = make(chan *scopeQuery, 1)
 	// What "changed since" means for us: this process's pipeline came
 	// up — the durable equivalent of the reference's mod timestamp.
 	e.discoverySince = time.Now()
@@ -547,6 +548,7 @@ const (
 // the entry goes back in the queue and the loop collects the frame.
 func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	e.drainAdvertAsk(dev, time.Now())
+	e.drainScopeAsk(dev, time.Now())
 	e.dueAdverts(dev, time.Now())
 	entry, ok := e.queue.pop(time.Now())
 	if !ok {

@@ -58,6 +58,7 @@ var commands []*command
 
 func init() {
 	commands = append(commands, daemonCommands()...)
+	commands = append(commands, relayCommands()...)
 	commands = append(commands, journalCommands()...)
 	commands = append(commands, sessionCommands()...)
 }
@@ -93,6 +94,29 @@ func daemonCommands() []*command {
 			forms:  []form{{"config show relay|radio <name>", "effective config with provenance"}},
 			maxPos: 3,
 			run:    (*session).config,
+		},
+	}
+}
+
+// relayCommands reach into one relay's own state: what its engine
+// knows, and the two things an operator can ask it to put on the air.
+func relayCommands() []*command {
+	return []*command{
+		{
+			name: "scopes",
+			forms: []form{
+				{"scopes", "the transport scopes this relay carries"},
+				{"scopes ask <pubkey>", "ask a neighbour which it carries"},
+			},
+			detail: []string{
+				"scopes [--relay R]",
+				"scopes ask <pubkey-prefix> [--relay R]",
+				"asking emits — admin only, one question at a time, and the",
+				"answer comes from the neighbour itself, not from a directory",
+			},
+			flags:  []flagSpec{{name: scopeRelay, valued: true}},
+			maxPos: 2,
+			run:    (*session).scopes,
 		},
 		{
 			name:   "neighbours",

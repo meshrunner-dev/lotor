@@ -76,6 +76,10 @@ type RelayInfo struct {
 	// Scopes lists the transport scopes this relay carries; empty for
 	// a protocol that has none.
 	Scopes []string
+	// AskScopes puts the scopes question to a neighbour named by a key
+	// prefix, and waits for its answer; nil when the protocol has no
+	// scopes to ask about.
+	AskScopes func(prefix []byte) ([]string, error)
 	// TriggerAdvert queues one operator announcement (flood or
 	// zero-hop); nil when the engine has no transmit pipeline.
 	TriggerAdvert func(flood bool) error

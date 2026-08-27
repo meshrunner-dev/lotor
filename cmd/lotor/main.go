@@ -419,6 +419,7 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		TXMode:        r.TXMode(),
 		Duty:          dutyOf(eng),
 		Scopes:        scopesOf(eng),
+		AskScopes:     askScopesOf(eng),
 		TriggerAdvert: advertTrigger(eng),
 		Neighbours:    neighboursOf(eng),
 		Identity:      eng.Identity(),
@@ -463,6 +464,25 @@ func scopesOf(eng protocol.Engine) []string {
 		return nil
 	}
 	return s.Scopes()
+}
+
+// askScopesOf exposes the question an operator may put to a
+// neighbour, when the protocol has scopes to ask about.
+func askScopesOf(eng protocol.Engine) func(prefix []byte) ([]string, error) {
+	a, ok := eng.(interface {
+		Neighbour(prefix []byte) ([]byte, error)
+		AskScopes(peer []byte) ([]string, error)
+	})
+	if !ok {
+		return nil
+	}
+	return func(prefix []byte) ([]string, error) {
+		peer, err := a.Neighbour(prefix)
+		if err != nil {
+			return nil, err
+		}
+		return a.AskScopes(peer)
+	}
 }
 
 // dutyOf exposes an engine's duty gauge when it has one.

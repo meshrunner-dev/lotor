@@ -388,6 +388,46 @@ func (s *session) printSent(sent []sentinel.Sent) {
 	}
 }
 
+// scopes shows what this relay carries, or asks a neighbour what it
+// does. The asking half emits, so it is admin-gated at the table.
+func (s *session) scopes(_ context.Context, in input) error {
+	r, err := s.oneRelay(in.opts[scopeRelay])
+	if err != nil {
+		return err
+	}
+	if len(in.pos) == 0 {
+		if len(r.Scopes) == 0 {
+			return fmt.Errorf("relay %q carries no scopes", r.Name)
+		}
+		fmt.Fprintf(s.out, "%s\r\n", strings.Join(r.Scopes, ", "))
+		return nil
+	}
+	if in.pos[0] != "ask" || len(in.pos) != 2 {
+		return errors.New("usage: scopes | scopes ask <pubkey-prefix>")
+	}
+	if s.deps.Privilege != Admin {
+		return errors.New("asking a neighbour emits — use the local console socket")
+	}
+	if r.AskScopes == nil {
+		return fmt.Errorf("relay %q has no scopes to ask about", r.Name)
+	}
+	prefix, err := hex.DecodeString(in.pos[1])
+	if err != nil {
+		return fmt.Errorf("%q is not a hex key prefix", in.pos[1])
+	}
+	fmt.Fprint(s.out, "asking…\r\n")
+	names, err := r.AskScopes(prefix)
+	if err != nil {
+		return err
+	}
+	if len(names) == 0 {
+		fmt.Fprint(s.out, "it carries nothing it will name\r\n")
+		return nil
+	}
+	fmt.Fprintf(s.out, "%s\r\n", strings.Join(names, ", "))
+	return nil
+}
+
 // advert queues one operator announcement: the reference CLI's
 // gesture — zero-hop by default, "flood" to address the mesh.
 func (s *session) advert(_ context.Context, in input) error {
