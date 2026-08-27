@@ -55,6 +55,12 @@ const (
 	TXOnAir        = "on-air"
 )
 
+// What a channel busy past the bounded wait earns.
+const (
+	LBTTransmit = "transmit" // key anyway — the mesh's convention
+	LBTDrop     = "drop"     // refuse, counted and visible
+)
+
 // TX configures a relay's transmit gate and channel politeness.
 type TX struct {
 	// Mode is the gate: dry (default), shadow, or on-air.
@@ -82,9 +88,9 @@ func (t *TX) Normalize() error {
 		return fmt.Errorf("tx: mode %q — want dry, shadow, on-air-zero-hop or on-air", t.Mode)
 	}
 	if t.LBTExhausted == "" {
-		t.LBTExhausted = "transmit"
+		t.LBTExhausted = LBTTransmit
 	}
-	if t.LBTExhausted != "transmit" && t.LBTExhausted != "drop" {
+	if t.LBTExhausted != LBTTransmit && t.LBTExhausted != LBTDrop {
 		return fmt.Errorf("tx: lbt_exhausted %q — want transmit or drop", t.LBTExhausted)
 	}
 	if t.LBTThresholdDB < 0 {

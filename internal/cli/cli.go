@@ -6,6 +6,8 @@
 package cli
 
 import (
+	"meshrunner.dev/lotor/internal/schema"
+
 	"bufio"
 	"context"
 	"errors"
@@ -123,6 +125,10 @@ type Deps struct {
 	// Traces holds the resolved-config provenance recorded at
 	// assembly, keyed "radio <name>" and "relay <name>".
 	Traces map[string][]config.Trace
+	// Kinds is the configuration vocabulary — every kind of object,
+	// its attributes and their docs — from which the console derives
+	// contexts, help and completion.
+	Kinds []schema.Kind
 }
 
 // maxLineBytes bounds one command line: a client that never sends a

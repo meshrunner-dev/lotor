@@ -26,7 +26,9 @@ import (
 )
 
 func init() {
-	protocol.Register("meshcore", protocol.Builder{Build: build, Check: check, Presets: presets})
+	protocol.Register("meshcore", protocol.Builder{
+		Build: build, Check: check, Presets: presets, Schema: Schema(),
+	})
 }
 
 // params is the relay-side configuration: the waveform choice plus

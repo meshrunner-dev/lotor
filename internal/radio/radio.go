@@ -8,6 +8,8 @@
 package radio
 
 import (
+	"meshrunner.dev/lotor/internal/schema"
+
 	"context"
 	"errors"
 	"fmt"
@@ -164,6 +166,10 @@ type Driver struct {
 	// one that reopens its radio every few seconds forever.
 	CheckTransmit func(cfg map[string]any) error
 	Presets       map[string]map[string]any
+	// Schema declares every attribute the driver accepts — the
+	// administration channels' single source for help, completion and
+	// validation vocabulary.
+	Schema []schema.Attr
 }
 
 var (

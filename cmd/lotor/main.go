@@ -40,6 +40,7 @@ import (
 	"meshrunner.dev/lotor/internal/confdb"
 	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 	_ "meshrunner.dev/lotor/internal/radio/sx126x"
+	"meshrunner.dev/lotor/internal/schema"
 	lotorversion "meshrunner.dev/lotor/internal/version"
 )
 
@@ -255,6 +256,7 @@ func run(dbPath, logLevel string) error {
 		Started: time.Now(),
 		Bus:     b,
 		Traces:  map[string][]config.Trace{},
+		Kinds:   buildKinds(),
 	}
 	relays := buildRelays(f, b, log, &deps)
 
@@ -291,6 +293,67 @@ func acquireInstanceLock(configPath string) (func(), error) {
 		return nil, err
 	}
 	return single.Acquire(context.Background(), "lotor", abs)
+}
+
+// buildKinds assembles the configuration vocabulary the console (and
+// later channels) navigate: the structural attributes from the config
+// package, the contributed ones from whichever protocol or driver an
+// instance chose, straight from their registries.
+func buildKinds() []schema.Kind {
+	sortedNames := func(presets map[string]map[string]any) []string {
+		names := make([]string, 0, len(presets))
+		for n := range presets {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		return names
+	}
+	return []schema.Kind{
+		{
+			Name: "relay", Doc: "one protocol instance, owning one radio",
+			Attrs: config.RelayAttrs(), ChoiceAttr: "protocol",
+			Contributed: func(choice string) []schema.Attr {
+				b, err := protocol.Lookup(choice)
+				if err != nil {
+					return nil
+				}
+				return b.Schema
+			},
+			Profiles: func(choice string) []string {
+				b, err := protocol.Lookup(choice)
+				if err != nil {
+					return nil
+				}
+				return sortedNames(b.Presets)
+			},
+		},
+		{
+			Name: "radio", Doc: "one physical transceiver attachment",
+			Attrs: config.RadioAttrs(), ChoiceAttr: "driver",
+			Contributed: func(choice string) []schema.Attr {
+				d, err := radio.Lookup(choice)
+				if err != nil {
+					return nil
+				}
+				return d.Schema
+			},
+			Profiles: func(choice string) []string {
+				d, err := radio.Lookup(choice)
+				if err != nil {
+					return nil
+				}
+				return sortedNames(d.Presets)
+			},
+		},
+		{
+			Name: "sentinel", Doc: "the observation journal", Singleton: true,
+			Attrs: config.SentinelAttrs(),
+		},
+		{
+			Name: "cli", Doc: "the operator listener", Singleton: true,
+			Attrs: config.CLIAttrs(),
+		},
+	}
 }
 
 // buildRelays assembles every configured relay. A broken one is a

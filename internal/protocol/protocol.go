@@ -5,6 +5,8 @@
 package protocol
 
 import (
+	"meshrunner.dev/lotor/internal/schema"
+
 	"time"
 
 	"context"
@@ -74,6 +76,10 @@ type Builder struct {
 	Build   func(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (Engine, error)
 	Check   func(cfg map[string]any) error
 	Presets map[string]map[string]any
+	// Schema declares every attribute the protocol accepts — the
+	// administration channels' single source for help, completion and
+	// validation vocabulary.
+	Schema []schema.Attr
 }
 
 var (

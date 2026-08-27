@@ -12,7 +12,8 @@ import (
 
 func init() {
 	radio.Register("sx126x-spi", radio.Driver{
-		Open: open, Inspect: Inspect, CheckTransmit: checkTransmit, Presets: Presets(),
+		Open: open, Inspect: Inspect, CheckTransmit: checkTransmit,
+		Presets: Presets(), Schema: Schema(),
 	})
 }
 
