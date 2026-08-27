@@ -253,10 +253,10 @@ func (s *session) config(_ context.Context, in input) error {
 	if len(args) < 3 || args[0] != verbShow || (args[1] != scopeRelay && args[1] != scopeRadio) {
 		return errors.New("usage: config show relay|radio <name>")
 	}
-	return s.showTraces(args[1] + " " + args[2])
+	return s.showTraces(args[1]+" "+args[2], false)
 }
 
-func (s *session) showTraces(key string) error {
+func (s *session) showTraces(key string, detail bool) error {
 	traces, ok := s.traces()[key]
 	if !ok {
 		keys := make([]string, 0, len(s.traces()))
@@ -272,9 +272,9 @@ func (s *session) showTraces(key string) error {
 	const sourceColumn = 2
 	for _, t := range traces {
 		value := fmt.Sprintf("%v", t.Value)
-		if secret[t.Key] {
-			// The private key and the passwords: set here, echoed
-			// never — the read-only telnet listener sees this table.
+		if secret[t.Key] && !detail {
+			// A secret is shown when it is asked for by name and not
+			// before: print masks, print detail does not.
 			value = maskedValue
 		}
 		// The mark lands on the source, which is the cell it is about.

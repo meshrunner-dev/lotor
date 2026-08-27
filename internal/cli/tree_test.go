@@ -112,18 +112,27 @@ func TestTreeCompletion(t *testing.T) {
 
 func TestPaintClassifiesTokens(t *testing.T) {
 	s := &session{deps: testDeps(t), colors: true}
-	painted := s.paintLine("/relay meshcore-868 print node_name=x")
+	painted := s.paintLine("/relay meshcore-868 set node_name=x")
 	for _, want := range []string{
 		cPath + "/" + cReset,            // the slash names the root
 		cPath + "relay" + cReset,        // a place
 		cPath + "meshcore-868" + cReset, // a place
-		cVerb + "print" + cReset,        // an action
+		cVerb + "set" + cReset,          // an action
 		cAttr + "node_name" + cReset,    // an attribute
 		cPunct + "=" + cReset,           // what joins the pair
 	} {
 		if !strings.Contains(painted, want) {
 			t.Errorf("missing %q in %q", want, painted)
 		}
+	}
+	// An argument is marked against what its own verb takes, not
+	// against whatever the place holds: print does not act on
+	// attributes, and says so before Enter.
+	if arg := s.paintLine("/relay meshcore-868 print detail"); !strings.Contains(arg, cAttr+"detail"+cReset) {
+		t.Errorf("print's own argument is not marked: %q", arg)
+	}
+	if arg := s.paintLine("/relay meshcore-868 print node_name=x"); !strings.Contains(arg, cUnres+"node_name"+cReset) {
+		t.Errorf("print was offered an attribute it does not take: %q", arg)
 	}
 	// The value carries no colour of its own.
 	if strings.Contains(painted, cReset+"x"+cReset) {
@@ -258,7 +267,7 @@ func TestTreeSetIsAdminOnly(t *testing.T) {
 	}
 }
 
-func TestTreeExportIsPasteableAndKeepsSecrets(t *testing.T) {
+func TestTreeExportIsPasteableAndWhole(t *testing.T) {
 	out := run(t, testDeps(t), "/relay meshcore-868 export")
 	// The line is absolute — pasteable from anywhere — and quoted
 	// values keep their quotes.
@@ -266,11 +275,10 @@ func TestTreeExportIsPasteableAndKeepsSecrets(t *testing.T) {
 		!strings.Contains(out, `node_name="test 🦝"`) {
 		t.Errorf("export is not a recreating line:\n%s", out)
 	}
-	if strings.Contains(out, "b5445dd625d531fc") {
-		t.Fatalf("export carried the private key:\n%s", out)
-	}
-	if !strings.Contains(out, "identity is secret") {
-		t.Errorf("export does not say what it cannot carry:\n%s", out)
+	// The identity is the part that makes this relay that relay: an
+	// export without it recreates a different node.
+	if !strings.Contains(out, "identity=b5445dd625d531fc") {
+		t.Fatalf("export left out the secret it needs to recreate:\n%s", out)
 	}
 }
 
@@ -431,9 +439,6 @@ func TestExportColoursItsSymbolClasses(t *testing.T) {
 	}
 	if !strings.Contains(got, cAttr+"node_name"+cReset) {
 		t.Errorf("attribute names are not coloured:\n%q", got)
-	}
-	if !strings.Contains(got, "# ") {
-		t.Errorf("the secret comment is not dimmed:\n%q", got)
 	}
 	// A pipe reads the same text with nothing in it: an export is also
 	// something machines read.
@@ -958,7 +963,7 @@ func TestProvenanceMarksTheSourceCellAlone(t *testing.T) {
 	}
 	var b strings.Builder
 	s := &session{deps: deps, colors: true, out: &b}
-	if err := s.showTraces("relay meshcore-868"); err != nil {
+	if err := s.showTraces("relay meshcore-868", false); err != nil {
 		t.Fatal(err)
 	}
 	got := b.String()
@@ -991,7 +996,7 @@ func TestProvenanceMarksTheSourceCellAlone(t *testing.T) {
 	// whole answer on its own — and does.
 	var plain strings.Builder
 	p := &session{deps: deps, out: &plain}
-	if err := p.showTraces("relay meshcore-868"); err != nil {
+	if err := p.showTraces("relay meshcore-868", false); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(plain.String(), "\x1b") {
@@ -1001,5 +1006,62 @@ func TestProvenanceMarksTheSourceCellAlone(t *testing.T) {
 		if !strings.Contains(plain.String(), want) {
 			t.Errorf("the plain table lost %q", want)
 		}
+	}
+}
+
+func TestPrintDetailIsTheOnlyViewThatShowsASecret(t *testing.T) {
+	masked := run(t, testDeps(t), "/relay meshcore-868 print")
+	if !strings.Contains(masked, maskedValue) || strings.Contains(masked, "b5445dd625d531fc") {
+		t.Errorf("print did not mask the identity:\n%s", masked)
+	}
+	shown := run(t, testDeps(t), "/relay meshcore-868 print detail")
+	if !strings.Contains(shown, "b5445dd625d531fc") {
+		t.Errorf("print detail withheld the identity:\n%s", shown)
+	}
+}
+
+func TestPrintDetailUnfoldsACollection(t *testing.T) {
+	// A collection is the one place print summarises — it names its
+	// instances and little else — so detail is what opens them out.
+	out := run(t, testDeps(t), "/relay print detail")
+	if !strings.Contains(out, "meshcore-868") || !strings.Contains(out, "node_name=") {
+		t.Errorf("the collection was not unfolded:\n%s", out)
+	}
+}
+
+func TestPrintRefusesAnArgumentItDoesNotTake(t *testing.T) {
+	out := run(t, testDeps(t), "/relay meshcore-868 print zz")
+	if !strings.Contains(out, "zz") || !strings.Contains(out, argDetail) {
+		t.Errorf("the refusal does not name what print takes:\n%s", out)
+	}
+	// The root holds no values, so it has nothing to detail.
+	if root := run(t, testDeps(t), "/print detail"); !strings.Contains(root, "no values") {
+		t.Errorf("the root accepted detail:\n%s", root)
+	}
+}
+
+func TestDetailIsDiscoverable(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	s.setPath([]string{"relay", "meshcore-868"})
+	if add, _ := s.complete("print d"); add != "etail " {
+		t.Errorf("detail does not complete: %q", add)
+	}
+	if help := s.helpForLine("print ", 0); !strings.Contains(help, argDetail) {
+		t.Errorf("the help after print does not name it:\n%s", help)
+	}
+}
+
+func TestExportRendersEveryListTheWaySetReadsItBack(t *testing.T) {
+	// A list of whole numbers is stored as one, and had been printed
+	// in the shape the language prints slices in — which the parser
+	// does not read. An export nobody can paste back is not one.
+	for _, c := range []struct{ in any }{{[]int{12, 13}}, {[]any{12, 13}}, {[]string{"12", "13"}}} {
+		if got := exportValue(c.in); got != "12,13" {
+			t.Errorf("exportValue(%v) = %q", c.in, got)
+		}
+	}
+	attr := schema.Attr{Name: "enable_pins", Type: schema.Ints}
+	if _, err := schema.Parse(attr, exportValue([]int{12, 13})); err != nil {
+		t.Errorf("what export wrote does not parse back: %s", err)
 	}
 }

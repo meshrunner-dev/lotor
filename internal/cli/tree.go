@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -295,7 +296,7 @@ func (s *session) treeVerb(ctx context.Context, path []string,
 		// configuration, the backup an operator can read.
 		return s.treeExport(path)
 	case verb == verbPrint:
-		s.treePrint(ctx, path)
+		return s.treePrint(ctx, path, args)
 	case verb == verbStatus && len(path) == 2:
 		return s.treeStatus(ctx, path)
 	case verb == verbSet || verb == verbUnset:
@@ -449,8 +450,9 @@ func (s *session) treeSet(ctx context.Context, path []string, verb string, args 
 // treeExport prints configuration as the absolute lines that would
 // recreate it — pasteable anywhere, which is not scripting. From the
 // root it exports everything, from a collection its instances, from
-// an instance itself. Secrets stay masked: an export is for reading
-// and diffing, and a private key does not belong in either.
+// an instance itself. It withholds nothing, secrets included: an
+// export whose purpose is to recreate a relay cannot leave out the
+// part that makes it that relay.
 func (s *session) treeExport(path []string) error {
 	switch len(path) {
 	case 0:
@@ -503,24 +505,14 @@ func (s *session) exportInstance(kind, name string) {
 	if !ok {
 		return
 	}
-	secret := s.secretAttrs(kind + " " + name)
 	var pairs [][2]string
-	var masked []string
 	for _, t := range traces {
 		if strings.HasPrefix(t.Source, "profile:") {
 			continue // the preset restates itself
 		}
-		if secret[t.Key] {
-			masked = append(masked, t.Key)
-			continue
-		}
 		pairs = append(pairs, [2]string{t.Key, exportValue(t.Value)})
 	}
 	s.exportLine(kind, verbAdd, name, pairs)
-	for _, key := range masked {
-		s.exportComment(fmt.Sprintf("%s %s: %s is secret — an export cannot carry it",
-			kind, name, key))
-	}
 }
 
 // exportSingleton prints one set line for a block that exists.
@@ -555,28 +547,22 @@ func (s *session) exportLine(kind, verb, name string, pairs [][2]string) {
 	fmt.Fprintf(s.out, "%s\r\n", b.String())
 }
 
-// exportComment writes a line the paste ignores. It carries no
-// weight: an export is read as often through a pipe or a diff as on a
-// terminal, and a remark that only looks like one where escapes
-// survive is a remark that fails where it matters.
-func (s *session) exportComment(text string) {
-	fmt.Fprintf(s.out, "# %s\r\n", text)
-}
-
-// exportValue renders one value the way set accepts it back.
+// exportValue renders one value the way set accepts it back. Every
+// list joins on commas whatever its element type, because commas are
+// the only form the parser reads: a list rendered any other way makes
+// a line that cannot be pasted back, which is the one thing an export
+// has to be.
 func exportValue(v any) string {
-	switch vv := v.(type) {
-	case []any:
-		parts := make([]string, len(vv))
-		for i, p := range vv {
-			parts[i] = fmt.Sprintf("%v", p)
+	rv := reflect.ValueOf(v)
+	if rv.IsValid() && rv.Kind() == reflect.Slice &&
+		rv.Type().Elem().Kind() != reflect.Uint8 {
+		parts := make([]string, rv.Len())
+		for i := range parts {
+			parts[i] = fmt.Sprintf("%v", rv.Index(i).Interface())
 		}
 		return quoteIfSpaced(strings.Join(parts, ","))
-	case []string:
-		return quoteIfSpaced(strings.Join(vv, ","))
-	default:
-		return quoteIfSpaced(fmt.Sprintf("%v", v))
 	}
+	return quoteIfSpaced(fmt.Sprintf("%v", v))
 }
 
 func quoteIfSpaced(s string) string {
@@ -589,6 +575,16 @@ func quoteIfSpaced(s string) string {
 // verbPrint is the tree's one universal verb, the console family's
 // word for "show me".
 const verbPrint = "print"
+
+// argDetail is print's one argument: every attribute in full, nothing
+// held back. It is the only way a secret is ever shown.
+const argDetail = "detail"
+
+// detailWidth is the column a detail paragraph wraps at. The console
+// never measures the terminal — its probe asks whether one is there,
+// not how wide — so this is the width nearly every terminal has at
+// least.
+const detailWidth = 80
 
 // mountedVerb reports whether a flat command serves this kind's
 // instances directly.
@@ -614,8 +610,18 @@ func (s *session) treeStatus(ctx context.Context, path []string) error {
 
 // treePrint shows a context: a kind lists its instances, an instance
 // shows its effective configuration with provenance.
-func (s *session) treePrint(_ context.Context, path []string) {
+func (s *session) treePrint(_ context.Context, path []string, args []string) error {
+	detail := false
+	for _, a := range args {
+		if a != argDetail {
+			return fmt.Errorf("%s takes %q and nothing else, not %q", verbPrint, argDetail, a)
+		}
+		detail = true
+	}
 	if len(path) == 0 {
+		if detail {
+			return fmt.Errorf("the root holds no values to %s", argDetail)
+		}
 		// The root holds no values of its own: what it can show is
 		// what stands below it.
 		tb := s.table()
@@ -628,30 +634,75 @@ func (s *session) treePrint(_ context.Context, path []string) {
 			}
 			tb.row("/"+k.Name, held, k.Doc)
 		}
-		_ = tb.flush(s.out)
-		return
+		return tb.flush(s.out)
 	}
 	if s.isSingleton(path) {
-		if err := s.showTraces(path[0]); err != nil {
-			fmt.Fprintf(s.out, "error: %s\r\n", err)
-		}
-		return
+		return s.showTraces(path[0], detail)
 	}
 	if len(path) == 1 {
-		var err error
+		// A collection is the one place print summarises: it names
+		// its instances and little else. detail is what unfolds them.
+		if detail {
+			return s.printDetail(path[0])
+		}
 		if path[0] == scopeRelay {
-			err = s.relayList()
-		} else {
-			err = s.radioList()
+			return s.relayList()
 		}
-		if err != nil {
-			fmt.Fprintf(s.out, "error: %s\r\n", err)
+		return s.radioList()
+	}
+	return s.showTraces(path[0]+" "+path[1], detail)
+}
+
+// printDetail unfolds a collection: one paragraph per instance, every
+// attribute it holds, nothing withheld. Provenance is print's own
+// answer and stays in its table — a paragraph has no column to put it
+// in, and weight alone must never be the only thing that says it.
+func (s *session) printDetail(kind string) error {
+	names := make([]string, 0, 4)
+	for name := range s.instances(kind) {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		fmt.Fprintf(s.out, "no %s configured\r\n", kind)
+		return nil
+	}
+	gutter := 0
+	for _, name := range names {
+		gutter = max(gutter, len(name))
+	}
+	// A space before the handle, two after the longest of them.
+	gutter += 3
+	for i, name := range names {
+		if i > 0 {
+			fmt.Fprint(s.out, "\r\n")
 		}
-		return
+		s.writeDetail(name, gutter, s.traces()[kind+" "+name])
 	}
-	if err := s.showTraces(path[0] + " " + path[1]); err != nil {
-		fmt.Fprintf(s.out, "error: %s\r\n", err)
+	return nil
+}
+
+// writeDetail renders one object as a paragraph: its handle in the
+// gutter, then its attributes as pairs packed to the width, each
+// continuation line starting under the gutter so the handle column
+// stays clear.
+func (s *session) writeDetail(handle string, gutter int, traces []config.Trace) {
+	var b strings.Builder
+	b.WriteString(" " + s.color(cPath, handle))
+	b.WriteString(strings.Repeat(" ", gutter-1-len(handle)))
+	col := gutter
+	for _, t := range traces {
+		value := exportValue(t.Value)
+		// Width arithmetic runs on the plain text: the escapes take up
+		// no columns, and counting them would wrap early.
+		if width := len(t.Key) + 1 + len(value) + 1; col > gutter && col+width > detailWidth {
+			b.WriteString("\r\n" + strings.Repeat(" ", gutter))
+			col = gutter
+		}
+		b.WriteString(s.color(cAttr, t.Key) + s.color(cPunct, "=") + value + " ")
+		col += len(t.Key) + 1 + len(value) + 1
 	}
+	fmt.Fprintf(s.out, "%s\r\n", b.String())
 }
 
 // treeHelp describes one place, one line per thing that can be typed
@@ -986,6 +1037,11 @@ func (s *session) attrsForAddLine(kind string, rest []string) []schema.Attr {
 func (s *session) argTermsFor(path, rest []string) []term {
 	verb := rest[0]
 	switch verb {
+	case verbPrint:
+		return []term{{
+			name: argDetail, class: cAttr,
+			doc: "every attribute in full, secrets included",
+		}}
 	case verbSet, verbUnset, verbAdd:
 		attrs := s.attrsAt(path)
 		if verb == verbAdd && len(path) == 1 && !s.isSingleton(path) {
@@ -1239,7 +1295,7 @@ type lineWalk struct {
 	path  []string
 	phase int // 0 walking the path, 1 expecting the verb, 2 its arguments
 	verb  string
-	attrs []schema.Attr
+	args  []string // what the verb accepts, whether switch or pair
 }
 
 func (w *lineWalk) paint(token string) string {
@@ -1267,7 +1323,7 @@ func (w *lineWalk) paintRest(token string) string {
 		return painted + w.paintRest(leftover)
 	case 1:
 		w.phase, w.verb = 2, token
-		w.attrs = w.s.attrsForLine(w.path, token)
+		w.args = names(w.s.argTermsFor(w.path, []string{token}))
 		cands := w.s.verbsAt(w.path)
 		if len(w.path) == 0 {
 			cands = append(cands, commandNames()...)
@@ -1304,19 +1360,17 @@ func (w *lineWalk) paintPath(token string) (painted, leftover string) {
 	return w.s.color(cPath, head+"/"), strings.Join(pieces[took:], "/")
 }
 
-// paintArg colours one argument: a pair reads as name, joiner, value;
-// a bare word is a name the operator is choosing, so nothing is
-// claimed about it.
+// paintArg colours one argument: a pair reads as name, joiner, value,
+// and a bare word as the switch it is.
 func (w *lineWalk) paintArg(token string) string {
 	name, value, ok := strings.Cut(token, "=")
 	if !ok {
-		return token
+		// A bare word is a switch, or the name a verb like unset
+		// takes: both are words the verb knows, so both are marked
+		// against the one list that says what it accepts.
+		return w.s.mark(cAttr, w.args, token)
 	}
-	names := make([]string, 0, len(w.attrs))
-	for _, a := range w.attrs {
-		names = append(names, a.Name)
-	}
-	return w.s.mark(cAttr, names, name) + w.s.color(cPunct, "=") + value
+	return w.s.mark(cAttr, w.args, name) + w.s.color(cPunct, "=") + value
 }
 
 // mark paints a word in its class when it names exactly one candidate,
@@ -1336,24 +1390,4 @@ func (s *session) mark(class string, cands []string, word string) string {
 // what turns a prefix into a name.
 func resolves(cands []string, word string) bool {
 	return slices.Contains(cands, word)
-}
-
-// attrsForLine resolves which attributes a verb may name at a place —
-// a creation line takes them from the choice typed on it, everything
-// else from the instance standing there.
-func (s *session) attrsForLine(path []string, verb string) []schema.Attr {
-	if verb == verbAdd && len(path) == 1 {
-		return s.kindAttrs(path[0], "")
-	}
-	return s.attrsAt(path)
-}
-
-// kindAttrs is a kind's attributes for one choice, choice-less when
-// the line has not made it yet.
-func (s *session) kindAttrs(kind, choice string) []schema.Attr {
-	k := s.kindByName(kind)
-	if k == nil {
-		return nil
-	}
-	return k.AttrsFor(choice)
 }
