@@ -598,8 +598,8 @@ func (s *session) scopes(_ context.Context, in input) error {
 	return nil
 }
 
-// advert queues one operator announcement: the reference CLI's
-// gesture — zero-hop by default, "flood" to address the mesh.
+// advert queues one operator announcement: zero-hop by default,
+// "flood" to address the mesh.
 func (s *session) advert(_ context.Context, in input) error {
 	flood := in.opts[optFlood] == optOn
 	r, err := s.oneRelay(in.opts[scopeRelay])
