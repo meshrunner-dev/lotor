@@ -7,7 +7,10 @@ package meshcore
 
 import (
 	"crypto/rand"
-	"encoding/binary"
+	// Four random bytes read as a number: the seam this package guards
+	// is wire formats, and a tag nobody parses has no byte order to
+	// get wrong.
+	"encoding/binary" //nolint:depguard
 	"errors"
 	"time"
 

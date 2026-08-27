@@ -20,8 +20,9 @@ linters:
     - wsl_v5
     - varnamelen
     - ireturn
-    # Require a curated import allowlist; overkill for three dependencies.
-    - depguard
+    # A curated allowlist for three dependencies would be overkill;
+    # depguard stays enabled for the one seam that must not be crossed
+    # (see settings below).
     - gomodguard
     - gomodguard_v2
     # Demand every struct literal list all fields; zero values are
@@ -51,6 +52,18 @@ linters:
     - nonamedreturns
 
   settings:
+    depguard:
+      rules:
+        # The wire protocol lives in the library, not in this daemon.
+        # Hand-packing a format here means it exists twice, and the two
+        # copies drift. Adding it upstream costs one function.
+        wire-formats-belong-upstream:
+          files:
+            - "**/internal/protocol/meshcore/*.go"
+            - "!$test"
+          deny:
+            - pkg: encoding/binary
+              desc: "wire formats belong in meshrunner.dev/pkg/meshcore — add the codec there and consume it (see AGENTS.md)"
     errcheck:
       # Best-effort writes to interactive streams (CLI sessions): a dead
       # transport surfaces on the next read, not on every print.

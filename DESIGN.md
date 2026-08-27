@@ -306,7 +306,12 @@ None of this exists, and nothing above may contradict it:
 
 - Low-level correctness is the obsession. The radio and protocol layers
   are the two published, hardware-validated, reference-tested modules;
-  Lotor consumes them and reimplements nothing at those layers.
+  Lotor consumes them and reimplements nothing at those layers. The
+  test is mechanical, not a matter of judgement: a byte offset, a bit
+  shift, a struct laid out for transmission or a quantity converted
+  into its wire unit is library work, and goes upstream before it is
+  used here. A lint gate holds the seam in the protocol package, and
+  `AGENTS.md` states it for anyone about to cross it.
 - Wire-protocol fidelity to the MeshCore reference is non-negotiable;
   behavioural defaults align with the reference firmware, deviations
   are opt-in and loudly logged.
