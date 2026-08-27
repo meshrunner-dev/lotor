@@ -21,15 +21,22 @@ type drawer struct {
 	// instance: what they act on is what the drawer holds, so this is
 	// where an operator goes looking for them.
 	verbs []string
+	// itemVerbs are the commands about one of the things it holds,
+	// and itemFlag is how such a command is told which one — filled
+	// from the path, because standing on one is saying which.
+	itemVerbs []string
+	itemFlag  string
 }
 
 const drawerNeighbours = "neighbours"
 
 var drawers = []drawer{{
-	name:  drawerNeighbours,
-	doc:   "repeaters heard with no relay in between",
-	on:    scopeRelay,
-	verbs: []string{cmdDiscover},
+	name:      drawerNeighbours,
+	doc:       "repeaters heard with no relay in between",
+	on:        scopeRelay,
+	verbs:     []string{cmdDiscover},
+	itemVerbs: []string{cmdAskScopes},
+	itemFlag:  optNeighbour,
 }}
 
 // drawersOn lists what a kind's instances hold.
@@ -48,7 +55,7 @@ func drawersOn(kind string) []drawer {
 // of the instance it would otherwise have mounted on.
 func claimedByDrawer(kind, verb string) bool {
 	for _, d := range drawers {
-		if d.on == kind && slices.Contains(d.verbs, verb) {
+		if d.on == kind && (slices.Contains(d.verbs, verb) || slices.Contains(d.itemVerbs, verb)) {
 			return true
 		}
 	}

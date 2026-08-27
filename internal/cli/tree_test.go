@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"strings"
@@ -1308,5 +1309,39 @@ func TestANameOffTheAirIsQuotedOnce(t *testing.T) {
 	// And a table leaves the separating to its columns.
 	if table := run(t, deps, "/relay/meshcore-868/neighbours/print"); strings.Contains(table, `"+14.00 dB"`) {
 		t.Errorf("the table quoted what its columns already separate:\n%s", table)
+	}
+}
+
+func TestAskingANeighbourIsAVerbWhereTheNeighbourIs(t *testing.T) {
+	deps := withNeighbour(t)
+	deps.Privilege = Admin
+	var asked []byte
+	deps.Relays[0].AskScopes = func(prefix []byte) ([]string, error) {
+		asked = prefix
+		return []string{"eu", "fr-idf"}, nil
+	}
+	// Standing on one of them says which, so the verb takes no target
+	// of its own: the path is the target.
+	out := run(t, deps, "/relay/meshcore-868/neighbours/0d139b6421d0/ask-scopes")
+	if !strings.Contains(out, "eu, fr-idf") {
+		t.Errorf("the answer never came back:\n%s", out)
+	}
+	if hex.EncodeToString(asked) != "0d139b6421d0" {
+		t.Errorf("the wrong neighbour was asked: %x", asked)
+	}
+	// It belongs to the neighbour, not to the relay or the drawer.
+	s := &session{deps: deps}
+	if v := s.verbsAt([]string{scopeRelay, "meshcore-868"}); slices.Contains(v, cmdAskScopes) {
+		t.Errorf("the relay answers to it: %v", v)
+	}
+	if v := s.verbsAt([]string{scopeRelay, "meshcore-868", drawerNeighbours}); slices.Contains(v, cmdAskScopes) {
+		t.Errorf("the drawer answers to it: %v", v)
+	}
+	if v := s.verbsAt([]string{scopeRelay, "meshcore-868", drawerNeighbours, "0d139b6421d0"}); !slices.Contains(v, cmdAskScopes) {
+		t.Errorf("the neighbour does not answer to it: %v", v)
+	}
+	// And scopes carries no sub-verb any more.
+	if refused := run(t, deps, "/relay/meshcore-868/scopes ask 0d13"); !strings.Contains(refused, "error") {
+		t.Errorf("the sub-verb still runs:\n%s", refused)
 	}
 }

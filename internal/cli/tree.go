@@ -329,11 +329,10 @@ func (s *session) treeVerb(ctx context.Context, path []string,
 		// verbs are answered above, so the root is a context like any
 		// other rather than a place where they stop working.
 		s.dispatch(ctx, rest)
-	case len(path) == 2 && s.mountedVerb(path[0], verb),
-		len(path) == 3 && claimedByDrawer(path[0], verb):
-		// The flat command runs as itself, told which instance asked —
-		// from the instance, or from a drawer the instance holds.
-		s.dispatch(ctx, append(append([]string{verb}, args...), path[0]+"="+path[1]))
+	case s.mountsHere(path, verb):
+		// The flat command runs as itself, told what the place stands
+		// for: standing somewhere is saying which.
+		s.dispatch(ctx, append(append([]string{verb}, args...), s.scopeFlags(path)...))
 	default:
 		return &unknownVerbError{verb: verb}
 	}
@@ -638,6 +637,37 @@ const intervalStop = "enter stops"
 // not how wide — so this is the width nearly every terminal has at
 // least.
 const detailWidth = 80
+
+// mountsHere reports whether a flat command answers at this place: on
+// an instance it acts on, in a drawer that claims it, or on one of the
+// things that drawer holds.
+func (s *session) mountsHere(path []string, verb string) bool {
+	switch s.placeAt(path) {
+	case atInstance:
+		return s.mountedVerb(path[0], verb)
+	case atDrawer:
+		d := drawerOn(path[0], path[2])
+		return d != nil && slices.Contains(d.verbs, verb)
+	case atDrawerItem:
+		d := drawerOn(path[0], path[2])
+		return d != nil && slices.Contains(d.itemVerbs, verb)
+	default:
+		return false
+	}
+}
+
+// scopeFlags names what the place stands for, in the words the command
+// declares — the instance always, and the one thing inside a drawer
+// when the session is standing on it.
+func (s *session) scopeFlags(path []string) []string {
+	out := []string{path[0] + "=" + path[1]}
+	if s.placeAt(path) == atDrawerItem {
+		if d := drawerOn(path[0], path[2]); d != nil {
+			out = append(out, d.itemFlag+"="+path[3])
+		}
+	}
+	return out
+}
 
 // mountedVerb reports whether a flat command serves this kind's
 // instances directly. A command that declares a flag named after the
@@ -1156,6 +1186,12 @@ func (s *session) verbNamesAt(path []string) []string {
 		verbs := []string{verbPrint}
 		if d := drawerOn(path[0], path[2]); d != nil {
 			verbs = append(verbs, d.verbs...)
+		}
+		return verbs
+	case len(path) == 4:
+		verbs := []string{verbPrint}
+		if d := drawerOn(path[0], path[2]); d != nil {
+			verbs = append(verbs, d.itemVerbs...)
 		}
 		return verbs
 	default:

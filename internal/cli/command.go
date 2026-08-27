@@ -93,20 +93,26 @@ func daemonCommands() []*command {
 func relayCommands() []*command {
 	return []*command{
 		{
-			name: cmdScopes,
-			forms: []form{
-				{cmdScopes, "the transport scopes this relay carries"},
-				{"scopes ask <pubkey>", "ask a neighbour which it carries"},
-			},
-			detail: []string{
-				"scopes [relay=<name>]",
-				"scopes ask <pubkey-prefix> [relay=<name>]",
-				"asking emits — admin only, one question at a time, and the",
-				"answer comes from the neighbour itself, not from a directory",
-			},
+			name:   cmdScopes,
+			forms:  []form{{cmdScopes, "the transport scopes this relay carries"}},
+			detail: []string{"scopes [relay=<name>]"},
 			flags:  []flagSpec{{name: scopeRelay, valued: true, doc: docRelay}},
-			maxPos: 2,
 			run:    (*session).scopes,
+		},
+		{
+			name:  cmdAskScopes,
+			forms: []form{{cmdAskScopes, "ask a neighbour which scopes it carries"}},
+			detail: []string{
+				"ask-scopes neighbour=<key-prefix> [relay=<name>]",
+				"admin only; it emits, and the answer comes from the",
+				"neighbour itself rather than from anything already known",
+			},
+			flags: []flagSpec{
+				{name: scopeRelay, valued: true, doc: docRelay},
+				{name: optNeighbour, valued: true, doc: "which one, by key prefix"},
+			},
+			admin: true,
+			run:   (*session).askScopes,
 		},
 		{
 			name: cmdDiscover,

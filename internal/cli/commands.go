@@ -565,25 +565,34 @@ func (s *session) scopes(_ context.Context, in input) error {
 	if err := working(r); err != nil {
 		return err
 	}
-	if len(in.pos) == 0 {
-		if len(r.Scopes) == 0 {
-			return fmt.Errorf("relay %q carries no scopes", r.Name)
-		}
-		fmt.Fprintf(s.out, "%s\r\n", strings.Join(r.Scopes, ", "))
-		return nil
+	if len(r.Scopes) == 0 {
+		return fmt.Errorf("relay %q carries no scopes", r.Name)
 	}
-	if in.pos[0] != "ask" || len(in.pos) != 2 {
-		return errors.New("usage: scopes | scopes ask <pubkey-prefix>")
+	fmt.Fprintf(s.out, "%s\r\n", strings.Join(r.Scopes, ", "))
+	return nil
+}
+
+// askScopes puts the question on the air. It reads nothing we already
+// hold: the answer is the neighbour's own, which is the whole point of
+// asking rather than looking.
+func (s *session) askScopes(_ context.Context, in input) error {
+	r, err := s.oneRelay(in.opts[scopeRelay])
+	if err != nil {
+		return err
 	}
-	if s.deps.Privilege != Admin {
-		return errors.New("asking a neighbour emits — use the local console socket")
+	if err := working(r); err != nil {
+		return err
+	}
+	key := in.opts[optNeighbour]
+	if key == "" {
+		return fmt.Errorf("which one? %s=<key prefix>", optNeighbour)
 	}
 	if r.AskScopes == nil {
 		return fmt.Errorf("relay %q has no scopes to ask about", r.Name)
 	}
-	prefix, err := hex.DecodeString(in.pos[1])
+	prefix, err := hex.DecodeString(key)
 	if err != nil {
-		return fmt.Errorf("%q is not a hex key prefix", in.pos[1])
+		return fmt.Errorf("%q is not a hex key prefix", key)
 	}
 	fmt.Fprint(s.out, "asking…\r\n")
 	names, err := r.AskScopes(prefix)

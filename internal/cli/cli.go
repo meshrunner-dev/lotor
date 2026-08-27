@@ -29,25 +29,27 @@ import (
 
 // Command vocabulary reused across parsers.
 const (
-	scopeRelay = "relay"
-	scopeRadio = "radio"
-	verbShow   = "show"
-	optOn      = "true"
-	optJSON    = "json"
-	optWatch   = "watch"
-	optFlood   = "flood"
-	optLast    = "last"
-	cmdFrames  = "frames"
-	cmdQuit    = "quit"
+	scopeRelay   = "relay"
+	scopeRadio   = "radio"
+	verbShow     = "show"
+	optOn        = "true"
+	optJSON      = "json"
+	optWatch     = "watch"
+	optFlood     = "flood"
+	optNeighbour = "neighbour"
+	optLast      = "last"
+	cmdFrames    = "frames"
+	cmdQuit      = "quit"
 
 	// The relay-scoped commands, named once: the flat table and the
 	// context tree both mount them.
-	cmdScopes   = "scopes"
-	cmdDiscover = "discover"
-	cmdAdvert   = "advert"
-	cmdUndo     = "undo"
-	verbList    = "list"
-	cmdJournal  = "journal"
+	cmdScopes    = "scopes"
+	cmdDiscover  = "discover"
+	cmdAskScopes = "ask-scopes"
+	cmdAdvert    = "advert"
+	cmdUndo      = "undo"
+	verbList     = "list"
+	cmdJournal   = "journal"
 	// helpWord asks about whatever it follows.
 	helpWord = "?"
 	// wordHelp and wordExit are the spelled-out halves of the two
