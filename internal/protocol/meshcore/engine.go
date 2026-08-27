@@ -89,7 +89,7 @@ type params struct {
 	// A scoped flood matching none of them is somebody else's
 	// business, exactly as the reference treats one whose code it
 	// cannot match.
-	AcceptScopes []string `yaml:"accept_scopes"`
+	AcceptScopes scopeList `yaml:"accept_scopes"`
 	// AcceptUnscoped decides whether plain floods are relayed at all —
 	// the reference's wildcard and its deny-flood bit. Unset relays
 	// them, which is what every mesh without scopes needs.
@@ -102,6 +102,9 @@ type params struct {
 	// enough to mean "password"; opening the door to anyone needs the
 	// word said out loud.
 	GuestAccess string `yaml:"guest_access"`
+	// SessionLimit bounds how many answers one logged-in guest may
+	// make this relay emit per minute; zero takes the default.
+	SessionLimit int `yaml:"session_limit"`
 	// GuestPassword is the credential when GuestAccess asks for one.
 	GuestPassword string `yaml:"guest_password"`
 	// OwnerInfo rides the anonymous owner reply after the name — the
@@ -280,16 +283,10 @@ func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (p
 	if err != nil {
 		return nil, err
 	}
-	// Zero values give the reference's dedup: a fixed 160-entry ring,
-	// no time bound. dedup_ttl adds an operator time bound on top.
-	if p.DedupEntries == 0 {
-		p.DedupEntries = referenceCapacity
-	}
-	if p.AdvertFloodInterval == 0 {
-		p.AdvertFloodInterval = 47 * time.Hour
-	}
-	if p.AdvertLocalInterval == 0 {
-		p.AdvertLocalInterval = 2 * time.Hour
+	if p.SessionLimit < 0 {
+		return nil, fmt.Errorf(
+			"meshcore params: session_limit %d — a budget below zero answers nothing at all",
+			p.SessionLimit)
 	}
 	var id *meshcore.LocalIdentity
 	if p.Identity != "" {
@@ -308,9 +305,32 @@ func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (p
 // that, because judging happens in every mode. Both the daemon and
 // the tests build through here, so a field added to the engine cannot
 // be missed by one of them.
+// withDefaults fills the values a config may leave unsaid. It runs in
+// newEngine rather than beside the config parse so that every engine
+// gets them, however it was built — a default applied on one path
+// only is a default the other path discovers as a zero.
+func (p params) withDefaults() params {
+	// Zero values give the reference's dedup: a fixed 160-entry ring,
+	// no time bound. dedup_ttl adds an operator time bound on top.
+	if p.DedupEntries == 0 {
+		p.DedupEntries = referenceCapacity
+	}
+	if p.AdvertFloodInterval == 0 {
+		p.AdvertFloodInterval = 47 * time.Hour
+	}
+	if p.AdvertLocalInterval == 0 {
+		p.AdvertLocalInterval = 2 * time.Hour
+	}
+	if p.SessionLimit == 0 {
+		p.SessionLimit = sessionLimitMax
+	}
+	return p
+}
+
 func newEngine(relayName string, p params, id *meshcore.LocalIdentity,
 	b *bus.Bus, log *zap.Logger,
 ) *engine {
+	p = p.withDefaults()
 	return &engine{
 		relay:      relayName,
 		p:          p,

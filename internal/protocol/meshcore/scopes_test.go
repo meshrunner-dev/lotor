@@ -5,7 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+
 	"meshrunner.dev/pkg/meshcore"
+
+	"meshrunner.dev/lotor/internal/bus"
 )
 
 func TestScopeConfigRefusesWhatCannotWork(t *testing.T) {
@@ -252,5 +256,56 @@ func TestScopeNameRecordsWhatItKnows(t *testing.T) {
 	}
 	if got := e.scopeName(build(meshcore.RouteDirect, "")); got != "" {
 		t.Errorf("direct traffic = %q, want nothing", got)
+	}
+}
+
+func TestAcceptScopesReadsAsAListOrALine(t *testing.T) {
+	base := func(v any) map[string]any {
+		return map[string]any{"frequency_hz": 869_618_000, "accept_scopes": v}
+	}
+	want := []string{"eu", "fr", "fr-91"}
+	for _, shape := range []any{
+		[]any{"eu", "fr", "fr-91"}, // the sequence
+		"eu, fr, fr-91",            // the line, as a neighbour answers it
+		"eu,fr,fr-91",              // and without the spaces
+	} {
+		p, err := paramsFrom(base(shape))
+		if err != nil {
+			t.Fatalf("%v refused: %v", shape, err)
+		}
+		if len(p.AcceptScopes) != len(want) {
+			t.Fatalf("%v gave %q", shape, p.AcceptScopes)
+		}
+		for i := range want {
+			if p.AcceptScopes[i] != want[i] {
+				t.Fatalf("%v gave %q", shape, p.AcceptScopes)
+			}
+		}
+	}
+	// A name the checker refuses is refused whichever shape carried it:
+	// splitting a line must not be a way past the validation.
+	for _, smuggled := range []any{"eu, $secret", []any{"eu", "$secret"}} {
+		if _, err := paramsFrom(base(smuggled)); err == nil {
+			t.Errorf("%v got a private scope past the checker", smuggled)
+		}
+	}
+}
+
+func TestSessionLimitIsConfigurable(t *testing.T) {
+	base := map[string]any{"frequency_hz": 869_618_000}
+	p, err := paramsFrom(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.withDefaults().SessionLimit; got != sessionLimitMax {
+		t.Fatalf("default session_limit = %d, want %d", got, sessionLimitMax)
+	}
+	base["session_limit"] = 20
+	if p, err = paramsFrom(base); err != nil || p.withDefaults().SessionLimit != 20 {
+		t.Fatalf("session_limit = %d (%v)", p.SessionLimit, err)
+	}
+	base["session_limit"] = -1
+	if _, err := build("test", base, bus.New(), zap.NewNop()); err == nil {
+		t.Error("a budget below zero was accepted")
 	}
 }

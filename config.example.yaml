@@ -51,6 +51,29 @@ relays:
         #   accept_scopes:  whose scoped floods it relays
         #   accept_unscoped: whether plain floods move through it at
         #                   all (true unless said otherwise)
+        # accept_scopes reads as a sequence or as one line — `[fr, be]`
+        # and `fr, be` mean the same list, the second being the shape a
+        # neighbour answers a scopes question in.
         # default_scope: fr
         # accept_scopes: [fr, be]
         # accept_unscoped: true
+
+        # Guest sessions: whether a stranger may open a read-only
+        # session over the air — status, telemetry, neighbours, owner.
+        # Never administration: that goes through the console socket,
+        # where the operating system's own permissions authenticate,
+        # not a password crossing a shared band.
+        #
+        #   guest_access: blocked   nobody may — the default
+        #                 password  whoever knows guest_password may
+        #                 open      anyone may, with no credential
+        #   guest_password: the credential, and only with `password`
+        #   session_limit: answers one session may make this relay
+        #                 emit per minute (6 unless said otherwise).
+        #                 Every answer costs airtime somewhere: a
+        #                 flood until the client teaches a route home,
+        #                 and after that one emission per repeater on
+        #                 the way.
+        # guest_access: password
+        # guest_password: <secret>
+        # session_limit: 6

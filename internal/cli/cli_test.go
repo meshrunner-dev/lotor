@@ -13,6 +13,7 @@ import (
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/radio"
+	"meshrunner.dev/lotor/internal/relay"
 	"meshrunner.dev/lotor/internal/sentinel"
 	"meshrunner.dev/lotor/internal/txn"
 )
@@ -440,5 +441,32 @@ func TestAdvertCommandIsAdminAndForwards(t *testing.T) {
 	deps.Relays[0].TriggerAdvert = nil
 	if out := run(t, deps, "advert"); !strings.Contains(out, "gate is dry") {
 		t.Errorf("a dry relay should refuse with its reason:\n%s", out)
+	}
+}
+
+func TestADownRelaySaysWhyRatherThanWhatIsMissing(t *testing.T) {
+	deps := testDeps(t)
+	deps.Privilege = Admin // discover and advert key the radio
+	deps.Relays[0].State = func() string { return relay.StateError }
+	deps.Relays[0].Err = func() string {
+		return `override scope "eu-868-narrow": cannot unmarshal !!str into []string`
+	}
+	// A relay that never configured has no scopes, no neighbourhood
+	// and no scan — every command must name the cause, not the
+	// consequence it happens to trip over.
+	for _, cmd := range []string{"scopes", "neighbours", "discover", "advert"} {
+		out := run(t, deps, cmd)
+		if !strings.Contains(out, "cannot unmarshal") {
+			t.Errorf("%q said %q — the operator never learns why", cmd, strings.TrimSpace(out))
+		}
+	}
+}
+
+func TestARunningRelayStillReportsWhatItLacks(t *testing.T) {
+	// The cause guard must not swallow the honest answer of a relay
+	// that is up and simply keeps no neighbourhood.
+	out := run(t, testDeps(t), "neighbours")
+	if !strings.Contains(out, "does not keep a neighbourhood") {
+		t.Errorf("neighbours said %q", strings.TrimSpace(out))
 	}
 }

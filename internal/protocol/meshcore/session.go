@@ -46,7 +46,8 @@ const (
 	// one poller in a loop would spend the whole mesh's airtime. And
 	// even a direct answer costs an emission at every repeater along
 	// the way, so unbounded questioning is never free. Generous enough
-	// for a status page and a neighbourhood query in the same breath.
+	// for a status page and a neighbourhood query in the same breath,
+	// and session_limit moves it for a site that wants otherwise.
 	sessionLimitMax    = 6
 	sessionLimitWindow = time.Minute
 
@@ -131,7 +132,7 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	}
 
 	c.lastTimestamp, c.lastActive = ts, time.Now()
-	c.asks = rateLimiter{max: sessionLimitMax, window: sessionLimitWindow}
+	c.asks = rateLimiter{max: e.p.SessionLimit, window: sessionLimitWindow}
 	e.acl.put(c)
 
 	e.log.Info("guest logged in", zap.String("txn", origin.Short()),

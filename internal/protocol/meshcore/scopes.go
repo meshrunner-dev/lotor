@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"meshrunner.dev/pkg/meshcore"
 )
 
@@ -201,4 +203,27 @@ func (e *engine) Scopes() []string {
 		return nil
 	}
 	return e.scopes.served()
+}
+
+// scopeList is a list of scope names that also reads as one line.
+// Written as a YAML sequence it behaves like any other; written as
+// `accept_scopes: eu, fr-91` — which is how the names arrive from a
+// neighbour, and the first thing a hand reaches for — it means the
+// same list. The leniency is safe because a scope name may not
+// contain a comma: checkScopeName refuses one, so the split can never
+// merge two names or divide one.
+type scopeList []string
+
+// UnmarshalYAML accepts either shape.
+func (l *scopeList) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		*l = meshcore.ScopeNames(n.Value)
+		return nil
+	}
+	var seq []string
+	if err := n.Decode(&seq); err != nil {
+		return err
+	}
+	*l = seq
+	return nil
 }

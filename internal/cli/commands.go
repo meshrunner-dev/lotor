@@ -14,6 +14,7 @@ import (
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/radio"
+	"meshrunner.dev/lotor/internal/relay"
 	"meshrunner.dev/lotor/internal/sentinel"
 )
 
@@ -388,6 +389,26 @@ func (s *session) printSent(sent []sentinel.Sent) {
 	}
 }
 
+// working refuses a command when the relay itself is not running, and
+// says so with the relay's own cause. A relay that never configured
+// has no scopes, no neighbourhood and no scan to run — none of which
+// is the reason, and every one of which reads like one. An operator
+// chasing four different symptom messages is an operator kept away
+// from the single line that explains all four.
+func working(r RelayInfo) error {
+	if r.State == nil || r.State() == relay.StateRunning {
+		return nil
+	}
+	state := r.State()
+	if r.Err != nil {
+		if cause := r.Err(); cause != "" {
+			return fmt.Errorf("relay %q is %s: %s", r.Name, state, cause)
+		}
+	}
+	return fmt.Errorf("relay %q is %s — see \"relay %s\" for what it is waiting on",
+		r.Name, state, r.Name)
+}
+
 // discover scans the neighbourhood and prints each answer as it
 // lands. The window is the protocol's, not ours: responders spread
 // themselves deliberately, so a scan that gave up early would report
@@ -395,6 +416,9 @@ func (s *session) printSent(sent []sentinel.Sent) {
 func (s *session) discover(ctx context.Context, in input) error {
 	r, err := s.oneRelay(in.opts[scopeRelay])
 	if err != nil {
+		return err
+	}
+	if err := working(r); err != nil {
 		return err
 	}
 	if r.Discover == nil {
@@ -432,6 +456,9 @@ func (s *session) discover(ctx context.Context, in input) error {
 func (s *session) scopes(_ context.Context, in input) error {
 	r, err := s.oneRelay(in.opts[scopeRelay])
 	if err != nil {
+		return err
+	}
+	if err := working(r); err != nil {
 		return err
 	}
 	if len(in.pos) == 0 {
@@ -481,6 +508,9 @@ func (s *session) advert(_ context.Context, in input) error {
 	if err != nil {
 		return err
 	}
+	if err := working(r); err != nil {
+		return err
+	}
 	if r.TriggerAdvert == nil {
 		return fmt.Errorf("relay %q has no transmit pipeline — its gate is dry", r.Name)
 	}
@@ -500,6 +530,9 @@ func (s *session) advert(_ context.Context, in input) error {
 func (s *session) neighbours(_ context.Context, in input) error {
 	r, err := s.oneRelay(in.opts[scopeRelay])
 	if err != nil {
+		return err
+	}
+	if err := working(r); err != nil {
 		return err
 	}
 	if r.Neighbours == nil {
