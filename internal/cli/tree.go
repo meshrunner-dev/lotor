@@ -328,7 +328,7 @@ func (s *session) treeVerb(ctx context.Context, path []string,
 		// a context lands here with the path emptied. The tree's own
 		// verbs are answered above, so the root is a context like any
 		// other rather than a place where they stop working.
-		s.dispatch(ctx, rest)
+		s.rootDispatch(ctx, rest)
 	case s.mountsHere(path, verb):
 		// The flat command runs as itself, told what the place stands
 		// for: standing somewhere is saying which.
@@ -1121,22 +1121,7 @@ func (s *session) termsAt(path []string) []term {
 	}
 	switch {
 	case len(path) == 0:
-		// A context is typeable at the root with or without its
-		// slash, so it is offered either way — which only holds
-		// because no context shares a name with a flat command.
-		for i := range s.deps.Kinds {
-			k := s.deps.Kinds[i]
-			out = append(out, term{
-				name: k.Name, class: cPath, doc: k.Doc, container: !k.Singleton,
-			})
-		}
-		for _, c := range commands {
-			doc := ""
-			if len(c.forms) > 0 {
-				doc = c.forms[0].desc
-			}
-			out = append(out, term{name: c.name, class: cVerb, doc: doc})
-		}
+		out = append(out, s.rootTerms()...)
 	case len(path) == 1 && !s.isSingleton(path):
 		inst := s.instances(path[0])
 		for name := range inst {
@@ -1156,6 +1141,32 @@ func (s *session) termsAt(path []string) []term {
 		}
 	}
 	return dedupe(out)
+}
+
+// rootTerms is what the root itself offers: the contexts, and the
+// commands that do not live somewhere more specific. A context is
+// typeable with or without its slash, so it is offered either way —
+// which only holds because no context shares a name with a flat
+// command.
+func (s *session) rootTerms() []term {
+	var out []term
+	for i := range s.deps.Kinds {
+		k := s.deps.Kinds[i]
+		out = append(out, term{
+			name: k.Name, class: cPath, doc: k.Doc, container: !k.Singleton,
+		})
+	}
+	for _, c := range commands {
+		if commandHome(c) != "" {
+			continue // it lives in its context, and is offered there
+		}
+		doc := ""
+		if len(c.forms) > 0 {
+			doc = c.forms[0].desc
+		}
+		out = append(out, term{name: c.name, class: cVerb, doc: doc})
+	}
+	return out
 }
 
 // parentOf names where ".." leads, so the entry says where it goes
@@ -1298,6 +1309,14 @@ func (s *session) attrsForAddLine(kind string, rest []string) []schema.Attr {
 	return k.AttrsFor(choice)
 }
 
+// pathAt is one step of a path, or nothing when it is not that deep.
+func pathAt(path []string, i int) string {
+	if i < len(path) {
+		return path[i]
+	}
+	return ""
+}
+
 // argTermsFor is what may still be written after a verb: the
 // attributes a mutation acts on, or the arguments a command takes.
 // Help and completion both read it, so an argument nobody can
@@ -1338,8 +1357,12 @@ func (s *session) argTermsFor(path, rest []string) []term {
 			})
 		}
 		for _, f := range c.flags {
-			// A relay is already chosen when standing inside one.
-			if f.name == scopeRelay && len(path) == 2 {
+			// The place fills what it stands for: the instance once
+			// inside one, and the item when standing on it.
+			if f.name == scopeRelay && len(path) >= 2 {
+				continue
+			}
+			if d := drawerOn(pathAt(path, 0), pathAt(path, 2)); d != nil && f.name == d.itemFlag {
 				continue
 			}
 			out = append(out, term{
@@ -1680,7 +1703,7 @@ func (w *lineWalk) paintRest(token string) string {
 		w.takesValue = takesValue(token)
 		cands := w.s.verbsAt(w.path)
 		if len(w.path) == 0 {
-			cands = append(cands, commandNames()...)
+			cands = append(cands, rootCommandNames()...)
 		}
 		return w.s.mark(cVerb, cands, token)
 	default:

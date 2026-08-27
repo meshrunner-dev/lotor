@@ -62,6 +62,11 @@ type command struct {
 	// swallow.
 	// their meaning stays the command's business.
 	flags []flagSpec
+	// on names the kind whose instance this command acts on. Such a
+	// command lives in its context and nowhere else: at the root
+	// nobody has said which one, and the old answer — quietly picking
+	// the only relay — was multi-relay hidden rather than handled.
+	on string
 	// takes is the one word a command reads without naming it,
 	// declared like every other so help can describe it and the painter
 	// can tell a chosen value from a mistake. A command without one
@@ -109,8 +114,9 @@ func relayCommands() []*command {
 	return []*command{
 		{
 			name:   cmdScopes,
+			on:     scopeRelay,
 			forms:  []form{{cmdScopes, "the transport scopes this relay carries"}},
-			detail: []string{"scopes [relay=<name>]"},
+			detail: []string{cmdScopes},
 			flags:  []flagSpec{{name: scopeRelay, valued: true, doc: docRelay}},
 			run:    (*session).scopes,
 		},
@@ -118,7 +124,7 @@ func relayCommands() []*command {
 			name:  cmdAskScopes,
 			forms: []form{{cmdAskScopes, "ask a neighbour which scopes it carries"}},
 			detail: []string{
-				"ask-scopes neighbour=<key-prefix> [relay=<name>]",
+				cmdAskScopes,
 				"admin only; it emits, and the answer comes from the",
 				"neighbour itself rather than from anything already known",
 			},
@@ -135,7 +141,7 @@ func relayCommands() []*command {
 				{cmdDiscover, "ask the neighbourhood who is there"},
 			},
 			detail: []string{
-				"discover [watch] [relay=<name>]",
+				"discover [watch]",
 				"admin only. It emits and returns; answers arrive spread",
 				"out over the following minute, on purpose, and join the",
 				"neighbourhood as they land — \"neighbours\" reads them,",
@@ -148,11 +154,12 @@ func relayCommands() []*command {
 		},
 		{
 			name: cmdAdvert,
+			on:   scopeRelay,
 			forms: []form{
 				{"advert [flood]", "announce this node now: zero-hop, or flood the mesh"},
 			},
 			detail: []string{
-				"advert [flood] [relay=<name>]",
+				"advert [flood]",
 				"admin only; one order per ten seconds, and the duty budget",
 				"has the last word on all of them",
 			},
@@ -280,6 +287,18 @@ func commandNames() []string {
 	return out
 }
 
+// rootCommandNames is what the root itself answers to — the commands
+// that do not live somewhere more specific.
+func rootCommandNames() []string {
+	out := make([]string, 0, len(commands))
+	for _, c := range commands {
+		if commandHome(c) == "" {
+			out = append(out, c.name)
+		}
+	}
+	return out
+}
+
 // lookup resolves a command by name or alias.
 func lookup(name string) *command {
 	for _, c := range commands {
@@ -354,11 +373,17 @@ func (s *session) help(_ context.Context, in input) error {
 	}
 	width := 0
 	for _, c := range commands {
+		if commandHome(c) != "" {
+			continue
+		}
 		for _, f := range c.forms {
 			width = max(width, len(f.call))
 		}
 	}
 	for _, c := range commands {
+		if commandHome(c) != "" {
+			continue
+		}
 		for _, f := range c.forms {
 			fmt.Fprintf(s.out, "%-*s  %s\r\n", width, f.call, f.desc)
 		}
@@ -381,6 +406,9 @@ func (s *session) helpFor(name string) error {
 	}
 	for _, l := range lines {
 		fmt.Fprint(s.out, l+"\r\n")
+	}
+	if home := commandHome(c); home != "" {
+		fmt.Fprintf(s.out, "lives in %s\r\n", home)
 	}
 	return nil
 }

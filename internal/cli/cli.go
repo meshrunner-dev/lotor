@@ -371,8 +371,25 @@ func (s *session) command(ctx context.Context, line string) {
 		return
 	}
 	if args := splitArgs(line); len(args) > 0 {
-		s.dispatch(ctx, args)
+		s.rootDispatch(ctx, args)
 	}
+}
+
+// rootDispatch runs a flat command typed at the root, refusing the
+// ones that live somewhere more specific by saying where. The old
+// answer — quietly acting on the only relay — was multi-relay hidden
+// rather than handled: a command that acts on one instance runs where
+// the instance is, and nowhere is not an instance.
+func (s *session) rootDispatch(ctx context.Context, args []string) {
+	c := lookup(args[0])
+	if c == nil || commandHome(c) == "" || slices.Contains(args[1:], helpWord) {
+		// A question is answerable anywhere — refusing "scopes ?"
+		// would refuse a question — and the help itself says where
+		// the command lives.
+		s.dispatch(ctx, args)
+		return
+	}
+	fmt.Fprintf(s.out, "error: %s lives in %s — stand there\r\n", c.name, commandHome(c))
 }
 
 // readLines feeds trimmed lines until EOF, an oversized line, or the

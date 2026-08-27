@@ -62,6 +62,24 @@ func claimedByDrawer(kind, verb string) bool {
 	return false
 }
 
+// commandHome says where a command lives when it is not a root
+// citizen: the instance it acts on, or the drawer that claimed it.
+// The path comes back as a template an operator can follow.
+func commandHome(c *command) string {
+	for _, d := range drawers {
+		if slices.Contains(d.verbs, c.name) {
+			return "/" + d.on + "/<name>/" + d.name
+		}
+		if slices.Contains(d.itemVerbs, c.name) {
+			return "/" + d.on + "/<name>/" + d.name + "/<" + d.itemFlag + ">"
+		}
+	}
+	if c.on != "" {
+		return "/" + c.on + "/<name>"
+	}
+	return ""
+}
+
 // drawerOn resolves one drawer by the kind that holds it and its name.
 func drawerOn(kind, name string) *drawer {
 	for i := range drawers {

@@ -463,7 +463,7 @@ func TestAdvertCommandIsAdminAndForwards(t *testing.T) {
 	}
 
 	// The transport decides: read-only sessions may not key the radio.
-	if out := run(t, deps, "advert"); !strings.Contains(out, "admin command") {
+	if out := run(t, deps, "/relay/meshcore-868/advert"); !strings.Contains(out, "admin command") {
 		t.Fatalf("read-only session was allowed to emit:\n%s", out)
 	}
 	if len(got) != 0 {
@@ -471,7 +471,8 @@ func TestAdvertCommandIsAdminAndForwards(t *testing.T) {
 	}
 
 	deps.Privilege = Admin
-	out := run(t, deps, "advert", "advert flood", "advert nope")
+	out := run(t, deps, "/relay/meshcore-868/advert",
+		"/relay/meshcore-868/advert flood", "/relay/meshcore-868/advert nope")
 	if !strings.Contains(out, "zero-hop advert queued") ||
 		!strings.Contains(out, "flood advert queued") {
 		t.Errorf("confirmations missing:\n%s", out)
@@ -484,7 +485,7 @@ func TestAdvertCommandIsAdminAndForwards(t *testing.T) {
 	}
 
 	deps.Relays[0].TriggerAdvert = nil
-	if out := run(t, deps, "advert"); !strings.Contains(out, "gate is dry") {
+	if out := run(t, deps, "/relay/meshcore-868/advert"); !strings.Contains(out, "gate is dry") {
 		t.Errorf("a dry relay should refuse with its reason:\n%s", out)
 	}
 }
@@ -499,7 +500,9 @@ func TestADownRelaySaysWhyRatherThanWhatIsMissing(t *testing.T) {
 	// A relay that never configured has no scopes, no neighbourhood
 	// and no scan — every command must name the cause, not the
 	// consequence it happens to trip over.
-	for _, cmd := range []string{"scopes", "discover", "advert",
+	for _, cmd := range []string{"/relay/meshcore-868/scopes",
+		"/relay/meshcore-868/advert",
+		"/relay/meshcore-868/neighbours/discover",
 		"/relay/meshcore-868/neighbours/print"} {
 		out := run(t, deps, cmd)
 		if !strings.Contains(out, "cannot unmarshal") {
@@ -530,7 +533,7 @@ func TestDiscoverAsksAndReturns(t *testing.T) {
 	// The default emits and hands the console back: the answers are
 	// recorded whether or not anyone is watching for them.
 	done := make(chan string, 1)
-	go func() { done <- run(t, deps, "discover") }()
+	go func() { done <- run(t, deps, "/relay/meshcore-868/neighbours/discover") }()
 	select {
 	case out := <-done:
 		if !strings.Contains(out, "answers land in the neighbourhood") {
@@ -548,7 +551,7 @@ func TestDiscoverAsksAndReturns(t *testing.T) {
 	key[0], key[1] = 0x88, 0x2f
 	found <- Neighbour{PubKey: key, SNR: 12.25}
 	close(found)
-	if out := run(t, deps, "discover watch"); !strings.Contains(out, "882f") ||
+	if out := run(t, deps, "/relay/meshcore-868/neighbours/discover watch"); !strings.Contains(out, "882f") ||
 		!strings.Contains(out, "12.2 dB") {
 		t.Errorf("watch said %q", strings.TrimSpace(out))
 	}
@@ -564,7 +567,7 @@ func TestWatchingDiscoverGivesTheConsoleBackOnALine(t *testing.T) {
 	}
 
 	done := make(chan string, 1)
-	go func() { done <- run(t, deps, "discover watch", "status") }()
+	go func() { done <- run(t, deps, "/relay/meshcore-868/neighbours/discover watch", "status") }()
 	select {
 	case out := <-done:
 		if !strings.Contains(out, "enter stops") {

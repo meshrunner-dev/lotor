@@ -1393,3 +1393,40 @@ func TestAFilterCompletesFromWhatTheJournalHolds(t *testing.T) {
 		t.Errorf("frames still answers to json:\n%s", out)
 	}
 }
+
+func TestACommandLivesInItsContextAndTheRootSaysWhere(t *testing.T) {
+	deps := withNeighbour(t)
+	deps.Privilege = Admin
+	// The root used to run these by quietly picking the only relay,
+	// which was multi-relay hidden rather than handled. Now it points
+	// at the place instead of guessing the instance.
+	for _, c := range []struct{ line, home string }{
+		{"scopes", "/relay/<name>"},
+		{"advert", "/relay/<name>"},
+		{"discover", "/relay/<name>/neighbours"},
+		{"ask-scopes", "/relay/<name>/neighbours/<neighbour>"},
+	} {
+		out := run(t, deps, c.line)
+		if !strings.Contains(out, "lives in "+c.home) {
+			t.Errorf("%q was not pointed home:\n%s", c.line, out)
+		}
+	}
+	// A question is answerable anywhere: refusing "scopes ?" would
+	// refuse a question, and its answer names the home too.
+	if out := run(t, deps, "scopes ?"); !strings.Contains(out, "lives in /relay/<name>") {
+		t.Errorf("the question was refused or unanswered:\n%s", out)
+	}
+	// The root neither lists nor offers what does not live there.
+	if help := run(t, deps, "help"); strings.Contains(help, "advert") {
+		t.Errorf("the root help lists a homed command:\n%s", help)
+	}
+	s := &session{deps: deps}
+	if add, _ := s.complete("adver"); add != "" {
+		t.Errorf("the root completed a homed command: %q", add)
+	}
+	// Inside its context it is a word like any other.
+	s.setPath([]string{scopeRelay, "meshcore-868"})
+	if add, _ := s.complete("adver"); add != "t " {
+		t.Errorf("the instance does not complete its own verb: %q", add)
+	}
+}
