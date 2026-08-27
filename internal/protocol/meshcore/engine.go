@@ -83,7 +83,7 @@ type params struct {
 	// it stamps on the adverts it originates and on a reply whose
 	// question named no scope. Empty speaks unscoped, which is what a
 	// relay does on a mesh that has no scopes. See the Vocabulary —
-	// this is not a radio region.
+	// this is not a radio band.
 	DefaultScope string `yaml:"default_scope"`
 	// AcceptScopes lists the scopes whose floods this relay carries.
 	// A scoped flood matching none of them is somebody else's

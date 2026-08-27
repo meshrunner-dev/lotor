@@ -37,12 +37,6 @@ endorsed by the MeshCore project.
   all** — embedded hosts with tight RAM and CPU relay without
   observing, and nothing else may depend on a sentinel existing.
 
-- **region** — a radio band and its channel plan: frequency, spreading
-  factor, bandwidth, and the duty ceiling that band imposes. A region
-  is a fact about the air, and it names a profile (`eu-868-narrow`).
-  The reference's documentation calls a transport scope a region too;
-  here the two words stay apart.
-
 - **scope** — a MeshCore *transport scope*: a named partition of the
   mesh that a flood is confined to. A scope is a shared secret — a
   16-byte key derived from its name — and a scoped flood carries a
@@ -54,6 +48,11 @@ endorsed by the MeshCore project.
   one `default_scope` it originates under and a set of `accept_scopes`
   it will relay; the reference calls the outgoing one the default
   scope, and this follows that name.
+
+  Code, configuration, journal and console say *scope*, always. A web
+  UI may present it as a *region* instead, because that is the word
+  MeshCore operators arrive with — a deliberate translation at the
+  edge, not an inconsistency to tidy away.
 
 ## Architecture
 
@@ -153,7 +152,7 @@ they live on the radio without stealing the relay's authority:
 - binding a relay whose frequency falls outside the radio's declared
   range is a load-time error (the relay comes up in `error`, visibly);
 - `tx_power_dbm: auto` (the relay default) resolves to the lower of
-  the region profile's default and the radio's cap, and the resolution
+  the band profile's default and the radio's cap, and the resolution
   is logged with provenance;
 - an **explicit** `tx_power_dbm` above the radio's cap is refused,
   never clamped — defaults may be prudent, explicit choices never lie.

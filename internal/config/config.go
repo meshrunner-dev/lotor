@@ -1,6 +1,6 @@
 // Package config loads the daemon's configuration file and implements
 // its layering paradigm: named profiles with per-profile override
-// scopes, instantiated for radio hardware and for relay regions alike.
+// scopes, instantiated for radio hardware and for relay bands alike.
 // Validation is strict everywhere — unknown keys, unknown profiles and
 // dangling references fail the load with a message, because a config
 // that half-applies is worse than one that refuses.
@@ -27,7 +27,7 @@ type Radio struct {
 
 // Relay declares one protocol instance: which protocol it speaks,
 // which radio it owns, and the layered waveform configuration
-// (region/channel presets and their overrides).
+// (band presets and their overrides).
 type Relay struct {
 	Protocol string  `yaml:"protocol"`
 	Radio    string  `yaml:"radio"`

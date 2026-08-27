@@ -66,7 +66,7 @@ func (t *scopeTable) match(pkt *meshcore.Packet) (name string, key meshcore.Tran
 	if !pkt.HasTransportCodes() {
 		return wildcardScope, meshcore.TransportKey{}, t.unscoped
 	}
-	if i := meshcore.MatchTransportRegion(pkt, t.accept); i >= 0 {
+	if i := meshcore.MatchScope(pkt, t.accept); i >= 0 {
 		return t.acceptNames[i], t.accept[i], true
 	}
 	return "", meshcore.TransportKey{}, false

@@ -54,7 +54,7 @@ func TestTamperedAdvertIsCalledOut(t *testing.T) {
 	e, sub := testEngine(t)
 
 	raw := signedAdvert(t, "Wanadoo")
-	raw[len(raw)-1] ^= 0xFF // corrupt the signed region
+	raw[len(raw)-1] ^= 0xFF // corrupt the signed bytes
 
 	e.judge(newFakeDevice(), frame(raw))
 

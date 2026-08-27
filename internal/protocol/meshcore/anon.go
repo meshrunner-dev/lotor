@@ -23,9 +23,11 @@ import (
 const (
 	// The request types the reference dispatches (MyMesh.cpp); a
 	// first byte of zero or a printable is a login attempt instead.
-	anonReqTypeRegions = 0x01
-	anonReqTypeOwner   = 0x02
-	anonReqTypeBasic   = 0x03
+	// The scopes request; the reference names this one REGIONS, the
+	// word this codebase reserves for a radio band.
+	anonReqTypeScopes = 0x01
+	anonReqTypeOwner  = 0x02
+	anonReqTypeBasic  = 0x03
 
 	// One fixed-window limiter across every anonymous answer — the
 	// reference's anon_limiter(4, 180): at most four replies per three
@@ -72,7 +74,7 @@ func (e *engine) anonVerdict(rx *reception) (verdict, why string, handled bool) 
 	switch t := plain[4]; {
 	case t == anonReqTypeOwner:
 		return verdictAnon, "owner request — the name behind the key", true
-	case t == anonReqTypeRegions:
+	case t == anonReqTypeScopes:
 		return verdictAnon, "scopes request", true
 	case t == anonReqTypeBasic:
 		return verdictAnon, "clock request", true
@@ -98,7 +100,7 @@ func replyPath(body []byte) (pathLen uint8, path []byte, ok bool) {
 }
 
 // respondAnon answers the anonymous questions a stranger may ask —
-// owner (the name behind the key), clock, regions — each only when the
+// owner (the name behind the key), clock, scopes — each only when the
 // request came direct, the reference's own gating, and all behind one
 // shared limiter. Logins were consumed by the judgement and stay
 // unanswered.
@@ -119,7 +121,7 @@ func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 		return // the reference gates every other anonymous answer on direct
 	}
 	// What each question gets. The clock prefix below is common to all
-	// three; owner adds the name, regions the comma-joined list the
+	// three; owner adds the name, scopes the comma-joined list the
 	// reference's exportNamesTo produces.
 	var text string
 	switch plain[4] {
@@ -127,7 +129,7 @@ func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 		text = e.p.NodeName + "\n" + e.p.OwnerInfo
 	case anonReqTypeBasic:
 		// The clock alone is the whole answer.
-	case anonReqTypeRegions:
+	case anonReqTypeScopes:
 		text = strings.Join(e.scopes.served(), ",")
 	default:
 		return // logins and the unknown stay unanswered

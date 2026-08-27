@@ -39,3 +39,18 @@ relays:
         # existing node to migrate it here. Guard this file: whoever
         # reads the key IS the node.
         # identity: <hex>
+
+        # Transport scopes: which slice of the band's traffic this
+        # relay carries. A scope is a mesh agreement, not a band fact —
+        # two relays on eu-868-narrow may serve different ones. Absent,
+        # the relay carries the plain mesh and is invisible to scoped
+        # traffic, which is what an unconfigured node does.
+        #
+        #   default_scope:  what this relay stamps on what it
+        #                   originates; must be one of accept_scopes
+        #   accept_scopes:  whose scoped floods it relays
+        #   accept_unscoped: whether plain floods move through it at
+        #                   all (true unless said otherwise)
+        # default_scope: fr
+        # accept_scopes: [fr, be]
+        # accept_unscoped: true

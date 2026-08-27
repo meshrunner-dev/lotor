@@ -1,6 +1,6 @@
 package meshcore
 
-// presets are the region/channel profiles this protocol ships with.
+// presets are the band profiles this protocol ships with.
 // The values are MeshCore network agreements: a relay must match its
 // mesh exactly or hear nothing.
 var presets = map[string]map[string]any{

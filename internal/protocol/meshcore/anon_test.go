@@ -188,7 +188,7 @@ func TestClockRequestGetsTheClock(t *testing.T) {
 func TestScopesRequestNamesWhatWeCarry(t *testing.T) {
 	// The answer is the reference's shape: the wildcard first when
 	// plain floods are carried, then each scope with its hash stripped.
-	if text := askAndOpen(t, anonReqTypeRegions); string(text) != "*" {
+	if text := askAndOpen(t, anonReqTypeScopes); string(text) != "*" {
 		t.Fatalf("scopes = %q, want just the wildcard from a relay with none", text)
 	}
 }
