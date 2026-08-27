@@ -726,7 +726,12 @@ func TestRadioFaultCountsTheLostEmission(t *testing.T) {
 	}
 }
 
-func TestOperatorAdvertWakesTheReceiver(t *testing.T) {
+// orderedAdvert drives one operator announcement to the air and hands
+// back what left the radio. One engine per order, because the spacing
+// guard is pipeline state now and a test cannot reach past it — which
+// is the point of it living there.
+func orderedAdvert(t *testing.T, flood bool) (bus.FrameSent, *meshcore.Packet) {
+	t.Helper()
 	// The order must not wait for the next scheduled duty: it closes
 	// the receive window and is served now. The rig's clocks are 16 s
 	// away, the test's patience 2 s — a prompt emission proves the wake.
@@ -734,38 +739,34 @@ func TestOperatorAdvertWakesTheReceiver(t *testing.T) {
 	runEngine(t, e, dev)
 	time.Sleep(50 * time.Millisecond) // let Run park in Receive
 
-	if err := e.RequestAdvert(false); err != nil {
+	if err := e.RequestAdvert(flood); err != nil {
 		t.Fatal(err)
 	}
 	sent := awaitSent(t, sub)
-	if sent.Kind != "advert-local" {
-		t.Fatalf("sent = %+v, want advert-local", sent)
-	}
-	raw := <-dev.sent
-	pkt, err := meshcore.ParsePacket(raw)
+	pkt, err := meshcore.ParsePacket(<-dev.sent)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return sent, pkt
+}
+
+func TestOperatorAdvertWakesTheReceiver(t *testing.T) {
+	sent, pkt := orderedAdvert(t, false)
+	if sent.Kind != "advert-local" {
+		t.Fatalf("sent = %+v, want advert-local", sent)
 	}
 	if !pkt.IsRouteDirect() || pkt.PathHashCount() != 0 {
 		t.Fatal("the operator's default advert must be zero-hop")
 	}
+}
 
-	// What is being checked here is the two shapes, not the spacing
-	// between orders — that has a test of its own. Let the clock
-	// forget the one just served.
-	e.askMu.Lock()
-	e.lastAskedAdvert = time.Time{}
-	e.askMu.Unlock()
-
-	if err := e.RequestAdvert(true); err != nil {
-		t.Fatal(err)
-	}
-	sent = awaitSent(t, sub)
+func TestOperatorFloodAdvertIsRoutable(t *testing.T) {
+	sent, pkt := orderedAdvert(t, true)
 	if sent.Kind != "advert-flood" {
 		t.Fatalf("sent = %+v, want advert-flood", sent)
 	}
-	if pkt, err = meshcore.ParsePacket(<-dev.sent); err != nil || !pkt.IsRouteFlood() {
-		t.Fatalf("flood advert route = %v (%v)", pkt.Route(), err)
+	if !pkt.IsRouteFlood() {
+		t.Fatalf("flood advert route = %v", pkt.Route())
 	}
 }
 
@@ -963,9 +964,9 @@ func TestMultipartUnwrapsToOneAck(t *testing.T) {
 }
 
 func TestOrderedAdvertsAreSpaced(t *testing.T) {
-	// The guard lives on the engine, not on the console: every door
-	// into it — the console today, a web button tomorrow — asks the
-	// same question of the same clock.
+	// The guard lives on the pipeline, not on the console: every door
+	// into the engine — the console today, a web button tomorrow —
+	// ends at this one clock, on one goroutine, with no lock.
 	e := armedEngine(t, "on-air")
 	now := time.Now()
 	if err := e.chargeAdvertAsk(now); err != nil {

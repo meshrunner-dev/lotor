@@ -96,7 +96,7 @@ func TestASecondScanIsRefusedNotSilentlyEmptied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first scan: %v", err)
 	}
-	if found == nil || time.Until(until) < sweepWindow-scanStartWait {
+	if found == nil || time.Until(until) < sweepWindow-askWait {
 		t.Fatalf("window = %s, want about %s from when the question went out",
 			time.Until(until), sweepWindow)
 	}

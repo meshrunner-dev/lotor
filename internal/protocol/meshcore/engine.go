@@ -159,6 +159,9 @@ type engine struct {
 	duty            *dutyLedger
 	nextFloodAdvert time.Time
 	nextLocalAdvert time.Time
+	// lastAskedAdvert is when an operator last ordered one, which
+	// paces those orders and nothing else.
+	lastAskedAdvert time.Time
 	limits          limits
 	scopes          *scopeTable
 	discoverySince  time.Time
@@ -174,7 +177,7 @@ type engine struct {
 	// advertAsk carries operator-triggered announcements into the
 	// pipeline's goroutine; wakeRx interrupts a blocked Receive so the
 	// order is served now, not at the next scheduled duty.
-	advertAsk chan string
+	advertAsk chan *advertOrder
 	// scopeAsk carries an operator's question about a neighbour's
 	// scopes; pendingScope is the one in flight, engine-goroutine only.
 	scopeAsk     chan *scopeQuery
@@ -184,13 +187,7 @@ type engine struct {
 	sweepAsk     chan *sweep
 	pendingSweep *sweep
 	wakeMu       sync.Mutex
-	// askMu guards the state an operator's orders keep between them.
-	// Those orders arrive on whatever goroutine served the console or
-	// the web, never the pipeline's, so the guard cannot live in the
-	// pipeline where the rest of this engine's state does.
-	askMu           sync.Mutex
-	lastAskedAdvert time.Time
-	wakeRx          context.CancelFunc
+	wakeRx       context.CancelFunc
 }
 
 // paramsFrom is the strict decode both build and the config checker

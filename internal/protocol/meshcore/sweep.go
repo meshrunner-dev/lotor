@@ -40,19 +40,12 @@ type sweep struct {
 	until time.Time
 	found chan Neighbour
 	seen  map[[meshcore.PubKeySize]byte]bool
-	// started is how the pipeline answers the asker: closed once the
-	// question is really on its way, or carrying the reason it is not.
-	// Without it a scan the relay refused would look exactly like a
-	// scan nobody answered — an empty room and a silent failure read
-	// the same from the console, and only one of them is true.
-	started chan error
+	// started is how the pipeline answers the asker. Without it a scan
+	// the relay refused would look exactly like a scan nobody answered
+	// — an empty room and a silent failure read the same from the
+	// console, and only one of them is true.
+	started ack
 }
-
-// scanStartWait bounds how long an asker waits to hear whether its
-// scan went out. The pipeline picks the question up on its next turn
-// of the receive loop, so this is slack, not a duration anyone should
-// notice.
-const scanStartWait = 3 * time.Second
 
 // Discover asks the neighbourhood who is there. The channel carries
 // each answer as it lands and closes when the window ends; the
@@ -70,7 +63,7 @@ func (e *engine) Discover() (<-chan Neighbour, time.Time, error) {
 		until:   time.Now().Add(sweepWindow),
 		found:   make(chan Neighbour, maxNeighbours),
 		seen:    map[[meshcore.PubKeySize]byte]bool{},
-		started: make(chan error, 1),
+		started: newAck(),
 	}
 	select {
 	case e.sweepAsk <- s:
@@ -85,14 +78,8 @@ func (e *engine) Discover() (<-chan Neighbour, time.Time, error) {
 
 	// Wait to hear that it went out. The window returned is the one
 	// the pipeline stamped when it did, not the one guessed here.
-	select {
-	case err := <-s.started:
-		if err != nil {
-			return nil, time.Time{}, err
-		}
-	case <-time.After(scanStartWait):
-		return nil, time.Time{}, errors.New(
-			"the relay never picked the scan up — see \"relay <name>\" for what it is doing")
+	if err := s.started.wait("scan"); err != nil {
+		return nil, time.Time{}, err
 	}
 	return s.found, s.until, nil
 }
@@ -100,7 +87,7 @@ func (e *engine) Discover() (<-chan Neighbour, time.Time, error) {
 // refuse tells the asker why its scan never went out, and closes the
 // answers it will never receive.
 func (s *sweep) refuse(err error) {
-	s.started <- err
+	s.started.refused(err)
 	close(s.found)
 }
 
@@ -142,7 +129,7 @@ func (e *engine) drainSweepAsk(dev radio.Device, now time.Time) {
 		// typed: the wait above is short but it is not nothing.
 		s.until = now.Add(sweepWindow)
 		e.pendingSweep = s
-		close(s.started)
+		s.started.taken()
 		id := txn.New()
 		e.log.Info("scanning the neighbourhood",
 			zap.String("txn", id.Short()), zap.Duration("window", sweepWindow))

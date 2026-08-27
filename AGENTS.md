@@ -66,6 +66,27 @@ Nothing forbidden is imported and the seam is gone anyway. If a method
 or a field only makes sense for one chip on one bus, it belongs behind
 the driver, whatever the linter says.
 
+## Orders from outside, and why the mutex count stays flat
+
+The console, a web UI and an API are three callers of the same
+methods, not three kinds of state. Reaching for a new mutex each time
+one arrives is the mistake to avoid; `ask.go` describes the shape that
+replaces it.
+
+Almost everything the protocol engine knows is owned by one goroutine
+and needs no lock, because nothing else writes it. What arrives from
+outside is an **order**, not a write: it goes on an ask channel, the
+pipeline serves it on its own turn, and an `ack` carries back either
+"taken" or the reason it was not. Policy that guards an order — a rate
+limit, a one-at-a-time rule — belongs on the pipeline side of that
+channel, next to the state it consults. Put it on the caller's side
+and it needs a lock, and every later caller needs to remember it.
+
+A lock is right for state that is genuinely shared and read
+concurrently: the neighbourhood, the counters, the duty ledger. There
+is one per table, and that count is a function of how many tables
+there are, never of how many callers.
+
 ## What does belong here
 
 Policy, not format; intent, not mechanism. Who may ask, how often, at

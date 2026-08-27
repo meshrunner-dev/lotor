@@ -160,7 +160,7 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 	}
 	e.duty = dl
 	e.started = time.Now()
-	e.advertAsk = make(chan string, 1)
+	e.advertAsk = make(chan *advertOrder, 1)
 	e.scopeAsk = make(chan *scopeQuery, 1)
 	e.sweepAsk = make(chan *sweep, 1)
 	// What "changed since" means for us: this process's pipeline came
@@ -433,19 +433,16 @@ func (e *engine) RequestAdvert(flood bool) error {
 	if !e.txEnabled() {
 		return errors.New("the transmit gate is dry — nothing may be sent")
 	}
-	if err := e.chargeAdvertAsk(time.Now()); err != nil {
-		return err
-	}
 	if time.Now().Before(clockEpoch) {
 		return errors.New("wall clock implausible — neighbours keep the newest advert timestamp, " +
 			"and this one would poison ours")
 	}
-	kind := "advert-local"
+	o := &advertOrder{kind: "advert-local", started: newAck()}
 	if flood {
-		kind = "advert-flood"
+		o.kind = "advert-flood"
 	}
 	select {
-	case e.advertAsk <- kind:
+	case e.advertAsk <- o:
 	default:
 		return errors.New("an advert is already pending")
 	}
@@ -454,7 +451,14 @@ func (e *engine) RequestAdvert(flood bool) error {
 		e.wakeRx() // close the receive window: serve the order now
 	}
 	e.wakeMu.Unlock()
-	return nil
+	return o.started.wait("advert")
+}
+
+// advertOrder is one announcement an operator asked for, and the
+// answer waiting to hear whether it went out.
+type advertOrder struct {
+	kind    string
+	started ack
 }
 
 // advertAskGap is the least time between two ordered announcements.
@@ -466,16 +470,14 @@ func (e *engine) RequestAdvert(flood bool) error {
 const advertAskGap = 10 * time.Second
 
 // chargeAdvertAsk admits one order and refuses the ones that crowd it,
-// saying how long is left rather than only that the answer is no. The
-// clock is stamped on the order, not on the emission: what is being
-// bounded is how often anyone may ask.
+// saying how long is left rather than only that the answer is no. It
+// runs on the pipeline's goroutine, beside the scheduled adverts'
+// clocks, so the spacing needs no lock to be right.
 //
-// The scheduler's own announcements do not come through here. They are
-// paced by their configured intervals, and an operator's order is not
-// evidence about when the next scheduled one is due.
+// Those scheduled announcements do not come through here. They keep
+// their configured cadence, and an operator's order is not evidence
+// about when the next one is due.
 func (e *engine) chargeAdvertAsk(now time.Time) error {
-	e.askMu.Lock()
-	defer e.askMu.Unlock()
 	if wait := advertAskGap - now.Sub(e.lastAskedAdvert); wait > 0 && !e.lastAskedAdvert.IsZero() {
 		return fmt.Errorf("an advert was ordered %s ago — %s to wait",
 			now.Sub(e.lastAskedAdvert).Round(time.Second), wait.Round(time.Second))
@@ -490,7 +492,13 @@ func (e *engine) chargeAdvertAsk(now time.Time) error {
 // byte-identical duplicate a neighbour would dedup away.
 func (e *engine) drainAdvertAsk(dev radio.Device, now time.Time) {
 	select {
-	case kind := <-e.advertAsk:
+	case o := <-e.advertAsk:
+		if err := e.chargeAdvertAsk(now); err != nil {
+			o.started.refused(err)
+			return
+		}
+		o.started.taken()
+		kind := o.kind
 		if kind == "advert-flood" {
 			if e.p.AdvertFloodInterval > 0 {
 				e.nextFloodAdvert = now.Add(e.p.AdvertFloodInterval)
