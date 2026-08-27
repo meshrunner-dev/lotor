@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"sort"
 )
 
@@ -16,14 +17,19 @@ type drawer struct {
 	doc  string
 	// on names the kind whose instances hold it.
 	on string
+	// verbs are the commands that belong here rather than on the
+	// instance: what they act on is what the drawer holds, so this is
+	// where an operator goes looking for them.
+	verbs []string
 }
 
 const drawerNeighbours = "neighbours"
 
 var drawers = []drawer{{
-	name: drawerNeighbours,
-	doc:  "repeaters heard with no relay in between",
-	on:   scopeRelay,
+	name:  drawerNeighbours,
+	doc:   "repeaters heard with no relay in between",
+	on:    scopeRelay,
+	verbs: []string{cmdDiscover},
 }}
 
 // drawersOn lists what a kind's instances hold.
@@ -35,6 +41,18 @@ func drawersOn(kind string) []drawer {
 		}
 	}
 	return out
+}
+
+// claimedByDrawer reports whether a drawer of this kind holds the
+// verb. A command belongs in one place, and this is what keeps it out
+// of the instance it would otherwise have mounted on.
+func claimedByDrawer(kind, verb string) bool {
+	for _, d := range drawers {
+		if d.on == kind && slices.Contains(d.verbs, verb) {
+			return true
+		}
+	}
+	return false
 }
 
 // drawerOn resolves one drawer by the kind that holds it and its name.

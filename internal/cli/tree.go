@@ -329,8 +329,10 @@ func (s *session) treeVerb(ctx context.Context, path []string,
 		// verbs are answered above, so the root is a context like any
 		// other rather than a place where they stop working.
 		s.dispatch(ctx, rest)
-	case len(path) == 2 && s.mountedVerb(path[0], verb):
-		// The flat command runs as itself, told which instance asked.
+	case len(path) == 2 && s.mountedVerb(path[0], verb),
+		len(path) == 3 && claimedByDrawer(path[0], verb):
+		// The flat command runs as itself, told which instance asked —
+		// from the instance, or from a drawer the instance holds.
 		s.dispatch(ctx, append(append([]string{verb}, args...), path[0]+"="+path[1]))
 	default:
 		return &unknownVerbError{verb: verb}
@@ -648,7 +650,7 @@ func (s *session) mountedVerb(kind, verb string) bool {
 		return false
 	}
 	spec := c.flag(kind)
-	return spec != nil && spec.valued
+	return spec != nil && spec.valued && !claimedByDrawer(kind, verb)
 }
 
 // treeStatus shows the instance the session stands in, as it runs.
@@ -1147,9 +1149,16 @@ func (s *session) verbNamesAt(path []string) []string {
 			}
 		}
 		return verbs
-	default:
+	case len(path) == 3:
 		// A drawer holds what the mesh is doing. There is nothing to
-		// set and nothing to export, so reading is all it answers to.
+		// set and nothing to export, so reading is all it answers to —
+		// that, and the commands whose subject is what it holds.
+		verbs := []string{verbPrint}
+		if d := drawerOn(path[0], path[2]); d != nil {
+			verbs = append(verbs, d.verbs...)
+		}
+		return verbs
+	default:
 		return []string{verbPrint}
 	}
 }

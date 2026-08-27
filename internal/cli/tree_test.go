@@ -94,7 +94,7 @@ func TestTreeCompletion(t *testing.T) {
 		{"/re", "lay/"}, // a container completes to its separator
 		{"/relay mesh", "core-868 "},
 		{"/relay meshcore-868 pr", "int "},
-		{"/relay meshcore-868 disc", "over "},
+		{"/relay meshcore-868/neighbours disc", "over "},
 	} {
 		add, hints := s.complete(c.line)
 		if add != c.add || hints != nil {
@@ -1150,10 +1150,19 @@ func TestACommandThatTakesARelayIsReachableFromInsideOne(t *testing.T) {
 	// command that asks it works here — not a hand-kept subset of
 	// them, which is how frames and tx came to be missing.
 	verbs := s.verbsAt(s.curPath())
-	for _, want := range []string{cmdDiscover, cmdAdvert, cmdFrames, "tx", "noise"} {
+	for _, want := range []string{cmdAdvert, cmdFrames, "tx", "noise"} {
 		if !slices.Contains(verbs, want) {
 			t.Errorf("%q is not reachable from inside a relay: %v", want, verbs)
 		}
+	}
+	// A command whose subject is what a drawer holds belongs in the
+	// drawer, and only there: the instance does not answer to it.
+	if slices.Contains(verbs, cmdDiscover) {
+		t.Errorf("a drawer's command stayed on the instance too: %v", verbs)
+	}
+	inDrawer := s.verbsAt([]string{scopeRelay, "meshcore-868", drawerNeighbours})
+	if !slices.Contains(inDrawer, cmdDiscover) {
+		t.Errorf("the drawer does not answer to what fills it: %v", inDrawer)
 	}
 	// A command that names no relay stays where it was.
 	if slices.Contains(verbs, cmdUndo) {
