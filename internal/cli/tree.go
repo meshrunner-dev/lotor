@@ -867,7 +867,16 @@ func (s *session) printDetail(kind string, secrets bool) error {
 		if !secrets {
 			masked = s.secretAttrs(kind + " " + name)
 		}
-		s.writeDetail(name, gutter, s.traces()[kind+" "+name], masked)
+		traces := s.traces()[kind+" "+name]
+		pairs := make([][2]string, 0, len(traces))
+		for _, t := range traces {
+			value := exportValue(t.Value)
+			if masked[t.Key] {
+				value = maskedValue
+			}
+			pairs = append(pairs, [2]string{t.Key, value})
+		}
+		s.writeDetail(name, gutter, pairs)
 	}
 	return nil
 }
@@ -875,27 +884,23 @@ func (s *session) printDetail(kind string, secrets bool) error {
 // writeDetail renders one object as a paragraph: its handle in the
 // gutter, then its attributes as pairs packed to the width, each
 // continuation line starting under the gutter so the handle column
-// stays clear.
-func (s *session) writeDetail(handle string, gutter int, traces []config.Trace,
-	masked map[string]bool,
-) {
+// stays clear. The values arrive rendered — whoever holds them knows
+// what they are, and a second pass over a value that was already
+// written for reading is a second pair of quotes around it.
+func (s *session) writeDetail(handle string, gutter int, pairs [][2]string) {
 	var b strings.Builder
 	b.WriteString(" " + s.color(cPath, handle))
 	b.WriteString(strings.Repeat(" ", gutter-1-len(handle)))
 	col := gutter
-	for _, t := range traces {
-		value := exportValue(t.Value)
-		if masked[t.Key] {
-			value = maskedValue
-		}
+	for _, p := range pairs {
 		// Width arithmetic runs on the plain text: the escapes take up
 		// no columns, and counting them would wrap early.
-		if width := len(t.Key) + 1 + len(value) + 1; col > gutter && col+width > detailWidth {
+		if width := len(p[0]) + 1 + len(p[1]) + 1; col > gutter && col+width > detailWidth {
 			b.WriteString("\r\n" + strings.Repeat(" ", gutter))
 			col = gutter
 		}
-		b.WriteString(s.color(cAttr, t.Key) + s.color(cPunct, "=") + value + " ")
-		col += len(t.Key) + 1 + len(value) + 1
+		b.WriteString(s.color(cAttr, p[0]) + s.color(cPunct, "=") + p[1] + " ")
+		col += len(p[0]) + 1 + len(p[1]) + 1
 	}
 	fmt.Fprintf(s.out, "%s\r\n", b.String())
 }

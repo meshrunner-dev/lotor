@@ -5,8 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
-
-	"meshrunner.dev/lotor/internal/config"
 )
 
 // A drawer is a runtime collection an instance holds: what the mesh is
@@ -102,11 +100,43 @@ func (s *session) drawerKeys(path []string) map[string]string {
 	return out
 }
 
+// neighbourRow is one neighbour as a view will show it. The name is
+// rendered here and only here, by the one function allowed to render
+// a name off the air; the rest stay as they read, and a view that
+// needs them to survive as single tokens quotes them itself.
+type neighbourRow struct {
+	name  string
+	snr   string
+	heard string
+}
+
+// fields is the row as a reader sees it, where whatever separates the
+// values is not the values' problem.
+func (n neighbourRow) fields() [][2]string {
+	return [][2]string{{"name", n.name}, {"snr", n.snr}, {"heard", n.heard}}
+}
+
+// pairs renders the row for the packed form, where a space would end
+// a value early. The name is left alone: it arrived quoted, and a
+// second pass over an already-rendered value is a second pair of
+// quotes around it.
+func (n neighbourRow) pairs() [][2]string {
+	return [][2]string{
+		{"name", n.name},
+		{"snr", quoteIfSpaced(n.snr)},
+		{"heard", quoteIfSpaced(n.heard)},
+	}
+}
+
+// cells renders the row for a table, where the columns do the
+// separating and nothing needs quoting to survive.
+func (n neighbourRow) cells() []string { return []string{n.name, n.snr, n.heard} }
+
 // drawerRows reads a drawer for printing: the keys in a stable order,
 // and what each one holds. Unlike drawerKeys it may consult the
 // journal, which knows a name for a node that only ever answered a
 // scan — the engine learns one only from an advert heard zero-hop.
-func (s *session) drawerRows(ctx context.Context, path []string) ([]string, map[string][]config.Trace, error) {
+func (s *session) drawerRows(ctx context.Context, path []string) ([]string, map[string]neighbourRow, error) {
 	r, err := s.findRelay(path[1])
 	if err != nil {
 		return nil, nil, err
@@ -119,7 +149,7 @@ func (s *session) drawerRows(ctx context.Context, path []string) ([]string, map[
 	}
 	named := s.nodeNames(ctx)
 	keys := []string{}
-	rows := map[string][]config.Trace{}
+	rows := map[string]neighbourRow{}
 	for _, n := range r.Neighbours() {
 		key := hex.EncodeToString(n.PubKey[:6])
 		name := n.Name
@@ -127,10 +157,10 @@ func (s *session) drawerRows(ctx context.Context, path []string) ([]string, map[
 			name = named[key]
 		}
 		keys = append(keys, key)
-		rows[key] = []config.Trace{
-			{Key: "name", Value: meshName(name)},
-			{Key: "snr", Value: fmt.Sprintf("%+.2f dB", n.SNR)},
-			{Key: "heard", Value: ago(n.Heard)},
+		rows[key] = neighbourRow{
+			name:  meshName(name),
+			snr:   fmt.Sprintf("%+.2f dB", n.SNR),
+			heard: ago(n.Heard),
 		}
 	}
 	sort.Strings(keys)
@@ -158,18 +188,14 @@ func (s *session) printDrawer(ctx context.Context, path []string, detail bool) e
 			if i > 0 {
 				fmt.Fprint(s.out, "\r\n")
 			}
-			s.writeDetail(k, gutter, rows[k], nil)
+			s.writeDetail(k, gutter, rows[k].pairs())
 		}
 		return nil
 	}
 	tb := s.table()
 	tb.header("KEY", "NAME", "SNR", "HEARD")
 	for _, k := range keys {
-		cells := []string{k}
-		for _, t := range rows[k] {
-			cells = append(cells, fmt.Sprintf("%v", t.Value))
-		}
-		tb.row(cells...)
+		tb.row(append([]string{k}, rows[k].cells()...)...)
 	}
 	return tb.flush(s.out)
 }
@@ -187,8 +213,8 @@ func (s *session) printDrawerItem(ctx context.Context, path []string) error {
 	}
 	tb := s.table()
 	tb.header("ATTRIBUTE", "VALUE")
-	for _, t := range row {
-		tb.row(t.Key, fmt.Sprintf("%v", t.Value))
+	for _, p := range row.fields() {
+		tb.row(p[0], p[1])
 	}
 	return tb.flush(s.out)
 }

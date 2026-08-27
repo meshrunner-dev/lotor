@@ -1278,3 +1278,26 @@ func TestADrawerIsOfferedAndItsKeysAre(t *testing.T) {
 		t.Errorf("help listed what print already lists:\n%s", help)
 	}
 }
+
+func TestANameOffTheAirIsQuotedOnce(t *testing.T) {
+	deps := testDeps(t)
+	var key [32]byte
+	copy(key[:], []byte{0x88, 0x2f, 0x6c, 0xdf, 0x02, 0x2d})
+	deps.Relays[0].Neighbours = func() []Neighbour {
+		return []Neighbour{{PubKey: key, Name: "FR91 Radiocom", SNR: 14, Heard: time.Now()}}
+	}
+	// The one function allowed to render a name off the air quotes it,
+	// so nothing downstream may quote it again.
+	out := run(t, deps, "/relay/meshcore-868/neighbours/print detail")
+	if !strings.Contains(out, `name="FR91 Radiocom"`) || strings.Contains(out, `""`) {
+		t.Errorf("the name was rendered twice:\n%s", out)
+	}
+	// A value that carries a space still has to survive as one pair.
+	if !strings.Contains(out, `snr="+14.00 dB"`) {
+		t.Errorf("a spaced value was not held together:\n%s", out)
+	}
+	// And a table leaves the separating to its columns.
+	if table := run(t, deps, "/relay/meshcore-868/neighbours/print"); strings.Contains(table, `"+14.00 dB"`) {
+		t.Errorf("the table quoted what its columns already separate:\n%s", table)
+	}
+}
