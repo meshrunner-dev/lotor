@@ -62,19 +62,30 @@ func ServeListener(ctx context.Context, ln net.Listener, deps Deps) error {
 			if _, unix := conn.(*net.UnixConn); !unix {
 				_, _ = conn.Write([]byte{iacByte, iacWill, optEcho, iacByte, iacWill, optSGA})
 			}
-			ServeEdited(ctx, struct {
-				io.Reader
-				io.Writer
-			}{
+			ServeAuto(ctx, &sessionConn{
 				Reader: &iacStripper{r: conn},
 				// A client that stops reading while a watch floods
 				// must wedge its own session, not the daemon: every
 				// write gets a deadline.
 				Writer: deadlineWriter{conn: conn},
+				conn:   conn,
 			}, deps)
 		})
 	}
 }
+
+// sessionConn is one session's byte stream, carrying the read
+// deadline the terminal probe needs — the reader above it strips
+// telnet commands, so the connection's own clock has to be reachable
+// through it.
+type sessionConn struct {
+	io.Reader
+	io.Writer
+
+	conn net.Conn
+}
+
+func (s *sessionConn) SetReadDeadline(t time.Time) error { return s.conn.SetReadDeadline(t) }
 
 // Telnet protocol bytes (RFC 854) and the options we negotiate.
 const (

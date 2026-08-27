@@ -599,3 +599,24 @@ func TestNeighboursBorrowNamesFromTheJournal(t *testing.T) {
 		t.Errorf("a nameless neighbour got no placeholder:\n%s", out)
 	}
 }
+
+func TestBothPathsEndALineTheSameWay(t *testing.T) {
+	// The editor accepts CR, LF and CR LF; so must the plain reader,
+	// or a peer's Enter is honoured on one path and swallowed on the
+	// other with nothing to tell it which path it got.
+	for _, term := range []string{"\r", "\n", "\r\n", "\r\x00"} {
+		lines := make(chan string, 4)
+		done := make(chan struct{})
+		go readLines(strings.NewReader("status"+term+"quit"+term), lines, done)
+		var got []string
+		for l := range lines {
+			if l != "" {
+				got = append(got, l)
+			}
+		}
+		close(done)
+		if len(got) != 2 || got[0] != "status" || got[1] != "quit" {
+			t.Errorf("terminator %q yielded %q", term, got)
+		}
+	}
+}

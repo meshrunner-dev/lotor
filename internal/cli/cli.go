@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"bytes"
 	"sync"
 
 	"meshrunner.dev/lotor/internal/schema"
@@ -200,6 +201,99 @@ func Serve(ctx context.Context, rw io.ReadWriter, deps Deps) {
 	s.repl(ctx)
 }
 
+// terminalGrace bounds how long a session waits to learn whether it is
+// talking to a terminal. A local one answers in microseconds; the wait
+// is only ever paid by something that is not a terminal, once, and it
+// is short enough that a script does not notice.
+const terminalGrace = 300 * time.Millisecond
+
+// ServeAuto chooses how to speak to whoever connected, and never
+// blocks waiting to find out.
+//
+// A terminal is asked to report its cursor position — the same
+// question a network console asks. The difference that matters is
+// what happens when no answer comes: the session degrades to plain
+// line input instead of waiting forever. Something that cannot answer
+// is something that cannot use the editor either, and a pipe deserves
+// its transcript without the repaints and the colours.
+func ServeAuto(ctx context.Context, rw io.ReadWriter, deps Deps) {
+	terminal, eaten := terminalAnswers(rw)
+	// Whatever the probe swallowed that was not the answer belongs to
+	// the session: a peer that sends its first command instead of a
+	// cursor report must not lose its first letters to the question.
+	session := struct {
+		io.Reader
+		io.Writer
+	}{Reader: io.MultiReader(bytes.NewReader(eaten), rw), Writer: rw}
+	if terminal {
+		ServeEdited(ctx, session, deps)
+		return
+	}
+	Serve(ctx, session, deps)
+}
+
+// terminalAnswers asks for the cursor position and reports whether a
+// terminal answered, along with whatever it read that was not the
+// answer — those bytes are the peer's, and the caller hands them back
+// to the session.
+//
+// It reads one byte at a time and stops the moment what it has cannot
+// become a cursor report, so a peer that starts talking straight away
+// pays neither the grace nor a lost keystroke.
+func terminalAnswers(rw io.ReadWriter) (terminal bool, eaten []byte) {
+	conn, ok := rw.(interface{ SetReadDeadline(t time.Time) error })
+	if !ok {
+		return false, nil // a transport with no clock cannot be waited on
+	}
+	if _, err := rw.Write([]byte("\x1b[6n")); err != nil {
+		return false, nil
+	}
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	if err := conn.SetReadDeadline(time.Now().Add(terminalGrace)); err != nil {
+		return false, nil
+	}
+	var got []byte
+	buf := make([]byte, 1)
+	for len(got) < cursorReportMax {
+		n, err := rw.Read(buf)
+		if n == 0 || err != nil {
+			return false, got
+		}
+		got = append(got, buf[0])
+		if !couldBeCursorReport(got) {
+			return false, got
+		}
+		if buf[0] == 'R' {
+			return true, nil
+		}
+	}
+	return false, got
+}
+
+// cursorReportMax bounds the answer: ESC [ rows ; cols R is far
+// shorter, and a peer feeding digits forever is not a terminal.
+const cursorReportMax = 32
+
+// couldBeCursorReport reports whether the bytes so far can still grow
+// into ESC [ rows ; cols R.
+func couldBeCursorReport(b []byte) bool {
+	if b[0] != 0x1b {
+		return false
+	}
+	if len(b) > 1 && b[1] != '[' {
+		return false
+	}
+	if len(b) < 3 {
+		return true // still just the introducer
+	}
+	for _, c := range b[2:] {
+		if (c < '0' || c > '9') && c != ';' && c != 'R' {
+			return false
+		}
+	}
+	return true
+}
+
 // ServeEdited runs the REPL behind the character-mode line editor:
 // history on the arrows, a movable cursor, the daemon echoing. The
 // transport delivers raw keystrokes (the telnet listener negotiates
@@ -292,6 +386,10 @@ func readLines(r io.Reader, lines chan<- string, done <-chan struct{}) {
 	}
 }
 
+// readBounded reads one line, ending it on either terminator. Both
+// have to work here because the editor accepts both: a peer whose
+// Enter the daemon honours on one path and swallows on the other is a
+// peer that cannot tell which path it got.
 func readBounded(br *bufio.Reader) (string, error) {
 	var b strings.Builder
 	for {
@@ -299,7 +397,14 @@ func readBounded(br *bufio.Reader) (string, error) {
 		if err != nil {
 			return strings.TrimSpace(b.String()), err
 		}
-		if c == '\n' {
+		if c == '\n' || c == '\r' {
+			if c == '\r' {
+				// A telnet peer sends CR LF or CR NUL; the partner is
+				// not an empty line of its own.
+				if next, perr := br.Peek(1); perr == nil && (next[0] == '\n' || next[0] == 0) {
+					_, _ = br.Discard(1)
+				}
+			}
 			return strings.TrimSpace(b.String()), nil
 		}
 		if b.Len() >= maxLineBytes {
