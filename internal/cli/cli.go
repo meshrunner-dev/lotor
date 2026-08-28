@@ -164,6 +164,16 @@ type RelayInfo struct {
 	Started time.Time
 }
 
+// HistoryQuery is one history print's answer to "which slice": the
+// same vocabulary frames speaks — a count, window edges, or a
+// revision to centre on.
+type HistoryQuery struct {
+	Count        int
+	Since, Until time.Time
+	AroundID     int64
+	Span         time.Duration
+}
+
 // HistoryEntry is one recorded mutation, as the console shows it:
 // values already rendered, secrets already masked by the store.
 type HistoryEntry struct {
@@ -237,9 +247,10 @@ type Deps struct {
 	LiveRelays func() []RelayInfo
 	LiveRadios func() []RadioInfo
 	// History reads the configuration's revision journal, newest
-	// first — who changed what, when. Nil hides the drawer's content
-	// behind its empty line.
-	History func(ctx context.Context, limit int) ([]HistoryEntry, error)
+	// first — who changed what, when — and says how many the asked
+	// window holds beyond what came back, so a capped listing can
+	// confess. Nil hides the drawer's content behind its empty line.
+	History func(ctx context.Context, q HistoryQuery) ([]HistoryEntry, int, error)
 	// LiveMQTTs lists the observer connections as they run.
 	LiveMQTTs  func() []MQTTInfo
 	LiveTraces func() map[string][]config.Trace

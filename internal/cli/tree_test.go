@@ -1763,7 +1763,9 @@ func TestUpdateInstallStagesAVerifiedUpdate(t *testing.T) {
 
 func TestSystemHistoryDrawer(t *testing.T) {
 	deps := testDeps(t)
-	deps.History = func(context.Context, int) ([]HistoryEntry, error) {
+	var asked HistoryQuery
+	deps.History = func(_ context.Context, q HistoryQuery) ([]HistoryEntry, int, error) {
+		asked = q
 		return []HistoryEntry{
 			{ID: 52, At: time.Now().Add(-2 * time.Minute), Principal: "console",
 				Kind: "mqtt", Name: "lab", Op: "set",
@@ -1771,7 +1773,7 @@ func TestSystemHistoryDrawer(t *testing.T) {
 			{ID: 51, At: time.Now().Add(-time.Hour), Principal: "console",
 				Kind: "update", Op: "set",
 				Changes: []AttrDelta{{Attr: "token", New: "<secret>"}}},
-		}, nil
+		}, 2, nil
 	}
 	out := run(t, deps, "/system/history/print")
 	// Newest first, deltas spelled, a singleton named by its kind
@@ -1792,9 +1794,43 @@ func TestSystemHistoryDrawer(t *testing.T) {
 			t.Errorf("item view missing %q:\n%s", want, item)
 		}
 	}
+	// The temporal selectors travel: frames' vocabulary, a revision
+	// id for around=.
+	run(t, deps, "/system/history/print last=2")
+	if asked.Count != 2 {
+		t.Errorf("last=2 asked %+v", asked)
+	}
+	run(t, deps, "/system/history/print last=2h")
+	if asked.Since.IsZero() || time.Until(asked.Since) > -90*time.Minute {
+		t.Errorf("last=2h asked %+v", asked)
+	}
+	run(t, deps, "/system/history/print around=45 span=30m")
+	if asked.AroundID != 45 || asked.Span != 30*time.Minute {
+		t.Errorf("around asked %+v", asked)
+	}
+	if out := run(t, deps, "/system/history/print around=nope"); !strings.Contains(out, "revision id") {
+		t.Errorf("bad around accepted:\n%s", out)
+	}
+	// The selectors belong to windowed drawers alone.
+	if out := run(t, deps, "/relay meshcore-868 neighbours print last=5"); !strings.Contains(out, "takes") {
+		t.Errorf("neighbours accepted a window:\n%s", out)
+	}
+
 	// Without the dependency the drawer is honestly empty.
 	deps.History = nil
 	if out := run(t, deps, "/system/history/print"); !strings.Contains(out, "no changes recorded") {
 		t.Errorf("empty line missing:\n%s", out)
+	}
+}
+
+func TestHistoryConfessesItsCap(t *testing.T) {
+	deps := testDeps(t)
+	deps.History = func(_ context.Context, q HistoryQuery) ([]HistoryEntry, int, error) {
+		return []HistoryEntry{{ID: 9, At: time.Now(), Principal: "console",
+			Kind: "mqtt", Name: "lab", Op: "set"}}, 40, nil
+	}
+	out := run(t, deps, "/system/history/print since=00:00")
+	if !strings.Contains(out, "newest 1 of 40 shown") {
+		t.Errorf("no confession:\n%s", out)
 	}
 }

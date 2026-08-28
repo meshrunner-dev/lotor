@@ -37,16 +37,23 @@ type drawer struct {
 	// completion, which ask from the terminal's goroutine and carry no
 	// request context.
 	keys func(s *session, instance string) map[string]string
-	// view reads the drawer for printing.
-	view func(s *session, ctx context.Context, instance string) (drawerView, error)
+	// view reads the drawer for printing; sel is the window the line
+	// asked for, meaningful only where windowed says so.
+	view func(s *session, ctx context.Context, instance string, sel frameSelectors) (drawerView, error)
+	// windowed says the drawer answers the temporal selectors — the
+	// vocabulary frames speaks, applied to what this drawer holds.
+	windowed bool
 }
 
 // drawerView is a drawer as print shows it: the columns of its
-// listing, the keys in display order, and one row per key.
+// listing, the keys in display order, and one row per key. note, when
+// set, follows the listing — the cap's confession, and anything else
+// the view owes the reader beyond the rows.
 type drawerView struct {
 	header []string
 	keys   []string
 	rows   map[string][]field
+	note   string
 }
 
 // field is one attribute of one thing a drawer holds.
@@ -118,12 +125,13 @@ var drawers = []drawer{{
 	keys:  (*session).airSessionKeys,
 	view:  (*session).airSessionView,
 }, {
-	name:  drawerHistory,
-	doc:   "the configuration's revision journal — who changed what, when",
-	on:    kindSystem,
-	empty: "no changes recorded yet",
-	keys:  (*session).historyKeys,
-	view:  (*session).historyView,
+	name:     drawerHistory,
+	doc:      "the configuration's revision journal — who changed what, when",
+	on:       kindSystem,
+	empty:    "no changes recorded yet",
+	keys:     (*session).historyKeys,
+	view:     (*session).historyView,
+	windowed: true,
 }}
 
 // historyDrawerDepth bounds what one print fetches: a journal, not a
@@ -131,11 +139,11 @@ var drawers = []drawer{{
 const historyDrawerDepth = 50
 
 // history reads the revision journal through the dependency.
-func (s *session) history(ctx context.Context) ([]HistoryEntry, error) {
+func (s *session) history(ctx context.Context, q HistoryQuery) ([]HistoryEntry, int, error) {
 	if s.deps.History == nil {
-		return nil, nil
+		return nil, 0, nil
 	}
-	return s.deps.History(ctx, historyDrawerDepth)
+	return s.deps.History(ctx, q)
 }
 
 // historyKeys answers the walker and completion: revision ids, as the
@@ -144,7 +152,7 @@ func (s *session) historyKeys(string) map[string]string {
 	type result struct{ rows []HistoryEntry }
 	ch := make(chan result, 1)
 	go func() {
-		rows, _ := s.history(context.Background())
+		rows, _, _ := s.history(context.Background(), HistoryQuery{Count: historyDrawerDepth})
 		ch <- result{rows}
 	}()
 	select {
@@ -160,15 +168,30 @@ func (s *session) historyKeys(string) map[string]string {
 }
 
 // historyView reads the journal for printing, newest first — the
-// order a "what just happened" question is asked in.
-func (s *session) historyView(ctx context.Context, _ string) (drawerView, error) {
-	rows, err := s.history(ctx)
+// order a "what just happened" question is asked in. The selectors
+// pick the slice, in frames' own vocabulary; around= takes a
+// revision id.
+func (s *session) historyView(ctx context.Context, _ string, sel frameSelectors) (drawerView, error) {
+	q := HistoryQuery{
+		Count: sel.count, Since: sel.since, Until: sel.until, Span: sel.span,
+	}
+	if sel.aroundPrefix != "" {
+		id, err := strconv.ParseInt(sel.aroundPrefix, 10, 64)
+		if err != nil {
+			return drawerView{}, fmt.Errorf("%s= wants a revision id here", optAround)
+		}
+		q.AroundID = id
+	}
+	rows, total, err := s.history(ctx, q)
 	if err != nil {
 		return drawerView{}, err
 	}
 	v := drawerView{
 		header: []string{"ID", "WHEN", "BY", "OP", "WHAT", "CHANGES"},
 		rows:   map[string][]field{},
+	}
+	if total > len(rows) {
+		v.note = fmt.Sprintf("newest %d of %d shown — narrow the window", len(rows), total)
 	}
 	for _, r := range rows {
 		key := strconv.FormatInt(r.ID, 10)
@@ -260,7 +283,7 @@ func (s *session) airSessionKeys(instance string) map[string]string {
 }
 
 // airSessionView reads the table for printing.
-func (s *session) airSessionView(ctx context.Context, instance string) (drawerView, error) {
+func (s *session) airSessionView(ctx context.Context, instance string, _ frameSelectors) (drawerView, error) {
 	rows, err := s.airSessions(instance)
 	if err != nil {
 		return drawerView{}, err
@@ -475,7 +498,7 @@ func (s *session) neighbourKeys(instance string) map[string]string {
 // walker's keys it may consult the journal, which knows a name for a
 // node that only ever answered a scan — the engine learns one only
 // from an advert heard zero-hop.
-func (s *session) neighbourView(ctx context.Context, instance string) (drawerView, error) {
+func (s *session) neighbourView(ctx context.Context, instance string, _ frameSelectors) (drawerView, error) {
 	r, err := s.findRelay(instance)
 	if err != nil {
 		return drawerView{}, err
@@ -507,9 +530,9 @@ func (s *session) neighbourView(ctx context.Context, instance string) (drawerVie
 
 // printDrawer shows what a drawer holds: a listing that names each one
 // and little else, or — asked for detail — each one opened out.
-func (s *session) printDrawer(ctx context.Context, path []string, detail bool) error {
+func (s *session) printDrawer(ctx context.Context, path []string, detail bool, sel frameSelectors) error {
 	site := s.drawerSiteAt(path)
-	v, err := site.d.view(s, ctx, site.instance)
+	v, err := site.d.view(s, ctx, site.instance, sel)
 	if err != nil {
 		return err
 	}
@@ -517,6 +540,11 @@ func (s *session) printDrawer(ctx context.Context, path []string, detail bool) e
 		fmt.Fprintf(s.out, "%s\r\n", site.d.empty)
 		return nil
 	}
+	defer func() {
+		if v.note != "" {
+			fmt.Fprintf(s.out, "%s\r\n", v.note)
+		}
+	}()
 	if detail {
 		gutter := 0
 		for _, k := range v.keys {
@@ -543,7 +571,7 @@ func (s *session) printDrawer(ctx context.Context, path []string, detail bool) e
 // shape print has everywhere it stands on a single object.
 func (s *session) printDrawerItem(ctx context.Context, path []string) error {
 	site := s.drawerSiteAt(path)
-	v, err := site.d.view(s, ctx, site.instance)
+	v, err := site.d.view(s, ctx, site.instance, frameSelectors{})
 	if err != nil {
 		return err
 	}

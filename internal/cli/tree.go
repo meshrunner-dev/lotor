@@ -784,12 +784,18 @@ func (s *session) treeStatus(ctx context.Context, path []string) error {
 type printArgs struct {
 	detail, secrets bool
 	every           time.Duration
+	// sel is the temporal slice, honoured only where a drawer says it
+	// is windowed.
+	sel frameSelectors
 }
 
 // printArgsFrom reads print's arguments, and refuses a word by naming
 // the ones that would have worked where it was written.
 func (s *session) printArgsFrom(path, args []string) (printArgs, error) {
 	var want printArgs
+	windowed := map[string]string{}
+	site := s.drawerSiteAt(path)
+	takesWindow := site != nil && site.d.windowed && site.item == ""
 	for _, a := range args {
 		key, value, valued := strings.Cut(a, "=")
 		switch {
@@ -805,12 +811,31 @@ func (s *session) printArgsFrom(path, args []string) (printArgs, error) {
 				return want, fmt.Errorf("%s wants a duration of a second or more, like 2s", argInterval)
 			}
 			want.every = d
+		case takesWindow && valued && isWindowWord(key):
+			windowed[key] = value
 		default:
 			return want, fmt.Errorf("%s takes %s, not %q",
 				verbPrint, humanList(names(s.printTerms(path))), key)
 		}
 	}
+	if len(windowed) > 0 {
+		sel, err := parseFrameSelectors(windowed, time.Now())
+		if err != nil {
+			return want, err
+		}
+		want.sel = sel
+	}
 	return want, nil
+}
+
+// isWindowWord says whether a key is one of the temporal selectors —
+// the vocabulary frames speaks, honoured by the windowed drawers.
+func isWindowWord(key string) bool {
+	switch key {
+	case optLast, optSince, optUntil, optAround, optSpan:
+		return true
+	}
+	return false
 }
 
 func (s *session) treePrint(ctx context.Context, path []string, args []string) error {
@@ -836,7 +861,7 @@ func (s *session) treePrint(ctx context.Context, path []string, args []string) e
 	case secrets && at == atCollection && !detail:
 		return fmt.Errorf("this listing shows no attributes — add %s", argDetail)
 	}
-	draw := func() error { return s.printOnce(ctx, path, detail, secrets) }
+	draw := func() error { return s.printOnce(ctx, path, want) }
 	if every > 0 {
 		return s.repaint(ctx, every, draw)
 	}
@@ -845,7 +870,8 @@ func (s *session) treePrint(ctx context.Context, path []string, args []string) e
 
 // printOnce draws the view one time. It is the whole of print when no
 // interval was asked for, and one frame of it when there was.
-func (s *session) printOnce(ctx context.Context, path []string, detail, secrets bool) error {
+func (s *session) printOnce(ctx context.Context, path []string, want printArgs) error {
+	detail, secrets := want.detail, want.secrets
 	if len(path) == 0 {
 		// The root holds no values of its own: what it can show is
 		// what stands below it.
@@ -881,7 +907,7 @@ func (s *session) printOnce(ctx context.Context, path []string, detail, secrets 
 	}
 	switch s.placeAt(path) {
 	case atDrawer:
-		return s.printDrawer(ctx, path, detail)
+		return s.printDrawer(ctx, path, detail, want.sel)
 	case atDrawerItem:
 		return s.printDrawerItem(ctx, path)
 	default:
@@ -1508,7 +1534,22 @@ func (s *session) printTerms(path []string) []term {
 		return []term{unmask, again}
 	case atDrawer:
 		// Nothing here was configured, so nothing here is masked.
-		return []term{unfold, again}
+		out := []term{unfold, again}
+		if site := s.drawerSiteAt(path); site != nil && site.d.windowed {
+			out = append(out,
+				term{name: optLast, class: cAttr, container: true,
+					doc: "the newest slice — a count (50) or a span (15m)"},
+				term{name: optSince, class: cAttr, container: true,
+					doc: "window start, as the views print moments"},
+				term{name: optUntil, class: cAttr, container: true,
+					doc: "window end"},
+				term{name: optAround, class: cAttr, container: true,
+					doc: "the window around one revision, by id"},
+				term{name: optSpan, class: cAttr, container: true,
+					doc: "how far around, each side (default 1m)"},
+			)
+		}
+		return out
 	default:
 		return []term{again}
 	}

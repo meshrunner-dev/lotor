@@ -125,7 +125,7 @@ func (s *session) sessionKeys(string) map[string]string {
 // sessionView reads the table for printing. Everything here is either
 // immutable for the session's life or read under its own lock, because
 // the reader is one session and the subject is another.
-func (s *session) sessionView(_ context.Context, _ string) (drawerView, error) {
+func (s *session) sessionView(_ context.Context, _ string, _ frameSelectors) (drawerView, error) {
 	if s.deps.Sessions == nil {
 		return drawerView{}, errors.New("this daemon keeps no session table")
 	}

@@ -393,9 +393,58 @@ type Revision struct {
 
 // Revisions lists the most recent mutations, newest first.
 func (s *Store) Revisions(ctx context.Context, limit int) ([]Revision, error) {
-	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, at, principal, kind, name, op, change FROM revisions ORDER BY id DESC LIMIT ?",
-		limit)
+	revs, _, err := s.RevisionsIn(ctx, time.Time{}, time.Time{}, limit)
+	return revs, err
+}
+
+// RevisionByID reads one revision whole.
+func (s *Store) RevisionByID(ctx context.Context, id int64) (*Revision, error) {
+	rows, err := s.scanRevisions(ctx,
+		"SELECT id, at, principal, kind, name, op, change FROM revisions WHERE id = ?", id)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("no revision %d", id)
+	}
+	return &rows[0], nil
+}
+
+// RevisionsIn lists the mutations inside a window, newest first — a
+// zero edge is unbounded — and counts the window whole, so a capped
+// listing can confess what it left out. Stored moments are RFC3339
+// UTC, where string order is time order.
+func (s *Store) RevisionsIn(ctx context.Context, since, until time.Time, limit int,
+) (revs []Revision, total int, err error) {
+	where, args := "", []any{}
+	edge := func(op string, at time.Time) {
+		if at.IsZero() {
+			return
+		}
+		if where != "" {
+			where += " AND "
+		}
+		where += "at " + op + " ?"
+		args = append(args, at.UTC().Format(time.RFC3339))
+	}
+	edge(">=", since)
+	edge("<=", until)
+	if where != "" {
+		where = " WHERE " + where
+	}
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM revisions"+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	revs, err = s.scanRevisions(ctx,
+		"SELECT id, at, principal, kind, name, op, change FROM revisions"+where+
+			" ORDER BY id DESC LIMIT ?", append(args, limit)...)
+	return revs, total, err
+}
+
+// scanRevisions runs one revision query and decodes its rows.
+func (s *Store) scanRevisions(ctx context.Context, query string, args ...any) ([]Revision, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

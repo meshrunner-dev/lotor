@@ -282,13 +282,40 @@ func (m *manager) systemTraces() []config.Trace {
 	return rows
 }
 
+// historyCap bounds one windowed read, the way frames bounds its own;
+// the listing confesses when the window held more.
+const historyCap = 1000
+
 // History reads the revision journal for the console, newest first:
 // who changed what, when — values as the store recorded them, which
-// means secrets arrive already masked.
-func (m *manager) History(ctx context.Context, limit int) ([]cli.HistoryEntry, error) {
-	revs, err := m.store.Revisions(ctx, limit)
+// means secrets arrive already masked. around= centres the window on
+// one revision's moment, a span each side.
+func (m *manager) History(ctx context.Context, q cli.HistoryQuery) ([]cli.HistoryEntry, int, error) {
+	since, until := q.Since, q.Until
+	if q.AroundID != 0 {
+		anchor, err := m.store.RevisionByID(ctx, q.AroundID)
+		if err != nil {
+			return nil, 0, err
+		}
+		span := q.Span
+		if span == 0 {
+			span = time.Minute
+		}
+		since, until = anchor.At.Add(-span), anchor.At.Add(span)
+	}
+	limit := q.Count
+	switch {
+	case limit > historyCap:
+		return nil, 0, fmt.Errorf("last= wants 1..%d", historyCap)
+	case limit > 0:
+	case !since.IsZero() || !until.IsZero():
+		limit = historyCap
+	default:
+		limit = 50
+	}
+	revs, total, err := m.store.RevisionsIn(ctx, since, until, limit)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	out := make([]cli.HistoryEntry, 0, len(revs))
 	for _, r := range revs {
@@ -315,7 +342,7 @@ func (m *manager) History(ctx context.Context, limit int) ([]cli.HistoryEntry, e
 		}
 		out = append(out, e)
 	}
-	return out, nil
+	return out, total, nil
 }
 
 // deltaValue renders one side of a recorded change; nil is absence,
