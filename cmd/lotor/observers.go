@@ -215,11 +215,15 @@ func observerDial(p mqtt.Params, name string, info cli.RelayInfo,
 	return opts
 }
 
-// neighboursRound is the observer's periodic neighbourhood walk: list
-// the direct neighbours, ask each its scopes over the air, and report
-// each outcome honestly — responded, timeout, or send_failed. It runs
-// off the observer's loop and reads the manager's live view, so a
-// bounced relay's successor answers.
+// neighboursRound is the observer's periodic neighbourhood cycle,
+// two-staged the way the ecosystem publishes it: a zero-hop discover
+// refreshes the table and its window is waited out, then each
+// neighbour is asked its scopes over the air, each outcome reported
+// honestly — responded, timeout, or send_failed. The snapshot is
+// rebuilt every cycle rather than trusted to age well: a table two
+// seconds old publishes what the air answers, not an empty page. It
+// runs off the observer's loop and reads the manager's live view, so
+// a bounced relay's successor answers.
 func (m *manager) neighboursRound(relayName string, log *zap.Logger,
 ) func(ctx context.Context) ([]mqtt.NeighborEntry, int) {
 	return func(ctx context.Context) ([]mqtt.NeighborEntry, int) {
@@ -227,6 +231,9 @@ func (m *manager) neighboursRound(relayName string, log *zap.Logger,
 		info, ok := m.infos[relayName]
 		m.mu.Unlock()
 		if !ok || info.Neighbours == nil {
+			return nil, 0
+		}
+		if !refreshNeighbours(ctx, info, log) {
 			return nil, 0
 		}
 		rows := info.Neighbours()
@@ -264,6 +271,33 @@ func (m *manager) neighboursRound(relayName string, log *zap.Logger,
 		log.Debug("neighbourhood round done",
 			zap.Int("neighbours", len(entries)), zap.Int("queried", queried))
 		return entries, queried
+	}
+}
+
+// refreshNeighbours runs the cycle's first stage: a zero-hop
+// discover, its answers drained until the window closes so the table
+// is current when the questions begin. A relay that cannot scan —
+// dry gate, a scan already running — degrades to the table as it
+// stands, said in the journal. false means the round was cancelled.
+func refreshNeighbours(ctx context.Context, info cli.RelayInfo, log *zap.Logger) bool {
+	if info.Discover == nil {
+		return true
+	}
+	answers, until, err := info.Discover()
+	if err != nil {
+		log.Debug("neighbourhood refresh skipped — table as it stands", zap.Error(err))
+		return true
+	}
+	log.Debug("neighbourhood refresh started", zap.Time("window_closes", until))
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case _, more := <-answers:
+			if !more {
+				return true
+			}
+		}
 	}
 }
 

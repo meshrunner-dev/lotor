@@ -98,11 +98,15 @@ off unless a consumer asks.
                 "status": "responded" | "timeout" | "send_failed"}]}
 ```
 
-The round is active: each neighbour is asked its scopes over the air,
-one at a time, and the outcome is reported honestly — `responded`
+The cycle is two-staged, as the ecosystem publishes it: a zero-hop
+discover first refreshes the neighbour table and its one-minute
+window is waited out, then each neighbour is asked its scopes over
+the air, one at a time — the snapshot is rebuilt every cycle, never
+trusted to age well. Each outcome is reported honestly — `responded`
 with its list, `timeout` when the question left and nothing came
 back, `send_failed` when it could not be asked at all (dry gate, no
-identity). An unknown age travels as `null`, never as zero. Enabling
+identity); a relay that cannot scan degrades to the table as it
+stands. An unknown age travels as `null`, never as zero. Enabling
 `neighbours_interval=` is therefore operator consent to those
 emissions — setting the cadence is the switch — with a 30-minute
 floor for the same reason, and a round also runs once when the
