@@ -40,6 +40,7 @@ import (
 	"meshrunner.dev/lotor/internal/update"
 
 	"meshrunner.dev/lotor/internal/confdb"
+	"meshrunner.dev/lotor/internal/mqtt"
 	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 	_ "meshrunner.dev/lotor/internal/radio/sx126x"
 	"meshrunner.dev/lotor/internal/schema"
@@ -439,7 +440,10 @@ func buildKinds() []schema.Kind {
 	}...)
 	kinds = append(kinds, schema.Kind{
 		Name: confdb.KindMQTT, Doc: "observer connections publishing the mesh to MQTT brokers",
-		Attrs: config.MQTTAttrs(),
+		Attrs: append([]schema.Attr{{Name: attrProfile, Type: schema.String,
+			Doc: `the community-broker preset; "custom" starts from nothing`}},
+			mqtt.Schema()...),
+		Profiles: func(string) []string { return sortedNames(mqtt.Presets()) },
 	})
 	return append(kinds, singletonKinds()...)
 }
@@ -745,6 +749,8 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		TXMode:        r.TXMode(),
 		Duty:          dutyOf(eng),
 		Scopes:        scopesOf(eng),
+		DefaultScope:  defaultScopeOf(eng),
+		Sign:          signOf(eng),
 		AskScopes:     askScopesOf(eng),
 		Discover:      discoverOf(eng),
 		TriggerAdvert: advertTrigger(eng),
@@ -754,6 +760,25 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		NodeName:      nodeNameOf(eng),
 		Traffic:       trafficOf(eng),
 	}
+}
+
+// defaultScopeOf reads which scope the relay itself speaks under.
+func defaultScopeOf(eng protocol.Engine) string {
+	d, ok := eng.(interface{ DefaultScope() string })
+	if !ok {
+		return ""
+	}
+	return d.DefaultScope()
+}
+
+// signOf exposes the engine's identity signature when it has one to
+// sign with; nil otherwise.
+func signOf(eng protocol.Engine) func([]byte) []byte {
+	sg, ok := eng.(interface{ IdentitySign(message []byte) []byte })
+	if !ok {
+		return nil
+	}
+	return sg.IdentitySign
 }
 
 // nodeNameOf reads what the relay calls itself on the air, when the

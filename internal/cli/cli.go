@@ -126,6 +126,11 @@ type RelayInfo struct {
 	// Scopes lists the transport scopes this relay carries; empty for
 	// a protocol that has none.
 	Scopes []string
+	// DefaultScope is the one the relay itself speaks under.
+	DefaultScope string
+	// Sign signs a message under the relay's node identity — how an
+	// observer proves the device to a broker; nil without an identity.
+	Sign func(message []byte) []byte
 	// AskScopes puts the scopes question to a neighbour named by a key
 	// prefix, and waits for its answer; nil when the protocol has no
 	// scopes to ask about.
