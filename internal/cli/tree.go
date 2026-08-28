@@ -1150,8 +1150,12 @@ func (s *session) rootTerms() []term {
 	var out []term
 	for i := range s.deps.Kinds {
 		k := s.deps.Kinds[i]
+		// A singleton used to be a leaf; one that holds a drawer is a
+		// container like any collection, and completing it must leave
+		// the operator mid-path rather than at a dead-ended space.
 		out = append(out, term{
-			name: k.Name, class: cPath, doc: k.Doc, container: !k.Singleton,
+			name: k.Name, class: cPath, doc: k.Doc,
+			container: !k.Singleton || len(drawersOn(k.Name)) > 0,
 		})
 	}
 	for _, c := range commands {

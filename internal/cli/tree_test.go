@@ -1466,6 +1466,20 @@ func TestSessionsAreADrawerOnTheConsoleItself(t *testing.T) {
 	if add, _ := s.complete("sess"); add != "ions/" {
 		t.Errorf("the drawer does not complete as a place: %q", add)
 	}
+	// The whole TAB chain from the root holds together: a singleton
+	// holding a drawer is a container, so completing it leaves the
+	// operator mid-path — never at a space nothing follows from.
+	s.setPath(nil)
+	if add, _ := s.complete("/cl"); add != "i/" {
+		t.Errorf("/cl did not complete into the container: %q", add)
+	}
+	if add, _ := s.complete("/cli/sess"); add != "ions/" {
+		t.Errorf("/cli/sess did not finish: %q", add)
+	}
+	// A drawerless singleton stays a leaf.
+	if add, _ := s.complete("/syst"); add != "em " {
+		t.Errorf("/syst grew a slash it cannot follow: %q", add)
+	}
 }
 
 func TestASessionSeesItsOwnLifeCycle(t *testing.T) {
