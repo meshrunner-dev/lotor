@@ -68,4 +68,5 @@ func TestStructuralSchemasCoverTheirStructs(t *testing.T) {
 	covered(t, SystemAttrs(), reflect.TypeFor[System](), nil)
 	covered(t, CLIAttrs(), reflect.TypeFor[CLI](), nil)
 	covered(t, UpdateAttrs(), reflect.TypeFor[Update](), nil)
+	covered(t, MQTTAttrs(), reflect.TypeFor[MQTT](), nil)
 }

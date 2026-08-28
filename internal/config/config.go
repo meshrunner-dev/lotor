@@ -181,6 +181,30 @@ type System struct {
 	Name string `yaml:"name"`
 }
 
+// MQTT is one broker connection the daemon observes the mesh into.
+type MQTT struct {
+	URL      string `yaml:"url"`
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+	IATA     string `yaml:"iata"`
+	Token    string `yaml:"token"`
+	// Topic is the template; empty takes the ecosystem's layout.
+	Topic string `yaml:"topic"`
+	// Relay names whose frames to watch; empty takes the only one.
+	Relay string `yaml:"relay"`
+	// The publication switches: nil reads as the contract's defaults
+	// — status and packets on, rx on — where a plain false could not
+	// tell "unset" from "off".
+	Status  *bool `yaml:"status"`
+	Packets *bool `yaml:"packets"`
+	Raw     bool  `yaml:"raw"`
+	RX      *bool `yaml:"rx"`
+	// TX is off, self-adverts or all; empty takes self-adverts.
+	TX             string        `yaml:"tx"`
+	Types          []string      `yaml:"types"`
+	StatusInterval time.Duration `yaml:"status_interval"`
+}
+
 // Update is where this relay looks for newer versions of itself.
 type Update struct {
 	// Channel names what to follow: release, rc, beta, dev, or a
@@ -201,6 +225,7 @@ type File struct {
 	CLI      *CLI             `yaml:"cli"`
 	System   *System          `yaml:"system"`
 	Update   *Update          `yaml:"update"`
+	MQTT     map[string]MQTT  `yaml:"mqtt"`
 }
 
 // Load reads, decodes and cross-validates a configuration file.

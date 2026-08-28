@@ -1263,3 +1263,33 @@ func (s *session) updateInstall(ctx context.Context, in input) error {
 		m.Version)
 	return nil
 }
+
+// mqttStatus shows one observer connection as it runs: the broker
+// session's state, and what it will admit to having done.
+func (s *session) mqttStatus(name string) error {
+	for _, mq := range s.mqtts() {
+		if mq.Name != name {
+			continue
+		}
+		tb := s.table()
+		state := "connecting"
+		if mq.Connected != nil && mq.Connected() {
+			state = "connected"
+		}
+		tb.row("broker", mq.URL)
+		tb.row("state", state)
+		tb.row("relay", mq.Relay)
+		if mq.Counters != nil {
+			published, pubErrors, busDropped, filtered, last := mq.Counters()
+			tb.row("published", strconv.FormatUint(published, 10))
+			tb.row("publish errors", strconv.FormatUint(pubErrors, 10))
+			tb.row("bus dropped", strconv.FormatUint(busDropped, 10))
+			tb.row("filtered", strconv.FormatUint(filtered, 10))
+			if !last.IsZero() {
+				tb.row("last published", ago(last))
+			}
+		}
+		return tb.flush(s.out)
+	}
+	return fmt.Errorf("no observer %q running", name)
+}

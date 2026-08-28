@@ -62,6 +62,41 @@ func SystemAttrs() []schema.Attr {
 	}
 }
 
+// MQTTAttrs describes one broker connection.
+func MQTTAttrs() []schema.Attr {
+	return []schema.Attr{
+		{Name: "url", Type: schema.String,
+			Doc: "the broker — tcp://host:1883, ssl://, ws:// or wss://"},
+		{Name: "username", Type: schema.String,
+			Doc: "broker credential; empty connects anonymously"},
+		{Name: "password", Type: schema.String, Secret: true,
+			Doc: "broker credential"},
+		{Name: "iata", Type: schema.String,
+			Doc: "the site's three-letter region code, for the topic"},
+		{Name: "token", Type: schema.String,
+			Doc: "per-connection token some topic layouts carry"},
+		{Name: "topic", Type: schema.String,
+			Doc: "topic template; empty takes meshcore/{iata}/{device}/{type}"},
+		{Name: "relay", Type: schema.String,
+			Doc: "whose frames to watch; empty takes the only relay"},
+		{Name: "status", Type: schema.Bool, Apply: schema.Hot,
+			Doc: "publish the periodic heartbeat (default true)"},
+		{Name: "packets", Type: schema.Bool, Apply: schema.Hot,
+			Doc: "publish each frame, analysed (default true)"},
+		{Name: "raw", Type: schema.Bool, Apply: schema.Hot,
+			Doc: "publish each frame as plain hex too (default false)"},
+		{Name: "rx", Type: schema.Bool, Apply: schema.Hot,
+			Doc: "share received frames (default true)"},
+		{Name: "tx", Type: schema.String, Enum: []string{"off", "self-adverts", "all"},
+			Apply: schema.Hot,
+			Doc:   "share sent frames: nothing, our own adverts, everything (default self-adverts)"},
+		{Name: "types", Type: schema.Words, Apply: schema.Hot,
+			Doc: "payload types to share, by name; empty shares all"},
+		{Name: "status_interval", Type: schema.Duration, Apply: schema.Hot,
+			Doc: "how often the heartbeat goes out (default 5m)"},
+	}
+}
+
 // UpdateAttrs describes where the relay looks for newer versions of
 // itself.
 func UpdateAttrs() []schema.Attr {

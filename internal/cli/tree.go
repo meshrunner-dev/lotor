@@ -174,8 +174,20 @@ func (s *session) instances(kind string) map[string]string {
 		for _, r := range s.radios() {
 			out[r.Name] = r.Driver
 		}
+	case scopeMQTT:
+		for _, mq := range s.mqtts() {
+			out[mq.Name] = mq.URL
+		}
 	}
 	return out
+}
+
+// mqtts is the live view of the observer connections.
+func (s *session) mqtts() []MQTTInfo {
+	if s.deps.LiveMQTTs != nil {
+		return s.deps.LiveMQTTs()
+	}
+	return nil
 }
 
 // resolveTree walks a token list from its starting point — the root
@@ -692,10 +704,14 @@ func (s *session) mountedVerb(kind, verb string) bool {
 // treeStatus shows the instance the session stands in, as it runs.
 func (s *session) treeStatus(ctx context.Context, path []string) error {
 	in := input{opts: map[string]string{path[0]: path[1]}}
-	if path[0] == scopeRelay {
+	switch path[0] {
+	case scopeRelay:
 		return s.relayStatus(ctx, in)
+	case scopeMQTT:
+		return s.mqttStatus(path[1])
+	default:
+		return s.radioStatus(ctx, in)
 	}
-	return s.radioStatus(ctx, in)
 }
 
 // treePrint shows a context: a kind lists its instances, an instance

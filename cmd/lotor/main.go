@@ -398,7 +398,7 @@ func buildKinds() []schema.Kind {
 		sort.Strings(names)
 		return names
 	}
-	kinds := make([]schema.Kind, 0, 6)
+	kinds := make([]schema.Kind, 0, 8)
 	kinds = append(kinds, []schema.Kind{
 		{
 			Name: confdb.KindRelay, Doc: "one protocol instance, owning one radio",
@@ -437,6 +437,10 @@ func buildKinds() []schema.Kind {
 			},
 		},
 	}...)
+	kinds = append(kinds, schema.Kind{
+		Name: confdb.KindMQTT, Doc: "observer connections publishing the mesh to MQTT brokers",
+		Attrs: config.MQTTAttrs(),
+	})
 	return append(kinds, singletonKinds()...)
 }
 
@@ -521,6 +525,7 @@ func consoleDeps(mgr *manager, b *bus.Bus, sen *sentinel.Sentinel) cli.Deps {
 		Kinds:      mgr.kinds,
 		LiveRelays: mgr.RelayInfos,
 		LiveRadios: mgr.RadioInfos,
+		LiveMQTTs:  mgr.MQTTInfos,
 		LiveTraces: mgr.Traces,
 		Mutate:     mgr.Mutate,
 		Undo:       mgr.Undo,
@@ -746,6 +751,32 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		Neighbours:    neighboursOf(eng),
 		AirSessions:   airSessionsOf(eng),
 		Identity:      eng.Identity(),
+		NodeName:      nodeNameOf(eng),
+		Traffic:       trafficOf(eng),
+	}
+}
+
+// nodeNameOf reads what the relay calls itself on the air, when the
+// protocol has a name at all.
+func nodeNameOf(eng protocol.Engine) string {
+	n, ok := eng.(interface{ NodeName() string })
+	if !ok {
+		return ""
+	}
+	return n.NodeName()
+}
+
+// trafficOf exposes the engine's lifetime tally, for the observers'
+// heartbeat; nil when the protocol keeps none.
+func trafficOf(eng protocol.Engine) func() (uint32, uint32, uint32, time.Duration, time.Duration) {
+	t, ok := eng.(interface{ TrafficStats() enginemc.StatsSnapshot })
+	if !ok {
+		return nil
+	}
+	return func() (sent, received, recvErrors uint32, txAir, rxAir time.Duration) {
+		s := t.TrafficStats()
+		return s.SentFlood + s.SentDirect, s.RecvTotal, s.RecvErrors,
+			s.TxAirtime, s.RxAirtime
 	}
 }
 

@@ -83,6 +83,10 @@ func (s *Stats) countSent(flood bool, airtime time.Duration) {
 	}
 }
 
+// Snapshot copies the tally out for any goroutine — the observers'
+// periodic heartbeat, notably.
+func (s *Stats) Snapshot() StatsSnapshot { return s.snapshot() }
+
 // snapshot copies the counters out.
 func (s *Stats) snapshot() StatsSnapshot {
 	s.mu.Lock()

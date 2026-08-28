@@ -16,6 +16,7 @@ import (
 	"maps"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -62,14 +63,15 @@ type manager struct {
 	sen   *sentinel.Sentinel
 	kinds []schema.Kind
 
-	mu      sync.Mutex
-	ctx     context.Context //nolint:containedctx // the daemon's lifetime, set once at Start
-	file    *config.File
-	wg      sync.WaitGroup
-	running map[string]*managedRelay
-	infos   map[string]cli.RelayInfo
-	radios  map[string]cli.RadioInfo
-	traces  map[string][]config.Trace
+	mu        sync.Mutex
+	ctx       context.Context //nolint:containedctx // the daemon's lifetime, set once at Start
+	file      *config.File
+	wg        sync.WaitGroup
+	running   map[string]*managedRelay
+	observers map[string]*managedObserver
+	infos     map[string]cli.RelayInfo
+	radios    map[string]cli.RadioInfo
+	traces    map[string][]config.Trace
 }
 
 type managedRelay struct {
@@ -82,20 +84,25 @@ func newManager(store *confdb.Store, f *config.File, b *bus.Bus,
 ) *manager {
 	return &manager{
 		store: store, file: f, bus: b, sen: sen, kinds: kinds, log: log,
-		running: map[string]*managedRelay{},
-		infos:   map[string]cli.RelayInfo{},
-		radios:  map[string]cli.RadioInfo{},
-		traces:  map[string][]config.Trace{},
+		running:   map[string]*managedRelay{},
+		observers: map[string]*managedObserver{},
+		infos:     map[string]cli.RelayInfo{},
+		radios:    map[string]cli.RadioInfo{},
+		traces:    map[string][]config.Trace{},
 	}
 }
 
-// Start assembles and launches every configured relay.
+// Start assembles and launches every configured relay, then the
+// observers that watch them.
 func (m *manager) Start(ctx context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ctx = ctx
 	for name := range m.file.Relays {
 		m.startRelay(ctx, name)
+	}
+	for name := range m.file.MQTT {
+		m.startObserver(ctx, name)
 	}
 }
 
@@ -232,6 +239,7 @@ func (m *manager) Traces() map[string][]config.Trace {
 		}
 		out[confdb.KindCLI] = rows
 	}
+	m.mqttTraces(out)
 	if u := m.file.Update; u != nil {
 		rows := []config.Trace{}
 		if u.Channel != "" {
@@ -447,6 +455,9 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 		case confdb.KindUpdate:
 			// check and install read the store live; nothing bounces.
 			return "applied — the next check reads it", nil
+		case confdb.KindMQTT:
+			m.bounceObserver(name)
+			return "applied — observer " + name + " reconnecting", nil
 		}
 		return "applied — no running relay uses this yet", nil
 	}
@@ -455,6 +466,9 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 	// session that ordered the change — hence the stored context, not
 	// the request's.
 	m.startRelay(m.ctx, relayName) //nolint:contextcheck // deliberate: daemon lifetime
+	// The observers watching it captured its face — name, key,
+	// waveform — and must follow the successor.
+	m.bounceObserversOf(relayName)
 	return fmt.Sprintf("applied — relay %s restarting", relayName), nil
 }
 
@@ -489,6 +503,11 @@ func (m *manager) Create(ctx context.Context, kind, name string,
 			return "", fmt.Errorf("radio %q already exists", name)
 		}
 		err = m.createRadio(next, name, attrs, change)
+	case confdb.KindMQTT:
+		if _, dup := next.MQTT[name]; dup {
+			return "", fmt.Errorf("observer %q already exists", name)
+		}
+		err = m.createMQTT(next, name, attrs, change)
 	default:
 		return "", fmt.Errorf("%q takes no new instances", kind)
 	}
@@ -512,13 +531,16 @@ func (m *manager) commitCreate(ctx context.Context, next *config.File,
 	if err := next.Validate(false); err != nil {
 		return "", err
 	}
-	if kind == confdb.KindRelay {
+	switch kind {
+	case confdb.KindRelay:
 		rc := next.Relays[name]
 		if _, err := resolveConfigs(rc, next.Radios[rc.Radio]); err != nil {
 			return "", err
 		}
-	} else if err := checkRadioAlone(next.Radios[name]); err != nil {
-		return "", err
+	case confdb.KindRadio:
+		if err := checkRadioAlone(next.Radios[name]); err != nil {
+			return "", err
+		}
 	}
 	section, err := objectSection(next, kind, name)
 	if err != nil {
@@ -528,9 +550,13 @@ func (m *manager) commitCreate(ctx context.Context, next *config.File,
 		return "", err
 	}
 	m.file = next
-	if kind == confdb.KindRelay {
+	switch kind {
+	case confdb.KindRelay:
 		m.startRelay(m.ctx, name) //nolint:contextcheck // deliberate: daemon lifetime
 		return fmt.Sprintf("added — relay %s starting", name), nil
+	case confdb.KindMQTT:
+		m.startObserver(m.ctx, name) //nolint:contextcheck // deliberate: daemon lifetime
+		return fmt.Sprintf("added — observer %s connecting", name), nil
 	}
 	return fmt.Sprintf("added — %s %s", kind, name), nil
 }
@@ -588,6 +614,310 @@ func (m *manager) createRelay(next *config.File, name string,
 	}
 	next.Relays[name] = rc
 	return minted, nil
+}
+
+// mqttTraces synthesises the observers' provenance rows: no layering,
+// so the store itself is the source of everything set.
+func (m *manager) mqttTraces(out map[string][]config.Trace) {
+	for name, mq := range m.file.MQTT {
+		rows := []config.Trace{{Key: attrMQTTURL, Value: mq.URL, Source: sourceConfig}}
+		add := func(key, value string) {
+			if value != "" {
+				rows = append(rows, config.Trace{Key: key, Value: value, Source: sourceConfig})
+			}
+		}
+		add(attrMQTTUsername, mq.Username)
+		add(attrMQTTPassword, mq.Password)
+		add(attrMQTTIATA, mq.IATA)
+		add(attrToken, mq.Token)
+		add(attrMQTTTopic, mq.Topic)
+		add(attrMQTTRelay, mq.Relay)
+		if mq.Status != nil {
+			add(attrMQTTStatus, strconv.FormatBool(*mq.Status))
+		}
+		if mq.Packets != nil {
+			add(attrMQTTPackets, strconv.FormatBool(*mq.Packets))
+		}
+		if mq.Raw {
+			add(attrMQTTRaw, "true")
+		}
+		if mq.RX != nil {
+			add(attrMQTTRX, strconv.FormatBool(*mq.RX))
+		}
+		add(attrMQTTTX, mq.TX)
+		add(attrMQTTTypes, strings.Join(mq.Types, ","))
+		if mq.StatusInterval != 0 {
+			add(attrMQTTInterval, mq.StatusInterval.String())
+		}
+		out[confdb.KindMQTT+" "+name] = rows
+	}
+}
+
+// createMQTT fills a new observer from its creation line: every
+// attribute goes through the same typed door a set would use, and the
+// broker url is the one thing it cannot exist without.
+func (m *manager) createMQTT(next *config.File, name string,
+	attrs map[string]string, change map[string]confdb.Change,
+) error {
+	set := make(map[string]string, len(attrs))
+	maps.Copy(set, attrs)
+	typed, err := m.parseAgainst(confdb.KindMQTT, "", set, nil)
+	if err != nil {
+		return err
+	}
+	mq := config.MQTT{}
+	for attr, v := range typed {
+		if err := setMQTTField(&mq, attr, v); err != nil {
+			return err
+		}
+		newVal := any(fmt.Sprintf("%v", v))
+		if attr == attrMQTTPassword {
+			newVal = maskedChange
+		}
+		change[attr] = confdb.Change{New: newVal}
+	}
+	if mq.URL == "" {
+		return errors.New("a new observer needs url=")
+	}
+	if next.MQTT == nil {
+		next.MQTT = map[string]config.MQTT{}
+	}
+	next.MQTT[name] = mq
+	return nil
+}
+
+// applyMQTTChanges edits one observer's stored shape.
+func applyMQTTChanges(next *config.File, name string,
+	typed map[string]any, unset []string,
+) (map[string]confdb.Change, error) {
+	mq, ok := next.MQTT[name]
+	if !ok {
+		return nil, fmt.Errorf("no observer %q", name)
+	}
+	change := map[string]confdb.Change{}
+	record := func(attr string, old any, hasNew bool, newText string) {
+		if attr == attrMQTTPassword {
+			old = maskedChange
+			if hasNew {
+				newText = maskedChange
+			}
+		}
+		c := confdb.Change{Old: old}
+		if hasNew {
+			c.New = newText
+		}
+		change[attr] = c
+	}
+	for attr, v := range typed {
+		old := mqttFieldValue(&mq, attr)
+		if err := setMQTTField(&mq, attr, v); err != nil {
+			return nil, err
+		}
+		record(attr, old, true, fmt.Sprintf("%v", v))
+	}
+	for _, attr := range unset {
+		old := mqttFieldValue(&mq, attr)
+		if err := clearMQTTField(&mq, attr); err != nil {
+			return nil, err
+		}
+		record(attr, old, false, "")
+	}
+	next.MQTT[name] = mq
+	return change, nil
+}
+
+// The observer attributes, named once for the setter, the reader and
+// the traces. token reuses attrToken: same word, same meaning.
+const (
+	attrMQTTURL      = "url"
+	attrMQTTUsername = "username"
+	attrMQTTPassword = "password"
+	attrMQTTIATA     = "iata"
+	attrMQTTTopic    = "topic"
+	attrMQTTRelay    = "relay"
+	attrMQTTTX       = "tx"
+	attrMQTTTypes    = "types"
+	attrMQTTInterval = "status_interval"
+	attrMQTTStatus   = "status"
+	attrMQTTPackets  = "packets"
+	attrMQTTRaw      = "raw"
+	attrMQTTRX       = "rx"
+)
+
+// setMQTTField writes one typed attribute onto the stored shape; it
+// is the single door creation and mutation share.
+func setMQTTField(mq *config.MQTT, attr string, v any) error {
+	if field := mqttStringField(mq, attr); field != nil {
+		text, err := asString(attr, v)
+		if err != nil {
+			return err
+		}
+		if attr == attrMQTTURL && !hasBrokerScheme(text) {
+			return fmt.Errorf("url %q — want tcp://, ssl://, ws:// or wss://", text)
+		}
+		*field = text
+		return nil
+	}
+	switch attr {
+	case attrMQTTStatus, attrMQTTPackets, attrMQTTRX, attrMQTTRaw:
+		return setMQTTBool(mq, attr, v)
+	case attrMQTTTypes:
+		words, ok := v.([]string)
+		if !ok {
+			return fmt.Errorf("%s wants a list of payload type names", attr)
+		}
+		mq.Types = words
+	case attrMQTTInterval:
+		text, err := asString(attr, v)
+		if err != nil {
+			return err
+		}
+		d, err := time.ParseDuration(text)
+		if err != nil {
+			return fmt.Errorf("%s: %w", attr, err)
+		}
+		mq.StatusInterval = d
+	default:
+		return fmt.Errorf("no attribute %q here", attr)
+	}
+	return nil
+}
+
+// mqttStringField maps the plain string attributes onto their fields.
+func mqttStringField(mq *config.MQTT, attr string) *string {
+	switch attr {
+	case attrMQTTURL:
+		return &mq.URL
+	case attrMQTTUsername:
+		return &mq.Username
+	case attrMQTTPassword:
+		return &mq.Password
+	case attrMQTTIATA:
+		return &mq.IATA
+	case attrToken:
+		return &mq.Token
+	case attrMQTTTopic:
+		return &mq.Topic
+	case attrMQTTRelay:
+		return &mq.Relay
+	case attrMQTTTX:
+		return &mq.TX
+	}
+	return nil
+}
+
+// setMQTTBool writes one of the switches.
+func setMQTTBool(mq *config.MQTT, attr string, v any) error {
+	b, ok := v.(bool)
+	if !ok {
+		return fmt.Errorf("%s wants true or false", attr)
+	}
+	switch attr {
+	case attrMQTTStatus:
+		mq.Status = &b
+	case attrMQTTPackets:
+		mq.Packets = &b
+	case attrMQTTRX:
+		mq.RX = &b
+	case attrMQTTRaw:
+		mq.Raw = b
+	}
+	return nil
+}
+
+// clearMQTTField resets one attribute to its default.
+func clearMQTTField(mq *config.MQTT, attr string) error {
+	switch attr {
+	case attrMQTTURL:
+		return errors.New("an observer cannot lose its url — remove it instead")
+	case attrMQTTUsername:
+		mq.Username = ""
+	case attrMQTTPassword:
+		mq.Password = ""
+	case attrMQTTIATA:
+		mq.IATA = ""
+	case attrToken:
+		mq.Token = ""
+	case attrMQTTTopic:
+		mq.Topic = ""
+	case attrMQTTRelay:
+		mq.Relay = ""
+	case attrMQTTTX:
+		mq.TX = ""
+	case attrMQTTStatus:
+		mq.Status = nil
+	case attrMQTTPackets:
+		mq.Packets = nil
+	case attrMQTTRX:
+		mq.RX = nil
+	case attrMQTTRaw:
+		mq.Raw = false
+	case attrMQTTTypes:
+		mq.Types = nil
+	case attrMQTTInterval:
+		mq.StatusInterval = 0
+	default:
+		return fmt.Errorf("no attribute %q here", attr)
+	}
+	return nil
+}
+
+// mqttFieldValue reads one attribute back, for a revision's old side.
+func mqttFieldValue(mq *config.MQTT, attr string) any {
+	switch attr {
+	case attrMQTTURL:
+		return orNil(mq.URL)
+	case attrMQTTUsername:
+		return orNil(mq.Username)
+	case attrMQTTPassword:
+		return orNil(mq.Password)
+	case attrMQTTIATA:
+		return orNil(mq.IATA)
+	case attrToken:
+		return orNil(mq.Token)
+	case attrMQTTTopic:
+		return orNil(mq.Topic)
+	case attrMQTTRelay:
+		return orNil(mq.Relay)
+	case attrMQTTTX:
+		return orNil(mq.TX)
+	case attrMQTTStatus:
+		return boolPtrValue(mq.Status)
+	case attrMQTTPackets:
+		return boolPtrValue(mq.Packets)
+	case attrMQTTRX:
+		return boolPtrValue(mq.RX)
+	case attrMQTTRaw:
+		return mq.Raw
+	case attrMQTTTypes:
+		if len(mq.Types) == 0 {
+			return nil
+		}
+		return strings.Join(mq.Types, ",")
+	case attrMQTTInterval:
+		if mq.StatusInterval == 0 {
+			return nil
+		}
+		return mq.StatusInterval.String()
+	}
+	return nil
+}
+
+func boolPtrValue(b *bool) any {
+	if b == nil {
+		return nil
+	}
+	return *b
+}
+
+// hasBrokerScheme admits the transports the client dials.
+func hasBrokerScheme(url string) bool {
+	for _, scheme := range []string{"tcp://", "ssl://", "ws://", "wss://"} {
+		if strings.HasPrefix(url, scheme) {
+			return true
+		}
+	}
+	return false
 }
 
 // maskedChange stands in a revision for a value too secret to record.
@@ -667,6 +997,9 @@ func (m *manager) Remove(ctx context.Context, kind, name, principal string) (str
 			}
 		}
 	}
+	if kind == confdb.KindMQTT {
+		m.stopObserver(name)
+	}
 	return msg, nil
 }
 
@@ -697,6 +1030,12 @@ func removeFromFile(next *config.File, kind, name string) (string, error) {
 	case confdb.KindCLI:
 		next.CLI = nil
 		return "removed — takes effect when the daemon restarts", nil
+	case confdb.KindMQTT:
+		if _, ok := next.MQTT[name]; !ok {
+			return "", fmt.Errorf("no observer %q", name)
+		}
+		delete(next.MQTT, name)
+		return "removed — observer " + name + " disconnected", nil
 	}
 	return "", fmt.Errorf("%q cannot be removed", kind)
 }
@@ -791,6 +1130,11 @@ func (m *manager) kindAndChoice(kind, name string) (*schema.Kind, string, error)
 			return nil, "", fmt.Errorf("no radio %q", name)
 		}
 		return k, rd.Driver, nil
+	case confdb.KindMQTT:
+		if _, ok := m.file.MQTT[name]; !ok {
+			return nil, "", fmt.Errorf("no observer %q", name)
+		}
+		return k, "", nil
 	}
 	return nil, "", fmt.Errorf("%q is not configurable from here yet", kind)
 }
@@ -815,6 +1159,9 @@ func applyChanges(next *config.File, kind, name string,
 		return change, "", err
 	case confdb.KindUpdate:
 		change, err := applyUpdateChanges(next, typed, unset)
+		return change, "", err
+	case confdb.KindMQTT:
+		change, err := applyMQTTChanges(next, name, typed, unset)
 		return change, "", err
 	case confdb.KindRelay:
 		change, err := applyRelayChanges(next, name, typed, unset)
@@ -1209,6 +1556,12 @@ func objectSection(f *config.File, kind, name string) (any, error) {
 			return nil, errors.New("no update block")
 		}
 		return *f.Update, nil
+	case confdb.KindMQTT:
+		mq, ok := f.MQTT[name]
+		if !ok {
+			return nil, fmt.Errorf("no observer %q", name)
+		}
+		return mq, nil
 	}
 	return nil, fmt.Errorf("%q is not configurable from here yet", kind)
 }

@@ -34,6 +34,7 @@ import (
 const (
 	scopeRelay   = "relay"
 	scopeRadio   = "radio"
+	scopeMQTT    = "mqtt"
 	verbShow     = "show"
 	optOn        = "true"
 	optJSON      = "json"
@@ -145,8 +146,24 @@ type RelayInfo struct {
 	// Duty reports the sliding-hour airtime spent against the band's
 	// budget; may be nil, ok false when unbudgeted or not transmitting.
 	Duty func() (used, budget time.Duration, ok bool)
+	// NodeName is what the relay calls itself on the air.
+	NodeName string
+	// Traffic reports the lifetime frame tally; may be nil.
+	Traffic func() (sent, received, recvErrors uint32, txAir, rxAir time.Duration)
 	// Identity is the relay's node public key in hex, empty when none.
 	Identity string
+}
+
+// MQTTInfo is what the CLI knows about one observer connection.
+type MQTTInfo struct {
+	Name  string
+	URL   string
+	Relay string
+	// Connected reports the broker session's state right now.
+	Connected func() bool
+	// Published, PublishErrors, BusDropped, Filtered and LastPublished
+	// come back together from Counters.
+	Counters func() (published, pubErrors, busDropped, filtered uint64, last time.Time)
 }
 
 // RadioInfo is what the CLI knows about one radio attachment.
@@ -182,6 +199,8 @@ type Deps struct {
 	// and static deployments use the fields.
 	LiveRelays func() []RelayInfo
 	LiveRadios func() []RadioInfo
+	// LiveMQTTs lists the observer connections as they run.
+	LiveMQTTs  func() []MQTTInfo
 	LiveTraces func() map[string][]config.Trace
 	// Mutate applies configuration changes — parse, validate, persist,
 	// bounce the owning relay — and says what happened. Nil when this

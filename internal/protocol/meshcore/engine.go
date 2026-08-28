@@ -361,6 +361,12 @@ func newEngine(relayName string, p params, id *meshcore.LocalIdentity,
 
 func (e *engine) Waveform() radio.Waveform { return e.p.Waveform }
 
+// NodeName is what this relay calls itself on the air.
+func (e *engine) NodeName() string { return e.p.NodeName }
+
+// TrafficStats copies the lifetime tally out, for observers.
+func (e *engine) TrafficStats() StatsSnapshot { return e.stats.Snapshot() }
+
 // TxPower reports the configured transmit power choice; explicit is
 // false for "auto", which resolves against the radio's cap.
 func (e *engine) TxPower() (dbm int8, explicit bool) {

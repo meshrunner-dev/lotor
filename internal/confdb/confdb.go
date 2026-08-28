@@ -42,6 +42,7 @@ const (
 	KindCLI      = "cli"
 	KindSystem   = "system"
 	KindUpdate   = "update"
+	KindMQTT     = "mqtt"
 )
 
 const schemaDDL = `
@@ -170,6 +171,26 @@ func assign(f *config.File, kind, name string, attrs []byte) error {
 			return err
 		}
 		f.Relays[name] = r
+	case KindSentinel, KindCLI, KindSystem, KindUpdate:
+		return assignSingleton(f, kind, attrs)
+	case KindMQTT:
+		mq, err := fromAttrs[config.MQTT](attrs)
+		if err != nil {
+			return err
+		}
+		if f.MQTT == nil {
+			f.MQTT = map[string]config.MQTT{}
+		}
+		f.MQTT[name] = mq
+	default:
+		return fmt.Errorf("unknown object kind %q", kind)
+	}
+	return nil
+}
+
+// assignSingleton decodes one singleton block into its pointer.
+func assignSingleton(f *config.File, kind string, attrs []byte) error {
+	switch kind {
 	case KindSentinel:
 		sen, err := fromAttrs[config.Sentinel](attrs)
 		if err != nil {
@@ -194,8 +215,6 @@ func assign(f *config.File, kind, name string, attrs []byte) error {
 			return err
 		}
 		f.Update = &u
-	default:
-		return fmt.Errorf("unknown object kind %q", kind)
 	}
 	return nil
 }
@@ -226,6 +245,9 @@ func (s *Store) ImportFile(ctx context.Context, f *config.File, principal string
 	}
 	if f.Update != nil {
 		objects = append(objects, object{KindUpdate, "", *f.Update})
+	}
+	for name, mq := range f.MQTT {
+		objects = append(objects, object{KindMQTT, name, mq})
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
