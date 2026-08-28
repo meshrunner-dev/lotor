@@ -560,17 +560,18 @@ func (s *session) treeSet(ctx context.Context, path []string, verb string, args 
 func (s *session) treeExport(path []string) error {
 	switch len(path) {
 	case 0:
-		// Radios before the relays that claim them: the paste has to
-		// work in order.
-		for _, kind := range []string{scopeRadio, scopeRelay} {
-			names := make([]string, 0, 2)
-			for name := range s.instances(kind) {
-				names = append(names, name)
+		// Every collection, radios first: a relay's add names its
+		// radio and an observer's names its relay, so the paste has to
+		// work in that order. Deriving the rest from the declared
+		// kinds keeps a new collection from being forgotten here.
+		kinds := []string{scopeRadio}
+		for i := range s.deps.Kinds {
+			if k := s.deps.Kinds[i]; !k.Singleton && k.Name != scopeRadio {
+				kinds = append(kinds, k.Name)
 			}
-			sort.Strings(names)
-			for _, name := range names {
-				s.exportInstance(kind, name)
-			}
+		}
+		for _, kind := range kinds {
+			s.exportCollection(kind)
 		}
 		for i := range s.deps.Kinds {
 			if k := s.deps.Kinds[i]; k.Singleton {
@@ -583,14 +584,7 @@ func (s *session) treeExport(path []string) error {
 			s.exportSingleton(path[0])
 			return nil
 		}
-		names := make([]string, 0, 2)
-		for name := range s.instances(path[0]) {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			s.exportInstance(path[0], name)
-		}
+		s.exportCollection(path[0])
 		return nil
 	default:
 		if _, ok := s.traces()[path[0]+" "+path[1]]; !ok {
@@ -598,6 +592,18 @@ func (s *session) treeExport(path []string) error {
 		}
 		s.exportInstance(path[0], path[1])
 		return nil
+	}
+}
+
+// exportCollection prints a kind's instances, names sorted.
+func (s *session) exportCollection(kind string) {
+	names := make([]string, 0, 2)
+	for name := range s.instances(kind) {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		s.exportInstance(kind, name)
 	}
 }
 
