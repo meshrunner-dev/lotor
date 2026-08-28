@@ -81,3 +81,38 @@ manifest host (its Pages, or anywhere static). On the relay:
 `/etc/lotor/trusted-keys/` by root. For a private repository's assets,
 `/update set token=…` — asset downloads then ride the GitHub API with
 `Accept: application/octet-stream`.
+
+## The install dance
+
+Installing never grants the daemon a privilege. The pieces, in order:
+
+1. `/update install` (console, admin): the daemon downloads into
+   `/var/lib/lotor/updates/`, verifies hash and signature, runs the
+   new binary's own `update selfcheck` — catching the wrong
+   architecture and the corrupt download before anything privileged
+   is asked — and writes the `ready` marker last.
+2. **`lotor-install.path`** sees the marker and starts
+   **`lotor-install.service`** (root, oneshot): `lotor update apply`
+   re-verifies the whole stage against *root's* trust store, links
+   the old binary aside as `.prev`, renames the new one in — no
+   instant without a binary at the path — arms the probation marker,
+   and restarts the service.
+3. The new daemon runs **on probation**: 90 healthy seconds commit
+   the update. If instead it crash-loops, the service's start limit
+   trips **`OnFailure=lotor-rollback.service`**, which puts `.prev`
+   back — and touches nothing when no update is on probation, so an
+   unrelated fault never rolls a good binary back.
+
+Enable the machinery once:
+
+```
+cp contrib/systemd/*.{service,path} /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now lotor-install.path
+systemctl enable lotor.service
+```
+
+The signature is the privilege boundary: a compromised daemon can
+stage whatever it likes and gain nothing, because the installer
+installs what verifies under `/etc/lotor/trusted-keys` and the
+embedded keys — or nothing.

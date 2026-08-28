@@ -272,6 +272,22 @@ func updateCommands() []*command {
 			},
 			run: (*session).updateCheck,
 		},
+		{
+			name:  cmdInstall,
+			on:    kindUpdate,
+			onOne: true,
+			forms: []form{{"install [force]", "fetch what the channel offers and stage it"}},
+			detail: []string{
+				"install [force]",
+				"downloads, verifies signature and hash, proves the new",
+				"binary starts, and stages it for the privileged installer —",
+				"which installs and restarts the daemon. force stages a",
+				"version that is not newer, for stepping down a channel.",
+			},
+			flags: []flagSpec{{name: optForce, doc: "stage even when nothing is newer"}},
+			admin: true,
+			run:   (*session).updateInstall,
+		},
 	}
 }
 

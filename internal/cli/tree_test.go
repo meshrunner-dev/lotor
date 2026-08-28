@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -1607,5 +1608,70 @@ func TestUpdateCheckIsAVerbOnItsBlock(t *testing.T) {
 	deps.UpdateTrust = func() ([]update.PublicKey, error) { return nil, nil }
 	if none := run(t, deps, "/update/check"); !strings.Contains(none, "no trusted keys") {
 		t.Errorf("keylessness was not named:\n%s", none)
+	}
+}
+
+func TestUpdateInstallStagesAVerifiedUpdate(t *testing.T) {
+	sec, pub, err := update.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := []byte("#!/bin/sh\nexit 0\n") // a stand-in the stage can hash
+	sum := sha256.Sum256(binary)
+	mux := http.NewServeMux()
+	var m update.Manifest
+	var raw []byte
+	mux.HandleFunc("/dev/manifest.json", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(raw) })
+	mux.HandleFunc("/dev/manifest.json.minisig", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(update.Sign(raw, sec, "channel:dev"))
+	})
+	mux.HandleFunc("/artifact", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(binary) })
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	m = update.Manifest{
+		Product: "lotor", Channel: "dev", Version: "0.2.0-dev.zz",
+		Published: time.Now().UTC().Truncate(time.Second),
+		Artifacts: map[string]update.Artifact{
+			update.Platform(): {URL: srv.URL + "/artifact",
+				SHA256: hex.EncodeToString(sum[:]), Size: int64(len(binary))},
+		},
+	}
+	if raw, err = json.Marshal(m); err != nil {
+		t.Fatal(err)
+	}
+
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	deps.Version = "0.1.0"
+	deps.StateDir = t.TempDir()
+	deps.UpdateTrust = func() ([]update.PublicKey, error) { return []update.PublicKey{pub}, nil }
+	deps.Kinds = append(deps.Kinds, schema.Kind{
+		Name: "update", Doc: "updates", Singleton: true, Attrs: config.UpdateAttrs(),
+	})
+	deps.Traces["update"] = []config.Trace{
+		{Key: "channel", Value: "dev", Source: "config"},
+		{Key: "url", Value: srv.URL, Source: "config"},
+	}
+
+	out := run(t, deps, "/update/install")
+	if !strings.Contains(out, "staged — the installer takes it from here") {
+		t.Fatalf("the install did not stage:\n%s", out)
+	}
+	// The stage verifies whole against the same trust the installer
+	// will hold it to.
+	ready, err := update.VerifyStaged(update.StageDir(deps.StateDir), []update.PublicKey{pub})
+	if err != nil || ready.Version != "0.2.0-dev.zz" {
+		t.Fatalf("VerifyStaged = %+v, %v", ready, err)
+	}
+	// Nothing newer refuses unless forced.
+	deps.Version = "0.2.0-dev.zz"
+	deps.Traces["update"][0].Value = "dev"
+	if refused := run(t, deps, "/update/install"); !strings.Contains(refused, "nothing newer") {
+		t.Errorf("parity was staged anyway:\n%s", refused)
+	}
+	// Read-only sessions may not stage a binary.
+	deps.Privilege = ReadOnly
+	if denied := run(t, deps, "/update/install force"); !strings.Contains(denied, "admin") {
+		t.Errorf("a read-only session staged an update:\n%s", denied)
 	}
 }

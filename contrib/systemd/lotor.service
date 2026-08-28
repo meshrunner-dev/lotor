@@ -1,0 +1,44 @@
+# Lotor mesh relay daemon.
+#
+# Runs as the dedicated lotor user: the radio needs nothing but the
+# spi and gpio groups, the configuration database and the journal live
+# in StateDirectory, the admin console socket in RuntimeDirectory.
+# Nothing outside those is written — ProtectSystem=strict holds with
+# no carve-outs.
+[Unit]
+Description=Lotor mesh relay daemon
+Documentation=https://meshrunner.dev/lotor
+After=network.target
+# The update safety net: if the service gives up entirely — the start
+# limit below — the rollback unit puts the previous binary back, and
+# only while an update is on probation.
+OnFailure=lotor-rollback.service
+StartLimitIntervalSec=90
+StartLimitBurst=4
+
+[Service]
+ExecStart=/usr/local/bin/lotor run
+Restart=on-failure
+RestartSec=5
+
+User=lotor
+Group=lotor
+SupplementaryGroups=spi gpio
+StateDirectory=lotor
+RuntimeDirectory=lotor
+RuntimeDirectoryMode=0750
+
+# No privileges to escalate, no devices beyond the radio, no view of
+# anything the daemon does not own. The device allowlist names kernel
+# character-device groups, not nodes: every SPI controller and GPIO
+# chip a board may carry, on any bus index, present or hotplugged.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+DeviceAllow=char-spidev rw
+DeviceAllow=char-gpiochip rw
+
+[Install]
+WantedBy=multi-user.target

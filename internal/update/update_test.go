@@ -169,4 +169,24 @@ func TestNewerSpeaksSemverOnStableChannelsAndTimeOnFastOnes(t *testing.T) {
 	if !Newer(dev, "whatever", 999) || Newer(dev, "whatever", 1000) || Newer(dev, "whatever", 2000) {
 		t.Error("the fast rule bent")
 	}
+	// What runs is what is offered: never an update, however fresh
+	// the manifest's stamp.
+	if Newer(dev, "0.1.0-dev.abcdef", 0) {
+		t.Error("the running version read as an update")
+	}
+}
+
+func TestLoopbackMaySpeakHTTP(t *testing.T) {
+	ok := Artifact{URL: "http://127.0.0.1:8080/x", SHA256: zeroes64, Size: 1}
+	if err := ok.check(); err != nil {
+		t.Errorf("loopback http refused: %v", err)
+	}
+	for _, url := range []string{
+		"http://example.org/x", "http://127.0.0.2/x", "http://localhost.evil.org/x",
+	} {
+		bad := Artifact{URL: url, SHA256: zeroes64, Size: 1}
+		if err := bad.check(); err == nil {
+			t.Errorf("%s passed as loopback", url)
+		}
+	}
 }

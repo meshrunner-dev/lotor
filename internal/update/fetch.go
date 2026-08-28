@@ -46,6 +46,11 @@ type Checked struct {
 	Manifest *Manifest
 	Key      PublicKey
 	ETag     string
+	// Raw and Sig are the exact bytes that verified: what a stage
+	// carries along so the privileged installer can re-verify them
+	// against its own trust store before touching anything.
+	Raw []byte
+	Sig []byte
 }
 
 // ErrUnchanged says the channel has not moved since the last check —
@@ -79,7 +84,7 @@ func (c *Client) Check(ctx context.Context, channel, etag string) (*Checked, err
 	if m.Channel != channel {
 		return nil, fmt.Errorf("asked for channel %s, the manifest says %s", channel, m.Channel)
 	}
-	return &Checked{Manifest: m, Key: key, ETag: gotETag}, nil
+	return &Checked{Manifest: m, Key: key, ETag: gotETag, Raw: raw, Sig: sig}, nil
 }
 
 // signatureFor finds a signature one of our keys can check: the

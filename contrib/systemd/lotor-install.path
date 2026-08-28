@@ -1,0 +1,13 @@
+# Watches for a staged update. The daemon — unprivileged, sandboxed —
+# downloads, verifies and stages under its state directory, and the
+# ready marker is the last file written. This unit is how the stage
+# crosses the privilege boundary without the daemon holding any.
+[Unit]
+Description=Watch for a staged lotor update
+
+[Path]
+PathExists=/var/lib/lotor/updates/ready
+Unit=lotor-install.service
+
+[Install]
+WantedBy=multi-user.target

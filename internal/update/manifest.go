@@ -63,7 +63,7 @@ func ParseManifest(raw []byte) (*Manifest, error) {
 
 func (a Artifact) check() error {
 	switch {
-	case !strings.HasPrefix(a.URL, "https://"):
+	case !strings.HasPrefix(a.URL, "https://") && !loopbackHTTP(a.URL):
 		return fmt.Errorf("url %q is not https", a.URL)
 	case a.Size <= 0:
 		return fmt.Errorf("size %d", a.Size)
@@ -72,6 +72,23 @@ func (a Artifact) check() error {
 		return fmt.Errorf("sha256 %q is not 32 hex bytes", a.SHA256)
 	}
 	return nil
+}
+
+// loopbackHTTP admits plain http for the machine's own addresses:
+// the sha256 carries the integrity whatever the transport, nothing
+// leaves the host to be read, and a local mirror or a test should not
+// need a certificate to serve bytes to itself.
+func loopbackHTTP(url string) bool {
+	rest, ok := strings.CutPrefix(url, "http://")
+	if !ok {
+		return false
+	}
+	for _, host := range []string{"127.0.0.1", "localhost", "[::1]"} {
+		if rest == host || strings.HasPrefix(rest, host+":") || strings.HasPrefix(rest, host+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // ArtifactFor picks the running platform's binary, named "linux/arm64"

@@ -1,0 +1,10 @@
+# The safety net, fired by lotor.service's OnFailure= when the service
+# gives up. It touches the binary only while an update is on probation
+# — a crash for any other reason is not the binary's fault, and rolls
+# nothing back.
+[Unit]
+Description=Roll a failed lotor update back
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/lotor update rollback

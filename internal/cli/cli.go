@@ -39,6 +39,7 @@ const (
 	optJSON      = "json"
 	optWatch     = "watch"
 	optFlood     = "flood"
+	optForce     = "force"
 	optNeighbour = "neighbour"
 	optFrameType = "type"
 	optVerdict   = "verdict"
@@ -56,6 +57,7 @@ const (
 	verbList     = "list"
 	cmdJournal   = "journal"
 	cmdCheck     = "check"
+	cmdInstall   = "install"
 	kindUpdate   = "update"
 	// helpWord asks about whatever it follows.
 	helpWord = "?"
@@ -200,6 +202,11 @@ type Deps struct {
 	// UpdateTrust resolves the verification keys for the update
 	// channels; nil takes the built-in store. Tests inject theirs.
 	UpdateTrust func() ([]update.PublicKey, error)
+	// StateDir is where the daemon may stage an update; DBPath is the
+	// configuration database, which a staged binary's selfcheck
+	// reads. Empty disables installing.
+	StateDir string
+	DBPath   string
 	// SystemName is what this installation calls itself — the prompt's
 	// right-hand side, and the name a browser will show. Nil falls
 	// back to the product's own name.

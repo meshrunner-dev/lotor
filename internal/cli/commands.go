@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 	"runtime"
 	"slices"
 	"sort"
@@ -1202,4 +1203,63 @@ func (s *session) updateCheck(ctx context.Context, _ input) error {
 		tb.row("notes", m.Notes)
 	}
 	return tb.flush(s.out)
+}
+
+// updateInstall fetches what the channel offers and stages it for the
+// privileged installer: download, hash, signature, and a run of the
+// new binary's own selfcheck, all before anything privileged is
+// asked. The installer re-verifies everything against its own trust
+// store — the staging daemon is not part of the trust chain.
+func (s *session) updateInstall(ctx context.Context, in input) error {
+	if s.deps.StateDir == "" {
+		return errors.New("this daemon keeps no state directory — nowhere to stage")
+	}
+	channel, url, token := s.updateConfig()
+	trust := s.deps.UpdateTrust
+	if trust == nil {
+		trust = func() ([]update.PublicKey, error) { return update.Trusted(update.TrustedKeysDir) }
+	}
+	keys, err := trust()
+	if err != nil {
+		return err
+	}
+	client := &update.Client{Base: url, Token: token, Trusted: keys}
+	checked, err := client.Check(ctx, channel, "")
+	if err != nil {
+		return err
+	}
+	m := checked.Manifest
+	if !update.Newer(m, s.deps.Version, 0) && in.opts[optForce] != optOn {
+		return fmt.Errorf("running %s — channel %s offers %s, nothing newer; %s forces",
+			s.deps.Version, channel, m.Version, optForce)
+	}
+	art, err := m.ArtifactFor(update.Platform())
+	if err != nil {
+		return err
+	}
+	dir := update.StageDir(s.deps.StateDir)
+	fmt.Fprintf(s.out, "fetching %s (%d bytes)…\r\n", m.Version, art.Size)
+	staged, err := client.Download(ctx, art, dir)
+	if err != nil {
+		return err
+	}
+	fmt.Fprint(s.out, "hash verified — proving the new binary starts…\r\n")
+	if s.deps.DBPath != "" {
+		// The "variable" subprocess is the point: the staged binary
+		// proving it starts, before anyone privileged is asked.
+		//nolint:gosec // the staged binary is the subject
+		probe := exec.CommandContext(ctx, staged, "update", "selfcheck", "--db", s.deps.DBPath)
+		if out, err := probe.CombinedOutput(); err != nil {
+			_ = update.ClearStage(dir)
+			return fmt.Errorf("the new binary fails its selfcheck: %s (%w)",
+				strings.TrimSpace(string(out)), err)
+		}
+	}
+	if err := update.WriteStage(dir, checked, update.Platform()); err != nil {
+		return err
+	}
+	fmt.Fprintf(s.out,
+		"%s staged — the installer takes it from here, and the daemon will restart\r\n",
+		m.Version)
+	return nil
 }

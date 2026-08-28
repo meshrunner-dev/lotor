@@ -1,0 +1,11 @@
+# The privileged installer. It re-verifies the whole stage against
+# root's own trust store — the keys embedded in the binary plus
+# /etc/lotor/trusted-keys — before touching anything: the daemon that
+# staged the files is not part of the trust chain, and a compromised
+# one can stage whatever it wants and gain nothing.
+[Unit]
+Description=Install a staged lotor update
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/lotor update apply

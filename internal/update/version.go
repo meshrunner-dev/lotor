@@ -107,6 +107,11 @@ func comparePre(a, b string) int {
 // newest manifest this relay ever accepted on this channel was
 // published, zero when none was.
 func Newer(m *Manifest, current string, lastPublished int64) bool {
+	if m.Version == current {
+		// What runs is what is offered: not an update on any channel,
+		// however fresh the manifest's stamp.
+		return false
+	}
 	if semverChannel(m.Channel) {
 		return CompareVersions(m.Version, current) > 0
 	}

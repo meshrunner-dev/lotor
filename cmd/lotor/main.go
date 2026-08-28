@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -36,6 +37,7 @@ import (
 	"meshrunner.dev/lotor/internal/relay"
 	"meshrunner.dev/lotor/internal/sentinel"
 	"meshrunner.dev/lotor/internal/single"
+	"meshrunner.dev/lotor/internal/update"
 
 	"meshrunner.dev/lotor/internal/confdb"
 	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
@@ -53,10 +55,105 @@ var version = lotorversion.Version
 type commandLine struct {
 	Run      runCmd           `cmd:""                              help:"Run the relay daemon in the foreground (what the systemd unit does)."`
 	Console  consoleCmd       `cmd:""                              help:"Open the console of a running daemon."`
-	Attach   consoleCmd       `cmd:""                              help:"Alias of console."                                                    hidden:""`
+	Attach   consoleCmd       `cmd:""                              help:"Alias of console."                                                         hidden:""`
 	Config   configCmd        `cmd:""                              help:"Configuration database tools."`
 	Identity identityCmd      `cmd:""                              help:"Node identity tools."`
+	Update   updateCmd        `cmd:""                              help:"The update machinery's own gears — the units turn these, not operators."`
 	Version  kong.VersionFlag `help:"Print the version and leave."`
+}
+
+// updateCmd is the privileged half of self-update, plus the health
+// probe both halves lean on. Operators drive updates from the
+// console (/update check, /update install); these subcommands are
+// what the systemd units run.
+type updateCmd struct {
+	Apply     updateApplyCmd     `cmd:"" help:"Verify the staged update and install it over the target (root; the path unit's job)."`
+	Rollback  updateRollbackCmd  `cmd:"" help:"Put the previous binary back (root; the OnFailure unit's job)."`
+	Selfcheck updateSelfcheckCmd `cmd:"" help:"Prove this binary starts: parse the configuration and leave."`
+}
+
+type updateApplyCmd struct {
+	State   string `default:"/var/lib/lotor"       help:"The daemon's state directory, where the stage waits."`
+	Target  string `default:"/usr/local/bin/lotor" help:"The binary to replace."`
+	Restart bool   `default:"true"                 help:"Restart lotor.service after installing."              negatable:""`
+}
+
+// Run is the privilege boundary made of code: it re-verifies the
+// stage against its own trust store — the embedded keys and whatever
+// root deposited — and only then touches the binary. The daemon that
+// staged the files could be lying from end to end and gain nothing.
+func (c *updateApplyCmd) Run() error {
+	trusted, err := update.Trusted(update.TrustedKeysDir)
+	if err != nil {
+		return err
+	}
+	dir := update.StageDir(c.State)
+	ready, err := update.VerifyStaged(dir, trusted)
+	if err != nil {
+		return fmt.Errorf("stage refused: %w", err)
+	}
+	if err := update.Apply(dir, c.Target); err != nil {
+		return err
+	}
+	if err := update.WritePending(c.State, ready.Version); err != nil {
+		return err
+	}
+	if err := update.ClearStage(dir); err != nil {
+		return err
+	}
+	fmt.Printf("installed %s over %s — the previous binary stands by as .prev\n",
+		ready.Version, c.Target)
+	if !c.Restart {
+		return nil
+	}
+	return exec.CommandContext(context.Background(), "systemctl", "restart", "lotor.service").Run()
+}
+
+type updateRollbackCmd struct {
+	State   string `default:"/var/lib/lotor"       help:"The daemon's state directory."`
+	Target  string `default:"/usr/local/bin/lotor" help:"The binary to restore."`
+	Restart bool   `default:"true"                 help:"Restart lotor.service after restoring." negatable:""`
+}
+
+func (c *updateRollbackCmd) Run() error {
+	// Fired by OnFailure, which knows only that the service died —
+	// not why. Without an update on probation the binary is not the
+	// suspect, and rolling it back would punish it for a radio fault.
+	if update.ReadPending(c.State) == nil {
+		fmt.Println("no update on probation — leaving the binary alone")
+		return nil
+	}
+	if err := update.Rollback(c.Target); err != nil {
+		return err
+	}
+	_ = update.ClearPending(c.State)
+	fmt.Printf("rolled %s back to its previous binary\n", c.Target)
+	if !c.Restart {
+		return nil
+	}
+	return exec.CommandContext(context.Background(), "systemctl", "restart", "lotor.service").Run()
+}
+
+type updateSelfcheckCmd struct {
+	DB string `default:"${default_db}" help:"Configuration database."`
+}
+
+// Run proves the binary executes on this machine and reads this
+// configuration: the stage runs it on the downloaded binary before
+// asking anyone privileged to act. It opens nothing but the database.
+func (c *updateSelfcheckCmd) Run() error {
+	store, f, err := openConfig(c.DB, zap.NewNop())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }()
+	// A relay-less configuration still starts a daemon, so it still
+	// passes a selfcheck.
+	if err := f.Validate(false); err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+	fmt.Println("selfcheck ok")
+	return nil
 }
 
 type identityCmd struct {
@@ -258,6 +355,9 @@ func run(dbPath, logLevel string) error {
 
 	mgr := newManager(store, f, b, sen, buildKinds(), log)
 	deps := consoleDeps(mgr, b, sen)
+	deps.DBPath = dbPath
+	deps.StateDir = filepath.Dir(dbPath)
+	watchProbation(ctx, deps.StateDir, log)
 	mgr.Start(ctx)
 
 	var producers sync.WaitGroup
@@ -383,6 +483,30 @@ func openConfig(dbPath string, log *zap.Logger) (*confdb.Store, *config.File, er
 			zap.String("db", dbPath))
 	}
 	return store, f, nil
+}
+
+// watchProbation commits an update once the new binary has held the
+// service up for a while. The marker was armed by the installer just
+// before the restart; surviving the grace is what "the update took"
+// means, and the OnFailure rollback is what happens when it does not.
+func watchProbation(ctx context.Context, stateDir string, log *zap.Logger) {
+	p := update.ReadPending(stateDir)
+	if p == nil {
+		return
+	}
+	const grace = 90 * time.Second
+	log.Info("update on probation", zap.String("version", p.Version), zap.Time("since", p.Since))
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-time.After(grace):
+			if err := update.ClearPending(stateDir); err != nil {
+				log.Warn("could not commit the update", zap.Error(err))
+				return
+			}
+			log.Info("update committed", zap.String("version", p.Version))
+		}
+	}()
 }
 
 // consoleDeps is everything the operator surfaces may consult: the
