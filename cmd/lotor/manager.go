@@ -232,6 +232,21 @@ func (m *manager) Traces() map[string][]config.Trace {
 		}
 		out[confdb.KindCLI] = rows
 	}
+	if u := m.file.Update; u != nil {
+		rows := []config.Trace{}
+		if u.Channel != "" {
+			rows = append(rows, config.Trace{Key: "channel", Value: u.Channel, Source: sourceConfig})
+		}
+		if u.URL != "" {
+			rows = append(rows, config.Trace{Key: "url", Value: u.URL, Source: sourceConfig})
+		}
+		if u.Token != "" {
+			rows = append(rows, config.Trace{Key: attrToken, Value: u.Token, Source: sourceConfig})
+		}
+		if len(rows) > 0 {
+			out[confdb.KindUpdate] = rows
+		}
+	}
 	return out
 }
 
@@ -429,6 +444,9 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 			return "applied — this system is now " + m.systemName(), nil
 		case confdb.KindSentinel, confdb.KindCLI:
 			return "applied — takes effect when the daemon restarts", nil
+		case confdb.KindUpdate:
+			// check and install read the store live; nothing bounces.
+			return "applied — the next check reads it", nil
 		}
 		return "applied — no running relay uses this yet", nil
 	}
@@ -574,6 +592,9 @@ func (m *manager) createRelay(next *config.File, name string,
 
 // maskedChange stands in a revision for a value too secret to record.
 const maskedChange = "<secret>"
+
+// attrToken is the update block's secret attribute.
+const attrToken = "token"
 
 func (m *manager) createRadio(next *config.File, name string,
 	attrs map[string]string, change map[string]confdb.Change,
@@ -791,6 +812,9 @@ func applyChanges(next *config.File, kind, name string,
 		return change, "", err
 	case confdb.KindSystem:
 		change, err := applySystemChanges(next, typed, unset)
+		return change, "", err
+	case confdb.KindUpdate:
+		change, err := applyUpdateChanges(next, typed, unset)
 		return change, "", err
 	case confdb.KindRelay:
 		change, err := applyRelayChanges(next, name, typed, unset)
@@ -1088,6 +1112,62 @@ func applySystemChanges(next *config.File,
 	return change, nil
 }
 
+// applyUpdateChanges edits the update block. Every attribute is read
+// live by the console's check and install, so nothing bounces and
+// nothing waits for a restart.
+func applyUpdateChanges(next *config.File,
+	typed map[string]any, unset []string,
+) (map[string]confdb.Change, error) {
+	change := map[string]confdb.Change{}
+	u := config.Update{}
+	if next.Update != nil {
+		u = *next.Update
+	}
+	field := func(attr string) (*string, error) {
+		switch attr {
+		case "channel":
+			return &u.Channel, nil
+		case "url":
+			return &u.URL, nil
+		case attrToken:
+			return &u.Token, nil
+		}
+		return nil, fmt.Errorf("no attribute %q here", attr)
+	}
+	for attr, v := range typed {
+		f, err := field(attr)
+		if err != nil {
+			return nil, err
+		}
+		text, err := asString(attr, v)
+		if err != nil {
+			return nil, err
+		}
+		old := orNil(*f)
+		newVal := any(text)
+		if attr == attrToken {
+			// The revision records that it changed, never what to.
+			old, newVal = maskedChange, maskedChange
+		}
+		change[attr] = confdb.Change{Old: old, New: newVal}
+		*f = text
+	}
+	for _, attr := range unset {
+		f, err := field(attr)
+		if err != nil {
+			return nil, err
+		}
+		old := orNil(*f)
+		if attr == attrToken {
+			old = maskedChange
+		}
+		change[attr] = confdb.Change{Old: old}
+		*f = ""
+	}
+	next.Update = &u
+	return change, nil
+}
+
 func orNil(s string) any {
 	if s == "" {
 		return nil
@@ -1124,6 +1204,11 @@ func objectSection(f *config.File, kind, name string) (any, error) {
 			return nil, errors.New("no system block")
 		}
 		return *f.System, nil
+	case confdb.KindUpdate:
+		if f.Update == nil {
+			return nil, errors.New("no update block")
+		}
+		return *f.Update, nil
 	}
 	return nil, fmt.Errorf("%q is not configurable from here yet", kind)
 }
