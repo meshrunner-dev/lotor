@@ -335,3 +335,84 @@ func TestSearchQueryRidesInThePrompt(t *testing.T) {
 		t.Errorf("the search still writes a line of its own:\n%q", got)
 	}
 }
+
+func TestAWrappedLineRepaintsFromItsFirstRow(t *testing.T) {
+	// The paste that used to flood the screen: a line three rows deep,
+	// then one more keystroke. The repaint must climb to the block's
+	// first row and clear down — never repaint from the middle, which
+	// scrolls the top rows away on every keystroke.
+	var out strings.Builder
+	ed := newEditor(strings.NewReader(""), &out)
+	ed.width = 20
+	ed.paint = func(s string) string { return s }
+	ed.prompt = func(string) string { return "> " }
+	ed.set(strings.Repeat("a", 40)) // 2 + 40 cells: three rows
+	out.Reset()
+	ed.set(strings.Repeat("a", 41))
+	got := out.String()
+	if !strings.HasPrefix(got, "\x1b[2A") {
+		t.Errorf("the repaint did not climb to the first row: %q", got)
+	}
+	if !strings.Contains(got, "\x1b[J") {
+		t.Errorf("the repaint did not clear the block: %q", got)
+	}
+	if strings.Contains(got, "\r\n") {
+		t.Errorf("a repaint scrolled: %q", got)
+	}
+}
+
+func TestEnterOnAWrappedLineDropsBelowTheBlock(t *testing.T) {
+	// Enter with the cursor mid-block must first step under the whole
+	// block, or the command's output prints into the wrapped tail.
+	var out strings.Builder
+	ed := newEditor(strings.NewReader(strings.Repeat("a", 40)+"\x01\r"), &out)
+	ed.width = 20
+	ed.paint = func(s string) string { return s }
+	ed.prompt = func(string) string { return "> " }
+	line, err := ed.readLine()
+	if err != nil || line != strings.Repeat("a", 40) {
+		t.Fatalf("readLine = %q, %v", line, err)
+	}
+	// Ctrl+A parked the cursor on row 0; the block ends on row 2.
+	if !strings.Contains(out.String(), "\x1b[2B\r\n") {
+		t.Errorf("Enter did not drop below the block:\n%q", out.String())
+	}
+}
+
+func TestAnUnmeasuredTerminalKeepsTheOldRepaint(t *testing.T) {
+	// Width zero is the wrap-blind editor as it always was: no climb,
+	// no clear-down, the single-row erase.
+	var out strings.Builder
+	ed := newEditor(strings.NewReader(""), &out)
+	ed.prompt = func(string) string { return "> " }
+	ed.set("hello")
+	if got := out.String(); !strings.Contains(got, "\r\x1b[J> hello") {
+		t.Errorf("render = %q", got)
+	}
+}
+
+func TestReportColumnsReadsTheAnswer(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want int
+	}{
+		{"\x1b[24;100R", 100},
+		{"\x1b[1;9999R", 9999},
+		{"\x1b[24R", 0},
+		{"garbage", 0},
+	} {
+		if got := reportColumns([]byte(c.in)); got != c.want {
+			t.Errorf("reportColumns(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestVisCellsIgnoresTheEscapes(t *testing.T) {
+	painted := "\x1b[36m/relay\x1b[m \x1b[35mprint\x1b[m"
+	if got := visCells(painted); got != len("/relay print") {
+		t.Errorf("visCells = %d, want %d", got, len("/relay print"))
+	}
+	if got := visCells("[admin@lab] > "); got != 14 {
+		t.Errorf("plain prompt = %d", got)
+	}
+}

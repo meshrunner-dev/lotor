@@ -19,6 +19,7 @@ import (
 	"net"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -263,17 +264,75 @@ const terminalGrace = 300 * time.Millisecond
 // its transcript without the repaints and the colours.
 func ServeAuto(ctx context.Context, rw io.ReadWriter, deps Deps) {
 	terminal, eaten := terminalAnswers(rw)
-	// Whatever the probe swallowed that was not the answer belongs to
+	width, alsoEaten := 0, []byte(nil)
+	if terminal {
+		// A terminal that answered the first question answers this
+		// one: how wide it is, learned the way the first was — push
+		// the cursor to the right edge and ask where it landed. The
+		// editor's wrapped-line repaints need the figure.
+		width, alsoEaten = measureWidth(rw)
+	}
+	// Whatever the probes swallowed that was not an answer belongs to
 	// the session: a peer that sends its first command instead of a
 	// cursor report must not lose its first letters to the question.
 	session := &probedConn{
-		Reader: io.MultiReader(bytes.NewReader(eaten), rw), Writer: rw, orig: rw,
+		Reader: io.MultiReader(bytes.NewReader(eaten), bytes.NewReader(alsoEaten), rw),
+		Writer: rw, orig: rw,
 	}
 	if terminal {
-		ServeEdited(ctx, session, deps)
+		serveEdited(ctx, session, deps, width)
 		return
 	}
 	Serve(ctx, session, deps)
+}
+
+// measureWidth asks the terminal how many columns it has: the cursor
+// is pushed far right, asked where it landed, and brought home. The
+// answer is trusted for the session — a resize mid-session is not
+// seen, and costs at worst a clumsy repaint.
+func measureWidth(rw io.ReadWriter) (width int, eaten []byte) {
+	conn, ok := rw.(interface{ SetReadDeadline(t time.Time) error })
+	if !ok {
+		return 0, nil
+	}
+	if _, err := rw.Write([]byte("\x1b[9999C\x1b[6n")); err != nil {
+		return 0, nil
+	}
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	if err := conn.SetReadDeadline(time.Now().Add(terminalGrace)); err != nil {
+		return 0, nil
+	}
+	var got []byte
+	buf := make([]byte, 1)
+	for len(got) < cursorReportMax {
+		n, err := rw.Read(buf)
+		if n == 0 || err != nil {
+			return 0, got
+		}
+		got = append(got, buf[0])
+		if !couldBeCursorReport(got) {
+			return 0, got
+		}
+		if buf[0] == 'R' {
+			_, _ = rw.Write([]byte("\r"))
+			return reportColumns(got), nil
+		}
+	}
+	return 0, got
+}
+
+// reportColumns reads the column out of ESC [ rows ; cols R.
+func reportColumns(report []byte) int {
+	text := string(report)
+	i := strings.IndexByte(text, ';')
+	if i < 0 || !strings.HasSuffix(text, "R") {
+		return 0
+	}
+	cols, err := strconv.Atoi(text[i+1 : len(text)-1])
+	if err != nil || cols < 1 {
+		return 0
+	}
+	return cols
 }
 
 // terminalAnswers asks for the cursor position and reports whether a
@@ -361,11 +420,18 @@ func (p *probedConn) RemoteAddr() net.Addr {
 // transport delivers raw keystrokes (the telnet listener negotiates
 // that; the console client sets its terminal raw).
 func ServeEdited(ctx context.Context, rw io.ReadWriter, deps Deps) {
+	serveEdited(ctx, rw, deps, 0)
+}
+
+// serveEdited is ServeEdited told how wide the terminal is; zero
+// leaves the editor wrap-blind.
+func serveEdited(ctx context.Context, rw io.ReadWriter, deps Deps, width int) {
 	lines := make(chan string)
 	done := make(chan struct{})
 	defer close(done)
 	s := &session{deps: deps, lines: lines, out: rw, colors: true, remote: remoteOf(rw)}
 	ed := newEditor(rw, rw)
+	ed.width = width
 	// The editor's hooks read the session's context from the transport
 	// goroutine; the session guards that state itself.
 	ed.prompt = s.promptWith

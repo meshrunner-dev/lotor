@@ -39,6 +39,16 @@ type editor struct {
 	// keystrokes build the query instead of the line.
 	search *searchState
 
+	// width is the terminal's measured columns; 0 means unknown, and
+	// the editor stays wrap-blind the way it always was. screenRow is
+	// which visual row of the edit block the cursor sits on, and
+	// promptCells the last prompt's visible width — both what a
+	// repaint needs to climb back to the block's first row instead of
+	// repainting from the middle and scrolling the top rows away.
+	width       int
+	screenRow   int
+	promptCells int
+
 	// The session's hooks, all optional. They run on the transport's
 	// goroutine — the session guards its own state against the REPL's.
 	prompt   func(search string) string                     // what to repaint before the line
@@ -145,6 +155,7 @@ func (e *editor) trackHelpCycle(c byte) {
 func (e *editor) control(c byte) (finished bool) {
 	switch c {
 	case 0x03: // Ctrl+C: abandon the line
+		e.dropBelow()
 		fmt.Fprint(e.out, "^C")
 		e.buf, e.cur, e.walk = e.buf[:0], 0, -1
 		return true
@@ -284,6 +295,7 @@ func (e *editor) completeLine() {
 		e.cur = len(e.buf)
 	}
 	if len(hints) > 0 {
+		e.dropBelow()
 		fmt.Fprint(e.out, "\r\n"+strings.Join(hints, "  ")+"\r\n")
 	}
 	e.render()
@@ -308,9 +320,13 @@ func (e *editor) backspace() {
 	}
 	atEnd := e.cur == len(e.buf)
 	erased := runewidth.RuneWidth(e.buf[e.cur-1])
+	wrapped := e.width > 0 &&
+		e.promptCells+runewidth.StringWidth(string(e.buf)) > e.width
 	e.buf = append(e.buf[:e.cur-1], e.buf[e.cur:]...)
 	e.cur--
-	if atEnd {
+	if atEnd && !wrapped {
+		// In place for the common case; a backspace cannot cross a
+		// wrap boundary, so a wrapped line repaints instead.
 		fmt.Fprint(e.out, strings.Repeat("\b \b", erased))
 	} else {
 		e.render()
@@ -337,6 +353,7 @@ func (e *editor) killWord() {
 
 // finishLine closes the edit.
 func (e *editor) finishLine() (string, error) {
+	e.dropBelow()
 	fmt.Fprint(e.out, "\r\n")
 	line := strings.TrimSpace(string(e.buf))
 	e.hist.add(line)
@@ -395,6 +412,7 @@ func (e *editor) help() {
 	e.search = nil
 	text := e.helpFor(string(e.buf), e.helpLevel)
 	e.helpLevel++
+	e.dropBelow()
 	fmt.Fprint(e.out, "\r\n"+text)
 	e.render()
 }
@@ -512,6 +530,12 @@ func (e *editor) set(line string) {
 // mesh's emoji count for the cells they occupy here too. The cursor
 // arithmetic runs on the plain text: colours change bytes, never
 // cells.
+//
+// A line longer than the terminal wraps, and a repaint that only
+// returns to the start of its own row repaints from the middle: every
+// keystroke then scrolls the earlier rows away, which is exactly what
+// pasting a long export used to do. With the width known, the repaint
+// climbs to the block's first row and clears down before drawing.
 func (e *editor) render() {
 	prompt := "> "
 	if e.prompt != nil {
@@ -526,8 +550,99 @@ func (e *editor) render() {
 	if e.paint != nil {
 		shown = e.paint(line)
 	}
-	fmt.Fprintf(e.out, "\r\x1b[K%s%s", prompt, shown)
-	if back := runewidth.StringWidth(line) - runewidth.StringWidth(string(e.buf[:e.cur])); back > 0 {
-		fmt.Fprintf(e.out, "\x1b[%dD", back)
+	if e.screenRow > 0 {
+		fmt.Fprintf(e.out, "\x1b[%dA", e.screenRow)
 	}
+	fmt.Fprintf(e.out, "\r\x1b[J%s%s", prompt, shown)
+	e.promptCells = visCells(prompt)
+	if e.width <= 0 {
+		if back := runewidth.StringWidth(line) - runewidth.StringWidth(string(e.buf[:e.cur])); back > 0 {
+			fmt.Fprintf(e.out, "\x1b[%dD", back)
+		}
+		return
+	}
+	total := e.promptCells + runewidth.StringWidth(line)
+	head := e.promptCells + runewidth.StringWidth(string(e.buf[:e.cur]))
+	endRow := rowOf(total, e.width)
+	if head == total {
+		// The cursor already sits where the drawing left it — moving
+		// it would break the terminal's deferred wrap at an exact
+		// row's end, and the next keystroke would overwrite the last
+		// cell instead of wrapping.
+		e.screenRow = endRow
+		return
+	}
+	// Mid-line the wrap behind the cursor has already happened — more
+	// text followed — so plain division places it, no deferral.
+	curRow, curCol := head/e.width, head%e.width
+	e.screenRow = curRow
+	if up := endRow - curRow; up > 0 {
+		fmt.Fprintf(e.out, "\x1b[%dA", up)
+	}
+	fmt.Fprint(e.out, "\r")
+	if curCol > 0 {
+		fmt.Fprintf(e.out, "\x1b[%dC", curCol)
+	}
+}
+
+// rowOf is the row a cursor sits on after drawing that many cells,
+// deferred-wrap aware: an exact multiple leaves it on the previous
+// row, which is where a terminal that has not wrapped yet keeps it.
+func rowOf(cells, width int) int {
+	if width <= 0 {
+		return 0
+	}
+	if cells > 0 && cells%width == 0 {
+		return cells/width - 1
+	}
+	return cells / width
+}
+
+// visCells is the cells a string occupies on screen: escape sequences
+// take none, and the rest counts by display width.
+func visCells(s string) int {
+	const (
+		text = iota
+		sawEsc
+		inCSI
+	)
+	var b strings.Builder
+	state := text
+	for _, r := range s {
+		switch state {
+		case sawEsc:
+			if r == '[' {
+				state = inCSI // parameters follow, until a final byte
+			} else {
+				state = text // a two-character escape, spent
+			}
+		case inCSI:
+			if r >= 0x40 && r <= 0x7e {
+				state = text
+			}
+		default:
+			if r == 0x1b {
+				state = sawEsc
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return runewidth.StringWidth(b.String())
+}
+
+// endRowNow is the edit block's last row as currently drawn.
+func (e *editor) endRowNow() int {
+	return rowOf(e.promptCells+runewidth.StringWidth(string(e.buf)), e.width)
+}
+
+// dropBelow steps the cursor under the whole edit block, so whatever
+// prints next lands below it rather than into its wrapped rows.
+func (e *editor) dropBelow() {
+	if e.width > 0 {
+		if down := e.endRowNow() - e.screenRow; down > 0 {
+			fmt.Fprintf(e.out, "\x1b[%dB", down)
+		}
+	}
+	e.screenRow = 0
 }
