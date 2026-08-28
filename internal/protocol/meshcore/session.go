@@ -103,23 +103,8 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 			zap.String("txn", origin.Short()), zap.Duration("skew", skew))
 		return
 	}
-	c := e.acl.get(senderPub)
-	switch {
-	case password == "" && c != nil:
-		// A blank password re-checks an existing session.
-	case e.p.GuestAccess == guestOpen ||
-		subtle.ConstantTimeCompare([]byte(password), []byte(e.p.GuestPassword)) == 1:
-		if c == nil {
-			c = &client{perms: permGuest}
-			copy(c.pubKey[:], senderPub)
-		}
-		c.secret = secret
-	default:
-		e.log.Debug("login refused", zap.String("txn", origin.Short()))
-		return
-	}
-	if ts <= c.lastTimestamp {
-		e.log.Debug("login replay refused", zap.String("txn", origin.Short()))
+	c := e.admitLogin(senderPub, secret, password, ts, pkt.IsRouteFlood(), origin)
+	if c == nil {
 		return
 	}
 	// Built before the session moves: a failure here would otherwise
@@ -149,6 +134,46 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 		tag: clock, body: rest, kind: "login-resp",
 		scope: e.replyScope(rx), out: c.out,
 	}, origin)
+}
+
+// admitLogin resolves a password attempt into a session, or nil when
+// it earns silence.
+func (e *engine) admitLogin(senderPub, secret []byte, password string,
+	ts uint32, flood bool, origin txn.ID,
+) *client {
+	c := e.acl.get(senderPub)
+	switch {
+	case password == "" && c != nil:
+		// A blank password re-checks an existing session.
+	case e.p.GuestAccess == guestOpen ||
+		subtle.ConstantTimeCompare([]byte(password), []byte(e.p.GuestPassword)) == 1:
+		if c == nil {
+			c = &client{perms: permGuest}
+			copy(c.pubKey[:], senderPub)
+		}
+		c.secret = secret
+	default:
+		e.log.Debug("login refused", zap.String("txn", origin.Short()))
+		return nil
+	}
+	if ts <= c.lastTimestamp {
+		e.log.Debug("login replay refused", zap.String("txn", origin.Short()))
+		return nil
+	}
+	// A login with a password opens a new conversation, and the route
+	// the old one taught belongs to the old one: a companion that
+	// reconfigured itself logs in again precisely because its
+	// situation changed, and an answer sent down the stale route is an
+	// answer it never hears. A flood login drops it too, whatever the
+	// password — the asker itself just said it has no route to us, so
+	// ours to it is suspect. Only a direct blank-password recheck
+	// keeps the route: that is a step inside the conversation, not the
+	// start of one. The reply floods until the client teaches a fresh
+	// route, which is the one cost of never answering into a void.
+	if password != "" || flood {
+		c.out = nil
+	}
+	return c
 }
 
 // loginReply composes what the reference sends back: our clock, the

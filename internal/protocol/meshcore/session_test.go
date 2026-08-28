@@ -445,3 +445,64 @@ func TestBlockedGuestAnswersNobody(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 	}
 }
+
+func TestAFreshLoginDropsTheRouteTheOldConversationTaught(t *testing.T) {
+	// The scenario off the air: a companion logs in, teaches a route,
+	// then reconfigures itself and logs in again — direct. The reply
+	// must not ride the dead route: the login opened a new
+	// conversation, and whatever the old one taught belongs to it.
+	e, _, _, peer := txRig(t, "on-air")
+	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
+	e.queue.depth = 8
+
+	frame, _ := login(t, e.id, peer, nowTS(300), "raccoon", false)
+	pkt, err := meshcore.ParsePacket(frame.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.respondAnon(rxOf(e, pkt), txn.New())
+	c := e.acl.get(peer.PubKey[:])
+	if c == nil {
+		t.Fatal("the first login made no session")
+	}
+	c.out = &outPath{pathLen: 2, path: []byte{0x4f, 0xa2}, learned: time.Now()}
+
+	frame, _ = login(t, e.id, peer, nowTS(301), "raccoon", false)
+	if pkt, err = meshcore.ParsePacket(frame.Payload); err != nil {
+		t.Fatal(err)
+	}
+	e.respondAnon(rxOf(e, pkt), txn.New())
+	if c.out != nil {
+		t.Error("the stale route survived the new login")
+	}
+	if n := len(e.queue.entries); n < 2 {
+		t.Fatalf("%d replies queued, want 2", n)
+	}
+	reply := e.queue.entries[len(e.queue.entries)-1].pkt
+	if !reply.IsRouteFlood() {
+		t.Errorf("the reply rode a route the login just invalidated: header %#x", reply.Header)
+	}
+
+	// A blank-password recheck is a step inside the same conversation,
+	// and keeps the route it stands on.
+	c.out = &outPath{pathLen: 0, path: []byte{}, learned: time.Now()}
+	frame, _ = login(t, e.id, peer, nowTS(302), "", false)
+	if pkt, err = meshcore.ParsePacket(frame.Payload); err != nil {
+		t.Fatal(err)
+	}
+	e.respondAnon(rxOf(e, pkt), txn.New())
+	if c.out == nil {
+		t.Error("a recheck dropped the route it should stand on")
+	}
+
+	// And a flood login rediscovers, whatever it carried: the asker
+	// itself said it has no route, so ours to it is suspect too.
+	frame, _ = login(t, e.id, peer, nowTS(303), "raccoon", true)
+	if pkt, err = meshcore.ParsePacket(frame.Payload); err != nil {
+		t.Fatal(err)
+	}
+	e.respondAnon(rxOf(e, pkt), txn.New())
+	if c.out != nil {
+		t.Error("a flood login kept a route it must rediscover")
+	}
+}
