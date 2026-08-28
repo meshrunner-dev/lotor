@@ -123,7 +123,7 @@ func (m *manager) observerConfig(name string, p mqtt.Params, log *zap.Logger) (m
 		Radio: mqtt.RadioString(info.Waveform.FrequencyHz,
 			uint32(max(info.Waveform.BandwidthHz, 0)), // a LoRa bandwidth, never negative
 			info.Waveform.SpreadingFactor, info.Waveform.CodingRate),
-		Health:       m.observerHealth(relayName, time.Now()),
+		Health:       m.observerHealth(relayName),
 		SelfScopes:   strings.Join(info.Scopes, ","),
 		DefaultScope: info.DefaultScope,
 	}
@@ -247,7 +247,7 @@ func (m *manager) neighboursRound(relayName string, log *zap.Logger,
 // observerHealth reads the watched relay's vitals each time the
 // heartbeat asks, through the manager's live view — a bounced relay's
 // successor answers, not a captured pointer to its predecessor.
-func (m *manager) observerHealth(relayName string, started time.Time) func() mqtt.Health {
+func (m *manager) observerHealth(relayName string) func() mqtt.Health {
 	return func() mqtt.Health {
 		m.mu.Lock()
 		info, ok := m.infos[relayName]
@@ -256,7 +256,7 @@ func (m *manager) observerHealth(relayName string, started time.Time) func() mqt
 		if !ok {
 			return h
 		}
-		up := int(time.Since(started).Seconds())
+		up := int(time.Since(info.Started).Seconds())
 		h.UptimeSecs = &up
 		h.Repeat = "off"
 		if info.TXMode == config.TXOnAir {

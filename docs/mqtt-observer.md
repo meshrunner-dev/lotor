@@ -86,23 +86,63 @@ sends `battery_mv`, `queue_len`, `internal_heap`, which lotor omits.
 the same frame as `packets.raw` without the analysis; highest volume,
 off unless a consumer asks.
 
-### NEIGHBORS — deferred
+### NEIGHBORS (QoS 0, retain where the broker allows, default off)
 
-The reference can publish its neighbour table (with scopes — a shape
-lotor's neighbourhood already holds). Deferred to a follow-up: it is
-periodic and additive, nothing in v1 forecloses it.
+```json
+{"timestamp", "origin", "origin_id",
+ "total_neighbors", "queried_neighbors", "truncated",
+ "self": {"scopes": "a,b,c", "default_scope": "a"},
+ "neighbors": [{"pubkey", "snr",
+                "heard_secs_ago": 42 | null,
+                "scopes": "a,b",
+                "status": "responded" | "timeout" | "send_failed"}]}
+```
+
+The round is active: each neighbour is asked its scopes over the air,
+one at a time, and the outcome is reported honestly — `responded`
+with its list, `timeout` when the question left and nothing came
+back, `send_failed` when it could not be asked at all (dry gate, no
+identity). An unknown age travels as `null`, never as zero. Enabling
+`neighbors=` is therefore operator consent to those emissions;
+`neighbors_interval` has a one-hour floor for the same reason, and a
+round also runs once when the broker session first lands. Rounds run
+off the observer's loop — frames keep flowing while a slow neighbour
+is being waited out.
+
+### Device authentication (JWT-shaped)
+
+Most community brokers authenticate the device by its own identity: a
+JWT-shaped token as the password, the fixed username
+`v1_{UPPERCASE_PUBKEY}`. Shaped, not standard — the third segment is
+the ed25519 signature over `header.payload` in **uppercase hex**, not
+base64url. Claims: `publicKey` (uppercase hex), `aud`, `iat`, `exp`.
+Setting `audience=` switches a connection to this mode; tokens are
+minted fresh at every (re)connect by the paho credentials provider,
+signed by the watched relay's node identity, `token_lifetime`
+claiming 24h unless the broker wants less.
 
 ## Design in lotor
 
-### A collection kind: `/mqtt`
+### A layered kind: `/mqtt`
 
-Each instance is one broker connection, first-class like a radio:
+Each instance is one broker connection, layered exactly like a radio
+or a relay: a `profile` names a community-broker preset (the
+ecosystem's public table — url, auth style, keepalive, retain),
+overrides patch it per profile, provenance says which said what. The
+parameter set lives in `internal/mqtt` beside the catalog it resolves
+against, pinned to the schema by test:
 
 | attr | type | default | note |
 |---|---|---|---|
+| `profile` | string | custom | community preset; `custom` starts empty |
 | `url` | string | — | `tcp://host:1883`, `ssl://`, `ws(s)://` |
-| `username` | string | "" | |
+| `username` | string | "" | `{pubkey}` sends the node key |
 | `password` | string, Secret | "" | |
+| `audience` | string | "" | non-empty switches to device auth |
+| `token_lifetime` | duration | 24h | what a minted token claims |
+| `keepalive` | duration | 2m | presets say 55s behind balancers |
+| `ca` | string | system roots | PEM file pinning the broker chain |
+| `retain` | bool | false | STATUS and NEIGHBORS only |
 | `iata` | string | — | feeds the topic template |
 | `token` | string | "" | for meshrank-style layouts |
 | `topic` | string | `meshcore/{iata}/{device}/{type}` | template |
@@ -114,6 +154,8 @@ Each instance is one broker connection, first-class like a radio:
 | `tx` | enum off/self-adverts/all | self-adverts | sent frames (reference default) |
 | `types` | words | all | payload-type filter, by name |
 | `status_interval` | duration | 5m | |
+| `neighbors` | bool | false | the active round above — RF consent |
+| `neighbors_interval` | duration | 24h | floor 1h |
 
 ### Data path
 
@@ -125,10 +167,14 @@ above, and publishes; a slow broker loses messages (bounded queue,
 drops counted and reported by status) rather than slowing the relay.
 
 Client: eclipse/paho.mqtt.golang — reconnect, keepalive and TLS are
-exactly the wheels not worth reinventing. Auth v1: none or
-username/password. The reference's per-community JWT presets are out
-of scope; a fork of the ecosystem's broker presets belongs in
-configuration, not in code.
+exactly the wheels not worth reinventing. What stays ours is policy:
+bounded publishes and writes, offline refusals counted rather than
+queued without end, and a connect signal the observer answers with a
+fresh STATUS — first session and re-established ones alike — instead
+of a blind first beat racing the dial. Auth is chosen by the resolved
+parameters: an `audience` mints device tokens, a `username` rides
+as-is (`{pubkey}` resolved to the node key), silence connects
+anonymously.
 
 ### Lifecycle
 

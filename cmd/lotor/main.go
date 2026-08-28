@@ -757,6 +757,7 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		Neighbours:    neighboursOf(eng),
 		AirSessions:   airSessionsOf(eng),
 		Identity:      eng.Identity(),
+		Started:       time.Now(),
 		NodeName:      nodeNameOf(eng),
 		Traffic:       trafficOf(eng),
 	}

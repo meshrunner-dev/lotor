@@ -157,6 +157,9 @@ type RelayInfo struct {
 	Traffic func() (sent, received, recvErrors uint32, txAir, rxAir time.Duration)
 	// Identity is the relay's node public key in hex, empty when none.
 	Identity string
+	// Started is when this assembly came up — device uptime starts
+	// here, not at whichever observer asks.
+	Started time.Time
 }
 
 // MQTTInfo is what the CLI knows about one observer connection.
