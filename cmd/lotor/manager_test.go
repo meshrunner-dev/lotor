@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -308,5 +309,41 @@ func TestOrphanOverridesCanStillBeUnset(t *testing.T) {
 	m.maskSecrets(m.file, "mqtt", "lab", change)
 	if change["neighbors"].Old != maskedChange {
 		t.Errorf("orphan value recorded in the clear: %+v", change["neighbors"])
+	}
+}
+
+func TestObserverShapeHeals(t *testing.T) {
+	old := `{"disabled":false,"profile":"","overrides":{"custom":{` +
+		`"url":"tcp://127.0.0.1:1883","iata":"par","neighbors":true,` +
+		`"status":false,"neighbors_interval":"2h"}}}`
+	healed, changed, err := healObserverAttrs(old)
+	if err != nil || !changed {
+		t.Fatalf("heal: %v changed=%v", err, changed)
+	}
+	var o map[string]any
+	if err := json.Unmarshal([]byte(healed), &o); err != nil {
+		t.Fatal(err)
+	}
+	overrides, ok := o["overrides"].(map[string]any)
+	if !ok {
+		t.Fatalf("overrides gone: %v", o)
+	}
+	kv, ok := overrides["custom"].(map[string]any)
+	if !ok {
+		t.Fatalf("custom scope gone: %v", overrides)
+	}
+	// The explicit old interval wins over the consent default, the
+	// silenced heartbeat keeps its silence, the code speaks uppercase.
+	if kv["neighbours_interval"] != "2h" || kv["status_interval"] != "0s" || kv["iata"] != "PAR" {
+		t.Errorf("healed wrong: %v", kv)
+	}
+	for _, gone := range []string{"neighbors", "neighbors_interval", "status"} {
+		if _, held := kv[gone]; held {
+			t.Errorf("%s survived", gone)
+		}
+	}
+	// The settled shape passes untouched.
+	if _, changed, _ := healObserverAttrs(healed); changed {
+		t.Error("a settled shape was rewritten")
 	}
 }

@@ -497,6 +497,12 @@ func openConfig(dbPath string, log *zap.Logger) (*confdb.Store, *config.File, er
 	if err != nil {
 		return nil, nil, err
 	}
+	// The shape heals before the first load: a store written by a
+	// past binary carries keys this one no longer speaks.
+	if err := store.Migrate(ctx, storeMigrations()); err != nil {
+		_ = store.Close()
+		return nil, nil, err
+	}
 	f, err := store.Load(ctx)
 	if err != nil {
 		_ = store.Close()

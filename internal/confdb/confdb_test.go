@@ -2,6 +2,8 @@ package confdb
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -227,5 +229,49 @@ func TestUndoStopsAtAnImport(t *testing.T) {
 	}
 	if _, err := s.LastMutation(ctx); err == nil {
 		t.Fatal("an import offered itself to undo — its inverse is a wipe")
+	}
+}
+
+func TestMigrationsLiftTheShapeOnce(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, Memory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if shape, err := s.Shape(ctx); err != nil || shape != 1 {
+		t.Fatalf("fresh shape = %d, %v", shape, err)
+	}
+	ran := 0
+	lift := []Migration{{To: 2, Doc: "test", Run: func(ctx context.Context, tx *sql.Tx) error {
+		ran++
+		_, err := tx.ExecContext(ctx,
+			"INSERT INTO objects(kind, name, attrs) VALUES('mqtt', 'seeded', '{}')")
+		return err
+	}}}
+	if err := s.Migrate(ctx, lift); err != nil {
+		t.Fatal(err)
+	}
+	if shape, _ := s.Shape(ctx); shape != 2 {
+		t.Errorf("shape after lift = %d", shape)
+	}
+	// Idempotent: a second boot runs nothing.
+	if err := s.Migrate(ctx, lift); err != nil || ran != 1 {
+		t.Errorf("second boot ran %d migrations (%v)", ran, err)
+	}
+	// A hole in the ladder is refused before anything moves.
+	err = s.Migrate(ctx, []Migration{{To: 4, Doc: "gap",
+		Run: func(context.Context, *sql.Tx) error { return nil }}})
+	if err == nil {
+		t.Error("a gapped ladder was climbed")
+	}
+	// A failing migration leaves the stamp untouched.
+	err = s.Migrate(ctx, []Migration{{To: 3, Doc: "boom",
+		Run: func(context.Context, *sql.Tx) error { return errors.New("boom") }}})
+	if err == nil {
+		t.Fatal("failure swallowed")
+	}
+	if shape, _ := s.Shape(ctx); shape != 2 {
+		t.Errorf("failed lift moved the stamp to %d", shape)
 	}
 }
