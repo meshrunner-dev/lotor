@@ -48,6 +48,11 @@ jobs:
           { echo "no embedded official key — mint one and embed it first"; exit 1; }
       - name: Replace the rolling dev assets
         run: |
+          # The tag follows the build: checking out dev must give the
+          # code the channel's binaries were built from, and the
+          # release page must say so. The manifest stays the authority
+          # either way — the tag is honesty, not mechanism.
+          git push --force origin "HEAD:refs/tags/dev"
           gh release view dev >/dev/null 2>&1 || gh release create dev --prerelease \
             --title "dev (rolling)" --notes "The dev channel bucket: assets follow main."
           gh release upload dev --clobber lotor_linux_arm64 lotor_linux_amd64
