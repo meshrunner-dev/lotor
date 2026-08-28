@@ -75,3 +75,8 @@ tasks:
     desc: Cross-compile the daemon for a 64-bit ARM board
     cmds:
       - GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o bin/lotor-arm64 ./cmd/lotor
+
+  build:arm:
+    desc: Cross-compile the daemon for a 32-bit ARM board (Cortex-A7 and up)
+    cmds:
+      - GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o bin/lotor-arm ./cmd/lotor

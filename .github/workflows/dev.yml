@@ -55,7 +55,7 @@ jobs:
           git push --force origin "HEAD:refs/tags/dev"
           gh release view dev >/dev/null 2>&1 || gh release create dev --prerelease \
             --title "dev (rolling)" --notes "The dev channel bucket: assets follow main."
-          gh release upload dev --clobber lotor_linux_arm64 lotor_linux_amd64
+          gh release upload dev --clobber lotor_linux_arm64 lotor_linux_amd64 lotor_linux_arm
       - name: Sign and publish the manifest
         env:
           RELSIGN_KEY: ${{ secrets.RELSIGN_KEY }}
@@ -65,6 +65,7 @@ jobs:
           printf '%s' "$RELSIGN_KEY" > relsign.key
           go run ./cmd/relsign manifest dev "$VERSION" manifest.json \
             "linux/arm64=${base}/lotor_linux_arm64=lotor_linux_arm64" \
-            "linux/amd64=${base}/lotor_linux_amd64=lotor_linux_amd64"
+            "linux/amd64=${base}/lotor_linux_amd64=lotor_linux_amd64" \
+            "linux/arm=${base}/lotor_linux_arm=lotor_linux_arm"
           go run ./cmd/relsign sign relsign.key manifest.json
           ./.github/scripts/publish-manifests.sh dev

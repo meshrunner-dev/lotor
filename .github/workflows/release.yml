@@ -63,7 +63,8 @@ jobs:
           flags=(--generate-notes)
           [ "${{ needs.meta.outputs.prerelease }}" = "true" ] && flags+=(--prerelease)
           gh release create "$VERSION" "${flags[@]}" \
-            "lotor_${VERSION}_linux_arm64" "lotor_${VERSION}_linux_amd64"
+            "lotor_${VERSION}_linux_arm64" "lotor_${VERSION}_linux_amd64" \
+            "lotor_${VERSION}_linux_arm"
       - name: Sign and publish the manifests
         env:
           RELSIGN_KEY: ${{ secrets.RELSIGN_KEY }}
@@ -74,7 +75,8 @@ jobs:
           for channel in ${{ needs.meta.outputs.channels }}; do
             go run ./cmd/relsign manifest "$channel" "$VERSION" manifest.json \
               "linux/arm64=${base}/lotor_${VERSION}_linux_arm64=lotor_${VERSION}_linux_arm64" \
-              "linux/amd64=${base}/lotor_${VERSION}_linux_amd64=lotor_${VERSION}_linux_amd64"
+              "linux/amd64=${base}/lotor_${VERSION}_linux_amd64=lotor_${VERSION}_linux_amd64" \
+              "linux/arm=${base}/lotor_${VERSION}_linux_arm=lotor_${VERSION}_linux_arm"
             go run ./cmd/relsign sign relsign.key manifest.json
             ./.github/scripts/publish-manifests.sh "$channel"
           done

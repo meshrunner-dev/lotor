@@ -58,10 +58,10 @@ jobs:
         run: |
           gh release view try >/dev/null 2>&1 || gh release create try --prerelease \
             --title "try (bucket)" --notes "Manual branch and PR builds; swept periodically."
-          for f in lotor_linux_arm64 lotor_linux_amd64; do
+          for f in lotor_linux_arm64 lotor_linux_amd64 lotor_linux_arm; do
             mv "$f" "${f/lotor_/lotor_${SLUG}_}"
           done
-          gh release upload try --clobber "lotor_${SLUG}_linux_arm64" "lotor_${SLUG}_linux_amd64"
+          gh release upload try --clobber "lotor_${SLUG}_linux_arm64" "lotor_${SLUG}_linux_amd64" "lotor_${SLUG}_linux_arm"
       - name: Sign and publish the manifest
         env:
           RELSIGN_KEY: ${{ secrets.RELSIGN_KEY }}
@@ -71,6 +71,7 @@ jobs:
           printf '%s' "$RELSIGN_KEY" > relsign.key
           go run ./cmd/relsign manifest "try-${SLUG}" "$VERSION" manifest.json \
             "linux/arm64=${base}/lotor_${SLUG}_linux_arm64=lotor_${SLUG}_linux_arm64" \
-            "linux/amd64=${base}/lotor_${SLUG}_linux_amd64=lotor_${SLUG}_linux_amd64"
+            "linux/amd64=${base}/lotor_${SLUG}_linux_amd64=lotor_${SLUG}_linux_amd64" \
+            "linux/arm=${base}/lotor_${SLUG}_linux_arm=lotor_${SLUG}_linux_arm"
           go run ./cmd/relsign sign relsign.key manifest.json
           ./.github/scripts/publish-manifests.sh "try-${SLUG}"
