@@ -10,6 +10,9 @@ on:
 jobs:
   sweep:
     runs-on: ubuntu-latest
+    # The deploy key lives in the environments only; the sweeper runs
+    # from main on a schedule, which is exactly what fast admits.
+    environment: fast
     permissions:
       contents: write
     env:

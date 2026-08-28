@@ -35,15 +35,18 @@ new artifact URLs — no deployed relay changes.
      `internal/update/trust.go`, exactly as the files read. The
      workflows refuse to publish while that list is empty.
 
-3. **The Actions environments.** Two, matching the trains:
-   - `stable` — holds the stable train's `RELSIGN_KEY`. Protection
-     rules: deployment allowed from tags `v*` only, and a required
+3. **The Actions environments.** Two, matching the trains, and each
+   holds its own copy of `UPDATES_DEPLOY_KEY` beside its signing key
+   — environment secrets are not shared:
+   - `stable` — the stable train's `RELSIGN_KEY` + the deploy key.
+     Protection rules: deployment from tags `v*` only, and a required
      reviewer, so pushing a tag is not enough to mint a signed stable
      release — someone approves the signing job. (Protection rules
      need a public repository, or Team/Enterprise for a private
      fork.)
-   - `fast` — holds the fast train's key, no gates: dev signs every
-     push by design.
+   - `fast` — the fast train's `RELSIGN_KEY` + the deploy key,
+     deployment from `main` only, no reviewer: dev signs every push
+     by design, and the try sweeper runs here too.
    The signing jobs declare `environment:`; keep them minimal and
    free of third-party actions — the environment bounds who and when,
    not what a compromised step inside the approved job could read.
