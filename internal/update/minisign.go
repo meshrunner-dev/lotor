@@ -36,16 +36,44 @@ const (
 	trustedPrefix   = "trusted comment: "
 )
 
-// PublicKey is one key manifests may be signed under.
+// PublicKey is one key manifests may be signed under, and the
+// channels it is allowed to vouch for. The scope is the verifier's
+// own pin — embedded in the binary, or written by root into the trust
+// store — never something the signature claims about itself: a key
+// for the fast channels must not be able to speak for the stable
+// ones, however its holder spells a comment. Empty means every
+// channel, the single-key fork's simple case.
 type PublicKey struct {
-	ID  [keyIDSize]byte
-	Key ed25519.PublicKey
+	ID       [keyIDSize]byte
+	Key      ed25519.PublicKey
+	Channels []string
+}
+
+// Vouches reports whether this key is pinned to the channel. A scope
+// ending in * pins a family — "try-*" is every manual build.
+func (p PublicKey) Vouches(channel string) bool {
+	if len(p.Channels) == 0 {
+		return true
+	}
+	for _, scope := range p.Channels {
+		if prefix, wild := strings.CutSuffix(scope, "*"); wild {
+			if strings.HasPrefix(channel, prefix) {
+				return true
+			}
+		} else if scope == channel {
+			return true
+		}
+	}
+	return false
 }
 
 // Hex names the key the way operators and file names refer to it.
 func (p PublicKey) Hex() string { return fmt.Sprintf("%x", p.ID) }
 
-// ParsePublicKey reads a minisign public key file.
+// ParsePublicKey reads a minisign public key file. The comment line
+// may pin the key to channels — "channels: release rc beta" anywhere
+// in it — which is trustworthy exactly because the file's author is
+// the trust store's: root wrote the line, or the binary embeds it.
 func ParsePublicKey(text []byte) (PublicKey, error) {
 	var p PublicKey
 	raw, err := decodeAfterComment(text, untrustedPrefix)
@@ -57,7 +85,20 @@ func ParsePublicKey(text []byte) (PublicKey, error) {
 	}
 	copy(p.ID[:], raw[2:2+keyIDSize])
 	p.Key = ed25519.PublicKey(raw[2+keyIDSize:])
+	p.Channels = commentChannels(string(text))
 	return p, nil
+}
+
+// commentChannels reads a "channels:" pin out of a key file's comment
+// line, comma- or space-separated; absent means unpinned.
+func commentChannels(text string) []string {
+	line, _, _ := strings.Cut(strings.TrimSpace(text), "\n")
+	_, after, found := strings.Cut(line, "channels:")
+	if !found {
+		return nil
+	}
+	fields := strings.FieldsFunc(after, func(r rune) bool { return r == ' ' || r == ',' })
+	return fields
 }
 
 // signature is one parsed .minisig file.
@@ -150,11 +191,15 @@ func GenerateKey() (SecretKey, PublicKey, error) {
 	return SecretKey{ID: id, Key: priv}, PublicKey{ID: id, Key: pub}, nil
 }
 
-// MarshalPublic renders the key as a minisign public key file.
+// MarshalPublic renders the key as a minisign public key file, its
+// channel pin riding the comment line when it carries one.
 func MarshalPublic(p PublicKey) []byte {
+	comment := untrustedPrefix + "minisign public key " + strings.ToUpper(p.Hex())
+	if len(p.Channels) > 0 {
+		comment += "; channels: " + strings.Join(p.Channels, " ")
+	}
 	raw := append(append([]byte(algPure), p.ID[:]...), p.Key...)
-	return []byte(untrustedPrefix + "minisign public key " + strings.ToUpper(p.Hex()) + "\n" +
-		base64.StdEncoding.EncodeToString(raw) + "\n")
+	return []byte(comment + "\n" + base64.StdEncoding.EncodeToString(raw) + "\n")
 }
 
 // MarshalSecret renders the signing key for the CI secret.

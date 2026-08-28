@@ -96,14 +96,18 @@ func manifest(args []string) error {
 // keygen writes relsign.key and relsign.pub into dir. The secret is
 // created 0600 and never printed: it goes into a CI secret by file,
 // not by scrollback.
+// keygen mints a pair, pinning the public half to the channels named
+// after the directory — the pin every verifier will read out of the
+// file's own comment line.
 func keygen(args []string) error {
-	if len(args) != 1 {
-		return errors.New("usage: relsign keygen <dir>")
+	if len(args) < 1 {
+		return errors.New("usage: relsign keygen <dir> [channel ...]")
 	}
 	sec, pub, err := update.GenerateKey()
 	if err != nil {
 		return err
 	}
+	pub.Channels = args[1:]
 	keyPath := filepath.Join(args[0], "relsign.key")
 	if _, err := statArg(keyPath); err == nil {
 		return fmt.Errorf("%s already exists — a signing key is not a thing to overwrite", keyPath)

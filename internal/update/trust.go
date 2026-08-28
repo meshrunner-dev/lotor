@@ -17,8 +17,12 @@ import (
 )
 
 // officialKeys is the project's own signing keys, newest first,
-// rendered exactly as their .pub files read. Empty until the first
-// key is minted; the release workflow refuses to publish while it is.
+// rendered exactly as their .pub files read — the channel pin rides
+// each comment line, and the two trains never share a key: the
+// stable one signs release, rc and beta behind a protected
+// environment, the fast one signs dev and try-* on every push. Empty
+// until the first keys are minted; the workflows refuse to publish
+// while it is.
 var officialKeys = []string{}
 
 // TrustedKeysDir is where an operator deposits additional public

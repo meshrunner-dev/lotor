@@ -91,6 +91,14 @@ func TestAStageVerifiesWholeOrNotAtAll(t *testing.T) {
 	if _, err := VerifyStaged(dir, []PublicKey{stranger}); err == nil {
 		t.Error("a stage verified under a stranger's store")
 	}
+	// And the channel pin holds at the installer's own hand: the same
+	// key, trusted but pinned elsewhere, is refused for this train.
+	pinned := pub
+	pinned.Channels = []string{"release"}
+	if _, err := VerifyStaged(dir, []PublicKey{pinned}); err == nil ||
+		!strings.Contains(err.Error(), "does not vouch") {
+		t.Errorf("the installer ignored the pin: %v", err)
+	}
 	// A bent binary is refused by the signed hash.
 	if err := os.WriteFile(filepath.Join(dir, stagedBinary), []byte("swapped"), 0o755); err != nil {
 		t.Fatal(err)

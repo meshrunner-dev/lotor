@@ -36,6 +36,9 @@ jobs:
   publish:
     needs: [meta, build]
     runs-on: ubuntu-latest
+    # The stable train's key lives here, behind the environment's
+    # protection rules: tags only, and a human approving the signing.
+    environment: stable
     permissions:
       contents: write
     env:

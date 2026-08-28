@@ -39,6 +39,7 @@ jobs:
   publish:
     needs: [meta, build]
     runs-on: ubuntu-latest
+    environment: fast
     permissions:
       contents: write
     env:

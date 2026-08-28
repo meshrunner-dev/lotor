@@ -84,6 +84,12 @@ func (c *Client) Check(ctx context.Context, channel, etag string) (*Checked, err
 	if m.Channel != channel {
 		return nil, fmt.Errorf("asked for channel %s, the manifest says %s", channel, m.Channel)
 	}
+	// The pin, enforced where it counts: a key vouches for the trains
+	// it was pinned to and no others, so the fast channels' hot key
+	// can never speak for a stable one.
+	if !key.Vouches(channel) {
+		return nil, fmt.Errorf("key %s does not vouch for channel %s", key.Hex(), channel)
+	}
 	return &Checked{Manifest: m, Key: key, ETag: gotETag, Raw: raw, Sig: sig}, nil
 }
 

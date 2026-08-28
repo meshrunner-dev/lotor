@@ -1,6 +1,7 @@
 package update
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -188,5 +189,57 @@ func TestLoopbackMaySpeakHTTP(t *testing.T) {
 		if err := bad.check(); err == nil {
 			t.Errorf("%s passed as loopback", url)
 		}
+	}
+}
+
+func TestAKeyVouchesForItsTrainAndNoOther(t *testing.T) {
+	stable := PublicKey{Channels: []string{"release", "rc", "beta"}}
+	fast := PublicKey{Channels: []string{"dev", "try-*"}}
+	open := PublicKey{}
+	for _, c := range []struct {
+		key     PublicKey
+		channel string
+		want    bool
+	}{
+		{stable, "release", true}, {stable, "beta", true}, {stable, "dev", false},
+		{fast, "dev", true}, {fast, "try-pr-123", true}, {fast, "release", false},
+		{fast, "try", false}, // the family needs its dash
+		{open, "anything", true},
+	} {
+		if got := c.key.Vouches(c.channel); got != c.want {
+			t.Errorf("Vouches(%v, %q) = %v", c.key.Channels, c.channel, got)
+		}
+	}
+}
+
+func TestTheChannelPinRidesTheKeyFile(t *testing.T) {
+	_, pub := pair(t)
+	pub.Channels = []string{"release", "rc", "beta"}
+	back, err := ParsePublicKey(MarshalPublic(pub))
+	if err != nil || len(back.Channels) != 3 || back.Channels[0] != "release" {
+		t.Fatalf("the pin did not round trip: %+v, %v", back.Channels, err)
+	}
+	// The comment is where root speaks: a hand-written store entry
+	// pins the same way.
+	text := strings.Replace(string(MarshalPublic(pub)),
+		"channels: release rc beta", "channels: dev,try-*", 1)
+	edited, err := ParsePublicKey([]byte(text))
+	if err != nil || !edited.Vouches("try-x") || edited.Vouches("release") {
+		t.Fatalf("the hand pin did not read: %+v, %v", edited.Channels, err)
+	}
+}
+
+func TestTheHotKeyCannotSpeakForTheStableChannel(t *testing.T) {
+	// The whole point of the trains: a manifest honestly signed by
+	// the fast key, served on the release channel, is refused by the
+	// pin — at the fetch, and again at the installer's re-check.
+	fastSec, fastPub := pair(t)
+	fastPub.Channels = []string{"dev", "try-*"}
+	m := channelManifest() // channel: release
+	srv := host(t, fastSec, m)
+	c := &Client{Base: srv.URL, Trusted: []PublicKey{fastPub}}
+	if _, err := c.Check(context.Background(), "release", ""); err == nil ||
+		!strings.Contains(err.Error(), "does not vouch for channel release") {
+		t.Fatalf("the pin did not hold at the fetch: %v", err)
 	}
 }

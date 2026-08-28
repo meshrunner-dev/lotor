@@ -19,18 +19,36 @@ new artifact URLs — no deployed relay changes.
    Enable Pages on the default branch, root. Add the DNS record:
    `updates.meshrunner.dev CNAME <org>.github.io`.
 
-2. **The signing key.** On a trusted machine:
+2. **The signing keys — one per train.** On a trusted machine:
    ```
-   go run ./cmd/relsign keygen /some/private/place
+   go run ./cmd/relsign keygen /private/stable release rc beta
+   go run ./cmd/relsign keygen /private/fast   dev try-*
    ```
-   - The **secret** (`relsign.key`) becomes the org Actions secret
-     `RELSIGN_KEY` — file content, verbatim. It is never printed and
-     never committed.
-   - The **public** half goes into `officialKeys` in
-     `internal/update/trust.go`, as the file reads. The workflows
-     refuse to publish while that list is empty.
+   The channel pin rides each `.pub` file's comment line, and every
+   verifier reads it there: a key vouches for its train and no other,
+   so the hot fast key can never sign anything a release-following
+   relay accepts.
+   - Each **secret** (`relsign.key`) becomes the `RELSIGN_KEY` secret
+     of its **Actions environment** (below) — file content, verbatim,
+     never printed and never committed.
+   - Both **public** halves go into `officialKeys` in
+     `internal/update/trust.go`, exactly as the files read. The
+     workflows refuse to publish while that list is empty.
 
-3. **The deploy key.** `ssh-keygen -t ed25519 -f updates-deploy`;
+3. **The Actions environments.** Two, matching the trains:
+   - `stable` — holds the stable train's `RELSIGN_KEY`. Protection
+     rules: deployment allowed from tags `v*` only, and a required
+     reviewer, so pushing a tag is not enough to mint a signed stable
+     release — someone approves the signing job. (Protection rules
+     need a public repository, or Team/Enterprise for a private
+     fork.)
+   - `fast` — holds the fast train's key, no gates: dev signs every
+     push by design.
+   The signing jobs declare `environment:`; keep them minimal and
+   free of third-party actions — the environment bounds who and when,
+   not what a compromised step inside the approved job could read.
+
+4. **The deploy key.** `ssh-keygen -t ed25519 -f updates-deploy`;
    the public half becomes a *deploy key with write access* on the
    `updates` repository, the private half the org secret
    `UPDATES_DEPLOY_KEY`.

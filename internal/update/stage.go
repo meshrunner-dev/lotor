@@ -158,12 +158,19 @@ func VerifyStaged(dir string, trusted []PublicKey) (*Ready, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := Verify(raw, sig, trusted); err != nil {
+	key, err := Verify(raw, sig, trusted)
+	if err != nil {
 		return nil, err
 	}
 	m, err := ParseManifest(raw)
 	if err != nil {
 		return nil, err
+	}
+	// The same pin the check enforced, held by the installer's own
+	// hand: a stage signed by a key outside the channel's train is
+	// refused however it got here.
+	if !key.Vouches(m.Channel) {
+		return nil, fmt.Errorf("key %s does not vouch for channel %s", key.Hex(), m.Channel)
 	}
 	art, err := m.ArtifactFor(ready.Platform)
 	if err != nil {
