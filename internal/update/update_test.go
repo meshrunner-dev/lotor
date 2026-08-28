@@ -86,12 +86,13 @@ func TestTrustedReadsTheOperatorsDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	keys, err := Trusted(dir)
-	if err != nil || len(keys) != 1 || keys[0].ID != pub.ID {
-		t.Fatalf("Trusted = %d keys, %v", len(keys), err)
+	if err != nil || len(keys) != len(officialKeys)+1 ||
+		keys[len(keys)-1].ID != pub.ID {
+		t.Fatalf("Trusted = %d keys, %v — want the official set plus the fork's", len(keys), err)
 	}
 	// A directory that does not exist contributes nothing and fails
 	// nothing: most relays never deposit a key.
-	if keys, err := Trusted(filepath.Join(dir, "absent")); err != nil || len(keys) != 0 {
+	if keys, err := Trusted(filepath.Join(dir, "absent")); err != nil || len(keys) != len(officialKeys) {
 		t.Fatalf("absent dir: %d keys, %v", len(keys), err)
 	}
 	// A malformed key is an error, never a silent skip.
@@ -241,5 +242,26 @@ func TestTheHotKeyCannotSpeakForTheStableChannel(t *testing.T) {
 	if _, err := c.Check(context.Background(), "release", ""); err == nil ||
 		!strings.Contains(err.Error(), "does not vouch for channel release") {
 		t.Fatalf("the pin did not hold at the fetch: %v", err)
+	}
+}
+
+func TestTheEmbeddedKeysParseAndKeepTheirTrains(t *testing.T) {
+	keys, err := Trusted(t.TempDir() + "/absent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("%d embedded keys, want the two trains", len(keys))
+	}
+	stable, fast := keys[0], keys[1]
+	if !stable.Vouches("release") || !stable.Vouches("rc") || !stable.Vouches("beta") ||
+		stable.Vouches("dev") {
+		t.Errorf("the stable key's pin bent: %v", stable.Channels)
+	}
+	if !fast.Vouches("dev") || !fast.Vouches("try-pr-9") || fast.Vouches("release") {
+		t.Errorf("the fast key's pin bent: %v", fast.Channels)
+	}
+	if stable.Hex() != "eb9e324264f759a8" || fast.Hex() != "1b2b9d744447e47f" {
+		t.Errorf("key ids drifted: %s, %s", stable.Hex(), fast.Hex())
 	}
 }

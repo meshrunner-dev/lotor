@@ -23,7 +23,16 @@ import (
 // environment, the fast one signs dev and try-* on every push. Empty
 // until the first keys are minted; the workflows refuse to publish
 // while it is.
-var officialKeys = []string{}
+var officialKeys = []string{
+	// The stable train: what a production relay follows. Signed from
+	// the protected environment, tags only, a human approving.
+	"untrusted comment: minisign public key EB9E324264F759A8; channels: release rc beta\n" +
+		"RWTrnjJCZPdZqDU4KGmFPcezPrYj+7+pTb1F+CJZQY21lJEaxLdk0iFT\n",
+	// The fast train: every push to main, every manual build. Hot by
+	// design, and pinned so it can never speak for the stable train.
+	"untrusted comment: minisign public key 1B2B9D744447E47F; channels: dev try-*\n" +
+		"RWQbK510REfkf5h/5S6NkBNJWSIEQ43DvFnI6SWlw9IObb4kT3Cx08mW\n",
+}
 
 // TrustedKeysDir is where an operator deposits additional public
 // keys — a fork's, typically. Root-owned on purpose.
