@@ -411,6 +411,59 @@ func (m *manager) Mutate(ctx context.Context, kind, name string,
 	return msg, nil
 }
 
+// maskSecrets replaces every secret value in a revision with the mask,
+// asking the schema which attributes those are — the same Secret flag
+// print and export honour. Naming them here would be a fourth list to
+// keep in step, and lists drift.
+func (m *manager) maskSecrets(f *config.File, kind, name string, change map[string]confdb.Change) {
+	k, choice, err := m.kindAndChoiceIn(f, kind, name)
+	if err != nil {
+		return // the caller's own error path reports it
+	}
+	for _, a := range k.AttrsFor(choice) {
+		if !a.Secret {
+			continue
+		}
+		c, ok := change[a.Name]
+		if !ok {
+			continue
+		}
+		if c.Old != nil {
+			c.Old = maskedChange
+		}
+		if c.New != nil {
+			c.New = maskedChange
+		}
+		change[a.Name] = c
+	}
+}
+
+// undoValues turns a revision's recorded changes into the set and
+// unset an undo applies: the old value becomes the new one, and an
+// attribute that had none is unset.
+//
+// A secret is masked precisely so it cannot be read back, which
+// leaves nothing to restore. Replaying the mask would write the word
+// "<secret>" into a live credential and report success; refusing says
+// what to do instead.
+func undoValues(revID int64, changes map[string]confdb.Change) (map[string]any, []string, error) {
+	typed := map[string]any{}
+	var unset []string
+	for attr, c := range changes {
+		if c.Old == nil {
+			unset = append(unset, attr)
+			continue
+		}
+		if c.Old == maskedChange {
+			return nil, nil, fmt.Errorf(
+				"revision %d changed %s, a secret the history does not record — "+
+					"undo cannot restore it; set it by hand", revID, attr)
+		}
+		typed[attr] = c.Old
+	}
+	return typed, unset, nil
+}
+
 // Undo inverts the newest recorded mutation — the old values become
 // the new ones, recorded like any other change so an undo can itself
 // be undone.
@@ -426,14 +479,9 @@ func (m *manager) Undo(ctx context.Context, principal string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	typed := map[string]any{}
-	var unset []string
-	for attr, c := range changes {
-		if c.Old == nil {
-			unset = append(unset, attr)
-			continue
-		}
-		typed[attr] = c.Old
+	typed, unset, err := undoValues(rev.ID, changes)
+	if err != nil {
+		return "", err
 	}
 	msg, err := m.applyTyped(ctx, rev.Kind, rev.Name, typed, unset, principal, "undo")
 	if err != nil {
@@ -465,6 +513,7 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 	if err != nil {
 		return "", err
 	}
+	m.maskSecrets(next, kind, name, change)
 	if err := next.Validate(false); err != nil {
 		return "", err
 	}
@@ -605,6 +654,7 @@ func (m *manager) commitCreate(ctx context.Context, next *config.File,
 			return "", err
 		}
 	}
+	m.maskSecrets(next, kind, name, change)
 	section, err := objectSection(next, kind, name)
 	if err != nil {
 		return "", err
@@ -667,12 +717,6 @@ func (m *manager) createRelay(next *config.File, name string,
 		if _, err := setRelayAttr(&rc, attr, v); err != nil {
 			return "", err
 		}
-		if attr == attrIdentity && minted != "" {
-			// The seed is a secret from birth: the revision records
-			// that an identity exists, never what it is.
-			change[attr] = confdb.Change{New: maskedChange}
-			continue
-		}
 		change[attr] = confdb.Change{New: v}
 	}
 	next.Relays[name] = rc
@@ -732,11 +776,7 @@ func (m *manager) createMQTT(next *config.File, name string,
 			return err
 		}
 		setOverride(&mq.Layered, attr, v)
-		newVal := any(fmt.Sprintf("%v", v))
-		if attr == attrMQTTPassword {
-			newVal = maskedChange
-		}
-		change[attr] = confdb.Change{New: newVal}
+		change[attr] = confdb.Change{New: fmt.Sprintf("%v", v)}
 	}
 	if next.MQTT == nil {
 		next.MQTT = map[string]config.MQTT{}
@@ -756,18 +796,12 @@ func applyMQTTChanges(next *config.File, name string,
 		return nil, fmt.Errorf("no observer %q", name)
 	}
 	change := map[string]confdb.Change{}
-	mask := func(attr string, v any) any {
-		if attr == attrMQTTPassword && v != nil {
-			return maskedChange
-		}
-		return v
-	}
 	for attr, v := range typed {
 		old, stored, err := setMQTTAttr(&mq, attr, v)
 		if err != nil {
 			return nil, err
 		}
-		change[attr] = confdb.Change{Old: mask(attr, old), New: mask(attr, stored)}
+		change[attr] = confdb.Change{Old: old, New: stored}
 	}
 	for _, attr := range unset {
 		if attr == attrProfile {
@@ -782,7 +816,7 @@ func applyMQTTChanges(next *config.File, name string,
 		if err != nil {
 			return nil, err
 		}
-		change[attr] = confdb.Change{Old: mask(attr, old)}
+		change[attr] = confdb.Change{Old: old}
 	}
 	next.MQTT[name] = mq
 	return change, nil
@@ -818,10 +852,6 @@ func setMQTTAttr(mq *config.MQTT, attr string, v any) (old, stored any, err erro
 		return setOverride(&mq.Layered, attr, v), v, nil
 	}
 }
-
-// attrMQTTPassword is the one observer attribute a revision must not
-// record in the clear.
-const attrMQTTPassword = "password"
 
 // attrDisabled is the parking flag: the object stays, nothing runs.
 const attrDisabled = "disabled"
@@ -1046,6 +1076,13 @@ func (m *manager) parseChanges(kind, name string,
 }
 
 func (m *manager) kindAndChoice(kind, name string) (*schema.Kind, string, error) {
+	return m.kindAndChoiceIn(m.file, kind, name)
+}
+
+// kindAndChoiceIn resolves against a given configuration rather than
+// the running one: an object being created lives only in the file
+// about to be committed.
+func (m *manager) kindAndChoiceIn(f *config.File, kind, name string) (*schema.Kind, string, error) {
 	var k *schema.Kind
 	for i := range m.kinds {
 		if m.kinds[i].Name == kind {
@@ -1061,19 +1098,19 @@ func (m *manager) kindAndChoice(kind, name string) (*schema.Kind, string, error)
 	}
 	switch kind {
 	case confdb.KindRelay:
-		rc, ok := m.file.Relays[name]
+		rc, ok := f.Relays[name]
 		if !ok {
 			return nil, "", fmt.Errorf("no relay %q", name)
 		}
 		return k, rc.Protocol, nil
 	case confdb.KindRadio:
-		rd, ok := m.file.Radios[name]
+		rd, ok := f.Radios[name]
 		if !ok {
 			return nil, "", fmt.Errorf("no radio %q", name)
 		}
 		return k, rd.Driver, nil
 	case confdb.KindMQTT:
-		if _, ok := m.file.MQTT[name]; !ok {
+		if _, ok := f.MQTT[name]; !ok {
 			return nil, "", fmt.Errorf("no observer %q", name)
 		}
 		return k, "", nil
@@ -1469,13 +1506,7 @@ func applyUpdateChanges(next *config.File,
 		if err != nil {
 			return nil, err
 		}
-		old := orNil(*f)
-		newVal := any(text)
-		if attr == attrToken {
-			// The revision records that it changed, never what to.
-			old, newVal = maskedChange, maskedChange
-		}
-		change[attr] = confdb.Change{Old: old, New: newVal}
+		change[attr] = confdb.Change{Old: orNil(*f), New: text}
 		*f = text
 	}
 	for _, attr := range unset {
@@ -1483,11 +1514,7 @@ func applyUpdateChanges(next *config.File,
 		if err != nil {
 			return nil, err
 		}
-		old := orNil(*f)
-		if attr == attrToken {
-			old = maskedChange
-		}
-		change[attr] = confdb.Change{Old: old}
+		change[attr] = confdb.Change{Old: orNil(*f)}
 		*f = ""
 	}
 	next.Update = &u

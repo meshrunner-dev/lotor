@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/config"
 )
 
@@ -212,5 +213,69 @@ func TestObserverIATANormalizesAtTheDoor(t *testing.T) {
 	}
 	if change["iata"].New != any("PAR") {
 		t.Errorf("revision records %v", change["iata"])
+	}
+}
+
+func TestNoSecretReachesTheRevision(t *testing.T) {
+	// guest_password is the case a named list misses: declared secret
+	// beside identity, and never masked until the schema was asked.
+	m := &manager{kinds: buildKinds(), file: sampleFile()}
+	change := map[string]confdb.Change{
+		"identity":       {Old: "0011", New: "2233"},
+		"guest_password": {Old: "hunter2", New: "swordfish"},
+		"node_name":      {Old: "old name", New: "new name"},
+	}
+	m.maskSecrets(m.file, "relay", "meshcore-868", change)
+
+	for _, attr := range []string{"identity", "guest_password"} {
+		if got := change[attr]; got.Old != maskedChange || got.New != maskedChange {
+			t.Errorf("%s recorded as %v → %v, want both masked", attr, got.Old, got.New)
+		}
+	}
+	if got := change["node_name"]; got.Old != "old name" || got.New != "new name" {
+		t.Errorf("an ordinary attribute was masked: %v → %v", got.Old, got.New)
+	}
+}
+
+func TestMaskingLeavesAnAbsentValueAbsent(t *testing.T) {
+	// A first set has no old value, and an unset has no new one. Those
+	// nils are what undo reads to know it should unset, so masking
+	// must not invent a value where there was none.
+	m := &manager{kinds: buildKinds(), file: sampleFile()}
+	change := map[string]confdb.Change{"identity": {New: "2233"}}
+	m.maskSecrets(m.file, "relay", "meshcore-868", change)
+	if got := change["identity"]; got.Old != nil || got.New != maskedChange {
+		t.Errorf("first set recorded as %v → %v", got.Old, got.New)
+	}
+}
+
+func TestUndoRefusesASecretItCannotRestore(t *testing.T) {
+	// Measured on the MQTT password before this guard existed: undo
+	// set it to the literal "<secret>" and reported success.
+	_, _, err := undoValues(7, map[string]confdb.Change{
+		"password": {Old: maskedChange, New: maskedChange},
+	})
+	if err == nil {
+		t.Fatal("undo replayed a masked secret")
+	}
+	for _, want := range []string{"revision 7", "password", "set it by hand"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	// The first change to a secret records no old value, so undoing it
+	// unsets — that case is restorable and must keep working.
+	typed, unset, err := undoValues(8, map[string]confdb.Change{
+		"password": {New: maskedChange},
+	})
+	if err != nil || len(typed) != 0 || len(unset) != 1 || unset[0] != "password" {
+		t.Errorf("first-set undo = %v %v %v, want an unset", typed, unset, err)
+	}
+	// And an ordinary attribute is unaffected.
+	typed, _, err = undoValues(9, map[string]confdb.Change{
+		"node_name": {Old: "old name", New: "new name"},
+	})
+	if err != nil || typed["node_name"] != "old name" {
+		t.Errorf("ordinary undo = %v %v", typed, err)
 	}
 }
