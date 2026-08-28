@@ -73,6 +73,10 @@ jobs:
           S3_BUCKET: ${{ vars.S3_BUCKET }}
           DL_BASE: ${{ vars.DL_BASE }}
         run: |
+          # The bucket wiring is the environment's to provide — absent
+          # values must fail here, in one line, not as a bent URL or a
+          # cryptic aws error three steps later.
+          : "${DL_BASE:?the environment must name its public download base}"
           for f in lotor_linux_arm64 lotor_linux_amd64 lotor_linux_arm; do
             mv "$f" "${f/lotor_/lotor_${VERSION}_}"
           done

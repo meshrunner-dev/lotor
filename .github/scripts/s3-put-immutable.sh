@@ -14,6 +14,8 @@
 # the stable train's bytes any more than its key can sign for it.
 set -euo pipefail
 key="$1" file="$2"
+: "${S3_ENDPOINT:?the environment must name its S3 API endpoint}"
+: "${S3_BUCKET:?the environment must name its bucket}"
 
 s3() { aws s3api "$1" --endpoint-url "$S3_ENDPOINT" --bucket "$S3_BUCKET" "${@:2}"; }
 
