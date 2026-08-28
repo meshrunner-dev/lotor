@@ -9,10 +9,15 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"meshrunner.dev/lotor/internal/update"
 )
@@ -35,9 +40,57 @@ func run(args []string) error {
 		return sign(rest)
 	case "verify":
 		return verify(rest)
+	case "manifest":
+		return manifest(rest)
 	default:
 		return fmt.Errorf("unknown command %q", cmd)
 	}
+}
+
+// manifest writes a channel manifest from built artifacts: each
+// argument names a platform, the URL the artifact will be served
+// from, and the local file whose bytes those are — the hash and size
+// are measured here, from the same bytes the workflow uploads, so
+// the manifest cannot drift from the artifact it describes.
+func manifest(args []string) error {
+	if len(args) < 4 {
+		return errors.New(
+			"usage: relsign manifest <channel> <version> <out.json> <platform>=<url>=<file> [more]")
+	}
+	m := update.Manifest{
+		Product:   "lotor",
+		Channel:   args[0],
+		Version:   args[1],
+		Published: time.Now().UTC().Truncate(time.Second),
+		Artifacts: map[string]update.Artifact{},
+	}
+	for _, spec := range args[3:] {
+		parts := strings.SplitN(spec, "=", 3)
+		if len(parts) != 3 {
+			return fmt.Errorf("artifact %q — want platform=url=file", spec)
+		}
+		content, err := readArg(parts[2])
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(content)
+		m.Artifacts[parts[0]] = update.Artifact{
+			URL:    parts[1],
+			SHA256: hex.EncodeToString(sum[:]),
+			Size:   int64(len(content)),
+		}
+	}
+	raw, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	// Parsed back before it is written: the writer holds itself to
+	// exactly what the readers will demand.
+	if _, err := update.ParseManifest(raw); err != nil {
+		return err
+	}
+	return writeArg(args[2], raw, 0o644)
 }
 
 // keygen writes relsign.key and relsign.pub into dir. The secret is

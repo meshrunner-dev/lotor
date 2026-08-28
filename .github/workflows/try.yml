@@ -1,0 +1,75 @@
+# The try channel: a manual build of any branch or PR, dropped into
+# one fixed pre-release bucket — assets named by their subject, never
+# a release or a tag per build — and served under a channel named
+# after it. try-clean sweeps what nobody fetched for a while.
+name: try channel
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "branch name, or pr/<number>"
+        required: true
+        type: string
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.m.outputs.ref }}
+      slug: ${{ steps.m.outputs.slug }}
+      version: ${{ steps.m.outputs.version }}
+    steps:
+      - id: m
+        run: |
+          ref="${{ inputs.ref }}"
+          case "$ref" in
+            pr/*) slug="pr-${ref#pr/}"; ref="refs/pull/${ref#pr/}/head" ;;
+            *)    slug="branch-$(echo "$ref" | tr -c 'a-zA-Z0-9' '-' | tr -s '-' | sed 's/-$//')" ;;
+          esac
+          { echo "ref=$ref"; echo "slug=$slug"
+            echo "version=0.1.0-try.${slug}.$(date -u +%Y%m%d%H%M%S)"; } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: meta
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      ref: ${{ needs.meta.outputs.ref }}
+
+  publish:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      SLUG: ${{ needs.meta.outputs.slug }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Drop the assets into the try bucket
+        run: |
+          gh release view try >/dev/null 2>&1 || gh release create try --prerelease \
+            --title "try (bucket)" --notes "Manual branch and PR builds; swept periodically."
+          for f in lotor_linux_arm64 lotor_linux_amd64; do
+            mv "$f" "${f/lotor_/lotor_${SLUG}_}"
+          done
+          gh release upload try --clobber "lotor_${SLUG}_linux_arm64" "lotor_${SLUG}_linux_amd64"
+      - name: Sign and publish the manifest
+        env:
+          RELSIGN_KEY: ${{ secrets.RELSIGN_KEY }}
+          DEPLOY_KEY: ${{ secrets.UPDATES_DEPLOY_KEY }}
+        run: |
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/try"
+          printf '%s' "$RELSIGN_KEY" > relsign.key
+          go run ./cmd/relsign manifest "try-${SLUG}" "$VERSION" manifest.json \
+            "linux/arm64=${base}/lotor_${SLUG}_linux_arm64=lotor_${SLUG}_linux_arm64" \
+            "linux/amd64=${base}/lotor_${SLUG}_linux_amd64=lotor_${SLUG}_linux_amd64"
+          go run ./cmd/relsign sign relsign.key manifest.json
+          ./.github/scripts/publish-manifests.sh "try-${SLUG}"

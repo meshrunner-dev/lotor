@@ -46,7 +46,7 @@ import (
 
 // version identifies this build in the CLI banner and status; the
 // firmware string a companion reads over the air is the same one.
-const version = lotorversion.Version
+var version = lotorversion.Version
 
 // commandLine is the Kong grammar. Bare `lotor` prints this help and
 // does nothing else — running the daemon is an explicit choice.

@@ -1,0 +1,64 @@
+# The dev channel: every push to main lands in one rolling
+# pre-release whose assets are replaced in place — a single entry on
+# the releases page, never recreated — and a freshly signed manifest
+# on the update host. A relay fetching mid-replacement is caught by
+# the manifest's sha256 and simply retries later.
+name: dev channel
+on:
+  push:
+    branches: [main]
+concurrency:
+  group: dev-channel
+  cancel-in-progress: true
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: echo "version=0.1.0-dev.$(date -u +%Y%m%d%H%M%S).${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Refuse to publish unsigned channels
+        run: grep -q "untrusted comment" internal/update/trust.go ||
+          { echo "no embedded official key — mint one and embed it first"; exit 1; }
+      - name: Replace the rolling dev assets
+        run: |
+          gh release view dev >/dev/null 2>&1 || gh release create dev --prerelease \
+            --title "dev (rolling)" --notes "The dev channel bucket: assets follow main."
+          gh release upload dev --clobber lotor_linux_arm64 lotor_linux_amd64
+      - name: Sign and publish the manifest
+        env:
+          RELSIGN_KEY: ${{ secrets.RELSIGN_KEY }}
+          DEPLOY_KEY: ${{ secrets.UPDATES_DEPLOY_KEY }}
+        run: |
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/dev"
+          printf '%s' "$RELSIGN_KEY" > relsign.key
+          go run ./cmd/relsign manifest dev "$VERSION" manifest.json \
+            "linux/arm64=${base}/lotor_linux_arm64=lotor_linux_arm64" \
+            "linux/amd64=${base}/lotor_linux_amd64=lotor_linux_amd64"
+          go run ./cmd/relsign sign relsign.key manifest.json
+          ./.github/scripts/publish-manifests.sh dev

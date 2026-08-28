@@ -1,0 +1,45 @@
+# The one build every channel shares: a matrix of platforms, the
+# version stamped into the binary, artifacts handed back to whichever
+# workflow called. Channels differ in what they do with the result,
+# never in how it was built.
+name: build
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      ref:
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux, goarch: arm64 }
+          - { goos: linux, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath \
+            -ldflags "-s -w -X meshrunner.dev/lotor/internal/version.Version=${{ inputs.version }}" \
+            -o "lotor_${{ matrix.goos }}_${{ matrix.goarch }}" ./cmd/lotor
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lotor_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: lotor_${{ matrix.goos }}_${{ matrix.goarch }}
+          if-no-files-found: error

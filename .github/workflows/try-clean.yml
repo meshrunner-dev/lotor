@@ -1,0 +1,42 @@
+# Sweep the try bucket: manifests older than two weeks go, and the
+# assets they pointed at go with them. Real channels are never
+# touched — the sweep only ever reads lotor/try-*/.
+name: try sweep
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Sweep stale try channels
+        env:
+          DEPLOY_KEY: ${{ secrets.UPDATES_DEPLOY_KEY }}
+        run: |
+          eval "$(ssh-agent -s)"
+          ssh-add - <<< "$DEPLOY_KEY"
+          mkdir -p ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git clone --depth 1 "git@github.com:${GITHUB_REPOSITORY_OWNER}/updates.git"
+          cutoff=$(date -u -d "14 days ago" +%s)
+          for dir in updates/lotor/try-*/; do
+            [ -d "$dir" ] || continue
+            published=$(jq -r .published "$dir/manifest.json" 2>/dev/null || echo "")
+            [ -n "$published" ] && [ "$(date -u -d "$published" +%s)" -gt "$cutoff" ] && continue
+            slug=$(basename "$dir"); slug="${slug#try-}"
+            echo "sweeping try-${slug}"
+            gh release delete-asset try "lotor_${slug}_linux_arm64" -y --repo "$GITHUB_REPOSITORY" || true
+            gh release delete-asset try "lotor_${slug}_linux_amd64" -y --repo "$GITHUB_REPOSITORY" || true
+            rm -r "$dir"
+          done
+          cd updates
+          git add -A
+          git diff --cached --quiet && exit 0
+          git -c user.name=relbot -c user.email=bots@meshrunner.dev \
+            commit -m "chore: sweep stale try channels"
+          git push
