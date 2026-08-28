@@ -144,3 +144,36 @@ func TestUndoCoercionsSurviveJSON(t *testing.T) {
 		t.Fatal("a fractional queue depth went through")
 	}
 }
+
+func TestObserverDisableIsStructural(t *testing.T) {
+	f := &config.File{MQTT: map[string]config.MQTT{
+		"lab": {Layered: config.Layered{Overrides: map[string]map[string]any{
+			config.CustomProfile: {"url": "tcp://127.0.0.1:1883"},
+		}}},
+	}}
+	change, owner, err := applyChanges(f, "mqtt", "lab",
+		map[string]any{"disabled": true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner != "" {
+		t.Errorf("disabling an observer bounced relay %q", owner)
+	}
+	if !f.MQTT["lab"].Disabled {
+		t.Error("disabled did not land on the field")
+	}
+	// The flag is item metadata, never a broker parameter: the
+	// override scope must not have caught it.
+	if _, leaked := f.MQTT["lab"].Layered.Overrides[config.CustomProfile]["disabled"]; leaked {
+		t.Error("disabled leaked into the override scope")
+	}
+	if c := change["disabled"]; c.New != any(true) {
+		t.Errorf("revision records %v", c)
+	}
+	if _, _, err := applyChanges(f, "mqtt", "lab", nil, []string{"disabled"}); err != nil {
+		t.Fatal(err)
+	}
+	if f.MQTT["lab"].Disabled {
+		t.Error("unset did not clear the flag")
+	}
+}

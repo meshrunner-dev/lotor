@@ -440,9 +440,12 @@ func buildKinds() []schema.Kind {
 	}...)
 	kinds = append(kinds, schema.Kind{
 		Name: confdb.KindMQTT, Doc: "observer connections publishing the mesh to MQTT brokers",
-		Attrs: append([]schema.Attr{{Name: attrProfile, Type: schema.String,
-			Doc: `the community-broker preset; "custom" starts from nothing`}},
-			mqtt.Schema()...),
+		Attrs: append([]schema.Attr{
+			{Name: attrProfile, Type: schema.String,
+				Doc: `the community-broker preset; "custom" starts from nothing`},
+			{Name: attrDisabled, Type: schema.Bool,
+				Doc: "parked: the configuration is kept, the connection does not run"},
+		}, mqtt.Schema()...),
 		Profiles: func(string) []string { return sortedNames(mqtt.Presets()) },
 	})
 	return append(kinds, singletonKinds()...)

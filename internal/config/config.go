@@ -187,6 +187,8 @@ type System struct {
 // observer code, beside the preset catalog it resolves against.
 type MQTT struct {
 	Layered Layered `yaml:",inline"`
+	// Disabled parks the connection: configuration kept, nothing runs.
+	Disabled bool `yaml:"disabled"`
 }
 
 // Update is where this relay looks for newer versions of itself.

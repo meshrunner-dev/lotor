@@ -135,6 +135,7 @@ against, pinned to the schema by test:
 | attr | type | default | note |
 |---|---|---|---|
 | `profile` | string | custom | community preset; `custom` starts empty |
+| `disabled` | bool | false | parked: configuration kept, nothing runs |
 | `url` | string | — | `tcp://host:1883`, `ssl://`, `ws(s)://` |
 | `username` | string | "" | `{pubkey}` sends the node key |
 | `password` | string, Secret | "" | |
@@ -183,7 +184,9 @@ config at start, bounced when their instance mutates — never bouncing
 the relay, whose frames they merely watch. The console gets `/mqtt`
 through the existing kind machinery (add/set/print/export), plus
 `status` on an instance: connected or not, what was published,
-dropped, filtered.
+dropped, filtered. `disable <name>` / `enable <name>` park and unpark
+a connection — sugar over `set disabled=` — and the listing marks
+parked ones with an `X` under a `Flags:` legend.
 
 ## Order of work
 

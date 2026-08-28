@@ -1298,22 +1298,32 @@ func (s *session) mqttStatus(name string) error {
 func (s *session) mqttList() error {
 	mqs := s.mqtts()
 	if len(mqs) == 0 {
-		fmt.Fprint(s.out, "no observers running\r\n")
+		fmt.Fprint(s.out, "no observers configured\r\n")
 		return nil
 	}
-	tb := s.table()
-	tb.header("NAME", "BROKER", "RELAY", "STATE", "PUBLISHED")
 	for _, mq := range mqs {
-		state := "connecting"
-		if mq.Connected != nil && mq.Connected() {
-			state = "connected"
+		if mq.Disabled {
+			fmt.Fprint(s.out, "Flags: X - disabled\r\n")
+			break
 		}
-		published := "-"
+	}
+	tb := s.table()
+	tb.header("", "NAME", "BROKER", "RELAY", "STATE", "PUBLISHED")
+	for _, mq := range mqs {
+		flag, state, published := "", "down", "-"
+		switch {
+		case mq.Disabled:
+			flag, state = "X", "-"
+		case mq.Connected != nil && mq.Connected():
+			state = "connected"
+		case mq.Connected != nil:
+			state = "connecting"
+		}
 		if mq.Counters != nil {
 			n, _, _, _, _ := mq.Counters()
 			published = strconv.FormatUint(n, 10)
 		}
-		tb.row(mq.Name, mq.URL, mq.Relay, state, published)
+		tb.row(flag, mq.Name, mq.URL, mq.Relay, state, published)
 	}
 	return tb.flush(s.out)
 }

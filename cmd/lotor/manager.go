@@ -448,6 +448,9 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 			return "applied — the next check reads it", nil
 		case confdb.KindMQTT:
 			m.bounceObserver(name)
+			if next.MQTT[name].Disabled {
+				return "applied — observer " + name + " disabled", nil
+			}
 			return "applied — observer " + name + " reconnecting", nil
 		}
 		return "applied — no running relay uses this yet", nil
@@ -637,6 +640,9 @@ func (m *manager) mqttTraces(out map[string][]config.Trace) {
 		rows := []config.Trace{
 			{Key: attrProfile, Value: profileName(mq.Layered), Source: sourceConfig},
 		}
+		if mq.Disabled {
+			rows = append(rows, config.Trace{Key: attrDisabled, Value: true, Source: sourceConfig})
+		}
 		if _, traces, err := mq.Layered.Resolve(mqtt.Presets()); err == nil {
 			rows = withStructural(traces, rows)
 		}
@@ -665,6 +671,15 @@ func (m *manager) createMQTT(next *config.File, name string,
 		return err
 	}
 	for attr, v := range typed {
+		if attr == attrDisabled {
+			b, err := asBool(attr, v)
+			if err != nil {
+				return err
+			}
+			mq.Disabled = b
+			change[attr] = confdb.Change{New: fmt.Sprintf("%v", v)}
+			continue
+		}
 		setOverride(&mq.Layered, attr, v)
 		newVal := any(fmt.Sprintf("%v", v))
 		if attr == attrMQTTPassword {
@@ -698,14 +713,22 @@ func applyMQTTChanges(next *config.File, name string,
 	}
 	for attr, v := range typed {
 		var old any
-		if attr == attrProfile {
+		switch attr {
+		case attrProfile:
 			old = mq.Layered.Profile
 			text, err := asString(attr, v)
 			if err != nil {
 				return nil, err
 			}
 			mq.Layered.Profile = text
-		} else {
+		case attrDisabled:
+			old = mq.Disabled
+			b, err := asBool(attr, v)
+			if err != nil {
+				return nil, err
+			}
+			mq.Disabled = b
+		default:
 			old = setOverride(&mq.Layered, attr, v)
 		}
 		change[attr] = confdb.Change{Old: mask(attr, old), New: mask(attr, v)}
@@ -713,6 +736,11 @@ func applyMQTTChanges(next *config.File, name string,
 	for _, attr := range unset {
 		if attr == attrProfile {
 			return nil, errors.New("profile cannot be unset — set it to what it should be")
+		}
+		if attr == attrDisabled {
+			change[attr] = confdb.Change{Old: mq.Disabled}
+			mq.Disabled = false
+			continue
 		}
 		old, err := unsetOverride(&mq.Layered, attr)
 		if err != nil {
@@ -727,6 +755,9 @@ func applyMQTTChanges(next *config.File, name string,
 // attrMQTTPassword is the one observer attribute a revision must not
 // record in the clear.
 const attrMQTTPassword = "password"
+
+// attrDisabled is the parking flag: the object stays, nothing runs.
+const attrDisabled = "disabled"
 
 // hasBrokerScheme admits the transports the client dials.
 func hasBrokerScheme(url string) bool {

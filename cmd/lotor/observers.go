@@ -289,6 +289,10 @@ func (m *manager) startObserver(ctx context.Context, name string) {
 		return
 	}
 	log := m.log.Named("mqtt").With(zap.String("observer", name))
+	if mq.Disabled {
+		log.Info("observer disabled — not started")
+		return
+	}
 	p, err := resolveMQTTParams(mq)
 	if err != nil {
 		log.Error("observer not started", zap.Error(err))
@@ -352,11 +356,14 @@ func (m *manager) bounceObserversOf(relayName string) {
 	}
 }
 
-// MQTTInfos is the console's live view of the observers.
+// MQTTInfos is the console's live view of the observers — the running
+// ones with their counters, and the configured-but-not-running ones
+// (disabled, or refused at start) so the listing and the tree still
+// see every object there is.
 func (m *manager) MQTTInfos() []cli.MQTTInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]cli.MQTTInfo, 0, len(m.observers))
+	out := make([]cli.MQTTInfo, 0, len(m.file.MQTT))
 	for name, h := range m.observers {
 		out = append(out, cli.MQTTInfo{
 			Name: name, URL: h.url, Relay: h.relay,
@@ -366,6 +373,19 @@ func (m *manager) MQTTInfos() []cli.MQTTInfo {
 				return n.Published, n.PublishErrors, n.BusDropped, n.Filtered, n.LastPublished
 			},
 		})
+	}
+	for name, mq := range m.file.MQTT {
+		if _, live := m.observers[name]; live {
+			continue
+		}
+		row := cli.MQTTInfo{Name: name, Disabled: mq.Disabled}
+		if p, err := resolveMQTTParams(mq); err == nil {
+			row.URL = p.URL
+			if relayName, err := m.observerRelay(p.Relay); err == nil {
+				row.Relay = relayName
+			}
+		}
+		out = append(out, row)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out

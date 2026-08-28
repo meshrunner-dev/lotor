@@ -164,9 +164,12 @@ type RelayInfo struct {
 
 // MQTTInfo is what the CLI knows about one observer connection.
 type MQTTInfo struct {
-	Name  string
-	URL   string
-	Relay string
+	Name string
+	// Disabled marks a parked connection: configured, deliberately
+	// not running.
+	Disabled bool
+	URL      string
+	Relay    string
 	// Connected reports the broker session's state right now.
 	Connected func() bool
 	// Published, PublishErrors, BusDropped, Filtered and LastPublished

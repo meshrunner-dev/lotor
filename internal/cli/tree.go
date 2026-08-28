@@ -334,6 +334,8 @@ func (s *session) treeVerb(ctx context.Context, path []string,
 		return s.treeStatus(ctx, path)
 	case verb == verbSet || verb == verbUnset:
 		return s.treeSet(ctx, path, verb, args)
+	case verb == verbDisable || verb == verbEnable:
+		return s.treeToggle(ctx, path, verb, args)
 	case verb == verbAdd || verb == verbRemove:
 		return s.treeCreateRemove(ctx, path, verb, args)
 	case len(path) == 0:
@@ -385,7 +387,49 @@ const (
 	// in the flat table because it only ever answers about the thing
 	// the session is standing in.
 	verbStatus = "status"
+	// disable parks an object without losing its configuration —
+	// sugar over set disabled=, the flag print marks with an X.
+	verbDisable = "disable"
+	verbEnable  = "enable"
 )
+
+// disableable says which kinds answer to disable and enable — the
+// ones whose objects may exist without running.
+func disableable(kind string) bool { return kind == scopeMQTT }
+
+// treeToggle serves disable and enable: from the collection with a
+// name on the line, from the instance with nothing — both land as the
+// one mutation set disabled= would be.
+func (s *session) treeToggle(ctx context.Context, path []string, verb string, args []string) error {
+	if s.deps.Mutate == nil {
+		return errors.New("this daemon has no mutation channel")
+	}
+	if s.deps.Privilege != Admin {
+		return fmt.Errorf("%s is an admin verb — use the local console socket", verb)
+	}
+	var name string
+	switch {
+	case len(path) == 2:
+		name = path[1]
+		if len(args) > 0 {
+			return fmt.Errorf("%s here works on %s — nothing else on the line", verb, name)
+		}
+	case len(args) != 1:
+		return fmt.Errorf("usage: %s <name>", verb)
+	default:
+		name = args[0]
+	}
+	value := "yes"
+	if verb == verbEnable {
+		value = "no"
+	}
+	msg, err := s.deps.Mutate(ctx, path[0], name, map[string]string{"disabled": value}, nil, "console")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(s.out, "%s\r\n", msg)
+	return nil
+}
 
 // treeCreateRemove serves add and remove, from a kind's collection —
 // and remove from a singleton, whose whole block is the instance.
@@ -1118,16 +1162,33 @@ type term struct {
 	content bool
 }
 
+// instanceNameTerms completes an instance name where a collection
+// verb wants one; on an instance there is nothing left to say.
+func (s *session) instanceNameTerms(path []string) []term {
+	if len(path) != 1 || s.isSingleton(path) {
+		return nil
+	}
+	instances := s.instances(path[0])
+	out := make([]term, 0, len(instances))
+	for name, choice := range instances {
+		out = append(out, term{name: name, class: cAttr, doc: choice})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
+}
+
 // verbDoc says what each of the tree's own verbs does, in the one line
 // the help gives it.
 var verbDoc = map[string]string{
-	verbPrint:  "show what is here",
-	verbStatus: "show it as it is running",
-	verbExport: "print the lines that would recreate this",
-	verbSet:    "change an attribute",
-	verbUnset:  "clear an attribute, back to what the preset says",
-	verbAdd:    "bring a new one into existence",
-	verbRemove: "take one out of existence",
+	verbPrint:   "show what is here",
+	verbStatus:  "show it as it is running",
+	verbExport:  "print the lines that would recreate this",
+	verbSet:     "change an attribute",
+	verbUnset:   "clear an attribute, back to what the preset says",
+	verbAdd:     "bring a new one into existence",
+	verbRemove:  "take one out of existence",
+	verbDisable: "park it: keep the configuration, stop running it",
+	verbEnable:  "unpark it and run it again",
 }
 
 // termsAt lists everything typeable at one place.
@@ -1227,7 +1288,11 @@ func (s *session) verbNamesAt(path []string) []string {
 		}
 		return verbs
 	case len(path) == 1:
-		return []string{verbPrint, verbAdd, verbRemove, verbExport}
+		verbs := []string{verbPrint, verbAdd, verbRemove, verbExport}
+		if disableable(path[0]) {
+			verbs = append(verbs, verbDisable, verbEnable)
+		}
+		return verbs
 	default:
 		if site := s.drawerSiteAt(path); site != nil {
 			// A drawer holds what the mesh is doing. There is nothing
@@ -1241,6 +1306,9 @@ func (s *session) verbNamesAt(path []string) []string {
 			return append(verbs, site.d.itemVerbs...)
 		}
 		verbs := []string{verbPrint, verbStatus, verbSet, verbUnset, verbExport}
+		if disableable(path[0]) {
+			verbs = append(verbs, verbDisable, verbEnable)
+		}
 		for _, v := range commandNames() {
 			if s.mountedVerb(path[0], v) {
 				verbs = append(verbs, v)
@@ -1349,6 +1417,8 @@ func (s *session) argTermsFor(path, rest []string) []term {
 	switch verb {
 	case verbPrint:
 		return s.printTerms(path)
+	case verbRemove, verbDisable, verbEnable:
+		return s.instanceNameTerms(path)
 	case verbSet, verbUnset, verbAdd:
 		attrs := s.attrsAt(path)
 		if verb == verbAdd && len(path) == 1 && !s.isSingleton(path) {
