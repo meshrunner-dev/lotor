@@ -807,10 +807,14 @@ func (s *session) printOnce(ctx context.Context, path []string, detail, secrets 
 		if detail {
 			return s.printDetail(path[0], secrets)
 		}
-		if path[0] == scopeRelay {
+		switch path[0] {
+		case scopeRelay:
 			return s.relayList()
+		case scopeMQTT:
+			return s.mqttList()
+		default:
+			return s.radioList()
 		}
-		return s.radioList()
 	}
 	switch s.placeAt(path) {
 	case atDrawer:
