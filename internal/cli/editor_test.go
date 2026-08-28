@@ -224,6 +224,36 @@ func TestShellKillsAndMotions(t *testing.T) {
 	if len(got) != 1 || got[0] != "ccbb" {
 		t.Fatalf("ctrl+w mid-line = %q", got)
 	}
+	// Ctrl+K is Ctrl+U's mirror: it keeps what precedes the cursor.
+	// Five lefts park it before " json"; the kill takes the rest.
+	got = edit(t, "nodes json\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x0b\r")
+	if len(got) != 1 || got[0] != "nodes" {
+		t.Fatalf("ctrl+k = %q", got)
+	}
+	// At the end of the line it has nothing to kill and must not eat
+	// the line itself.
+	got = edit(t, "nodes\x0b\r")
+	if len(got) != 1 || got[0] != "nodes" {
+		t.Fatalf("ctrl+k at end = %q", got)
+	}
+}
+
+func TestCtrlLClearsTheScreenAndKeepsTheDraft(t *testing.T) {
+	// The draft survives the clear — the screen is redrawn around it,
+	// which is the whole point of clearing mid-command.
+	got := edit(t, "stat\x0cus\r")
+	if len(got) != 1 || got[0] != "status" {
+		t.Fatalf("ctrl+l = %q", got)
+	}
+	// And it must actually clear: home, then erase the display.
+	var out bytes.Buffer
+	ed := newEditor(strings.NewReader("x\x0c\r"), &out)
+	if _, err := ed.readLine(); err != nil {
+		t.Fatalf("readLine: %v", err)
+	}
+	if !strings.Contains(out.String(), "\x1b[H\x1b[2J") {
+		t.Errorf("no clear sequence in %q", out.String())
+	}
 }
 
 func TestReverseSearchFindsAndRuns(t *testing.T) {

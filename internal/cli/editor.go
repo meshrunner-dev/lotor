@@ -169,6 +169,17 @@ func (e *editor) control(c byte) (finished bool) {
 			e.cur = 0
 			e.render()
 		}
+	case 0x0b: // Ctrl+K: kill to the end of the line
+		if e.cur < len(e.buf) {
+			e.buf = e.buf[:e.cur]
+			e.render()
+		}
+	case 0x0c: // Ctrl+L: clear the screen, keeping the line being edited
+		// Home before erase: the cursor is somewhere down the drawing,
+		// and screenRow counts rows that are about to stop existing.
+		fmt.Fprint(e.out, "\x1b[H\x1b[2J")
+		e.screenRow = 0
+		e.render()
 	case 0x01: // Ctrl+A: start of line
 		e.cur = 0
 		e.render()
