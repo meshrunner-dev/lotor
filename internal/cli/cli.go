@@ -84,6 +84,20 @@ type Neighbour struct {
 	Heard time.Time
 }
 
+// AirSession is one companion logged in over the air, as the console
+// shows it.
+type AirSession struct {
+	PubKey [32]byte
+	Admin  bool
+	// Path is the route home the client taught us, one hash byte per
+	// hop; HasPath false means answers flood. A zero-hop path says
+	// the client is adjacent, which is not the same as not knowing.
+	Path        []byte
+	HasPath     bool
+	PathLearned time.Time
+	LastActive  time.Time
+}
+
 // RelayInfo is what the CLI knows about one relay.
 type RelayInfo struct {
 	Name     string
@@ -119,6 +133,9 @@ type RelayInfo struct {
 	// Neighbours lists the direct neighbourhood — repeaters heard with
 	// no relay in between; nil when the engine keeps none.
 	Neighbours func() []Neighbour
+	// AirSessions lists the companions logged in over the air; nil
+	// when the protocol keeps no sessions.
+	AirSessions func() ([]AirSession, error)
 	// Duty reports the sliding-hour airtime spent against the band's
 	// budget; may be nil, ok false when unbudgeted or not transmitting.
 	Duty func() (used, budget time.Duration, ok bool)

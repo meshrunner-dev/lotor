@@ -446,11 +446,7 @@ func (e *engine) RequestAdvert(flood bool) error {
 	default:
 		return errors.New("an advert is already pending")
 	}
-	e.wakeMu.Lock()
-	if e.wakeRx != nil {
-		e.wakeRx() // close the receive window: serve the order now
-	}
-	e.wakeMu.Unlock()
+	e.wakeReceiver()
 	return o.started.wait("advert")
 }
 

@@ -607,6 +607,7 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		Discover:      discoverOf(eng),
 		TriggerAdvert: advertTrigger(eng),
 		Neighbours:    neighboursOf(eng),
+		AirSessions:   airSessionsOf(eng),
 		Identity:      eng.Identity(),
 	}
 }
@@ -628,6 +629,32 @@ func neighboursOf(eng protocol.Engine) func() []cli.Neighbour {
 			out[i] = cli.Neighbour{PubKey: r.PubKey, Name: r.Name, SNR: r.SNR, Heard: r.Heard}
 		}
 		return out
+	}
+}
+
+// airSessionsOf exposes an engine's over-the-air session table when
+// it keeps one, converted to the console's own row type.
+func airSessionsOf(eng protocol.Engine) func() ([]cli.AirSession, error) {
+	a, ok := eng.(interface {
+		ClientSessions() ([]enginemc.ClientSession, error)
+	})
+	if !ok {
+		return nil
+	}
+	return func() ([]cli.AirSession, error) {
+		rows, err := a.ClientSessions()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]cli.AirSession, len(rows))
+		for i, r := range rows {
+			out[i] = cli.AirSession{
+				PubKey: r.PubKey, Admin: r.Admin,
+				Path: r.Path, HasPath: r.HasPath,
+				PathLearned: r.PathLearned, LastActive: r.LastActive,
+			}
+		}
+		return out, nil
 	}
 }
 

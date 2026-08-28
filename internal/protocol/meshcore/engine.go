@@ -188,8 +188,12 @@ type engine struct {
 	// is the window currently open, engine-goroutine only.
 	sweepAsk     chan *sweep
 	pendingSweep *sweep
-	wakeMu       sync.Mutex
-	wakeRx       context.CancelFunc
+	// sessionsAsk carries the console's request for a snapshot of the
+	// client table. It asks for no emission, so unlike the others it
+	// is served whatever the gate's mode.
+	sessionsAsk chan *sessionsOrder
+	wakeMu      sync.Mutex
+	wakeRx      context.CancelFunc
 }
 
 // paramsFrom is the strict decode both build and the config checker
@@ -337,16 +341,17 @@ func newEngine(relayName string, p params, id *meshcore.LocalIdentity,
 ) *engine {
 	p = p.withDefaults()
 	return &engine{
-		relay:      relayName,
-		p:          p,
-		id:         id,
-		bus:        b,
-		log:        log,
-		seen:       newSeenTable(p.DedupTTL, p.DedupEntries),
-		neighbours: newNeighbourTable(),
-		acl:        newACL(),
-		limits:     newLimits(),
-		scopes:     newScopeTable(p),
+		relay:       relayName,
+		p:           p,
+		id:          id,
+		bus:         b,
+		log:         log,
+		seen:        newSeenTable(p.DedupTTL, p.DedupEntries),
+		neighbours:  newNeighbourTable(),
+		acl:         newACL(),
+		sessionsAsk: make(chan *sessionsOrder, 1),
+		limits:      newLimits(),
+		scopes:      newScopeTable(p),
 	}
 }
 
@@ -382,6 +387,7 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 		e.log.Info("dry run: judging frames, transmitting nothing")
 	}
 	for {
+		e.drainSessionsAsk(time.Now())
 		// Reception blocks until the pipeline next needs the radio —
 		// the queue's earliest schedule or an advert clock. Nothing
 		// pending means no deadline at all.
@@ -401,7 +407,12 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 			ctx.Err() == nil:
 			// The receive window closed — by its deadline, or by an
 			// operator order waking the receiver; while the parent
-			// lives, nobody else holds that cancel. The pipeline's turn.
+			// lives, nobody else holds that cancel. The pipeline's
+			// turn — which a dry gate has none of: the only order that
+			// reaches it is the snapshot, served at the loop's top.
+			if !e.txEnabled() {
+				continue
+			}
 			if err := e.txPhase(ctx, dev); err != nil {
 				return err
 			}
@@ -420,17 +431,20 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 // order that landed while no window was open is caught by the pending
 // check here, on the way into the next one.
 func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.CancelFunc) {
-	if !e.txEnabled() {
-		return ctx, func() {}
-	}
 	// Held across the choice and the store both: an order landing
 	// between them would otherwise fire a cancel this window has not
-	// published yet, and wait for a frame that may never come.
+	// published yet, and wait for a frame that may never come. A dry
+	// gate registers the wake too — the snapshot order asks for no
+	// emission, and it must not have to wait for a frame to land.
 	e.wakeMu.Lock()
 	defer e.wakeMu.Unlock()
 	var rctx context.Context
 	var cancel context.CancelFunc
 	switch wait, ok := e.txWait(time.Now()); {
+	case len(e.sessionsAsk) > 0:
+		rctx, cancel = context.WithDeadline(ctx, time.Now())
+	case !e.txEnabled():
+		rctx, cancel = context.WithCancel(ctx)
 	case len(e.advertAsk) > 0 || len(e.scopeAsk) > 0 || len(e.sweepAsk) > 0:
 		rctx, cancel = context.WithDeadline(ctx, time.Now())
 	case ok:
@@ -440,6 +454,16 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 	}
 	e.wakeRx = cancel
 	return rctx, cancel
+}
+
+// wakeReceiver closes the current receive window so a pending order
+// is served now rather than at the next scheduled duty.
+func (e *engine) wakeReceiver() {
+	e.wakeMu.Lock()
+	if e.wakeRx != nil {
+		e.wakeRx()
+	}
+	e.wakeMu.Unlock()
 }
 
 // Neighbours reports the nodes heard with no relay in between, newest

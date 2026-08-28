@@ -1504,3 +1504,40 @@ func TestASessionSeesItsOwnLifeCycle(t *testing.T) {
 	}
 	doneB()
 }
+
+func TestAirSessionsAreADrawerOnTheRelay(t *testing.T) {
+	deps := testDeps(t)
+	var adjacent, routed, lost [32]byte
+	adjacent[0], routed[0], lost[0] = 0xAA, 0xBB, 0xCC
+	deps.Relays[0].AirSessions = func() ([]AirSession, error) {
+		return []AirSession{
+			// A taught route, hop by hop, is the whole point of asking.
+			{PubKey: routed, HasPath: true, Path: []byte{0x4f, 0xa2}, LastActive: time.Now()},
+			// Zero hops is knowledge too: the client is adjacent.
+			{PubKey: adjacent, HasPath: true, Path: []byte{}, LastActive: time.Now()},
+			// And no route yet is what it costs.
+			{PubKey: lost, LastActive: time.Now()},
+		}, nil
+	}
+	out := run(t, deps, "/relay/meshcore-868/sessions/print")
+	for _, want := range []string{"4f→a2 (2 hops)", "adjacent (0 hops)", "none yet — answers flood",
+		"direct", "flood", "guest"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the table lacks %q:\n%s", want, out)
+		}
+	}
+	// One of them is somewhere to stand.
+	one := run(t, deps, "/relay/meshcore-868/sessions/bb0000000000/print")
+	if !strings.Contains(one, "4f→a2") {
+		t.Errorf("standing on a session showed nothing of it:\n%s", one)
+	}
+	// Runtime through and through: print answers, nothing else does.
+	if refused := run(t, deps, "/relay/meshcore-868/sessions/export"); !strings.Contains(refused, `no "export" here`) {
+		t.Errorf("the drawer answered to export:\n%s", refused)
+	}
+	// A protocol without sessions says so.
+	deps.Relays[0].AirSessions = nil
+	if none := run(t, deps, "/relay/meshcore-868/sessions/print"); !strings.Contains(none, "keeps no over-the-air sessions") {
+		t.Errorf("the absence was not named:\n%s", none)
+	}
+}

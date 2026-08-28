@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
+	"time"
 )
 
 // A drawer is a runtime collection an instance holds: what the mesh is
@@ -79,6 +81,9 @@ func pairs(row []field) [][2]string {
 	return out
 }
 
+// drawerSessions names two drawers, one per holder: the console's own
+// sessions on /cli, the over-the-air ones on a relay. Same word on
+// purpose — each reads as "the sessions this thing holds".
 const (
 	drawerNeighbours = "neighbours"
 	drawerSessions   = "sessions"
@@ -102,7 +107,113 @@ var drawers = []drawer{{
 	empty: "nobody connected", // unreachable: the reader is a session
 	keys:  (*session).sessionKeys,
 	view:  (*session).sessionView,
+}, {
+	name:  drawerSessions,
+	doc:   "companions logged in over the air",
+	on:    scopeRelay,
+	empty: "nobody logged in",
+	keys:  (*session).airSessionKeys,
+	view:  (*session).airSessionView,
 }}
+
+// airSessions reads a relay's over-the-air session table, refusing
+// with the relay's own reason when it is down.
+func (s *session) airSessions(instance string) ([]AirSession, error) {
+	r, err := s.findRelay(instance)
+	if err != nil {
+		return nil, err
+	}
+	if err := working(r); err != nil {
+		return nil, err
+	}
+	if r.AirSessions == nil {
+		return nil, fmt.Errorf("relay %q keeps no over-the-air sessions", r.Name)
+	}
+	return r.AirSessions()
+}
+
+// airSessionKeys is the walker's and completion's answer — bounded,
+// because a completion that hangs on a stuck relay is worse than one
+// that offers nothing.
+func (s *session) airSessionKeys(instance string) map[string]string {
+	type result struct{ rows []AirSession }
+	ch := make(chan result, 1)
+	go func() {
+		rows, _ := s.airSessions(instance)
+		ch <- result{rows}
+	}()
+	select {
+	case got := <-ch:
+		out := map[string]string{}
+		for _, c := range got.rows {
+			out[hex.EncodeToString(c.PubKey[:6])] = airRole(c)
+		}
+		return out
+	case <-time.After(completionBudget):
+		return nil
+	}
+}
+
+// airSessionView reads the table for printing.
+func (s *session) airSessionView(ctx context.Context, instance string) (drawerView, error) {
+	rows, err := s.airSessions(instance)
+	if err != nil {
+		return drawerView{}, err
+	}
+	named := s.nodeNames(ctx)
+	v := drawerView{
+		header: []string{"KEY", "NAME", "WHO", "ANSWERS", "PATH", "ACTIVE"},
+		rows:   map[string][]field{},
+	}
+	for _, c := range rows {
+		key := hex.EncodeToString(c.PubKey[:6])
+		v.keys = append(v.keys, key)
+		v.rows[key] = []field{
+			{name: "name", value: meshName(named[key]), rendered: true},
+			{name: "who", value: airRole(c)},
+			{name: "answers", value: airAnswers(c)},
+			{name: "path", value: airPath(c)},
+			{name: "active", value: ago(c.LastActive)},
+		}
+	}
+	sort.Strings(v.keys)
+	return v, nil
+}
+
+// airRole names what a companion may do here.
+func airRole(c AirSession) string {
+	if c.Admin {
+		return "admin"
+	}
+	return "guest"
+}
+
+// airAnswers says how a reply to this companion travels: down the
+// route it taught us, or flooded across the mesh until it does.
+func airAnswers(c AirSession) string {
+	if !c.HasPath {
+		return "flood"
+	}
+	return "direct"
+}
+
+// airPath spells the route home, hop by hop, oldest step first — the
+// hashes a directed answer will visit on its way to the source. No
+// route yet reads as what it costs: every answer floods.
+func airPath(c AirSession) string {
+	switch {
+	case !c.HasPath:
+		return "none yet — answers flood"
+	case len(c.Path) == 0:
+		return "adjacent (0 hops)"
+	default:
+		hops := make([]string, len(c.Path))
+		for i, h := range c.Path {
+			hops[i] = hex.EncodeToString([]byte{h})
+		}
+		return strings.Join(hops, "→") + fmt.Sprintf(" (%d hops)", len(c.Path))
+	}
+}
 
 // drawerSite is where a path stands relative to a drawer: which one,
 // the instance holding it — empty for a singleton's — and the item,
