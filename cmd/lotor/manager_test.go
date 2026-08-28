@@ -279,3 +279,34 @@ func TestUndoRefusesASecretItCannotRestore(t *testing.T) {
 		t.Errorf("ordinary undo = %v %v", typed, err)
 	}
 }
+
+func TestOrphanOverridesCanStillBeUnset(t *testing.T) {
+	// A key stored by a past shape of the software — the schema no
+	// longer names it, and refusing the unset stranded it in the
+	// store with no door but sqlite.
+	m := &manager{kinds: buildKinds(), file: &config.File{MQTT: map[string]config.MQTT{
+		"lab": {Layered: config.Layered{Overrides: map[string]map[string]any{
+			config.CustomProfile: {"url": "tcp://127.0.0.1:1883", "neighbors": true},
+		}}},
+	}}}
+	if _, err := m.parseChanges("mqtt", "lab", nil, []string{"neighbors"}); err != nil {
+		t.Fatalf("orphan unset refused: %v", err)
+	}
+	// A name no shape ever stored stays refused.
+	if _, err := m.parseChanges("mqtt", "lab", nil, []string{"never_was"}); err == nil {
+		t.Error("an invented name passed the door")
+	}
+	change, _, err := applyChanges(m.file, "mqtt", "lab", nil, []string{"neighbors"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, held := m.file.MQTT["lab"].Layered.Overrides[config.CustomProfile]["neighbors"]; held {
+		t.Error("the orphan survived its unset")
+	}
+	// The revision cannot know whether a past shape's key was secret,
+	// so its value travels masked.
+	m.maskSecrets(m.file, "mqtt", "lab", change)
+	if change["neighbors"].Old != maskedChange {
+		t.Errorf("orphan value recorded in the clear: %+v", change["neighbors"])
+	}
+}

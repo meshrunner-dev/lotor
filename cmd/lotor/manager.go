@@ -492,13 +492,12 @@ func (m *manager) maskSecrets(f *config.File, kind, name string, change map[stri
 	if err != nil {
 		return // the caller's own error path reports it
 	}
-	for _, a := range k.AttrsFor(choice) {
-		if !a.Secret {
-			continue
-		}
-		c, ok := change[a.Name]
+	attrs := k.AttrsFor(choice)
+	known := make(map[string]bool, len(attrs))
+	mask := func(name string) {
+		c, ok := change[name]
 		if !ok {
-			continue
+			return
 		}
 		if c.Old != nil {
 			c.Old = maskedChange
@@ -506,7 +505,20 @@ func (m *manager) maskSecrets(f *config.File, kind, name string, change map[stri
 		if c.New != nil {
 			c.New = maskedChange
 		}
-		change[a.Name] = c
+		change[name] = c
+	}
+	for _, a := range attrs {
+		known[a.Name] = true
+		if a.Secret {
+			mask(a.Name)
+		}
+	}
+	// An orphan — a key only a past shape of the schema could name —
+	// cannot say whether it was secret; the mask is the safe default.
+	for name := range change {
+		if !known[name] {
+			mask(name)
+		}
 	}
 }
 
@@ -1136,7 +1148,11 @@ func (m *manager) parseAgainst(kind, choice string,
 
 // parseChanges types every value against the schema the instance's
 // choice resolves — an unknown attribute or a value of the wrong
-// shape is refused before anything else happens.
+// shape is refused before anything else happens. The one exception is
+// an unset naming an orphan: a key a past shape stored that the
+// schema no longer speaks. Refusing those stranded them in the store
+// with no door but sqlite — clearing is the one verb an orphan still
+// answers to.
 func (m *manager) parseChanges(kind, name string,
 	set map[string]string, unset []string,
 ) (map[string]any, error) {
@@ -1144,7 +1160,61 @@ func (m *manager) parseChanges(kind, name string,
 	if err != nil {
 		return nil, err
 	}
-	return m.parseAgainst(kind, choice, set, unset)
+	var orphans, known []string
+	for _, attr := range unset {
+		if m.orphanOverride(kind, name, attr) {
+			orphans = append(orphans, attr)
+			continue
+		}
+		known = append(known, attr)
+	}
+	typed, err := m.parseAgainst(kind, choice, set, known)
+	if err != nil {
+		return nil, err
+	}
+	// The orphans need no validation beyond existing: the apply path
+	// deletes override keys by name and asks the schema nothing.
+	_ = orphans
+	return typed, nil
+}
+
+// orphanOverride reports whether an attribute, unknown to the current
+// schema, still sits in the object's live override scope — stored by
+// a past shape of the software, removable and nothing else.
+func (m *manager) orphanOverride(kind, name, attr string) bool {
+	var l *config.Layered
+	switch kind {
+	case confdb.KindRelay:
+		if rc, ok := m.file.Relays[name]; ok {
+			l = &rc.Layered
+		}
+	case confdb.KindRadio:
+		if rd, ok := m.file.Radios[name]; ok {
+			l = &rd.Layered
+		}
+	case confdb.KindMQTT:
+		if mq, ok := m.file.MQTT[name]; ok {
+			l = &mq.Layered
+		}
+	}
+	if l == nil {
+		return false
+	}
+	scope := l.Profile
+	if scope == "" {
+		scope = config.CustomProfile
+	}
+	if _, held := l.Overrides[scope][attr]; !held {
+		return false
+	}
+	// Known attributes go through the schema door; only what the
+	// schema no longer names is an orphan.
+	k, choice, err := m.kindAndChoice(kind, name)
+	if err != nil {
+		return false
+	}
+	_, known := schema.Find(k.AttrsFor(choice), attr)
+	return !known
 }
 
 func (m *manager) kindAndChoice(kind, name string) (*schema.Kind, string, error) {
