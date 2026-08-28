@@ -466,6 +466,25 @@ func (e *engine) wakeReceiver() {
 	e.wakeMu.Unlock()
 }
 
+// passingBy reports whether a direct packet is in transit between
+// other nodes: hops remain, and the head of the path is not ours to
+// serve. Traces and control packets keep their own judgement — their
+// targets do not ride the path head.
+func (e *engine) passingBy(pkt *meshcore.Packet) (string, bool) {
+	if !pkt.IsRouteDirect() || pkt.PathHashCount() == 0 {
+		return "", false
+	}
+	switch pkt.PayloadType() {
+	case meshcore.PayloadTypeTrace, meshcore.PayloadTypeControl:
+		return "", false
+	default:
+	}
+	if e.id != nil && e.id.HashMatches(pkt.Path[:min(pkt.PathHashSize(), len(pkt.Path))]) {
+		return "", false // ours to relay: witnessed and judged like anything else
+	}
+	return verdictNotAddressed, true
+}
+
 // Neighbours reports the nodes heard with no relay in between, newest
 // heard first — any goroutine.
 func (e *engine) Neighbours() []Neighbour {
@@ -556,6 +575,22 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 	rx := &reception{pkt: pkt, frame: frame, id: id}
 	judged.Scope = e.scopeName(rx)
 	log = log.With(describe(rx, &judged, e.id)...)
+	// A direct packet still carrying hops belongs to the nodes its
+	// path names. When none of them is us, it passes by without
+	// touching the duplicate table — the reference releases it
+	// unmarked — because the same bytes come back with the path
+	// consumed when we are the destination, and a table that
+	// witnessed the transit copy would call that delivery a
+	// duplicate. Seen off the air: a companion's routed login died
+	// exactly that way, judged in transit and deduplicated on
+	// arrival.
+	if verdict, passing := e.passingBy(pkt); passing {
+		e.stats.countHeard(pkt, frame.RSSI, frame.SNR, frame.Airtime, false)
+		log.Info("frame judged", zap.String("verdict", verdict))
+		judged.Verdict = verdict
+		e.bus.Publish(judged)
+		return
+	}
 	if first, dup := e.seen.witness(pkt.Hash(), id, frame.At); dup {
 		e.stats.countHeard(pkt, frame.RSSI, frame.SNR, frame.Airtime, true)
 		log.Info("frame judged",

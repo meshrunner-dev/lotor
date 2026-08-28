@@ -506,3 +506,75 @@ func TestAFreshLoginDropsTheRouteTheOldConversationTaught(t *testing.T) {
 		t.Error("a flood login kept a route it must rediscover")
 	}
 }
+
+// withHops re-marshals a direct frame with hops still on its path, the
+// shape a routed packet has in transit.
+func withHops(t *testing.T, frame radio.Frame, hops ...byte) radio.Frame {
+	t.Helper()
+	pkt, err := meshcore.ParsePacket(frame.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt.Path, pkt.PathLen = hops, uint8(len(hops))
+	raw, err := pkt.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame.Payload = raw
+	return frame
+}
+
+func TestATransitCopyMustNotDeduplicateTheDelivery(t *testing.T) {
+	// Seen off the air: a companion logs in along a configured path.
+	// The packet is heard twice — once with hops remaining, in transit
+	// between the repeaters it names, and once with the path consumed,
+	// which is the delivery. The transit copy is not ours and must not
+	// poison the duplicate table against the delivery.
+	e, dev, sub, peer := txRig(t, "on-air")
+	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
+	e.queue.depth = 8
+
+	frame, _ := login(t, e.id, peer, nowTS(400), "raccoon", false)
+	e.judge(dev, withHops(t, frame, 0x77, 0x33))
+	if v := awaitJudged(t, sub); v.Verdict != verdictNotAddressed {
+		t.Fatalf("the transit copy was judged %q, want %q", v.Verdict, verdictNotAddressed)
+	}
+	e.judge(dev, frame)
+	v := awaitJudged(t, sub)
+	if v.Verdict != verdictAnon {
+		t.Fatalf("the delivery was judged %q, want %q — the transit copy poisoned the table",
+			v.Verdict, verdictAnon)
+	}
+	if n := len(e.queue.entries); n != 1 {
+		t.Fatalf("%d replies queued, want the login answered once", n)
+	}
+
+	// The other half of the reference's rule still holds: a packet we
+	// relay is witnessed, so its echo cannot be relayed twice.
+	frame2, _ := login(t, e.id, peer, nowTS(401), "raccoon", false)
+	relayed := withHops(t, frame2, e.id.PubKey[0], 0x33)
+	e.judge(dev, relayed)
+	if v := awaitJudged(t, sub); v.Verdict != verdictRelayDirect {
+		t.Fatalf("the next-hop copy was judged %q, want %q", v.Verdict, verdictRelayDirect)
+	}
+	e.judge(dev, relayed)
+	if v := awaitJudged(t, sub); v.Verdict != verdictDuplicate {
+		t.Fatalf("the echo of a relayed packet was judged %q, want %q", v.Verdict, verdictDuplicate)
+	}
+}
+
+// awaitJudged reads bus events until a judgement arrives.
+func awaitJudged(t *testing.T, sub *bus.Subscription) bus.FrameJudged {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-sub.C:
+			if j, ok := ev.(bus.FrameJudged); ok {
+				return j
+			}
+		case <-deadline:
+			t.Fatal("no judgement arrived")
+		}
+	}
+}
