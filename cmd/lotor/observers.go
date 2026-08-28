@@ -289,10 +289,19 @@ func refreshNeighbours(ctx context.Context, info cli.RelayInfo, log *zap.Logger)
 		return true
 	}
 	log.Debug("neighbourhood refresh started", zap.Time("window_closes", until))
+	// The engine closes the channel at the window's end; the deadline
+	// below is the belt for an engine that cannot say so in time —
+	// the round proceeds with the table as it stands rather than
+	// hanging on a quiet channel.
+	overdue := time.NewTimer(time.Until(until) + 30*time.Second)
+	defer overdue.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return false
+		case <-overdue.C:
+			log.Debug("neighbourhood refresh window never closed — table as it stands")
+			return true
 		case _, more := <-answers:
 			if !more {
 				return true

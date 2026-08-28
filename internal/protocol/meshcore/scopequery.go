@@ -130,6 +130,10 @@ func (e *engine) drainScopeAsk(dev radio.Device, now time.Time) {
 			return
 		}
 		e.pendingScope = q
+		// Same quiet-channel clause as the sweep: the slot must free
+		// on time even if nothing is heard, or the next question hits
+		// "already in flight" until luck turns the loop.
+		time.AfterFunc(scopeQueryWait+time.Second, e.wakeReceiver)
 		id := txn.New()
 		e.log.Info("asking a neighbour for its scopes",
 			zap.String("txn", id.Short()), zap.String("peer", shortKey(q.peer[:])))
