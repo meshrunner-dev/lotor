@@ -268,7 +268,7 @@ func (m *manager) neighboursRound(relayName string, log *zap.Logger,
 			}
 			entries = append(entries, e)
 		}
-		log.Debug("neighbourhood round done",
+		log.Info("neighbourhood round done",
 			zap.Int("neighbours", len(entries)), zap.Int("queried", queried))
 		return entries, queried
 	}
@@ -288,7 +288,7 @@ func refreshNeighbours(ctx context.Context, info cli.RelayInfo, log *zap.Logger)
 		log.Debug("neighbourhood refresh skipped — table as it stands", zap.Error(err))
 		return true
 	}
-	log.Debug("neighbourhood refresh started", zap.Time("window_closes", until))
+	log.Info("neighbourhood refresh started", zap.Time("window_closes", until))
 	// The engine closes the channel at the window's end; the deadline
 	// below is the belt for an engine that cannot say so in time —
 	// the round proceeds with the table as it stands rather than
