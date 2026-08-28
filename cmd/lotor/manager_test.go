@@ -404,3 +404,35 @@ func mustDecodeMQTT(t *testing.T, attrs string) config.MQTT {
 	}
 	return mq
 }
+
+func TestRevisionSecretsScrubWhereverTheyNest(t *testing.T) {
+	// Three real shapes from the journal: a plain change, the set that
+	// predates the mask, and the whole-object keepsake of a remove.
+	var c any
+	raw := `{"identity":{"new":"deadbeef"},"node_name":{"new":"x"},` +
+		`"object":{"old":{"overrides":{"eu":{"guest_password":"hunter2","spi":"/dev/spidev0.0"}}}}}`
+	if err := json.Unmarshal([]byte(raw), &c); err != nil {
+		t.Fatal(err)
+	}
+	if !scrubSecrets(c) {
+		t.Fatal("nothing scrubbed")
+	}
+	out, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leaked := range []string{"deadbeef", "hunter2"} {
+		if strings.Contains(string(out), leaked) {
+			t.Errorf("%s survived: %s", leaked, out)
+		}
+	}
+	for _, kept := range []string{`"node_name":{"new":"x"}`, "/dev/spidev0.0"} {
+		if !strings.Contains(string(out), kept) {
+			t.Errorf("%s lost: %s", kept, out)
+		}
+	}
+	// Idempotent: a masked journal stays put.
+	if scrubSecrets(c) {
+		t.Error("a masked journal was rewritten")
+	}
+}
