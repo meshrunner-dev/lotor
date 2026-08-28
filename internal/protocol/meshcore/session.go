@@ -245,6 +245,9 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 	// the keep-alive exists for exactly that, and retiring the
 	// companion that sends one instead of polling would be perverse.
 	c.lastTimestamp, c.lastActive = ts, time.Now()
+	// The advanced timestamp must reach the store before the next
+	// restart, or the request just served would replay after it.
+	e.acl.save(c)
 	if !answered {
 		return // nothing to say, but the session lives on
 	}

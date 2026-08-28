@@ -30,6 +30,7 @@ import (
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/mqtt"
+	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/relay"
 	"meshrunner.dev/lotor/internal/schema"
@@ -128,7 +129,8 @@ func (m *manager) Close() { _ = m.store.Close() }
 func (m *manager) startRelay(ctx context.Context, name string) {
 	rc := m.file.Relays[name]
 	var r *relay.Relay
-	asm, err := assemble(ctx, name, rc, m.file.Radios[rc.Radio], m.bus, m.log, m.sen)
+	asm, err := assemble(ctx, name, rc, m.file.Radios[rc.Radio], m.bus, m.log, m.sen,
+		m.sessionStore(name))
 	if err != nil {
 		m.log.Error("relay configuration failed",
 			zap.String("relay", name), zap.Error(err))
@@ -156,6 +158,52 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 		defer close(done)
 		r.Run(rctx)
 	})
+}
+
+// sessionStore hands a relay a persistence door onto the acl table,
+// keyed to its name: the successor of a bounced relay reads back the
+// very sessions its predecessor kept.
+func (m *manager) sessionStore(relay string) enginemc.SessionStore {
+	return &aclStore{store: m.store, relay: relay}
+}
+
+// aclStore ties the meshcore session table to confdb. It touches the
+// database alone, never the manager's mutex — a save fired from the
+// engine goroutine mid-bounce must not wait on the lock the bounce
+// holds.
+type aclStore struct {
+	store *confdb.Store
+	relay string
+}
+
+func (a *aclStore) LoadSessions() ([]enginemc.PersistedSession, error) {
+	rows, err := a.store.LoadACL(context.Background(), a.relay)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]enginemc.PersistedSession, 0, len(rows))
+	for _, r := range rows {
+		p := enginemc.PersistedSession{
+			Perms: r.Perms, LastTimestamp: r.LastTimestamp,
+			OutPath: r.OutPath, OutPathLen: r.OutPathLen,
+			Learned: r.Learned, LastActive: r.LastActive,
+		}
+		copy(p.PubKey[:], r.PubKey)
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func (a *aclStore) SaveSession(p enginemc.PersistedSession) error {
+	return a.store.SaveACL(context.Background(), a.relay, confdb.ACLRow{
+		PubKey: p.PubKey[:], Perms: p.Perms, LastTimestamp: p.LastTimestamp,
+		OutPath: p.OutPath, OutPathLen: p.OutPathLen,
+		Learned: p.Learned, LastActive: p.LastActive,
+	})
+}
+
+func (a *aclStore) ForgetSession(pubKey [meshcore.PubKeySize]byte) error {
+	return a.store.ForgetACL(context.Background(), a.relay, pubKey[:])
 }
 
 // stopRelay stops one relay and waits for it to let its radio go —

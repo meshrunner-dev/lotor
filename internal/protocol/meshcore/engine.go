@@ -379,7 +379,7 @@ func newEngine(relayName string, p params, id *meshcore.LocalIdentity,
 		log:         log,
 		seen:        newSeenTable(p.DedupTTL, p.DedupEntries),
 		neighbours:  newNeighbourTable(),
-		acl:         newACL(),
+		acl:         newACL(nil),
 		sessionsAsk: make(chan *sessionsOrder, 1),
 		limits:      newLimits(),
 		scopes:      newScopeTable(p),
@@ -393,6 +393,24 @@ func (e *engine) NodeName() string { return e.p.NodeName }
 
 // TrafficStats copies the lifetime tally out, for observers.
 func (e *engine) TrafficStats() StatsSnapshot { return e.stats.Snapshot() }
+
+// AttachSessions gives the engine somewhere to persist its session
+// table and loads what is already there, the shared secret recomputed
+// per session. Called once, before Run: a nil identity keeps the
+// table in memory, since a secret it cannot recompute is a session it
+// cannot restore.
+func (e *engine) AttachSessions(store SessionStore) {
+	if e.id == nil {
+		return
+	}
+	e.acl.store = store
+	e.acl.load(func(pubKey []byte) ([]byte, error) {
+		return e.id.SharedSecret(pubKey)
+	})
+	if n := len(e.acl.by); n > 0 {
+		e.log.Info("sessions restored", zap.Int("count", n))
+	}
+}
 
 // IdentitySign signs a message under the node identity — the device
 // authentication some observer brokers demand. Nil without one.

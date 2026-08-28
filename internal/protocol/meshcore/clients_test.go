@@ -6,7 +6,7 @@ import (
 )
 
 func TestSessionSnapshotCarriesTheRouteButNeverTheSecret(t *testing.T) {
-	a := newACL()
+	a := newACL(nil)
 	now := time.Now()
 	with := &client{secret: []byte("derived"), lastActive: now}
 	with.pubKey[0] = 0xBB

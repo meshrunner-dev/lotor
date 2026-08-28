@@ -65,6 +65,17 @@ CREATE TABLE IF NOT EXISTS revisions(
   op        TEXT NOT NULL,
   change    TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS acl(
+  relay          TEXT NOT NULL,
+  pubkey         BLOB NOT NULL,
+  perms          INTEGER NOT NULL,
+  last_timestamp INTEGER NOT NULL,
+  out_path       BLOB,
+  out_path_len   INTEGER,
+  learned        TEXT,
+  last_active    TEXT NOT NULL,
+  PRIMARY KEY(relay, pubkey)
+);
 INSERT INTO meta(key, value) VALUES('schema_version', '1')
   ON CONFLICT(key) DO NOTHING;
 `

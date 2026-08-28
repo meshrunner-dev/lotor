@@ -69,6 +69,7 @@ func (e *engine) learnOutPath(c *client, pr *meshcore.PathReturn) {
 		learned: time.Now(),
 	}
 	c.lastActive = time.Now()
+	e.acl.save(c)
 	e.log.Info("a client taught us its route home",
 		zap.String("pubkey", shortKey(c.pubKey[:])),
 		zap.Int("hops", int(pr.PathLen&pathHopCountMask)))

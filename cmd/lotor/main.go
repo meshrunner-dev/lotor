@@ -737,7 +737,7 @@ type assembled struct {
 }
 
 func assemble(ctx context.Context, name string, rc config.Relay, radioSpec config.Radio,
-	b *bus.Bus, log *zap.Logger, sen *sentinel.Sentinel,
+	b *bus.Bus, log *zap.Logger, sen *sentinel.Sentinel, sessions enginemc.SessionStore,
 ) (*assembled, error) {
 	res, err := resolveConfigs(rc, radioSpec)
 	if err != nil {
@@ -752,6 +752,16 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 	eng, err := res.builder.Build(name, res.relayCfg, b, rlog)
 	if err != nil {
 		return nil, err
+	}
+	// The session table persists where the protocol keeps one and a
+	// store was offered: a companion outlives the bounce, its replay
+	// guard with it.
+	if sessions != nil {
+		if a, ok := eng.(interface {
+			AttachSessions(store enginemc.SessionStore)
+		}); ok {
+			a.AttachSessions(sessions)
+		}
 	}
 	env, err := bindEnvelope(res.drv, res.radioCfg, eng)
 	if err != nil {

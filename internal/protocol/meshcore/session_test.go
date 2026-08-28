@@ -370,7 +370,7 @@ func TestKeepAliveKeepsTheSessionAlive(t *testing.T) {
 }
 
 func TestIdleSessionsRetire(t *testing.T) {
-	a := newACL()
+	a := newACL(nil)
 	var key [meshcore.PubKeySize]byte
 	key[0] = 0xAB
 	a.put(&client{pubKey: key, lastActive: time.Now().Add(-2 * sessionIdle)})
