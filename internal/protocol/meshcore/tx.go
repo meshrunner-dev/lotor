@@ -693,7 +693,14 @@ func (e *engine) key(ctx context.Context, dev radio.Device, raw []byte) (radio.T
 // requeue puts an entry back for the next pass; a queue that filled
 // meanwhile refuses it, counted like any other refusal.
 func (e *engine) requeue(entry txEntry) {
-	entry.notBefore = time.Now()
+	// A requeue means the radio was busy receiving. The channel is as
+	// occupied as a CAD-busy channel — so the retry keeps the same
+	// pacing, instead of spinning SPI polls against a chip that is
+	// mid-demodulation for the whole of a frame's airtime. Our own
+	// reception completing wakes the receive loop on its edge either
+	// way; only the retransmit attempt is paced.
+	entry.notBefore = time.Now().Add(
+		lbtRetryNominal/2 + rand.N(lbtRetryNominal)) //nolint:gosec // backoff jitter, not security
 	if !e.queue.push(entry) {
 		e.bus.Publish(bus.TxDropped{
 			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: "queue-full",

@@ -1004,3 +1004,18 @@ func TestTheFirstOrderedAdvertIsNotHeldBack(t *testing.T) {
 		t.Fatalf("the first order of a fresh relay was refused: %v", err)
 	}
 }
+
+func TestRequeueIsPacedNotImmediate(t *testing.T) {
+	// A requeue means the radio was busy receiving: retrying with no
+	// delay spins SPI polls against a chip mid-demodulation for a
+	// whole frame's airtime. The retry must carry the LBT pacing.
+	e, _, sub, _ := txRig(t, "shadow")
+	defer sub.Close()
+	before := time.Now()
+	e.requeue(txEntry{kind: "relay-flood", origin: txn.New()})
+	entry := e.queue.entries[0]
+	wait := entry.notBefore.Sub(before)
+	if wait < lbtRetryNominal/2 || wait > lbtRetryNominal*3/2+50*time.Millisecond {
+		t.Errorf("requeue pacing %v — want the LBT retry band around %v", wait, lbtRetryNominal)
+	}
+}
