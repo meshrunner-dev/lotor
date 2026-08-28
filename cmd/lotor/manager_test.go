@@ -177,3 +177,17 @@ func TestObserverDisableIsStructural(t *testing.T) {
 		t.Error("unset did not clear the flag")
 	}
 }
+
+func TestObserverParamsWantABuildableTopic(t *testing.T) {
+	mq := config.MQTT{Layered: config.Layered{Overrides: map[string]map[string]any{
+		config.CustomProfile: {"url": "wss://broker.example:8084"},
+	}}}
+	if _, err := resolveMQTTParams(mq); err == nil ||
+		!strings.Contains(err.Error(), "empty level") {
+		t.Errorf("iata hole accepted: %v", err)
+	}
+	mq.Layered.Overrides[config.CustomProfile]["iata"] = "PAR"
+	if _, err := resolveMQTTParams(mq); err != nil {
+		t.Errorf("with iata: %v", err)
+	}
+}

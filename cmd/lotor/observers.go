@@ -70,6 +70,16 @@ func resolveMQTTParams(mq config.MQTT) (mqtt.Params, error) {
 		return mqtt.Params{}, fmt.Errorf(
 			"neighbors_interval under %s — each round asks every neighbour over the air", neighboursFloor)
 	}
+	// The topic must already build with what is configured — finding a
+	// hole per published frame is a journal full of refusals, not an
+	// answer the operator can act on.
+	topic := p.Topic
+	if topic == "" {
+		topic = mqtt.DefaultTopic
+	}
+	if _, err := mqtt.BuildTopic(topic, p.IATA, "-", p.Token, mqtt.TopicStatus); err != nil {
+		return mqtt.Params{}, fmt.Errorf("nothing could be published: %w", err)
+	}
 	return p, nil
 }
 
