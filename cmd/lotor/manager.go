@@ -681,6 +681,10 @@ func (m *manager) createMQTT(next *config.File, name string,
 			change[attr] = confdb.Change{New: fmt.Sprintf("%v", v)}
 			continue
 		}
+		v, err := mqttOverrideValue(attr, v)
+		if err != nil {
+			return err
+		}
 		setOverride(&mq.Layered, attr, v)
 		newVal := any(fmt.Sprintf("%v", v))
 		if attr == attrMQTTPassword {
@@ -713,26 +717,11 @@ func applyMQTTChanges(next *config.File, name string,
 		return v
 	}
 	for attr, v := range typed {
-		var old any
-		switch attr {
-		case attrProfile:
-			old = mq.Layered.Profile
-			text, err := asString(attr, v)
-			if err != nil {
-				return nil, err
-			}
-			mq.Layered.Profile = text
-		case attrDisabled:
-			old = mq.Disabled
-			b, err := asBool(attr, v)
-			if err != nil {
-				return nil, err
-			}
-			mq.Disabled = b
-		default:
-			old = setOverride(&mq.Layered, attr, v)
+		old, stored, err := setMQTTAttr(&mq, attr, v)
+		if err != nil {
+			return nil, err
 		}
-		change[attr] = confdb.Change{Old: mask(attr, old), New: mask(attr, v)}
+		change[attr] = confdb.Change{Old: mask(attr, old), New: mask(attr, stored)}
 	}
 	for _, attr := range unset {
 		if attr == attrProfile {
@@ -753,12 +742,62 @@ func applyMQTTChanges(next *config.File, name string,
 	return change, nil
 }
 
+// setMQTTAttr writes one observer attribute where it belongs — the
+// structural knobs on their fields, everything else into the live
+// profile's override scope — and reports what it held and what was
+// actually stored, normalization included.
+func setMQTTAttr(mq *config.MQTT, attr string, v any) (old, stored any, err error) {
+	switch attr {
+	case attrProfile:
+		old = mq.Layered.Profile
+		text, err := asString(attr, v)
+		if err != nil {
+			return nil, nil, err
+		}
+		mq.Layered.Profile = text
+		return old, text, nil
+	case attrDisabled:
+		old = mq.Disabled
+		b, err := asBool(attr, v)
+		if err != nil {
+			return nil, nil, err
+		}
+		mq.Disabled = b
+		return old, b, nil
+	default:
+		v, err := mqttOverrideValue(attr, v)
+		if err != nil {
+			return nil, nil, err
+		}
+		return setOverride(&mq.Layered, attr, v), v, nil
+	}
+}
+
 // attrMQTTPassword is the one observer attribute a revision must not
 // record in the clear.
 const attrMQTTPassword = "password"
 
 // attrDisabled is the parking flag: the object stays, nothing runs.
 const attrDisabled = "disabled"
+
+// attrIATA is the region code, normalized at the door like the rest
+// of the ecosystem stores it: validated and uppercased before it
+// lands in an override, so print and the wire say the same thing.
+const attrIATA = "iata"
+
+// mqttOverrideValue is the one door an observer override value passes
+// through, whichever line wrote it: iata comes out normalized,
+// everything else verbatim.
+func mqttOverrideValue(attr string, v any) (any, error) {
+	if attr != attrIATA {
+		return v, nil
+	}
+	text, err := asString(attr, v)
+	if err != nil {
+		return nil, err
+	}
+	return mqtt.NormalizeIATA(text)
+}
 
 // hasBrokerScheme admits the transports the client dials.
 func hasBrokerScheme(url string) bool {

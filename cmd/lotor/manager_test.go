@@ -191,3 +191,26 @@ func TestObserverParamsWantABuildableTopic(t *testing.T) {
 		t.Errorf("with iata: %v", err)
 	}
 }
+
+func TestObserverIATANormalizesAtTheDoor(t *testing.T) {
+	f := &config.File{MQTT: map[string]config.MQTT{
+		"lab": {Layered: config.Layered{Overrides: map[string]map[string]any{
+			config.CustomProfile: {"url": "tcp://127.0.0.1:1883"},
+		}}},
+	}}
+	if _, _, err := applyChanges(f, "mqtt", "lab",
+		map[string]any{"iata": "p@r"}, nil); err == nil {
+		t.Error("a bad code reached the store")
+	}
+	change, _, err := applyChanges(f, "mqtt", "lab",
+		map[string]any{"iata": "par"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.MQTT["lab"].Layered.Overrides[config.CustomProfile]["iata"]; got != "PAR" {
+		t.Errorf("store holds %v, want PAR", got)
+	}
+	if change["iata"].New != any("PAR") {
+		t.Errorf("revision records %v", change["iata"])
+	}
+}
