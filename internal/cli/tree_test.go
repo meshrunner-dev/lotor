@@ -274,6 +274,22 @@ func TestProfileValuesComplete(t *testing.T) {
 	}
 }
 
+func TestCompletionDoesNotStutterASpokenWord(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	// One switch, already on the line: TAB must not offer it again —
+	// a real transcript once read "advert" then flood six times over.
+	if add, hints := s.complete("/relay meshcore-868 advert flood "); add != "" || hints != nil {
+		t.Errorf("flood re-offered: %q %v", add, hints)
+	}
+	// An attribute valued on the line is spoken too.
+	add, hints := s.complete("/relay meshcore-868 print interval=2s ")
+	for _, h := range append(hints, add) {
+		if strings.Contains(h, "interval") {
+			t.Errorf("interval re-offered: %q %v", add, hints)
+		}
+	}
+}
+
 func TestAddRefusesAnAttributeAsTheName(t *testing.T) {
 	deps := testDeps(t)
 	deps.Privilege = Admin

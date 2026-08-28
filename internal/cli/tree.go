@@ -1599,13 +1599,21 @@ func (s *session) completeArgs(path, rest []string, last string) (add string, hi
 	if attr, val, has := strings.Cut(last, "="); has {
 		return s.completeValue(path, rest, attr, val)
 	}
+	// What the line already says is not offered again: a switch
+	// spoken twice means nothing more, and TAB after "advert flood"
+	// must not stutter flood down the line.
+	used := map[string]bool{}
+	for _, a := range rest[1:] {
+		name, _, _ := strings.Cut(a, "=")
+		used[unquoted(name)] = true
+	}
 	// A term that takes a value completes up to its '=', the way a
 	// context completes up to its slash: the operator is mid-argument,
 	// not mid-word.
 	words := make([]string, 0, len(terms))
 	takesValue := map[string]bool{}
 	for _, t := range terms {
-		if t.placeholder {
+		if t.placeholder || used[t.name] {
 			continue
 		}
 		word := t.name
