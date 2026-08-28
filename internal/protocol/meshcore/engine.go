@@ -548,6 +548,7 @@ func (e *engine) heard(frame radio.Frame) (txn.ID, *zap.Logger) {
 		Bytes: len(frame.Payload), RSSI: frame.RSSI, SNR: frame.SNR,
 		SignalRSSI: frame.SignalRSSI, FreqErrHz: frame.FreqErrHz,
 		Airtime: frame.Airtime,
+		Raw:     append([]byte(nil), frame.Payload...),
 	})
 	return id, log
 }

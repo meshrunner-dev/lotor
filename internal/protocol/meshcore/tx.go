@@ -612,6 +612,7 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	sent := bus.FrameSent{
 		Relay: e.relay, Txn: entry.origin, Kind: entry.kind,
 		PowerDBm: e.policy.PowerDBm, Shadow: e.paperOnly(entry.pkt),
+		Raw: append([]byte(nil), raw...),
 	}
 	if sent.Shadow {
 		sent.At, sent.Airtime = time.Now(), dev.Airtime(len(raw))

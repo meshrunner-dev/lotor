@@ -21,7 +21,10 @@ type FrameHeard struct {
 	// FreqErrHz is the sender's carrier offset — a per-node crystal
 	// health signal once averaged over its frames.
 	FreqErrHz float64
-	Airtime   time.Duration
+	// Raw is the frame as it came off the air, whole. Observers
+	// republish it; the journal ignores it.
+	Raw     []byte
+	Airtime time.Duration
 }
 
 // FrameJudged is the protocol engine's verdict on a heard frame.
@@ -72,6 +75,9 @@ type FrameSent struct {
 	// Shadow marks a journalled-never-keyed emission: the audit trail
 	// that earns on-air.
 	Shadow bool
+	// Raw is the frame as it went on the air (or would have, for a
+	// shadow), whole.
+	Raw []byte
 }
 
 // TxDropped is an emission the pipeline gave up on, with its reason:
