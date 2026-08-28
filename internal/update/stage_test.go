@@ -1,6 +1,8 @@
 package update
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -46,6 +48,43 @@ func stagedChannel(t *testing.T, binary []byte) (*Client, *Checked, PublicKey) {
 	return client, checked, pub
 }
 
+// packedChannel serves a channel whose artifact travels gzipped, and
+// returns the checked statement a daemon would hold.
+func packedChannel(t *testing.T, binary []byte) (*Client, *Checked) {
+	t.Helper()
+	sec, pub := pair(t)
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(binary); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	packed := buf.Bytes()
+	packedSum, binSum := sha256.Sum256(packed), sha256.Sum256(binary)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(packed)
+	}))
+	t.Cleanup(srv.Close)
+	m := Manifest{
+		Product: "lotor", Channel: "dev", Version: "0.2.0-dev.abc",
+		Published: time.Now().UTC().Truncate(time.Second),
+		Artifacts: map[string]Artifact{
+			Platform(): {URL: srv.URL + "/artifact.gz",
+				SHA256: hex.EncodeToString(packedSum[:]), Size: int64(len(packed)),
+				Compression:  "gzip",
+				BinarySHA256: hex.EncodeToString(binSum[:]), BinarySize: int64(len(binary))},
+		},
+	}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := &Checked{Manifest: &m, Key: pub, Raw: raw, Sig: Sign(raw, sec, "channel:dev")}
+	return &Client{Base: srv.URL, Trusted: []PublicKey{pub}}, checked
+}
+
 func TestDownloadVerifiesTheBytesItSaves(t *testing.T) {
 	binary := []byte("pretend this is an ELF for the right architecture")
 	client, checked, _ := stagedChannel(t, binary)
@@ -67,6 +106,67 @@ func TestDownloadVerifiesTheBytesItSaves(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, stagedBinary)); !os.IsNotExist(err) {
 		t.Error("the mismatched file was left behind")
+	}
+}
+
+func TestACompressedArtifactUnpacksToProvedBytes(t *testing.T) {
+	binary := []byte("pretend this is an ELF, once the gzip is undone")
+	client, checked := packedChannel(t, binary)
+	dir := t.TempDir()
+	art, _ := checked.Manifest.ArtifactFor(Platform())
+	path, err := client.Download(context.Background(), art, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != string(binary) {
+		t.Fatal("the staged bytes are not the unpacked binary")
+	}
+	// The transport form does not outlive the download.
+	if _, err := os.Stat(filepath.Join(dir, stagedFetch)); !os.IsNotExist(err) {
+		t.Error("the fetched archive was left behind")
+	}
+	// The whole stage holds downstream: marker and installer re-check
+	// speak the binary's hash, never the transport's.
+	if err := WriteStage(dir, checked, Platform()); err != nil {
+		t.Fatal(err)
+	}
+	binSum := sha256.Sum256(binary)
+	ready, err := VerifyStaged(dir, []PublicKey{checked.Key})
+	if err != nil || ready.SHA256 != hex.EncodeToString(binSum[:]) {
+		t.Fatalf("VerifyStaged = %+v, %v", ready, err)
+	}
+}
+
+func TestACompressedArtifactIsRefusedBeforeItIsParsed(t *testing.T) {
+	binary := []byte("bytes nobody will ever unpack")
+	client, checked := packedChannel(t, binary)
+	dir := t.TempDir()
+	art, _ := checked.Manifest.ArtifactFor(Platform())
+	// Bytes the transport bent die on the fetch hash, upstream of the
+	// decompressor; nothing survives on disk.
+	bent := art
+	bent.SHA256 = strings.Repeat("f", 64)
+	if _, err := client.Download(context.Background(), bent, dir); err == nil {
+		t.Fatal("bent transport bytes were accepted")
+	}
+	for _, name := range []string{stagedBinary, stagedFetch} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s was left behind", name)
+		}
+	}
+	// A manifest whose binary promise does not match its own artifact
+	// ends in a clean refusal: the wrong hash, and the wrong size —
+	// the unpack bound — each on their own.
+	wrongHash := art
+	wrongHash.BinarySHA256 = strings.Repeat("f", 64)
+	if _, err := client.Download(context.Background(), wrongHash, dir); err == nil {
+		t.Error("a wrong binary hash was accepted")
+	}
+	short := art
+	short.BinarySize = int64(len(binary) - 1)
+	if _, err := client.Download(context.Background(), short, dir); err == nil ||
+		!strings.Contains(err.Error(), "unpacks to") {
+		t.Errorf("an understated binary_size was accepted: %v", err)
 	}
 }
 

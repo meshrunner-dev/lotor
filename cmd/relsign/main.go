@@ -9,6 +9,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -51,11 +53,19 @@ func run(args []string) error {
 // argument names a platform, the URL the artifact will be served
 // from, and the local file whose bytes those are — the hash and size
 // are measured here, from the same bytes the workflow uploads, so
-// the manifest cannot drift from the artifact it describes.
+// the manifest cannot drift from the artifact it describes. With
+// -gzip the compression happens here too, in the same process that
+// hashes: each file gains a .gz beside it that is byte-for-byte what
+// the manifest's sha256 describes, the file itself becomes the binary
+// pair, and the URL is expected to name the .gz.
 func manifest(args []string) error {
+	var compress bool
+	if len(args) > 0 && args[0] == "-gzip" {
+		compress, args = true, args[1:]
+	}
 	if len(args) < 4 {
 		return errors.New(
-			"usage: relsign manifest <channel> <version> <out.json> <platform>=<url>=<file> [more]")
+			"usage: relsign manifest [-gzip] <channel> <version> <out.json> <platform>=<url>=<file> [more]")
 	}
 	m := update.Manifest{
 		Product:   "lotor",
@@ -74,11 +84,25 @@ func manifest(args []string) error {
 			return err
 		}
 		sum := sha256.Sum256(content)
-		m.Artifacts[parts[0]] = update.Artifact{
+		art := update.Artifact{
 			URL:    parts[1],
 			SHA256: hex.EncodeToString(sum[:]),
 			Size:   int64(len(content)),
 		}
+		if compress {
+			packed, err := gzipBytes(content)
+			if err != nil {
+				return err
+			}
+			if err := writeArg(parts[2]+".gz", packed, 0o644); err != nil {
+				return err
+			}
+			packedSum := sha256.Sum256(packed)
+			art.Compression = "gzip"
+			art.BinarySHA256, art.BinarySize = art.SHA256, art.Size
+			art.SHA256, art.Size = hex.EncodeToString(packedSum[:]), int64(len(packed))
+		}
+		m.Artifacts[parts[0]] = art
 	}
 	raw, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -91,6 +115,23 @@ func manifest(args []string) error {
 		return err
 	}
 	return writeArg(args[2], raw, 0o644)
+}
+
+// gzipBytes packs one artifact at the best ratio — CI pays the
+// compression once, every relay pays the download every time.
+func gzipBytes(content []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	gz, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := gz.Write(content); err != nil {
+		return nil, err
+	}
+	if err := gz.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // keygen writes relsign.key and relsign.pub into dir. The secret is

@@ -136,6 +136,13 @@ linters:
       - path: ^internal/mqtt/payload\.go$
         linters: [tagliatelle]
 
+      # The update manifest is a signed, published contract that forks
+      # and hands with stock minisign already consume: its keys are
+      # snake_case, and restyling them would be publishing a different
+      # format under the same signature scheme.
+      - path: ^internal/update/manifest\.go$
+        linters: [tagliatelle]
+
       # CLI declaration tags (kong) carry inline help texts that cannot
       # wrap.
       - linters: [lll]

@@ -10,6 +10,7 @@ package update
 // signature, or nothing.
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,7 +27,11 @@ import (
 
 // Stage file names, under <state>/updates/.
 const (
-	stagedBinary   = "lotor.next"
+	stagedBinary = "lotor.next"
+	// stagedFetch holds a compressed artifact between its download and
+	// its unpacking — the window where the bytes are proved but not
+	// yet a binary. It never outlives Download.
+	stagedFetch    = "lotor.next.fetch"
 	stagedManifest = "manifest.json"
 	stagedSig      = "manifest.json.minisig"
 	// readyMarker is what the installer's path unit watches for. It is
@@ -43,7 +48,10 @@ const (
 // StageDir is where a state directory keeps its staged update.
 func StageDir(stateDir string) string { return filepath.Join(stateDir, "updates") }
 
-// Ready is the marker's content: what was staged and why.
+// Ready is the marker's content: what was staged and why. SHA256 is
+// the staged binary's — the unpacked bytes when the artifact travelled
+// compressed — because the marker describes what sits on disk, not
+// what rode the wire.
 type Ready struct {
 	Version  string    `json:"version"`
 	Channel  string    `json:"channel"`
@@ -53,16 +61,46 @@ type Ready struct {
 }
 
 // Download fetches one artifact into dir under the staged name,
-// verifying size and sha256 as the bytes arrive. The destination is
-// synced before the function returns, and a mismatch removes it — a
-// half-trusted binary is not a thing to leave lying about.
+// verifying size and sha256 as the bytes arrive, and unpacking the
+// result when the artifact travels compressed. The order is the
+// security property: nothing parses the fetched bytes until their
+// hash has proved them against the signed manifest, so an attacker on
+// the artifact transport — plain http by design — reaches a hash
+// comparison and never the decompressor. Whatever fails is removed
+// whole; a half-trusted binary is not a thing to leave lying about.
 func (c *Client) Download(ctx context.Context, a Artifact, dir string) (string, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", err
 	}
+	dest := filepath.Join(dir, stagedBinary)
+	if a.Compression == "" {
+		if err := c.fetch(ctx, a, dest, 0o755); err != nil {
+			_ = os.Remove(dest)
+			return "", err
+		}
+		return dest, nil
+	}
+	fetched := filepath.Join(dir, stagedFetch)
+	err := c.fetch(ctx, a, fetched, 0o600)
+	if err == nil {
+		// The fetched bytes are proved; only now may they be parsed.
+		err = unpack(fetched, dest, a)
+	}
+	_ = os.Remove(fetched)
+	if err != nil {
+		_ = os.Remove(dest)
+		return "", err
+	}
+	return dest, nil
+}
+
+// fetch brings one artifact's bytes to dest, holding them to the
+// manifest's word — a.Size bytes hashing to a.SHA256 — and syncing
+// before it returns. The caller owns the cleanup either way.
+func (c *Client) fetch(ctx context.Context, a Artifact, dest string, mode os.FileMode) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.URL, nil)
 	if err != nil {
-		return "", err
+		return err
 	}
 	// The one header GitHub's asset API needs to hand bytes instead
 	// of JSON; every static host ignores it.
@@ -72,16 +110,15 @@ func (c *Client) Download(ctx context.Context, a Artifact, dir string) (string, 
 	}
 	resp, err := c.http().Do(req)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("%s: %s", a.URL, resp.Status)
+		return fmt.Errorf("%s: %s", a.URL, resp.Status)
 	}
-	dest := filepath.Join(dir, stagedBinary)
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755) //nolint:gosec // a binary must be executable
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode) //nolint:gosec // the stage dir is ours
 	if err != nil {
-		return "", err
+		return err
 	}
 	h := sha256.New()
 	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, a.Size+1))
@@ -97,11 +134,48 @@ func (c *Client) Download(ctx context.Context, a Artifact, dir string) (string, 
 	if err == nil && hex.EncodeToString(h.Sum(nil)) != a.SHA256 {
 		err = errors.New("artifact bytes do not hash to what the manifest promised")
 	}
+	return err
+}
+
+// unpack turns a proved fetch into the staged binary, held to the
+// manifest's other promise: exactly binary_size bytes hashing to
+// binary_sha256. The input was verified before this runs; the output
+// bound stays anyway, because even an honestly signed manifest that
+// mis-states its sizes must end in a clean error, never a filled
+// disk. Streamed to the file, never held in RAM.
+func unpack(from, to string, a Artifact) error {
+	src, err := os.Open(from) //nolint:gosec // the stage dir is ours
 	if err != nil {
-		_ = os.Remove(dest)
-		return "", err
+		return err
 	}
-	return dest, nil
+	defer func() { _ = src.Close() }()
+	gz, err := gzip.NewReader(src)
+	if err != nil {
+		return fmt.Errorf("proved artifact does not open as %s: %w", a.Compression, err)
+	}
+	f, err := os.OpenFile(to, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755) //nolint:gosec // a binary must be executable
+	if err != nil {
+		return err
+	}
+	binSum, binSize := a.Binary()
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(gz, binSize+1))
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if cerr := gz.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil && n != binSize {
+		err = fmt.Errorf("artifact unpacks to %d bytes, the manifest says %d", n, binSize)
+	}
+	if err == nil && hex.EncodeToString(h.Sum(nil)) != binSum {
+		err = errors.New("unpacked bytes do not hash to what the manifest promised")
+	}
+	return err
 }
 
 // WriteStage lays the verified statement beside the binary and drops
@@ -123,11 +197,12 @@ func WriteStage(dir string, checked *Checked, platform string) error {
 			return err
 		}
 	}
+	binSum, _ := art.Binary()
 	ready, err := json.Marshal(Ready{
 		Version:  checked.Manifest.Version,
 		Channel:  checked.Manifest.Channel,
 		Platform: platform,
-		SHA256:   art.SHA256,
+		SHA256:   binSum,
 		Staged:   time.Now().UTC(),
 	})
 	if err != nil {
@@ -180,8 +255,12 @@ func VerifyStaged(dir string, trusted []PublicKey) (*Ready, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The staged binary answers to the manifest's binary hash: for a
+	// compressed artifact that is the unpacked pair, and the transport
+	// form never reaches this boundary at all.
+	binSum, _ := art.Binary()
 	sum := sha256.Sum256(bin)
-	if hex.EncodeToString(sum[:]) != art.SHA256 {
+	if hex.EncodeToString(sum[:]) != binSum {
 		return nil, errors.New("staged binary does not hash to what the signed manifest promises")
 	}
 	if m.Version != ready.Version {
@@ -196,7 +275,7 @@ func ClearStage(dir string) error {
 	if err := os.Remove(filepath.Join(dir, readyMarker)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	for _, name := range []string{stagedBinary, stagedManifest, stagedSig} {
+	for _, name := range []string{stagedBinary, stagedFetch, stagedManifest, stagedSig} {
 		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
 			return err
 		}

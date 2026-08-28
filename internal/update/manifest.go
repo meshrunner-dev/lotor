@@ -2,7 +2,12 @@ package update
 
 // The manifest is a channel's whole statement: one version, its
 // artifacts by platform, and when it was said. The signature rides
-// beside it; the sha256 inside carries the trust down to the bytes.
+// beside it; the sha256 inside carries the trust down to the bytes —
+// which is why the artifact transport owes nothing, not even TLS: the
+// hash decides, whatever pipe the bytes rode. A compressed artifact
+// carries two hashes because there are two boundaries: sha256 proves
+// the fetched bytes before anything parses them, binary_sha256 proves
+// what unpacking produced and is what the installer re-checks.
 
 import (
 	"encoding/hex"
@@ -24,11 +29,21 @@ type Manifest struct {
 }
 
 // Artifact is one platform's binary: where it is, what it hashes to,
-// how big it is.
+// how big it is. URL, SHA256 and Size always describe the same bytes
+// — the ones the fetch brings back. When those bytes travel packed,
+// Compression names how and the Binary pair describes what unpacking
+// must produce; when Compression is empty the fetched bytes are the
+// binary and the Binary fields are absent.
 type Artifact struct {
 	URL    string `json:"url"`
 	SHA256 string `json:"sha256"`
 	Size   int64  `json:"size"`
+	// Compression is empty or "gzip". Anything else is a manifest this
+	// binary cannot act on, refused at parse so the refusal names the
+	// real problem instead of surfacing as a failed unpack.
+	Compression  string `json:"compression,omitempty"`
+	BinarySHA256 string `json:"binary_sha256,omitempty"`
+	BinarySize   int64  `json:"binary_size,omitempty"`
 }
 
 // ParseManifest reads and checks one. Every field is load-bearing —
@@ -63,32 +78,51 @@ func ParseManifest(raw []byte) (*Manifest, error) {
 
 func (a Artifact) check() error {
 	switch {
-	case !strings.HasPrefix(a.URL, "https://") && !loopbackHTTP(a.URL):
-		return fmt.Errorf("url %q is not https", a.URL)
+	// Plain http is admitted on purpose: the manifest arrived signed
+	// over TLS and its sha256 pins the artifact's bytes, so the
+	// artifact transport is just a pipe — a MITM there can produce a
+	// failed hash and nothing else. The manifest host is where TLS
+	// still matters, and that is the client's Base, not this URL.
+	case !strings.HasPrefix(a.URL, "https://") && !strings.HasPrefix(a.URL, "http://"):
+		return fmt.Errorf("url %q is not http(s)", a.URL)
 	case a.Size <= 0:
 		return fmt.Errorf("size %d", a.Size)
 	}
-	if raw, err := hex.DecodeString(a.SHA256); err != nil || len(raw) != 32 {
-		return fmt.Errorf("sha256 %q is not 32 hex bytes", a.SHA256)
+	if err := checkHash("sha256", a.SHA256); err != nil {
+		return err
+	}
+	switch a.Compression {
+	case "":
+		if a.BinarySHA256 != "" || a.BinarySize != 0 {
+			return errors.New("binary fields without compression describe nothing")
+		}
+		return nil
+	case "gzip":
+		if a.BinarySize <= 0 {
+			return fmt.Errorf("binary_size %d", a.BinarySize)
+		}
+		return checkHash("binary_sha256", a.BinarySHA256)
+	}
+	return fmt.Errorf("compression %q is not one this binary can undo", a.Compression)
+}
+
+func checkHash(name, hash string) error {
+	if raw, err := hex.DecodeString(hash); err != nil || len(raw) != 32 {
+		return fmt.Errorf("%s %q is not 32 hex bytes", name, hash)
 	}
 	return nil
 }
 
-// loopbackHTTP admits plain http for the machine's own addresses:
-// the sha256 carries the integrity whatever the transport, nothing
-// leaves the host to be read, and a local mirror or a test should not
-// need a certificate to serve bytes to itself.
-func loopbackHTTP(url string) bool {
-	rest, ok := strings.CutPrefix(url, "http://")
-	if !ok {
-		return false
+// Binary names the installed binary's hash and size whatever the
+// transport packing: the unpacked pair when the artifact travels
+// compressed, the artifact's own otherwise. Everything downstream of
+// the fetch — the stage, the installer's re-check — verifies against
+// this, never against the transport form.
+func (a Artifact) Binary() (sha256 string, size int64) {
+	if a.Compression != "" {
+		return a.BinarySHA256, a.BinarySize
 	}
-	for _, host := range []string{"127.0.0.1", "localhost", "[::1]"} {
-		if rest == host || strings.HasPrefix(rest, host+":") || strings.HasPrefix(rest, host+"/") {
-			return true
-		}
-	}
-	return false
+	return a.SHA256, a.Size
 }
 
 // ArtifactFor picks the running platform's binary, named "linux/arm64"

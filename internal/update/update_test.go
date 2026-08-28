@@ -120,10 +120,18 @@ func TestManifestRefusesWhatItCannotStand(t *testing.T) {
 	}
 	for _, c := range []struct{ name, from, to string }{
 		{"no version", `"version": "1.4.2",`, ""},
-		{"http url", "https://example.org", "http://example.org"},
+		{"ftp url", "https://example.org", "ftp://example.org"},
 		{"short sha", zeroes64, "00ff"},
 		{"zero size", `"size": 1`, `"size": 0`},
 		{"unknown field", `"product"`, `"produce"`},
+		{"binary fields without compression", `"size": 1`,
+			`"size": 1, "binary_sha256": "` + zeroes64 + `", "binary_size": 1`},
+		{"unknown compression", `"size": 1`, `"size": 1, "compression": "zstd",
+			"binary_sha256": "` + zeroes64 + `", "binary_size": 1`},
+		{"compression without binary hash", `"size": 1`,
+			`"size": 1, "compression": "gzip", "binary_size": 1`},
+		{"compression without binary size", `"size": 1`,
+			`"size": 1, "compression": "gzip", "binary_sha256": "` + zeroes64 + `"`},
 	} {
 		bent := strings.Replace(goodManifest, c.from, c.to, 1)
 		if _, err := ParseManifest([]byte(bent)); err == nil {
@@ -178,18 +186,30 @@ func TestNewerSpeaksSemverOnStableChannelsAndTimeOnFastOnes(t *testing.T) {
 	}
 }
 
-func TestLoopbackMaySpeakHTTP(t *testing.T) {
-	ok := Artifact{URL: "http://127.0.0.1:8080/x", SHA256: zeroes64, Size: 1}
-	if err := ok.check(); err != nil {
-		t.Errorf("loopback http refused: %v", err)
-	}
+func TestTheArtifactTransportOwesNoTLS(t *testing.T) {
+	// The signed manifest's sha256 pins the artifact's bytes, so the
+	// artifact may ride plain http from anywhere — a MITM there can
+	// produce a failed hash and nothing else.
 	for _, url := range []string{
-		"http://example.org/x", "http://127.0.0.2/x", "http://localhost.evil.org/x",
+		"http://dl.example.org/x", "http://127.0.0.1:8080/x", "https://example.org/x",
 	} {
-		bad := Artifact{URL: url, SHA256: zeroes64, Size: 1}
-		if err := bad.check(); err == nil {
-			t.Errorf("%s passed as loopback", url)
+		ok := Artifact{URL: url, SHA256: zeroes64, Size: 1}
+		if err := ok.check(); err != nil {
+			t.Errorf("%s refused: %v", url, err)
 		}
+	}
+}
+
+func TestBinaryNamesTheInstalledBytes(t *testing.T) {
+	ones64 := strings.Repeat("1", 64)
+	plain := Artifact{SHA256: zeroes64, Size: 5}
+	if sum, size := plain.Binary(); sum != zeroes64 || size != 5 {
+		t.Errorf("plain artifact: %s, %d", sum, size)
+	}
+	packed := Artifact{SHA256: zeroes64, Size: 5,
+		Compression: "gzip", BinarySHA256: ones64, BinarySize: 9}
+	if sum, size := packed.Binary(); sum != ones64 || size != 9 {
+		t.Errorf("packed artifact: %s, %d", sum, size)
 	}
 }
 
