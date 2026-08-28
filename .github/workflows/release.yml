@@ -55,28 +55,46 @@ jobs:
       - name: Refuse to publish unsigned channels
         run: grep -q "untrusted comment" internal/update/trust.go ||
           { echo "no embedded official key — mint one and embed it first"; exit 1; }
-      - name: Create the release
+      - name: Create the release page
+        # Notes for humans, an anchor for the tag — the binaries live
+        # in the stable train's bucket, and only the manifests say so.
         run: |
-          for f in lotor_linux_arm64 lotor_linux_amd64; do
-            mv "$f" "${f/lotor_/lotor_${VERSION}_}"
-          done
           flags=(--generate-notes)
           [ "${{ needs.meta.outputs.prerelease }}" = "true" ] && flags+=(--prerelease)
-          gh release create "$VERSION" "${flags[@]}" \
-            "lotor_${VERSION}_linux_arm64" "lotor_${VERSION}_linux_amd64" \
-            "lotor_${VERSION}_linux_arm"
-      - name: Sign and publish the manifests
+          gh release create "$VERSION" "${flags[@]}"
+      - name: Compress, sign, upload, publish
         env:
           RELSIGN_KEY: ${{ secrets.RELSIGN_KEY }}
           DEPLOY_KEY: ${{ secrets.UPDATES_DEPLOY_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_KEY }}
+          AWS_REGION: ${{ vars.S3_REGION || 'us-east-1' }}
+          S3_ENDPOINT: ${{ vars.S3_ENDPOINT }}
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
+          DL_BASE: ${{ vars.DL_BASE }}
         run: |
-          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}"
+          for f in lotor_linux_arm64 lotor_linux_amd64 lotor_linux_arm; do
+            mv "$f" "${f/lotor_/lotor_${VERSION}_}"
+          done
+          base="${DL_BASE}/lotor/${VERSION}"
           printf '%s' "$RELSIGN_KEY" > relsign.key
+          # One manifest per channel first: relsign -gzip compresses and
+          # hashes in one process, so the .gz files it writes are
+          # byte-for-byte what every channel's signature vouches for.
           for channel in ${{ needs.meta.outputs.channels }}; do
-            go run ./cmd/relsign manifest "$channel" "$VERSION" manifest.json \
-              "linux/arm64=${base}/lotor_${VERSION}_linux_arm64=lotor_${VERSION}_linux_arm64" \
-              "linux/amd64=${base}/lotor_${VERSION}_linux_amd64=lotor_${VERSION}_linux_amd64" \
-              "linux/arm=${base}/lotor_${VERSION}_linux_arm=lotor_${VERSION}_linux_arm"
-            go run ./cmd/relsign sign relsign.key manifest.json
+            go run ./cmd/relsign manifest -gzip "$channel" "$VERSION" "manifest-${channel}.json" \
+              "linux/arm64=${base}/lotor_${VERSION}_linux_arm64.gz=lotor_${VERSION}_linux_arm64" \
+              "linux/amd64=${base}/lotor_${VERSION}_linux_amd64.gz=lotor_${VERSION}_linux_amd64" \
+              "linux/arm=${base}/lotor_${VERSION}_linux_arm.gz=lotor_${VERSION}_linux_arm"
+            go run ./cmd/relsign sign relsign.key "manifest-${channel}.json"
+          done
+          # Artifacts land before any manifest points at them: a
+          # published channel never names bytes not yet there.
+          for f in lotor_"${VERSION}"_linux_*.gz; do
+            ./.github/scripts/s3-put-immutable.sh "lotor/${VERSION}/${f}" "$f"
+          done
+          for channel in ${{ needs.meta.outputs.channels }}; do
+            cp "manifest-${channel}.json" manifest.json
+            cp "manifest-${channel}.json.minisig" manifest.json.minisig
             ./.github/scripts/publish-manifests.sh "$channel"
           done

@@ -1,6 +1,9 @@
-# Sweep the try bucket: manifests older than two weeks go, and the
-# assets they pointed at go with them. Real channels are never
-# touched — the sweep only ever reads lotor/try-*/.
+# Sweep the fast train's bucket: try manifests older than two weeks
+# go, and the version they point at goes with them; dev versions
+# expire on the same clock, all but the one the live manifest names.
+# The stable bucket is never touched — this job does not even hold a
+# credential that could reach it. The manifest is the authority
+# throughout: nothing a live manifest names is ever deleted.
 name: try sweep
 on:
   schedule:
@@ -10,33 +13,69 @@ on:
 jobs:
   sweep:
     runs-on: ubuntu-latest
-    # The deploy key lives in the environments only; the sweeper runs
-    # from main on a schedule, which is exactly what fast admits.
+    # The deploy key and the fast bucket's credentials live in the
+    # environment only; the sweeper runs from main on a schedule,
+    # which is exactly what fast admits.
     environment: fast
     permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
+      contents: read
     steps:
-      - name: Sweep stale try channels
+      - name: Sweep stale try channels and dev versions
         env:
           DEPLOY_KEY: ${{ secrets.UPDATES_DEPLOY_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_KEY }}
+          AWS_REGION: ${{ vars.S3_REGION || 'us-east-1' }}
+          S3_ENDPOINT: ${{ vars.S3_ENDPOINT }}
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
         run: |
           eval "$(ssh-agent -s)"
           ssh-add - <<< "$DEPLOY_KEY"
           mkdir -p ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
           git clone --depth 1 "git@github.com:${GITHUB_REPOSITORY_OWNER}/updates.git"
           cutoff=$(date -u -d "14 days ago" +%s)
+
+          # Every object under one version's prefix, deleted by name.
+          sweep_version() {
+            aws s3api list-objects-v2 --endpoint-url "$S3_ENDPOINT" --bucket "$S3_BUCKET" \
+              --prefix "lotor/$1/" --query 'Contents[].Key' --output text 2>/dev/null \
+              | tr '\t' '\n' | while read -r key; do
+              [ -n "$key" ] && [ "$key" != "None" ] || continue
+              aws s3api delete-object --endpoint-url "$S3_ENDPOINT" --bucket "$S3_BUCKET" \
+                --key "$key" >/dev/null
+              echo "deleted s3://${S3_BUCKET}/${key}"
+            done
+          }
+
+          # Try channels: a stale manifest goes, and the one version it
+          # names goes with it — derived from the manifest itself, so
+          # the sweep never guesses at keys.
           for dir in updates/lotor/try-*/; do
             [ -d "$dir" ] || continue
             published=$(jq -r .published "$dir/manifest.json" 2>/dev/null || echo "")
             [ -n "$published" ] && [ "$(date -u -d "$published" +%s)" -gt "$cutoff" ] && continue
-            slug=$(basename "$dir"); slug="${slug#try-}"
-            echo "sweeping try-${slug}"
-            gh release delete-asset try "lotor_${slug}_linux_arm64" -y --repo "$GITHUB_REPOSITORY" || true
-            gh release delete-asset try "lotor_${slug}_linux_amd64" -y --repo "$GITHUB_REPOSITORY" || true
+            version=$(jq -r .version "$dir/manifest.json" 2>/dev/null || echo "")
+            [ -n "$version" ] && sweep_version "$version"
+            echo "sweeping $(basename "$dir")"
             rm -r "$dir"
           done
+
+          # Dev versions: every push minted one, and each carries its
+          # instant in its own name — no object metadata needed. All
+          # but the version the live manifest names expire.
+          current=$(jq -r .version updates/lotor/dev/manifest.json 2>/dev/null || echo "")
+          aws s3api list-objects-v2 --endpoint-url "$S3_ENDPOINT" --bucket "$S3_BUCKET" \
+            --prefix "lotor/" --query 'Contents[].Key' --output text 2>/dev/null \
+            | tr '\t' '\n' | sed -n 's#^lotor/\([^/]*-dev\.[^/]*\)/.*#\1#p' | sort -u \
+            | while read -r version; do
+            [ "$version" = "$current" ] && continue
+            stamp=$(echo "$version" | sed -n 's/.*-dev\.\([0-9]\{14\}\)\..*/\1/p')
+            [ -n "$stamp" ] || continue
+            born=$(date -u -d "${stamp:0:8} ${stamp:8:2}:${stamp:10:2}:${stamp:12:2}" +%s)
+            [ "$born" -gt "$cutoff" ] && continue
+            sweep_version "$version"
+          done
+
           cd updates
           git add -A
           git diff --cached --quiet && exit 0

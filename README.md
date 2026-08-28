@@ -39,9 +39,11 @@ maintains afterwards. As root, on the target (example: linux/arm64 —
 a Raspberry Pi):
 
 ```sh
-# The binary, from the channel of your choice (dev shown).
-curl -fL -o /usr/local/bin/lotor \
-  https://github.com/meshrunner-dev/lotor/releases/download/dev/lotor_linux_arm64
+# The binary, from the channel of your choice (dev shown): the signed
+# manifest names the current version's artifact, gzipped.
+url=$(curl -fsSL https://updates.meshrunner.dev/lotor/dev/manifest.json \
+  | jq -r '.artifacts["linux/arm64"].url')
+curl -fL "$url" | gunzip > /usr/local/bin/lotor
 chmod 755 /usr/local/bin/lotor
 
 # A dedicated user: the radio needs nothing beyond spi and gpio.

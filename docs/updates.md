@@ -2,10 +2,25 @@
 
 The relays only ever talk to `https://updates.meshrunner.dev/lotor/…`,
 which serves nothing but static files: a signed `manifest.json` per
-channel, and `channels.json` for discovery. The binaries live in
-release assets; the manifests point at them. Leaving GitHub one day is
-an rsync of the static tree to another host, and fresh manifests with
-new artifact URLs — no deployed relay changes.
+channel, and `channels.json` for discovery. The binaries live in two
+S3 buckets, one per train, as gzipped objects keyed by version —
+`lotor/<version>/lotor_<version>_<os>_<arch>.gz` — written once and
+never overwritten; the manifests point at them. Artifact downloads
+ride plain http on purpose: the manifest arrived signed over TLS and
+its sha256 pins the artifact's bytes, so the artifact transport is
+just a pipe — a MITM there produces a failed hash and nothing else.
+TLS is owed where the *decision* travels, and that is the manifest
+host. Leaving any host one day is an rsync of the static tree, a copy
+of the objects, and fresh manifests — no deployed relay changes.
+
+Two hashes per artifact, because there are two boundaries: `sha256`
+and `size` describe the fetched bytes, verified before anything
+parses them — an attacker on the plain-http leg never reaches the
+decompressor; `binary_sha256` and `binary_size` describe what
+unpacking must produce, and are what the daemon stages and the
+privileged installer re-verifies. `cmd/relsign manifest -gzip`
+compresses and hashes in one process, so the `.gz` the workflow
+uploads is byte-for-byte what the signature vouches for.
 
 ## One-time setup
 
@@ -35,46 +50,71 @@ new artifact URLs — no deployed relay changes.
      `internal/update/trust.go`, exactly as the files read. The
      workflows refuse to publish while that list is empty.
 
-3. **The Actions environments.** Two, matching the trains, and each
-   holds its own copy of `UPDATES_DEPLOY_KEY` beside its signing key
-   — environment secrets are not shared:
-   - `stable` — the stable train's `RELSIGN_KEY` + the deploy key.
-     Protection rules: deployment from tags `v*` only, and a required
-     reviewer, so pushing a tag is not enough to mint a signed stable
-     release — someone approves the signing job. (Protection rules
-     need a public repository, or Team/Enterprise for a private
-     fork.)
-   - `fast` — the fast train's `RELSIGN_KEY` + the deploy key,
-     deployment from `main` only, no reviewer: dev signs every push
-     by design, and the try sweeper runs here too.
+3. **The buckets — one per train.** The signature protects integrity;
+   the split protects *availability*: the fast train signs every push
+   with no reviewer, so its credentials are the hot ones, and they
+   must not be able to delete what the stable train published. Each
+   bucket is public-read over plain http (the manifests carry the
+   trust), written only by its train's CI credentials, and those
+   credentials hold `PutObject` and `ListBucket` — no delete on the
+   stable bucket for anyone automated, delete on the fast bucket for
+   the sweeper. The upload script refuses an existing key: artifacts
+   are immutable, and a collision is a bug to hear about, not bytes
+   to replace.
+
+4. **The Actions environments.** Two, matching the trains, and each
+   holds its own copies beside its signing key — environment secrets
+   are not shared. Per environment:
+   - secrets: `RELSIGN_KEY`, `UPDATES_DEPLOY_KEY`, and the bucket's
+     `S3_ACCESS_KEY` + `S3_SECRET_KEY`;
+   - variables: `S3_ENDPOINT` (the https API endpoint uploads talk
+     to), `S3_BUCKET`, `DL_BASE` (the public http base the artifact
+     URLs are minted under, no trailing slash), and optionally
+     `S3_REGION` (defaults to `us-east-1`, which most S3-compatibles
+     accept).
+   - `stable` — protection rules: deployment from tags `v*` only, and
+     a required reviewer, so pushing a tag is not enough to mint a
+     signed stable release — someone approves the signing job.
+     (Protection rules need a public repository, or Team/Enterprise
+     for a private fork.)
+   - `fast` — deployment from `main` only, no reviewer: dev signs
+     every push by design, and the try sweeper runs here too.
    The signing jobs declare `environment:`; keep them minimal and
    free of third-party actions — the environment bounds who and when,
    not what a compromised step inside the approved job could read.
 
-4. **The deploy key.** `ssh-keygen -t ed25519 -f updates-deploy`;
+5. **The deploy key.** `ssh-keygen -t ed25519 -f updates-deploy`;
    the public half becomes a *deploy key with write access* on the
    `updates` repository, the private half the org secret
    `UPDATES_DEPLOY_KEY`.
 
 ## Channels
 
-| channel      | fed by                          | binaries                     |
-|--------------|---------------------------------|------------------------------|
-| `release`    | tag `vX.Y.Z`                    | the tag's release assets     |
-| `rc`         | tag `vX.Y.Z-rc.N` (and stables) | idem                         |
+| channel      | fed by                           | binaries                    |
+|--------------|----------------------------------|-----------------------------|
+| `release`    | tag `vX.Y.Z`                     | stable bucket, that version |
+| `rc`         | tag `vX.Y.Z-rc.N` (and stables)  | idem                        |
 | `beta`       | tag `vX.Y.Z-beta.N` (and stables)| idem                        |
-| `dev`        | every push to main              | rolling pre-release `dev`    |
-| `try-<slug>` | manual run of *try channel*     | fixed pre-release `try`      |
+| `dev`        | every push to main               | fast bucket, its own version|
+| `try-<slug>` | manual run of *try channel*      | fast bucket, its own version|
 
-A stable release also refreshes `rc` and `beta`: a less stable channel
-is never behind a more stable one. When one is legitimately ahead (a
-running beta cycle), the relays' own semver guard keeps them where
-they are.
+Every publication is its own immutable version — nothing rolls, and
+nothing is ever replaced in place. A stable tag still gets a GitHub
+release page for its notes; no binaries ride on it. A stable release
+also refreshes `rc` and `beta`: a less stable channel is never behind
+a more stable one. When one is legitimately ahead (a running beta
+cycle), the relays' own semver guard keeps them where they are. And
+because dev versions accumulate instead of overwriting each other,
+bisecting a fleet regression is one hand-written manifest away —
+every build of the last two weeks is still addressable.
 
-`try` builds any branch (`ref: my-branch`) or PR (`ref: pr/123`) into
-the shared `try` bucket — one pre-release, assets named by subject,
-no tags, no notifications. The weekly sweep deletes manifests older
-than two weeks and the assets they pointed at.
+`try` builds any branch (`ref: my-branch`) or PR (`ref: pr/123`) as
+an ordinary version whose name embeds the subject — no releases, no
+tags, no notifications. The weekly sweep deletes try manifests older
+than two weeks and the version each pointed at, then dev versions on
+the same clock — all but the one the live manifest names. The stable
+bucket is never swept; a few megabytes per release is what history
+costs.
 
 ## Key rollover
 
@@ -96,12 +136,35 @@ limit of the scheme.
 
 ## Forks
 
-A fork runs the same workflows with its own `RELSIGN_KEY` and its own
-manifest host (its Pages, or anywhere static). On the relay:
-`/update set url=… channel=…`, and the fork's `relsign.pub` dropped in
-`/etc/lotor/trusted-keys/` by root. For a private repository's assets,
-`/update set token=…` — asset downloads then ride the GitHub API with
+A fork runs the same workflows with its own `RELSIGN_KEY`, its own
+manifest host (its Pages, or anywhere static) and its own bucket —
+or any static host at all for the artifacts, plain http included:
+the manifest's hashes carry the trust, not the artifact transport.
+On the relay: `/update set url=… channel=…`, and the fork's
+`relsign.pub` dropped in `/etc/lotor/trusted-keys/` by root. For
+artifacts served as a private GitHub repository's release assets,
+`/update set token=…` — downloads then ride the GitHub API with
 `Accept: application/octet-stream`.
+
+## The move off release assets (2026-08)
+
+The manifests are the hinge: a relay only ever acts on the current
+manifest, so the flip is atomic per channel — but a relay must *read*
+the new statement before its channel speaks it. Manifests carrying
+`compression` or a plain-http URL are refused by clients from before
+the bridge (strict parsing refuses unknown fields — by design), so
+the order was:
+
+1. **Bridge** — ship the client that reads both forms (gzip, http
+   URLs) through the *old* pipeline; let each channel's fleet take it.
+2. **Flip** — switch the workflows to bucket uploads and compressed
+   manifests. A relay still running a pre-bridge build after the flip
+   is stuck on its last version and says so in `update check`; the
+   cure is one manual install of any bridge-or-later build.
+3. **Sweep the past** — delete the rolling `dev` release, the `try`
+   release and the `dev` tag by hand; the tag's honesty role is
+   carried by the version string, which embeds the commit. Old stable
+   release assets may stay: nothing references them.
 
 ## The install dance
 

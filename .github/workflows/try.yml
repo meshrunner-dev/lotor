@@ -1,7 +1,8 @@
-# The try channel: a manual build of any branch or PR, dropped into
-# one fixed pre-release bucket — assets named by their subject, never
-# a release or a tag per build — and served under a channel named
-# after it. try-clean sweeps what nobody fetched for a while.
+# The try channel: a manual build of any branch or PR, published like
+# every other channel — an immutable version of its own in the fast
+# train's bucket, never a release or a tag per build — and served
+# under a channel named after its subject. try-clean sweeps the
+# channels nobody refreshed for a while, and their versions with them.
 name: try channel
 on:
   workflow_dispatch:
@@ -41,11 +42,10 @@ jobs:
     runs-on: ubuntu-latest
     environment: fast
     permissions:
-      contents: write
+      contents: read
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       SLUG: ${{ needs.meta.outputs.slug }}
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -54,24 +54,30 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
-      - name: Drop the assets into the try bucket
-        run: |
-          gh release view try >/dev/null 2>&1 || gh release create try --prerelease \
-            --title "try (bucket)" --notes "Manual branch and PR builds; swept periodically."
-          for f in lotor_linux_arm64 lotor_linux_amd64 lotor_linux_arm; do
-            mv "$f" "${f/lotor_/lotor_${SLUG}_}"
-          done
-          gh release upload try --clobber "lotor_${SLUG}_linux_arm64" "lotor_${SLUG}_linux_amd64" "lotor_${SLUG}_linux_arm"
-      - name: Sign and publish the manifest
+      - name: Compress, sign, upload, publish
         env:
           RELSIGN_KEY: ${{ secrets.RELSIGN_KEY }}
           DEPLOY_KEY: ${{ secrets.UPDATES_DEPLOY_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_KEY }}
+          AWS_REGION: ${{ vars.S3_REGION || 'us-east-1' }}
+          S3_ENDPOINT: ${{ vars.S3_ENDPOINT }}
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
+          DL_BASE: ${{ vars.DL_BASE }}
         run: |
-          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/try"
+          # The version embeds the slug and the instant, so the names
+          # need no slug of their own: one scheme for every channel.
+          for f in lotor_linux_arm64 lotor_linux_amd64 lotor_linux_arm; do
+            mv "$f" "${f/lotor_/lotor_${VERSION}_}"
+          done
+          base="${DL_BASE}/lotor/${VERSION}"
           printf '%s' "$RELSIGN_KEY" > relsign.key
-          go run ./cmd/relsign manifest "try-${SLUG}" "$VERSION" manifest.json \
-            "linux/arm64=${base}/lotor_${SLUG}_linux_arm64=lotor_${SLUG}_linux_arm64" \
-            "linux/amd64=${base}/lotor_${SLUG}_linux_amd64=lotor_${SLUG}_linux_amd64" \
-            "linux/arm=${base}/lotor_${SLUG}_linux_arm=lotor_${SLUG}_linux_arm"
+          go run ./cmd/relsign manifest -gzip "try-${SLUG}" "$VERSION" manifest.json \
+            "linux/arm64=${base}/lotor_${VERSION}_linux_arm64.gz=lotor_${VERSION}_linux_arm64" \
+            "linux/amd64=${base}/lotor_${VERSION}_linux_amd64.gz=lotor_${VERSION}_linux_amd64" \
+            "linux/arm=${base}/lotor_${VERSION}_linux_arm.gz=lotor_${VERSION}_linux_arm"
           go run ./cmd/relsign sign relsign.key manifest.json
+          for f in lotor_"${VERSION}"_linux_*.gz; do
+            ./.github/scripts/s3-put-immutable.sh "lotor/${VERSION}/${f}" "$f"
+          done
           ./.github/scripts/publish-manifests.sh "try-${SLUG}"
