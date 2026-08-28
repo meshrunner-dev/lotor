@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/radio"
@@ -121,5 +122,40 @@ func TestSeenTableExpires(t *testing.T) {
 	judged := drainJudged(t, sub)
 	if judged[1].Verdict != "would-relay-flood" {
 		t.Errorf("expired hash still judged %q", judged[1].Verdict)
+	}
+}
+
+func TestTxPowerReadsTheScalarWhateverItsTag(t *testing.T) {
+	// A value that crossed the console arrives as a string whatever
+	// it spells: "0" set by an operator is the figure 0 imported
+	// from a file. Seen on the air as an export nobody could paste
+	// back.
+	for _, c := range []struct {
+		in       string
+		explicit bool
+		dbm      int8
+	}{
+		{`tx_power_dbm: 7`, true, 7},
+		{`tx_power_dbm: "0"`, true, 0},
+		{`tx_power_dbm: "-5"`, true, -5},
+		{`tx_power_dbm: auto`, false, 0},
+		{`tx_power_dbm: ""`, false, 0},
+	} {
+		var p struct {
+			TX txPower `yaml:"tx_power_dbm"`
+		}
+		if err := yaml.Unmarshal([]byte(c.in), &p); err != nil {
+			t.Errorf("%s: %v", c.in, err)
+			continue
+		}
+		if p.TX.explicit != c.explicit || p.TX.dbm != c.dbm {
+			t.Errorf("%s = %+v", c.in, p.TX)
+		}
+	}
+	var p struct {
+		TX txPower `yaml:"tx_power_dbm"`
+	}
+	if err := yaml.Unmarshal([]byte(`tx_power_dbm: loud`), &p); err == nil {
+		t.Error("a word that is not auto parsed as a power")
 	}
 }

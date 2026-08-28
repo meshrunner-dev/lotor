@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -138,11 +139,14 @@ func (t *txPower) UnmarshalYAML(node *yaml.Node) error {
 		*t = txPower{}
 		return nil
 	}
-	var dbm int8
-	if err := node.Decode(&dbm); err != nil {
-		return fmt.Errorf(`tx_power_dbm wants "auto" or a dBm figure: %w`, err)
+	// Read the scalar's text, not its tag: a value that crossed the
+	// console is a string whatever it spells, and "0" set by an
+	// operator is the same figure 0 imported from a file.
+	dbm, err := strconv.ParseInt(node.Value, 10, 8)
+	if err != nil {
+		return fmt.Errorf(`tx_power_dbm wants "auto" or a dBm figure, not %q`, node.Value)
 	}
-	*t = txPower{explicit: true, dbm: dbm}
+	*t = txPower{explicit: true, dbm: int8(dbm)}
 	return nil
 }
 
