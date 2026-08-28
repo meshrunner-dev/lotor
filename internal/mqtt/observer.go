@@ -46,6 +46,22 @@ type Config struct {
 	TX                   string
 	Types                []string // payload-type names; empty admits all
 	StatusInterval       time.Duration
+	// Retain marks the heartbeat and the neighbourhood, the two
+	// messages whose latest edition is the interesting one.
+	Retain bool
+
+	// Connects signals each established broker session; the observer
+	// answers every one with a fresh heartbeat instead of guessing
+	// when the dial lands.
+	Connects <-chan struct{}
+
+	// Neighbors runs one neighbourhood round — walking the table and
+	// asking each neighbour its scopes takes real airtime, so it is a
+	// closure of the relay's, and nil means the feature is off.
+	Neighbors         func(ctx context.Context) ([]NeighborEntry, int)
+	NeighborsInterval time.Duration
+	// The self block of the neighbourhood message.
+	SelfScopes, DefaultScope string
 
 	// The watched relay's face: name on the air, public key in hex.
 	Origin, OriginID string
@@ -109,20 +125,41 @@ func (o *Observer) Counters(sub *bus.Subscription) Counters {
 // owns the subscription's lifetime; the observer owns the sink's.
 func (o *Observer) Run(ctx context.Context, sub *bus.Subscription) {
 	defer o.sink.Close()
-	var tick *time.Ticker
-	var tickC <-chan time.Time
+	var tickC, nbTickC <-chan time.Time
 	if o.cfg.Status && o.cfg.StatusInterval > 0 {
-		tick = time.NewTicker(o.cfg.StatusInterval)
+		tick := time.NewTicker(o.cfg.StatusInterval)
 		defer tick.Stop()
 		tickC = tick.C
-		o.publishStatus(time.Now())
+		// Without a connect signal the first beat goes out blind; with
+		// one, it waits for the session instead of counting a failure.
+		if o.cfg.Connects == nil {
+			o.publishStatus(time.Now())
+		}
 	}
+	if o.cfg.Neighbors != nil && o.cfg.NeighborsInterval > 0 {
+		tick := time.NewTicker(o.cfg.NeighborsInterval)
+		defer tick.Stop()
+		nbTickC = tick.C
+	}
+	nbDone := make(chan struct{}, 1)
+	nbBusy := false
+	first := true
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-o.cfg.Connects:
+			o.publishStatus(time.Now())
+			if first {
+				first = false
+				o.startNeighbors(ctx, &nbBusy, nbDone)
+			}
 		case at := <-tickC:
 			o.publishStatus(at)
+		case <-nbTickC:
+			o.startNeighbors(ctx, &nbBusy, nbDone)
+		case <-nbDone:
+			nbBusy = false
 		case ev, ok := <-sub.C:
 			if !ok {
 				return
@@ -130,6 +167,30 @@ func (o *Observer) Run(ctx context.Context, sub *bus.Subscription) {
 			o.event(ev)
 		}
 	}
+}
+
+// startNeighbors runs one neighbourhood round off the loop — asking
+// each neighbour its scopes blocks for seconds per query, and frames
+// must keep flowing meanwhile. One round at a time; a tick landing on
+// a running round is dropped, not queued.
+func (o *Observer) startNeighbors(ctx context.Context, busy *bool, done chan<- struct{}) {
+	if o.cfg.Neighbors == nil || *busy {
+		return
+	}
+	*busy = true
+	go func() {
+		defer func() { done <- struct{}{} }()
+		entries, queried := o.cfg.Neighbors(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		payload, err := NeighborsJSON(time.Now(), o.cfg.Origin, o.cfg.OriginID,
+			o.cfg.SelfScopes, o.cfg.DefaultScope, entries, queried)
+		if err != nil {
+			return
+		}
+		o.publish(TopicNeighbors, 0, payload)
+	}()
 }
 
 func (o *Observer) event(ev bus.Event) {
@@ -215,6 +276,12 @@ func (o *Observer) publishStatus(at time.Time) {
 	o.publish(TopicStatus, 1, payload)
 }
 
+// retained says whether a message class carries the retain flag: the
+// snapshots do, when the broker allows it; the frame stream never.
+func (o *Observer) retained(class string) bool {
+	return o.cfg.Retain && (class == TopicStatus || class == TopicNeighbors)
+}
+
 func (o *Observer) publish(class string, qos byte, payload []byte) {
 	topic, err := BuildTopic(o.cfg.Topic, o.cfg.IATA, o.cfg.OriginID, o.cfg.Token, class)
 	if err != nil {
@@ -224,7 +291,7 @@ func (o *Observer) publish(class string, qos byte, payload []byte) {
 		o.log.Warn("observer topic refused", zap.Error(err))
 		return
 	}
-	if err := o.sink.Publish(topic, qos, false, payload); err != nil {
+	if err := o.sink.Publish(topic, qos, o.retained(class), payload); err != nil {
 		o.mu.Lock()
 		o.n.PublishErrors++
 		o.mu.Unlock()

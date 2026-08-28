@@ -14,9 +14,10 @@ const DefaultTopic = "meshcore/{iata}/{device}/{type}"
 
 // The message classes a topic is built for.
 const (
-	TopicStatus  = "status"
-	TopicPackets = "packets"
-	TopicRaw     = "raw"
+	TopicStatus    = "status"
+	TopicPackets   = "packets"
+	TopicRaw       = "raw"
+	TopicNeighbors = "neighbors"
 )
 
 // BuildTopic expands the template for one message class. Unknown

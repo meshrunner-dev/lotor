@@ -126,18 +126,28 @@ func readRemaining(conn net.Conn) (int, bool) {
 
 func TestBrokerSpeaksRealMQTT(t *testing.T) {
 	srv := startMiniBroker(t)
-	broker, err := Dial(srv.url(), "", "", "test", zap.NewNop())
+	connected := make(chan struct{}, 1)
+	broker, err := Dial(Options{
+		URL: srv.url(), Instance: "test", Keepalive: 55 * time.Second,
+		OnConnect: func() {
+			select {
+			case connected <- struct{}{}:
+			default:
+			}
+		},
+	}, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer broker.Close()
 	deadline := time.After(5 * time.Second)
-	for !broker.Connected() {
-		select {
-		case <-deadline:
-			t.Fatal("the client never connected")
-		case <-time.After(10 * time.Millisecond):
-		}
+	select {
+	case <-connected:
+	case <-deadline:
+		t.Fatal("the client never signalled its connection")
+	}
+	if !broker.Connected() {
+		t.Fatal("signalled connected, reports not")
 	}
 	if err := broker.Publish("meshcore/PAR/feed/packets", 0, false, []byte(`{"x":1}`)); err != nil {
 		t.Fatal(err)

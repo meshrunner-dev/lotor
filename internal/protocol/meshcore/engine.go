@@ -367,6 +367,18 @@ func (e *engine) NodeName() string { return e.p.NodeName }
 // TrafficStats copies the lifetime tally out, for observers.
 func (e *engine) TrafficStats() StatsSnapshot { return e.stats.Snapshot() }
 
+// IdentitySign signs a message under the node identity — the device
+// authentication some observer brokers demand. Nil without one.
+func (e *engine) IdentitySign(message []byte) []byte {
+	if e.id == nil {
+		return nil
+	}
+	return e.id.Sign(message)
+}
+
+// DefaultScope is the transport scope this relay speaks under.
+func (e *engine) DefaultScope() string { return e.p.DefaultScope }
+
 // TxPower reports the configured transmit power choice; explicit is
 // false for "auto", which resolves against the radio's cap.
 func (e *engine) TxPower() (dbm int8, explicit bool) {

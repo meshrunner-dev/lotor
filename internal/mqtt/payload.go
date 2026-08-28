@@ -201,3 +201,68 @@ func RawJSON(raw []byte, at time.Time, origin, originID string) ([]byte, error) 
 		Data:      hex.EncodeToString(raw),
 	})
 }
+
+// NeighborEntry is one neighbour as the neighbourhood message shows
+// it: the passive facts, and the outcome of asking it for its scopes.
+type NeighborEntry struct {
+	PubKey       string
+	SNR          float64
+	HeardSecsAgo int
+	HeardUnknown bool
+	Scopes       string
+	// Status is the scopes question's outcome: responded, timeout, or
+	// send_failed — the ecosystem's own vocabulary.
+	Status string
+}
+
+type neighborsMessage struct {
+	Timestamp        string          `json:"timestamp"`
+	Origin           string          `json:"origin"`
+	OriginID         string          `json:"origin_id"`
+	TotalNeighbors   int             `json:"total_neighbors"`
+	QueriedNeighbors int             `json:"queried_neighbors"`
+	Truncated        bool            `json:"truncated"`
+	Self             neighborsSelf   `json:"self"`
+	Neighbors        []neighborEntry `json:"neighbors"`
+}
+
+type neighborsSelf struct {
+	Scopes       string `json:"scopes"`
+	DefaultScope string `json:"default_scope"`
+}
+
+type neighborEntry struct {
+	PubKey       string  `json:"pubkey"`
+	SNR          float64 `json:"snr"`
+	HeardSecsAgo *int    `json:"heard_secs_ago"`
+	Scopes       string  `json:"scopes"`
+	Status       string  `json:"status"`
+}
+
+// NeighborsJSON builds the neighbourhood message. queried counts the
+// entries actually asked this round; an unknown age travels as null,
+// not as zero.
+func NeighborsJSON(at time.Time, origin, originID, selfScopes, defaultScope string,
+	entries []NeighborEntry, queried int,
+) ([]byte, error) {
+	m := neighborsMessage{
+		Timestamp:        isoTimestamp(at),
+		Origin:           origin,
+		OriginID:         originID,
+		TotalNeighbors:   len(entries),
+		QueriedNeighbors: queried,
+		Self:             neighborsSelf{Scopes: selfScopes, DefaultScope: defaultScope},
+		Neighbors:        make([]neighborEntry, 0, len(entries)),
+	}
+	for _, e := range entries {
+		out := neighborEntry{
+			PubKey: e.PubKey, SNR: e.SNR, Scopes: e.Scopes, Status: e.Status,
+		}
+		if !e.HeardUnknown {
+			age := e.HeardSecsAgo
+			out.HeardSecsAgo = &age
+		}
+		m.Neighbors = append(m.Neighbors, out)
+	}
+	return json.Marshal(m)
+}

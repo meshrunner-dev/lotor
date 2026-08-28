@@ -63,6 +63,11 @@ func (e *engine) Neighbour(prefix []byte) ([]byte, error) {
 	return found, nil
 }
 
+// ErrNoAnswer says a question went out and its window closed empty —
+// distinct from failing to ask, and callers report the two apart.
+var ErrNoAnswer = errors.New("no answer — the neighbour is out of earshot, " +
+	"rate-limiting us, or carries nothing it will admit to")
+
 // AskScopes asks one neighbour which scopes it carries and waits for
 // the answer. Safe from any goroutine; the question is served by the
 // pipeline's own, like every other emission.
@@ -104,8 +109,7 @@ func (e *engine) AskScopes(peer []byte) ([]string, error) {
 	case names := <-q.answer:
 		return names, nil
 	case <-time.After(scopeQueryWait):
-		return nil, errors.New("no answer — the neighbour is out of earshot, " +
-			"rate-limiting us, or carries nothing it will admit to")
+		return nil, ErrNoAnswer
 	}
 }
 
