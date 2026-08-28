@@ -37,7 +37,7 @@ CapabilityBoundingSet=
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-DeviceAllow=char-spidev rw
+DeviceAllow=char-spi rw
 DeviceAllow=char-gpiochip rw
 
 [Install]
