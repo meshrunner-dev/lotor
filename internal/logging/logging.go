@@ -42,9 +42,9 @@ func EncodeLevel(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 }
 
 // Trace logs at the trace level; zap has no method for a level it
-// does not name.
+// does not name. The caller shown is Trace's caller, not this file.
 func Trace(log *zap.Logger, msg string, fields ...zap.Field) {
-	log.Log(TraceLevel, msg, fields...)
+	log.WithOptions(zap.AddCallerSkip(1)).Log(TraceLevel, msg, fields...)
 }
 
 // On reports whether trace is being written at all — the guard for
