@@ -179,6 +179,9 @@ func (f *File) ConsoleSocket() (path string, explicit bool) {
 // answers: a name nobody chose is still better than no name.
 type System struct {
 	Name string `yaml:"name"`
+	// LogLevel, when set, overrides the boot flag while the daemon
+	// runs — the knob an investigation turns without a restart.
+	LogLevel string `yaml:"log_level"`
 }
 
 // MQTT is one broker connection the daemon observes the mesh into,

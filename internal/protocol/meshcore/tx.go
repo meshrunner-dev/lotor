@@ -14,6 +14,7 @@ import (
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/protocol"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/txn"
@@ -730,6 +731,8 @@ func (e *engine) clearChannel(ctx context.Context, dev radio.Device, log *zap.Lo
 			return lbtGo, nil
 		}
 		retry := lbtRetryNominal/2 + rand.N(lbtRetryNominal) //nolint:gosec // backoff jitter, not security
+		logging.Trace(log, "lbt channel busy — backing off",
+			zap.Duration("retry_in", retry), zap.Duration("bound_left", time.Until(deadline)))
 		select {
 		case <-ctx.Done():
 			return lbtDrop, ctx.Err()

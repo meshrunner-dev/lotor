@@ -59,6 +59,9 @@ func SystemAttrs() []schema.Attr {
 	return []schema.Attr{
 		{Name: "name", Type: schema.String, Apply: schema.Hot,
 			Doc: "what this installation calls itself; empty takes the machine's hostname"},
+		{Name: "log_level", Type: schema.String, Apply: schema.Hot,
+			Enum: []string{"trace", "debug", "info", "warn", "error"},
+			Doc:  "how deep the journal speaks, applied live; empty takes the boot flag"},
 	}
 }
 

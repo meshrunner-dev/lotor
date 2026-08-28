@@ -40,6 +40,7 @@ import (
 	"meshrunner.dev/lotor/internal/update"
 
 	"meshrunner.dev/lotor/internal/confdb"
+	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/mqtt"
 	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 	_ "meshrunner.dev/lotor/internal/radio/sx126x"
@@ -181,7 +182,7 @@ func (c *identityNewCmd) Run() error {
 
 type runCmd struct {
 	DB       string `default:"${default_db}" help:"Configuration database."`
-	LogLevel string `default:"info"          help:"Zap level: debug, info, warn, error."`
+	LogLevel string `default:"info"          help:"Log level: trace, debug, info, warn, error."`
 }
 
 func (c *runCmd) Run() error { return run(c.DB, c.LogLevel) }
@@ -317,23 +318,34 @@ func console(addr string) error {
 	return nil
 }
 
+// openLocked takes the instance lock, then the store: the two doors a
+// second daemon must not pass, opened as one step.
+func openLocked(dbPath string, log *zap.Logger,
+) (release func(), store *confdb.Store, f *config.File, err error) {
+	release, err = acquireInstanceLock(dbPath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	store, f, err = openConfig(dbPath, log)
+	if err != nil {
+		release()
+		return nil, nil, nil, err
+	}
+	return release, store, f, nil
+}
+
 func run(dbPath, logLevel string) error {
-	log, err := newLogger(logLevel)
+	log, levelKnob, err := newLogger(logLevel)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = log.Sync() }()
 
-	release, err := acquireInstanceLock(dbPath)
+	release, store, f, err := openLocked(dbPath, log)
 	if err != nil {
 		return err
 	}
 	defer release()
-
-	store, f, err := openConfig(dbPath, log)
-	if err != nil {
-		return err
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -355,6 +367,7 @@ func run(dbPath, logLevel string) error {
 	}
 
 	mgr := newManager(store, f, b, sen, buildKinds(), log)
+	mgr.adoptLevelKnob(levelKnob)
 	deps := consoleDeps(mgr, b, sen)
 	deps.DBPath = dbPath
 	deps.StateDir = filepath.Dir(dbPath)
@@ -1067,17 +1080,23 @@ func announceOverrides(log *zap.Logger, traceSets ...[]config.Trace) {
 	}
 }
 
-func newLogger(level string) (*zap.Logger, error) {
-	lvl, err := zapcore.ParseLevel(level)
+// newLogger builds the daemon's logger and hands back the level knob:
+// the boot flag decides where it starts, the console may move it while
+// the daemon runs.
+func newLogger(level string) (*zap.Logger, zap.AtomicLevel, error) {
+	lvl, err := logging.ParseLevel(level)
 	if err != nil {
-		return nil, fmt.Errorf("log level: %w", err)
+		return nil, zap.AtomicLevel{}, fmt.Errorf("log level: %w", err)
 	}
+	atomic := zap.NewAtomicLevelAt(lvl)
 	cfg := zap.NewProductionConfig()
-	cfg.Level = zap.NewAtomicLevelAt(lvl)
+	cfg.Level = atomic
 	cfg.Encoding = "console"
 	// Retry loops make errors an expected operational state; the
 	// message and fields carry the story, a stack trace adds nothing.
 	cfg.DisableStacktrace = true
 	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	return cfg.Build()
+	cfg.EncoderConfig.EncodeLevel = logging.EncodeLevel
+	log, err := cfg.Build()
+	return log, atomic, err
 }

@@ -21,12 +21,14 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"gopkg.in/yaml.v3"
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/cli"
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/mqtt"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/relay"
@@ -62,6 +64,11 @@ type manager struct {
 	log   *zap.Logger
 	sen   *sentinel.Sentinel
 	kinds []schema.Kind
+
+	// The log level's live knob and where the boot flag left it — the
+	// fallback when the stored override is cleared.
+	logKnob   zap.AtomicLevel
+	bootLevel zapcore.Level
 
 	mu        sync.Mutex
 	ctx       context.Context //nolint:containedctx // the daemon's lifetime, set once at Start
@@ -228,11 +235,7 @@ func (m *manager) Traces() map[string][]config.Trace {
 		}
 		out[confdb.KindSentinel] = rows
 	}
-	// The system name is always shown, hostname included, because a
-	// default is still the answer to "what is this machine called".
-	out[confdb.KindSystem] = []config.Trace{
-		{Key: attrName, Value: m.systemName(), Source: m.nameSource()},
-	}
+	out[confdb.KindSystem] = m.systemTraces()
 	if c := m.file.CLI; c != nil {
 		rows := []config.Trace{{Key: "listen", Value: c.Listen, Source: sourceConfig}}
 		if c.Socket != nil {
@@ -257,6 +260,25 @@ func (m *manager) Traces() map[string][]config.Trace {
 		}
 	}
 	return out
+}
+
+// systemTraces shows the system block as it is felt: the name however
+// it was decided, and the log level in effect, flag or override. The
+// caller holds mu.
+func (m *manager) systemTraces() []config.Trace {
+	rows := []config.Trace{
+		{Key: attrName, Value: m.systemName(), Source: m.nameSource()},
+	}
+	levelSource := "flag"
+	if m.file.System != nil && m.file.System.LogLevel != "" {
+		levelSource = sourceConfig
+	}
+	if m.logKnob != (zap.AtomicLevel{}) {
+		rows = append(rows, config.Trace{
+			Key: attrLogLevel, Value: logging.LevelName(m.logKnob.Level()), Source: levelSource,
+		})
+	}
+	return rows
 }
 
 // SystemName is what this installation calls itself — the console's
@@ -440,8 +462,10 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 	if relayName == "" {
 		switch kind {
 		case confdb.KindSystem:
-			// The one attribute anything reads live.
-			return "applied — this system is now " + m.systemName(), nil
+			// Both attributes are read live.
+			m.applyLogLevel()
+			return fmt.Sprintf("applied — this system is now %s, logging at %s",
+				m.systemName(), logging.LevelName(m.logKnob.Level())), nil
 		case confdb.KindSentinel, confdb.KindCLI:
 			return "applied — takes effect when the daemon restarts", nil
 		case confdb.KindUpdate:
@@ -1334,25 +1358,62 @@ func applySystemChanges(next *config.File,
 		sys = *next.System
 	}
 	for attr, v := range typed {
-		if attr != attrName {
-			return nil, fmt.Errorf("no attribute %q here", attr)
-		}
-		change[attr] = confdb.Change{Old: orNil(sys.Name), New: v}
-		name, err := asString(attr, v)
+		text, err := asString(attr, v)
 		if err != nil {
 			return nil, err
 		}
-		sys.Name = name
-	}
-	for _, attr := range unset {
-		if attr != attrName {
+		switch attr {
+		case attrName:
+			change[attr] = confdb.Change{Old: orNil(sys.Name), New: v}
+			sys.Name = text
+		case attrLogLevel:
+			change[attr] = confdb.Change{Old: orNil(sys.LogLevel), New: v}
+			sys.LogLevel = text
+		default:
 			return nil, fmt.Errorf("no attribute %q here", attr)
 		}
-		change[attr] = confdb.Change{Old: orNil(sys.Name)}
-		sys.Name = ""
+	}
+	for _, attr := range unset {
+		switch attr {
+		case attrName:
+			change[attr] = confdb.Change{Old: orNil(sys.Name)}
+			sys.Name = ""
+		case attrLogLevel:
+			change[attr] = confdb.Change{Old: orNil(sys.LogLevel)}
+			sys.LogLevel = ""
+		default:
+			return nil, fmt.Errorf("no attribute %q here", attr)
+		}
 	}
 	next.System = &sys
 	return change, nil
+}
+
+// attrLogLevel is the system knob an investigation turns live.
+const attrLogLevel = "log_level"
+
+// adoptLevelKnob hands the manager the logger's live level and where
+// the boot flag left it, then lets the stored override speak.
+func (m *manager) adoptLevelKnob(knob zap.AtomicLevel) {
+	m.logKnob, m.bootLevel = knob, knob.Level()
+	m.applyLogLevel()
+}
+
+// applyLogLevel points the live knob where the configuration says —
+// the stored override when one is set, the boot flag otherwise.
+func (m *manager) applyLogLevel() {
+	lvl := m.bootLevel
+	if m.file.System != nil && m.file.System.LogLevel != "" {
+		parsed, err := logging.ParseLevel(m.file.System.LogLevel)
+		if err != nil {
+			// The enum guards the door; a stored value only fails here
+			// if the vocabulary shrank across versions.
+			m.log.Warn("stored log level unreadable — boot flag holds", zap.Error(err))
+		} else {
+			lvl = parsed
+		}
+	}
+	m.logKnob.SetLevel(lvl)
 }
 
 // applyUpdateChanges edits the update block. Every attribute is read

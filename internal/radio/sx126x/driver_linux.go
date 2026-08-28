@@ -11,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/pkg/lora"
 	"meshrunner.dev/pkg/lora/linux"
@@ -159,11 +160,18 @@ func (d *device) AssessChannel(ctx context.Context, thresholdDB float64) (bool, 
 		if nf, ok := d.floor.value(); ok {
 			rssi, err := d.r.RSSI()
 			if err == nil && rssi > nf.DBm+thresholdDB {
+				logging.Trace(d.log, "lbt rssi stage: busy",
+					zap.Float64("rssi_dbm", rssi), zap.Float64("floor_dbm", nf.DBm),
+					zap.Float64("threshold_db", thresholdDB))
 				return true, nil
 			}
 		}
 	}
 	busy, err := d.r.AssessChannel(ctx, sx126x.CAD{})
+	if logging.On(d.log) {
+		logging.Trace(d.log, "lbt cad verdict",
+			zap.Bool("busy", busy), zap.NamedError("chip", err))
+	}
 	return busy, receptionPending(err)
 }
 
@@ -207,6 +215,14 @@ func (d *device) Receive(ctx context.Context) (radio.Frame, error) {
 			return radio.Frame{}, err
 		}
 		if f != nil {
+			if logging.On(d.log) {
+				logging.Trace(d.log, "rx frame off the chip",
+					zap.Int("bytes", len(f.Payload)),
+					zap.Float64("rssi_dbm", f.RSSI), zap.Float64("snr_db", f.SNR),
+					zap.Float64("signal_rssi_dbm", f.SignalRSSI),
+					zap.Float64("freq_err_hz", f.FreqErr),
+					zap.Duration("airtime", f.Airtime))
+			}
 			return mapFrame(f), nil
 		}
 		now := time.Now()
@@ -250,6 +266,7 @@ func (d *device) collectPhase(ctx context.Context, edges <-chan struct{},
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-edges:
+		logging.Trace(d.log, "irq dio1 edge while collecting")
 	case <-tick.C:
 		d.sampleFloor()
 		d.refreshStats()
@@ -270,6 +287,7 @@ func (d *device) restPhase(ctx context.Context, until time.Duration, rechecked *
 			return err
 		}
 		if high {
+			logging.Trace(d.log, "irq dio1 level high at rest — polling again")
 			*rechecked = true
 			return nil // look again
 		}
@@ -281,8 +299,10 @@ func (d *device) restPhase(ctx context.Context, until time.Duration, rechecked *
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-d.r.Events():
+		logging.Trace(d.log, "irq dio1 edge at rest")
 	case <-timer.C:
 	case <-d.watchdog:
+		logging.Trace(d.log, "board watchdog woke the receiver")
 	}
 	return nil
 }
@@ -294,9 +314,16 @@ func (d *device) Transmit(ctx context.Context, payload []byte, powerDBm int8) (r
 	// the trouble came after — a hand-back that failed on the bus. The
 	// caller needs both: the airtime was radiated and must be charged
 	// whatever happens to the session next.
+	logging.Trace(d.log, "tx keying",
+		zap.Int("bytes", len(payload)), zap.Int8("power_dbm", powerDBm))
 	res, err := d.r.Transmit(ctx, payload, powerDBm)
 	if res == nil {
 		return radio.TxReport{}, receptionPending(err)
+	}
+	if logging.On(d.log) {
+		logging.Trace(d.log, "tx done — chip handed back to rx",
+			zap.Duration("airtime", res.Airtime), zap.Duration("keyed", res.Duration),
+			zap.NamedError("handback", err))
 	}
 	return radio.TxReport{
 		At:       res.At,
