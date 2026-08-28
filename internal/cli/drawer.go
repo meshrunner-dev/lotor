@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -87,7 +88,9 @@ func pairs(row []field) [][2]string {
 const (
 	drawerNeighbours = "neighbours"
 	drawerSessions   = "sessions"
+	drawerHistory    = "history"
 	kindCLI          = "cli"
+	kindSystem       = "system"
 )
 
 var drawers = []drawer{{
@@ -114,7 +117,109 @@ var drawers = []drawer{{
 	empty: "nobody logged in",
 	keys:  (*session).airSessionKeys,
 	view:  (*session).airSessionView,
+}, {
+	name:  drawerHistory,
+	doc:   "the configuration's revision journal — who changed what, when",
+	on:    kindSystem,
+	empty: "no changes recorded yet",
+	keys:  (*session).historyKeys,
+	view:  (*session).historyView,
 }}
+
+// historyDrawerDepth bounds what one print fetches: a journal, not a
+// dump — the store keeps everything, the console shows the recent.
+const historyDrawerDepth = 50
+
+// history reads the revision journal through the dependency.
+func (s *session) history(ctx context.Context) ([]HistoryEntry, error) {
+	if s.deps.History == nil {
+		return nil, nil
+	}
+	return s.deps.History(ctx, historyDrawerDepth)
+}
+
+// historyKeys answers the walker and completion: revision ids, as the
+// operator would type them.
+func (s *session) historyKeys(string) map[string]string {
+	type result struct{ rows []HistoryEntry }
+	ch := make(chan result, 1)
+	go func() {
+		rows, _ := s.history(context.Background())
+		ch <- result{rows}
+	}()
+	select {
+	case got := <-ch:
+		out := map[string]string{}
+		for _, r := range got.rows {
+			out[strconv.FormatInt(r.ID, 10)] = r.Op + " " + historyWhat(r)
+		}
+		return out
+	case <-time.After(completionBudget):
+		return nil
+	}
+}
+
+// historyView reads the journal for printing, newest first — the
+// order a "what just happened" question is asked in.
+func (s *session) historyView(ctx context.Context, _ string) (drawerView, error) {
+	rows, err := s.history(ctx)
+	if err != nil {
+		return drawerView{}, err
+	}
+	v := drawerView{
+		header: []string{"ID", "WHEN", "BY", "OP", "WHAT", "CHANGES"},
+		rows:   map[string][]field{},
+	}
+	for _, r := range rows {
+		key := strconv.FormatInt(r.ID, 10)
+		v.keys = append(v.keys, key)
+		v.rows[key] = []field{
+			{name: "when", value: ago(r.At)},
+			{name: "by", value: r.Principal},
+			{name: "op", value: r.Op},
+			{name: "what", value: historyWhat(r), rendered: true},
+			{name: "changes", value: historyChanges(r.Changes), rendered: true},
+		}
+	}
+	return v, nil
+}
+
+// historyWhat names the object a revision touched; a singleton is its
+// kind alone.
+func historyWhat(r HistoryEntry) string {
+	if r.Name == "" {
+		return r.Kind
+	}
+	return r.Kind + " " + r.Name
+}
+
+// historyChanges spells the deltas, attribute by attribute. Long
+// values are cut for the listing's sake — the journal is an answer to
+// "what happened", and sqlite still holds every byte.
+func historyChanges(deltas []AttrDelta) string {
+	parts := make([]string, 0, len(deltas))
+	for _, d := range deltas {
+		switch {
+		case d.Old == "":
+			parts = append(parts, fmt.Sprintf("%s: → %s", d.Attr, historyCut(d.New)))
+		case d.New == "":
+			parts = append(parts, fmt.Sprintf("%s: %s → (unset)", d.Attr, historyCut(d.Old)))
+		default:
+			parts = append(parts, fmt.Sprintf("%s: %s → %s",
+				d.Attr, historyCut(d.Old), historyCut(d.New)))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// historyCut bounds one value for the listing.
+func historyCut(v string) string {
+	const keep = 48
+	if len(v) <= keep {
+		return v
+	}
+	return v[:keep] + "…"
+}
 
 // airSessions reads a relay's over-the-air session table, refusing
 // with the relay's own reason when it is down.

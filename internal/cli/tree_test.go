@@ -787,9 +787,10 @@ func TestRefusalsPointAtTheWord(t *testing.T) {
 func TestCompletionOffersOnlyWhatWouldRun(t *testing.T) {
 	s := &session{deps: testDeps(t)}
 	// A context reaches its place with or without the slash, so both
-	// spellings complete — and both run.
+	// spellings complete — and both run. /system holds the history
+	// drawer now, so it completes as the container it is.
 	for _, line := range []string{"sys", "/sys"} {
-		if add, _ := s.complete(line); add != "tem " {
+		if add, _ := s.complete(line); add != "tem/" {
 			t.Errorf("complete(%q) = %q", line, add)
 		}
 	}
@@ -1563,9 +1564,12 @@ func TestSessionsAreADrawerOnTheConsoleItself(t *testing.T) {
 	if add, _ := s.complete("/cli/sess"); add != "ions/" {
 		t.Errorf("/cli/sess did not finish: %q", add)
 	}
-	// A drawerless singleton stays a leaf.
-	if add, _ := s.complete("/syst"); add != "em " {
-		t.Errorf("/syst grew a slash it cannot follow: %q", add)
+	// A singleton that grew a drawer completes into it, like /cli did.
+	if add, _ := s.complete("/syst"); add != "em/" {
+		t.Errorf("/syst is a container now: %q", add)
+	}
+	if add, _ := s.complete("/system/hist"); add != "ory/" {
+		t.Errorf("/system/hist did not finish: %q", add)
 	}
 }
 
@@ -1754,5 +1758,43 @@ func TestUpdateInstallStagesAVerifiedUpdate(t *testing.T) {
 	deps.Privilege = ReadOnly
 	if denied := run(t, deps, "/update/install force"); !strings.Contains(denied, "admin") {
 		t.Errorf("a read-only session staged an update:\n%s", denied)
+	}
+}
+
+func TestSystemHistoryDrawer(t *testing.T) {
+	deps := testDeps(t)
+	deps.History = func(context.Context, int) ([]HistoryEntry, error) {
+		return []HistoryEntry{
+			{ID: 52, At: time.Now().Add(-2 * time.Minute), Principal: "console",
+				Kind: "mqtt", Name: "lab", Op: "set",
+				Changes: []AttrDelta{{Attr: "iata", Old: "par", New: "PAR"}}},
+			{ID: 51, At: time.Now().Add(-time.Hour), Principal: "console",
+				Kind: "update", Op: "set",
+				Changes: []AttrDelta{{Attr: "token", New: "<secret>"}}},
+		}, nil
+	}
+	out := run(t, deps, "/system/history/print")
+	// Newest first, deltas spelled, a singleton named by its kind
+	// alone, and the mask shown exactly as the store keeps it.
+	at52, at51 := strings.Index(out, "52"), strings.Index(out, "51")
+	if at52 == -1 || at51 == -1 || at52 > at51 {
+		t.Errorf("order or coverage wrong:\n%s", out)
+	}
+	for _, want := range []string{"iata: par → PAR", "mqtt lab", "token: → <secret>", "update"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+	// One revision, stood upon.
+	item := run(t, deps, "/system/history/52/print")
+	for _, want := range []string{"ATTRIBUTE", "console", "mqtt lab"} {
+		if !strings.Contains(item, want) {
+			t.Errorf("item view missing %q:\n%s", want, item)
+		}
+	}
+	// Without the dependency the drawer is honestly empty.
+	deps.History = nil
+	if out := run(t, deps, "/system/history/print"); !strings.Contains(out, "no changes recorded") {
+		t.Errorf("empty line missing:\n%s", out)
 	}
 }

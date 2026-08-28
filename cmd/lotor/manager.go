@@ -282,6 +282,51 @@ func (m *manager) systemTraces() []config.Trace {
 	return rows
 }
 
+// History reads the revision journal for the console, newest first:
+// who changed what, when — values as the store recorded them, which
+// means secrets arrive already masked.
+func (m *manager) History(ctx context.Context, limit int) ([]cli.HistoryEntry, error) {
+	revs, err := m.store.Revisions(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]cli.HistoryEntry, 0, len(revs))
+	for _, r := range revs {
+		e := cli.HistoryEntry{
+			ID: r.ID, At: r.At, Principal: r.Principal,
+			Kind: r.Kind, Name: r.Name, Op: r.Op,
+		}
+		changes, err := r.Changes()
+		if err != nil {
+			// A row the journal cannot decode still names itself.
+			e.Changes = []cli.AttrDelta{{Attr: "change", New: "(unreadable: " + err.Error() + ")"}}
+		} else {
+			attrs := make([]string, 0, len(changes))
+			for attr := range changes {
+				attrs = append(attrs, attr)
+			}
+			sort.Strings(attrs)
+			for _, attr := range attrs {
+				c := changes[attr]
+				e.Changes = append(e.Changes, cli.AttrDelta{
+					Attr: attr, Old: deltaValue(c.Old), New: deltaValue(c.New),
+				})
+			}
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// deltaValue renders one side of a recorded change; nil is absence,
+// not the word "nil".
+func deltaValue(v any) string {
+	if v == nil {
+		return ""
+	}
+	return fmt.Sprintf("%v", v)
+}
+
 // SystemName is what this installation calls itself — the console's
 // prompt, and whatever a browser puts in its title bar, read the same
 // answer from here. Safe from any goroutine.

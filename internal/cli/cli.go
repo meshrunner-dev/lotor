@@ -164,6 +164,26 @@ type RelayInfo struct {
 	Started time.Time
 }
 
+// HistoryEntry is one recorded mutation, as the console shows it:
+// values already rendered, secrets already masked by the store.
+type HistoryEntry struct {
+	ID        int64
+	At        time.Time
+	Principal string
+	Kind      string
+	Name      string
+	Op        string
+	Changes   []AttrDelta
+}
+
+// AttrDelta is one attribute's before and after. Empty means absent —
+// no value on that side of the change.
+type AttrDelta struct {
+	Attr string
+	Old  string
+	New  string
+}
+
 // MQTTInfo is what the CLI knows about one observer connection.
 type MQTTInfo struct {
 	Name string
@@ -216,6 +236,10 @@ type Deps struct {
 	// and static deployments use the fields.
 	LiveRelays func() []RelayInfo
 	LiveRadios func() []RadioInfo
+	// History reads the configuration's revision journal, newest
+	// first — who changed what, when. Nil hides the drawer's content
+	// behind its empty line.
+	History func(ctx context.Context, limit int) ([]HistoryEntry, error)
 	// LiveMQTTs lists the observer connections as they run.
 	LiveMQTTs  func() []MQTTInfo
 	LiveTraces func() map[string][]config.Trace
