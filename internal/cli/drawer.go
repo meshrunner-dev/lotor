@@ -15,7 +15,9 @@ import (
 type drawer struct {
 	name string
 	doc  string
-	// on names the kind whose instances hold it.
+	// on names the kind that holds it — each instance of a collection
+	// kind, or the block itself when the kind is a singleton, which
+	// holds nothing between itself and what it holds.
 	on string
 	// verbs are the commands that belong here rather than on the
 	// instance: what they act on is what the drawer holds, so this is
@@ -26,9 +28,62 @@ type drawer struct {
 	// from the path, because standing on one is saying which.
 	itemVerbs []string
 	itemFlag  string
+	// empty is what print says when the drawer holds nothing.
+	empty string
+	// keys names what stands inside — for the walker and for
+	// completion, which ask from the terminal's goroutine and carry no
+	// request context.
+	keys func(s *session, instance string) map[string]string
+	// view reads the drawer for printing.
+	view func(s *session, ctx context.Context, instance string) (drawerView, error)
 }
 
-const drawerNeighbours = "neighbours"
+// drawerView is a drawer as print shows it: the columns of its
+// listing, the keys in display order, and one row per key.
+type drawerView struct {
+	header []string
+	keys   []string
+	rows   map[string][]field
+}
+
+// field is one attribute of one thing a drawer holds.
+type field struct {
+	name, value string
+	// rendered says the value already carries its own bounds — it
+	// went through the one function allowed to render it — so no view
+	// may wrap it again.
+	rendered bool
+}
+
+// cells is a row for a table, where the columns do the separating.
+func cells(row []field) []string {
+	out := make([]string, len(row))
+	for i, f := range row {
+		out[i] = f.value
+	}
+	return out
+}
+
+// pairs is a row for the packed form, where a space would end a value
+// early: what arrived rendered is left alone, the rest is quoted only
+// where it needs to be.
+func pairs(row []field) [][2]string {
+	out := make([][2]string, len(row))
+	for i, f := range row {
+		v := f.value
+		if !f.rendered {
+			v = quoteIfSpaced(v)
+		}
+		out[i] = [2]string{f.name, v}
+	}
+	return out
+}
+
+const (
+	drawerNeighbours = "neighbours"
+	drawerSessions   = "sessions"
+	kindCLI          = "cli"
+)
 
 var drawers = []drawer{{
 	name:      drawerNeighbours,
@@ -37,7 +92,53 @@ var drawers = []drawer{{
 	verbs:     []string{cmdDiscover},
 	itemVerbs: []string{cmdAskScopes},
 	itemFlag:  optNeighbour,
+	empty:     "nobody heard directly yet",
+	keys:      (*session).neighbourKeys,
+	view:      (*session).neighbourView,
+}, {
+	name:  drawerSessions,
+	doc:   "who is on this console right now",
+	on:    kindCLI,
+	empty: "nobody connected", // unreachable: the reader is a session
+	keys:  (*session).sessionKeys,
+	view:  (*session).sessionView,
 }}
+
+// drawerSite is where a path stands relative to a drawer: which one,
+// the instance holding it — empty for a singleton's — and the item,
+// when the path reaches one.
+type drawerSite struct {
+	d        *drawer
+	instance string
+	item     string
+}
+
+// drawerSiteAt resolves a path against the drawers, or nil when it
+// names no drawer at all.
+func (s *session) drawerSiteAt(path []string) *drawerSite {
+	if len(path) < 2 {
+		return nil
+	}
+	base := 2
+	if s.isSingleton(path[:1]) {
+		base = 1
+	}
+	if len(path) <= base || len(path) > base+2 {
+		return nil
+	}
+	d := drawerOn(path[0], path[base])
+	if d == nil {
+		return nil
+	}
+	site := &drawerSite{d: d}
+	if base == 2 {
+		site.instance = path[1]
+	}
+	if len(path) > base+1 {
+		site.item = path[base+1]
+	}
+	return site
+}
 
 // drawersOn lists what a kind's instances hold.
 func drawersOn(kind string) []drawer {
@@ -115,24 +216,32 @@ func (s *session) placeAt(path []string) place {
 			return atSingleton
 		}
 		return atCollection
-	case 2:
-		return atInstance
-	case 3:
+	}
+	if site := s.drawerSiteAt(path); site != nil {
+		if site.item != "" {
+			return atDrawerItem
+		}
 		return atDrawer
-	case 4:
-		return atDrawerItem
+	}
+	if len(path) == 2 && !s.isSingleton(path[:1]) {
+		return atInstance
 	}
 	return atNowhere
 }
 
-// drawerKeys names what stands in a drawer, and what each one is. It
-// reads the engine alone, because completion asks this question from
-// the terminal's goroutine where there is no request to carry.
+// drawerKeys names what stands in a drawer, and what each one is —
+// engine-only, because completion asks from the terminal's goroutine.
 func (s *session) drawerKeys(path []string) map[string]string {
-	if len(path) < 3 || path[2] != drawerNeighbours {
+	site := s.drawerSiteAt(path)
+	if site == nil || site.d.keys == nil {
 		return nil
 	}
-	r, err := s.findRelay(path[1])
+	return site.d.keys(s, site.instance)
+}
+
+// neighbourKeys is the neighbours drawer's answer.
+func (s *session) neighbourKeys(instance string) map[string]string {
+	r, err := s.findRelay(instance)
 	if err != nil || r.Neighbours == nil {
 		return nil
 	}
@@ -143,102 +252,70 @@ func (s *session) drawerKeys(path []string) map[string]string {
 	return out
 }
 
-// neighbourRow is one neighbour as a view will show it. The name is
-// rendered here and only here, by the one function allowed to render
-// a name off the air; the rest stay as they read, and a view that
-// needs them to survive as single tokens quotes them itself.
-type neighbourRow struct {
-	name  string
-	snr   string
-	heard string
-}
-
-// fields is the row as a reader sees it, where whatever separates the
-// values is not the values' problem.
-func (n neighbourRow) fields() [][2]string {
-	return [][2]string{{"name", n.name}, {"snr", n.snr}, {"heard", n.heard}}
-}
-
-// pairs renders the row for the packed form, where a space would end
-// a value early. The name is left alone: it arrived quoted, and a
-// second pass over an already-rendered value is a second pair of
-// quotes around it.
-func (n neighbourRow) pairs() [][2]string {
-	return [][2]string{
-		{"name", n.name},
-		{"snr", quoteIfSpaced(n.snr)},
-		{"heard", quoteIfSpaced(n.heard)},
-	}
-}
-
-// cells renders the row for a table, where the columns do the
-// separating and nothing needs quoting to survive.
-func (n neighbourRow) cells() []string { return []string{n.name, n.snr, n.heard} }
-
-// drawerRows reads a drawer for printing: the keys in a stable order,
-// and what each one holds. Unlike drawerKeys it may consult the
-// journal, which knows a name for a node that only ever answered a
-// scan — the engine learns one only from an advert heard zero-hop.
-func (s *session) drawerRows(ctx context.Context, path []string) ([]string, map[string]neighbourRow, error) {
-	r, err := s.findRelay(path[1])
+// neighbourView reads the neighbourhood for printing. Unlike the
+// walker's keys it may consult the journal, which knows a name for a
+// node that only ever answered a scan — the engine learns one only
+// from an advert heard zero-hop.
+func (s *session) neighbourView(ctx context.Context, instance string) (drawerView, error) {
+	r, err := s.findRelay(instance)
 	if err != nil {
-		return nil, nil, err
+		return drawerView{}, err
 	}
 	if err := working(r); err != nil {
-		return nil, nil, err
+		return drawerView{}, err
 	}
 	if r.Neighbours == nil {
-		return nil, nil, fmt.Errorf("relay %q does not keep a neighbourhood", r.Name)
+		return drawerView{}, fmt.Errorf("relay %q does not keep a neighbourhood", r.Name)
 	}
 	named := s.nodeNames(ctx)
-	keys := []string{}
-	rows := map[string]neighbourRow{}
+	v := drawerView{header: []string{"KEY", "NAME", "SNR", "HEARD"}, rows: map[string][]field{}}
 	for _, n := range r.Neighbours() {
 		key := hex.EncodeToString(n.PubKey[:6])
 		name := n.Name
 		if name == "" {
 			name = named[key]
 		}
-		keys = append(keys, key)
-		rows[key] = neighbourRow{
-			name:  meshName(name),
-			snr:   fmt.Sprintf("%+.2f dB", n.SNR),
-			heard: ago(n.Heard),
+		v.keys = append(v.keys, key)
+		v.rows[key] = []field{
+			{name: "name", value: meshName(name), rendered: true},
+			{name: "snr", value: fmt.Sprintf("%+.2f dB", n.SNR)},
+			{name: "heard", value: ago(n.Heard)},
 		}
 	}
-	sort.Strings(keys)
-	return keys, rows, nil
+	sort.Strings(v.keys)
+	return v, nil
 }
 
 // printDrawer shows what a drawer holds: a listing that names each one
 // and little else, or — asked for detail — each one opened out.
 func (s *session) printDrawer(ctx context.Context, path []string, detail bool) error {
-	keys, rows, err := s.drawerRows(ctx, path)
+	site := s.drawerSiteAt(path)
+	v, err := site.d.view(s, ctx, site.instance)
 	if err != nil {
 		return err
 	}
-	if len(keys) == 0 {
-		fmt.Fprint(s.out, "nobody heard directly yet\r\n")
+	if len(v.keys) == 0 {
+		fmt.Fprintf(s.out, "%s\r\n", site.d.empty)
 		return nil
 	}
 	if detail {
 		gutter := 0
-		for _, k := range keys {
+		for _, k := range v.keys {
 			gutter = max(gutter, len(k))
 		}
 		gutter += 3
-		for i, k := range keys {
+		for i, k := range v.keys {
 			if i > 0 {
 				fmt.Fprint(s.out, "\r\n")
 			}
-			s.writeDetail(k, gutter, rows[k].pairs())
+			s.writeDetail(k, gutter, pairs(v.rows[k]))
 		}
 		return nil
 	}
 	tb := s.table()
-	tb.header("KEY", "NAME", "SNR", "HEARD")
-	for _, k := range keys {
-		tb.row(append([]string{k}, rows[k].cells()...)...)
+	tb.header(v.header...)
+	for _, k := range v.keys {
+		tb.row(append([]string{k}, cells(v.rows[k])...)...)
 	}
 	return tb.flush(s.out)
 }
@@ -246,18 +323,20 @@ func (s *session) printDrawer(ctx context.Context, path []string, detail bool) e
 // printDrawerItem shows one of them, attribute by attribute — the
 // shape print has everywhere it stands on a single object.
 func (s *session) printDrawerItem(ctx context.Context, path []string) error {
-	keys, rows, err := s.drawerRows(ctx, path[:3])
+	site := s.drawerSiteAt(path)
+	v, err := site.d.view(s, ctx, site.instance)
 	if err != nil {
 		return err
 	}
-	row, ok := rows[path[3]]
+	row, ok := v.rows[site.item]
 	if !ok {
-		return fmt.Errorf("no %q in this %s — %s lists %d", path[3], path[2], verbPrint, len(keys))
+		return fmt.Errorf("no %q in this %s — %s lists %d",
+			site.item, site.d.name, verbPrint, len(v.keys))
 	}
 	tb := s.table()
 	tb.header("ATTRIBUTE", "VALUE")
-	for _, p := range row.fields() {
-		tb.row(p[0], p[1])
+	for _, f := range row {
+		tb.row(f.name, f.value)
 	}
 	return tb.flush(s.out)
 }

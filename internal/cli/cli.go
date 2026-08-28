@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"slices"
 	"sort"
 	"strings"
@@ -171,6 +172,10 @@ type Deps struct {
 	Create func(ctx context.Context, kind, name string, attrs map[string]string,
 		principal string) (string, error)
 	Remove func(ctx context.Context, kind, name, principal string) (string, error)
+	// Sessions is the table of live console sessions, shared across
+	// the listeners so any session can see the others. Nil means no
+	// introspection.
+	Sessions *Sessions
 	// SystemName is what this installation calls itself — the prompt's
 	// right-hand side, and the name a browser will show. Nil falls
 	// back to the product's own name.
@@ -191,15 +196,21 @@ type session struct {
 	// quitting is set when the operator asked to leave from inside a
 	// nested command (a watch stopped by "quit").
 	quitting bool
-	// watching guards against nested watches piling subscriptions.
-	watching bool
 	// colors says the transport is a raw terminal that renders ANSI;
 	// piped sessions read plain text.
 	colors bool
-	// mu guards path: the editor's hooks read it from the transport
-	// goroutine while commands move it from the REPL's.
-	mu   sync.Mutex
-	path []string
+	// The introspection fields: who this session is when another one
+	// looks at it through /cli/sessions. id and began are set once at
+	// registration, remote at construction; watching travels under mu
+	// because other sessions read it live.
+	id     string
+	remote string
+	began  time.Time
+	// mu guards path — the editor's hooks read it from the transport
+	// goroutine while commands move it from the REPL's — and watching.
+	mu       sync.Mutex
+	path     []string
+	watching bool
 }
 
 // Serve runs the REPL on plain line input — pipes, scripts, tests.
@@ -208,7 +219,7 @@ func Serve(ctx context.Context, rw io.ReadWriter, deps Deps) {
 	done := make(chan struct{})
 	defer close(done)
 	go readLines(rw, lines, done)
-	s := &session{deps: deps, lines: lines, out: rw}
+	s := &session{deps: deps, lines: lines, out: rw, remote: remoteOf(rw)}
 	s.repl(ctx)
 }
 
@@ -232,10 +243,9 @@ func ServeAuto(ctx context.Context, rw io.ReadWriter, deps Deps) {
 	// Whatever the probe swallowed that was not the answer belongs to
 	// the session: a peer that sends its first command instead of a
 	// cursor report must not lose its first letters to the question.
-	session := struct {
-		io.Reader
-		io.Writer
-	}{Reader: io.MultiReader(bytes.NewReader(eaten), rw), Writer: rw}
+	session := &probedConn{
+		Reader: io.MultiReader(bytes.NewReader(eaten), rw), Writer: rw, orig: rw,
+	}
 	if terminal {
 		ServeEdited(ctx, session, deps)
 		return
@@ -305,6 +315,24 @@ func couldBeCursorReport(b []byte) bool {
 	return true
 }
 
+// probedConn is what the probe hands the session: the swallowed bytes
+// given back ahead of the stream, with the transport's address still
+// visible through it.
+type probedConn struct {
+	io.Reader
+	io.Writer
+
+	orig any
+}
+
+func (p *probedConn) RemoteAddr() net.Addr {
+	c, ok := p.orig.(interface{ RemoteAddr() net.Addr })
+	if !ok {
+		return nil
+	}
+	return c.RemoteAddr()
+}
+
 // ServeEdited runs the REPL behind the character-mode line editor:
 // history on the arrows, a movable cursor, the daemon echoing. The
 // transport delivers raw keystrokes (the telnet listener negotiates
@@ -313,7 +341,7 @@ func ServeEdited(ctx context.Context, rw io.ReadWriter, deps Deps) {
 	lines := make(chan string)
 	done := make(chan struct{})
 	defer close(done)
-	s := &session{deps: deps, lines: lines, out: rw, colors: true}
+	s := &session{deps: deps, lines: lines, out: rw, colors: true, remote: remoteOf(rw)}
 	ed := newEditor(rw, rw)
 	// The editor's hooks read the session's context from the transport
 	// goroutine; the session guards that state itself.
@@ -342,6 +370,7 @@ func ServeEdited(ctx context.Context, rw io.ReadWriter, deps Deps) {
 // after the banner and after every command, so it always lands below
 // the output it follows.
 func (s *session) repl(ctx context.Context) {
+	defer s.register()()
 	banner(s.out, s.deps.Version, s.systemName(), s.deps.Privilege)
 	for ctx.Err() == nil {
 		fmt.Fprint(s.out, s.prompt())

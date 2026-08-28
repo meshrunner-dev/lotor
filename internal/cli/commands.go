@@ -553,11 +553,10 @@ func (s *session) discover(ctx context.Context, in input) error {
 	// A watch holds the console, so a line has to be able to take it
 	// back — and the line that does is itself a command, which could
 	// be another watch. One at a time, as the frame stream does it.
-	if s.watching {
+	if !s.beginWatch() {
 		return errors.New("already watching")
 	}
-	s.watching = true
-	defer func() { s.watching = false }()
+	defer s.endWatch()
 
 	fmt.Fprintf(s.out, "listening %s (enter stops)…\r\n", time.Until(until).Round(time.Second))
 	answered := 0
@@ -1005,11 +1004,10 @@ func (s *session) watch(ctx context.Context, opts map[string]string) error {
 	// The line that stops a watch runs as a command — which could be
 	// another watch, nesting subscriptions without bound. One at a
 	// time.
-	if s.watching {
+	if !s.beginWatch() {
 		return errors.New("already watching")
 	}
-	s.watching = true
-	defer func() { s.watching = false }()
+	defer s.endWatch()
 	fmt.Fprint(s.out, "watching (enter stops)…\r\n")
 	sub := s.deps.Bus.Subscribe(64)
 	defer sub.Close()

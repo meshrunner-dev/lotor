@@ -230,9 +230,10 @@ func (s *session) walkPiece(path []string, piece string) ([]string, bool) {
 			return nil, false
 		}
 		return append(path, piece), true
-	case len(path) == 2 && drawerOn(path[0], piece) != nil:
+	case len(path) == 1 && s.isSingleton(path) && drawerOn(path[0], piece) != nil,
+		len(path) == 2 && !s.isSingleton(path[:1]) && drawerOn(path[0], piece) != nil:
 		return append(path, piece), true
-	case len(path) == 3:
+	case s.placeAt(path) == atDrawer:
 		if _, ok := s.drawerKeys(path)[piece]; !ok {
 			return nil, false
 		}
@@ -642,29 +643,26 @@ const detailWidth = 80
 // an instance it acts on, in a drawer that claims it, or on one of the
 // things that drawer holds.
 func (s *session) mountsHere(path []string, verb string) bool {
-	switch s.placeAt(path) {
-	case atInstance:
-		return s.mountedVerb(path[0], verb)
-	case atDrawer:
-		d := drawerOn(path[0], path[2])
-		return d != nil && slices.Contains(d.verbs, verb)
-	case atDrawerItem:
-		d := drawerOn(path[0], path[2])
-		return d != nil && slices.Contains(d.itemVerbs, verb)
-	default:
-		return false
+	if site := s.drawerSiteAt(path); site != nil {
+		if site.item == "" {
+			return slices.Contains(site.d.verbs, verb)
+		}
+		return slices.Contains(site.d.itemVerbs, verb)
 	}
+	return s.placeAt(path) == atInstance && s.mountedVerb(path[0], verb)
 }
 
 // scopeFlags names what the place stands for, in the words the command
 // declares — the instance always, and the one thing inside a drawer
 // when the session is standing on it.
 func (s *session) scopeFlags(path []string) []string {
-	out := []string{path[0] + "=" + path[1]}
-	if s.placeAt(path) == atDrawerItem {
-		if d := drawerOn(path[0], path[2]); d != nil {
-			out = append(out, d.itemFlag+"="+path[3])
-		}
+	site := s.drawerSiteAt(path)
+	var out []string
+	if site == nil || site.instance != "" {
+		out = append(out, path[0]+"="+path[1])
+	}
+	if site != nil && site.item != "" {
+		out = append(out, site.d.itemFlag+"="+site.item)
 	}
 	return out
 }
@@ -1127,14 +1125,14 @@ func (s *session) termsAt(path []string) []term {
 		for name := range inst {
 			out = append(out, term{name: name, class: cPath, doc: inst[name], content: true})
 		}
-	case len(path) == 2:
-		// A drawer is grammar, not content: every instance of the kind
+	case s.placeAt(path) == atSingleton || s.placeAt(path) == atInstance:
+		// A drawer is grammar, not content: every holder of the kind
 		// has the same ones, and they are named rather than listed by
 		// print the way an instance is.
 		for _, d := range drawersOn(path[0]) {
 			out = append(out, term{name: d.name, class: cPath, doc: d.doc, container: true})
 		}
-	case len(path) == 3:
+	case s.placeAt(path) == atDrawer:
 		held := s.drawerKeys(path)
 		for key := range held {
 			out = append(out, term{name: key, class: cPath, doc: held[key], content: true})
@@ -1191,7 +1189,18 @@ func (s *session) verbNamesAt(path []string) []string {
 		return []string{verbPrint, verbSet, verbUnset, verbExport, verbRemove}
 	case len(path) == 1:
 		return []string{verbPrint, verbAdd, verbRemove, verbExport}
-	case len(path) == 2:
+	default:
+		if site := s.drawerSiteAt(path); site != nil {
+			// A drawer holds what the mesh is doing. There is nothing
+			// to set and nothing to export, so reading is all it
+			// answers to — that, and the commands whose subject is
+			// what it holds, or the one thing being stood on.
+			verbs := []string{verbPrint}
+			if site.item == "" {
+				return append(verbs, site.d.verbs...)
+			}
+			return append(verbs, site.d.itemVerbs...)
+		}
 		verbs := []string{verbPrint, verbStatus, verbSet, verbUnset, verbExport}
 		for _, v := range commandNames() {
 			if s.mountedVerb(path[0], v) {
@@ -1199,23 +1208,6 @@ func (s *session) verbNamesAt(path []string) []string {
 			}
 		}
 		return verbs
-	case len(path) == 3:
-		// A drawer holds what the mesh is doing. There is nothing to
-		// set and nothing to export, so reading is all it answers to —
-		// that, and the commands whose subject is what it holds.
-		verbs := []string{verbPrint}
-		if d := drawerOn(path[0], path[2]); d != nil {
-			verbs = append(verbs, d.verbs...)
-		}
-		return verbs
-	case len(path) == 4:
-		verbs := []string{verbPrint}
-		if d := drawerOn(path[0], path[2]); d != nil {
-			verbs = append(verbs, d.itemVerbs...)
-		}
-		return verbs
-	default:
-		return []string{verbPrint}
 	}
 }
 
@@ -1309,14 +1301,6 @@ func (s *session) attrsForAddLine(kind string, rest []string) []schema.Attr {
 	return k.AttrsFor(choice)
 }
 
-// pathAt is one step of a path, or nothing when it is not that deep.
-func pathAt(path []string, i int) string {
-	if i < len(path) {
-		return path[i]
-	}
-	return ""
-}
-
 // argTermsFor is what may still be written after a verb: the
 // attributes a mutation acts on, or the arguments a command takes.
 // Help and completion both read it, so an argument nobody can
@@ -1362,7 +1346,7 @@ func (s *session) argTermsFor(path, rest []string) []term {
 			if f.name == scopeRelay && len(path) >= 2 {
 				continue
 			}
-			if d := drawerOn(pathAt(path, 0), pathAt(path, 2)); d != nil && f.name == d.itemFlag {
+			if site := s.drawerSiteAt(path); site != nil && f.name == site.d.itemFlag {
 				continue
 			}
 			out = append(out, term{

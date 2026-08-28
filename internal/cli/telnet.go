@@ -87,6 +87,9 @@ type sessionConn struct {
 
 func (s *sessionConn) SetReadDeadline(t time.Time) error { return s.conn.SetReadDeadline(t) }
 
+// RemoteAddr names the far end, for the session table.
+func (s *sessionConn) RemoteAddr() net.Addr { return s.conn.RemoteAddr() }
+
 // Telnet protocol bytes (RFC 854) and the options we negotiate.
 const (
 	iacByte  = 255 // IAC — interpret as command

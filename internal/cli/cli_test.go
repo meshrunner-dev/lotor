@@ -42,10 +42,11 @@ func testDeps(t *testing.T) Deps {
 		t.Fatal(err)
 	}
 	return Deps{
-		Version: "test",
-		Started: time.Now().Add(-90 * time.Minute),
-		Bus:     b,
-		Kinds:   testKinds(),
+		Version:  "test",
+		Started:  time.Now().Add(-90 * time.Minute),
+		Bus:      b,
+		Kinds:    testKinds(),
+		Sessions: NewSessions(),
 		Relays: []RelayInfo{{
 			Name: "meshcore-868", Protocol: "meshcore",
 			Radio: "slot1", Driver: "sx126x-spi",

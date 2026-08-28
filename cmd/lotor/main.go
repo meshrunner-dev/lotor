@@ -378,6 +378,7 @@ func consoleDeps(mgr *manager, b *bus.Bus, sen *sentinel.Sentinel) cli.Deps {
 	return cli.Deps{
 		Version:    version,
 		Started:    time.Now(),
+		Sessions:   cli.NewSessions(),
 		Bus:        b,
 		Sentinel:   sen,
 		Kinds:      mgr.kinds,

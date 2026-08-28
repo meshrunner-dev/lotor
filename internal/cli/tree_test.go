@@ -1430,3 +1430,63 @@ func TestACommandLivesInItsContextAndTheRootSaysWhere(t *testing.T) {
 		t.Errorf("the instance does not complete its own verb: %q", add)
 	}
 }
+
+func TestSessionsAreADrawerOnTheConsoleItself(t *testing.T) {
+	deps := testDeps(t)
+	deps.Kinds = append(deps.Kinds, schema.Kind{
+		Name: "cli", Doc: "the operator listener", Singleton: true,
+		Attrs: []schema.Attr{{Name: "session_limit", Type: schema.Int, Doc: "how many at once"}},
+	})
+	// A second session, standing somewhere, so the first can see it.
+	other := &session{deps: deps, out: &strings.Builder{}, remote: "192.0.2.7:40312", colors: true}
+	other.setPath([]string{scopeRelay, "meshcore-868"})
+	otherDone := other.register()
+	defer otherDone()
+
+	out := run(t, deps, "/cli/sessions/print")
+	for _, want := range []string{"read-only", "192.0.2.7:40312", "/relay/meshcore-868", "this session"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the table lacks %q:\n%s", want, out)
+		}
+	}
+	// One of them is somewhere to stand: its id resolves as a step,
+	// and print there shows the one session whole.
+	one := run(t, deps, "/cli/sessions/1/print")
+	if !strings.Contains(one, "192.0.2.7:40312") || !strings.Contains(one, "term") {
+		t.Errorf("standing on a session showed nothing of it:\n%s", one)
+	}
+	// A drawer answers to print and nothing else, on a singleton as on
+	// an instance.
+	if refused := run(t, deps, "/cli/sessions/export"); !strings.Contains(refused, `no "export" here`) {
+		t.Errorf("the drawer answered to export:\n%s", refused)
+	}
+	// And it is discoverable: the singleton offers it as a place.
+	s := &session{deps: deps}
+	s.setPath([]string{"cli"})
+	if add, _ := s.complete("sess"); add != "ions/" {
+		t.Errorf("the drawer does not complete as a place: %q", add)
+	}
+}
+
+func TestASessionSeesItsOwnLifeCycle(t *testing.T) {
+	deps := testDeps(t)
+	// register/remove bracket the repl: after a session ends, its row
+	// is gone, and ids are never reused within a daemon's life.
+	a := &session{deps: deps, out: &strings.Builder{}}
+	doneA := a.register()
+	b := &session{deps: deps, out: &strings.Builder{}}
+	doneB := b.register()
+	if a.id == b.id {
+		t.Fatalf("two sessions share id %q", a.id)
+	}
+	doneA()
+	if got := b.sessionKeys(""); len(got) != 1 {
+		t.Errorf("a closed session still listed: %v", got)
+	}
+	c := &session{deps: deps, out: &strings.Builder{}}
+	defer c.register()()
+	if c.id == a.id {
+		t.Errorf("id %q was reused", a.id)
+	}
+	doneB()
+}
