@@ -129,6 +129,13 @@ linters:
 
   exclusions:
     rules:
+      # The observer JSON schemas are the ecosystem's wire contract:
+      # snake_case and capitalised keys as the consumers already parse
+      # them. Restyling the tags would be publishing a different
+      # protocol.
+      - path: ^internal/mqtt/payload\.go$
+        linters: [tagliatelle]
+
       # CLI declaration tags (kong) carry inline help texts that cannot
       # wrap.
       - linters: [lll]
