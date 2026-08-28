@@ -33,7 +33,10 @@ func TestAMomentIsWrittenTheWayTheViewsWriteOne(t *testing.T) {
 }
 
 func TestSelectorsRefuseSayingOneThingTwoWays(t *testing.T) {
-	now := time.Now()
+	// Fixed, and later than every clock time below: a bare time still
+	// in the future resolves to yesterday, which would make
+	// since=10:00 until=09:00 a properly ordered window.
+	now := time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC)
 	for _, c := range []struct {
 		opts map[string]string
 		want string
