@@ -30,8 +30,8 @@ const observerSubBuffer = 256
 
 // neighboursFloor is the least a neighbourhood round may repeat:
 // each one asks every neighbour over the air, and that is airtime
-// the mesh pays for.
-const neighboursFloor = time.Hour
+// the mesh pays for — negligible at this pace, rude much below it.
+const neighboursFloor = 30 * time.Minute
 
 type managedObserver struct {
 	cancel context.CancelFunc
@@ -66,9 +66,12 @@ func resolveMQTTParams(mq config.MQTT) (mqtt.Params, error) {
 	default:
 		return mqtt.Params{}, fmt.Errorf("tx %q — want off, self-adverts or all", p.TX)
 	}
-	if p.Neighbors && p.NeighborsInterval.Std() != 0 && p.NeighborsInterval.Std() < neighboursFloor {
+	if p.NeighboursInterval.Std() != 0 && p.NeighboursInterval.Std() < neighboursFloor {
 		return mqtt.Params{}, fmt.Errorf(
-			"neighbors_interval under %s — each round asks every neighbour over the air", neighboursFloor)
+			"neighbours_interval under %s — each round asks every neighbour over the air", neighboursFloor)
+	}
+	if err := mqtt.ValidOwner(p.Owner); err != nil {
+		return mqtt.Params{}, err
 	}
 	iata, err := mqtt.NormalizeIATA(p.IATA)
 	if err != nil {
@@ -142,25 +145,28 @@ func (m *manager) observerConfig(name string, p mqtt.Params, log *zap.Logger) (m
 		SelfScopes:   strings.Join(info.Scopes, ","),
 		DefaultScope: info.DefaultScope,
 	}
+	if p.Origin != "" {
+		// The operator may publish under another banner than the air's.
+		cfg.Origin = p.Origin
+	}
 	if cfg.Topic == "" {
 		cfg.Topic = mqtt.DefaultTopic
 	}
 	if cfg.TX == "" {
 		cfg.TX = mqtt.TXSelfAdverts
 	}
-	cfg.Status = p.Status == nil || *p.Status
 	cfg.Packets = p.Packets == nil || *p.Packets
 	cfg.RX = p.RX == nil || *p.RX
-	cfg.StatusInterval = p.StatusInterval.Std()
-	if cfg.StatusInterval == 0 {
-		cfg.StatusInterval = 5 * time.Minute
+	// The interval is the heartbeat's whole switch: absent beats at
+	// the default, an explicit zero is silence.
+	cfg.StatusInterval = 5 * time.Minute
+	if p.StatusInterval != nil {
+		cfg.StatusInterval = p.StatusInterval.Std()
 	}
-	if p.Neighbors {
+	cfg.Status = cfg.StatusInterval > 0
+	if p.NeighboursInterval.Std() > 0 {
 		cfg.Neighbors = m.neighboursRound(relayName, log)
-		cfg.NeighborsInterval = p.NeighborsInterval.Std()
-		if cfg.NeighborsInterval == 0 {
-			cfg.NeighborsInterval = 24 * time.Hour
-		}
+		cfg.NeighborsInterval = p.NeighboursInterval.Std()
 	}
 	return cfg, nil
 }
@@ -188,7 +194,7 @@ func observerDial(p mqtt.Params, name string, info cli.RelayInfo,
 	switch {
 	case p.Audience != "":
 		opts.Credentials = func() (string, string) {
-			token, err := mqtt.AuthToken(info.Identity, p.Audience, p.TokenLifetime.Std(),
+			token, err := mqtt.AuthToken(info.Identity, p.Audience, p.Owner, p.TokenLifetime.Std(),
 				time.Now(), func(msg []byte) ([]byte, error) {
 					if info.Sign == nil {
 						return nil, errors.New("the relay cannot sign — no identity")

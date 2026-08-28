@@ -25,7 +25,9 @@ const jwtDefaultTTL = 24 * time.Hour
 type Signer func(message []byte) ([]byte, error)
 
 // AuthToken builds the token a JWT broker takes as the password.
-func AuthToken(pubKeyHex, audience string, ttl time.Duration, now time.Time, sign Signer) (string, error) {
+// owner, when set, rides as the optional claim the platforms use to
+// tie the feed to an operator.
+func AuthToken(pubKeyHex, audience, owner string, ttl time.Duration, now time.Time, sign Signer) (string, error) {
 	if audience == "" {
 		return "", errors.New("a token needs an audience")
 	}
@@ -45,7 +47,8 @@ func AuthToken(pubKeyHex, audience string, ttl time.Duration, now time.Time, sig
 		Aud       string `json:"aud"`
 		Iat       int64  `json:"iat"`
 		Exp       int64  `json:"exp"`
-	}{strings.ToUpper(pubKeyHex), audience, iat, iat + int64(ttl.Seconds())})
+		Owner     string `json:"owner,omitempty"`
+	}{strings.ToUpper(pubKeyHex), audience, iat, iat + int64(ttl.Seconds()), owner})
 	if err != nil {
 		return "", err
 	}

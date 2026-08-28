@@ -786,17 +786,24 @@ const attrDisabled = "disabled"
 const attrIATA = "iata"
 
 // mqttOverrideValue is the one door an observer override value passes
-// through, whichever line wrote it: iata comes out normalized,
-// everything else verbatim.
+// through, whichever line wrote it: iata comes out normalized, owner
+// proven a key, everything else verbatim.
 func mqttOverrideValue(attr string, v any) (any, error) {
-	if attr != attrIATA {
-		return v, nil
+	switch attr {
+	case attrIATA:
+		text, err := asString(attr, v)
+		if err != nil {
+			return nil, err
+		}
+		return mqtt.NormalizeIATA(text)
+	case "owner":
+		text, err := asString(attr, v)
+		if err != nil {
+			return nil, err
+		}
+		return text, mqtt.ValidOwner(text)
 	}
-	text, err := asString(attr, v)
-	if err != nil {
-		return nil, err
-	}
-	return mqtt.NormalizeIATA(text)
+	return v, nil
 }
 
 // hasBrokerScheme admits the transports the client dials.

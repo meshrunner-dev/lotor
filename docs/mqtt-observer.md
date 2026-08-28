@@ -103,9 +103,10 @@ one at a time, and the outcome is reported honestly — `responded`
 with its list, `timeout` when the question left and nothing came
 back, `send_failed` when it could not be asked at all (dry gate, no
 identity). An unknown age travels as `null`, never as zero. Enabling
-`neighbors=` is therefore operator consent to those emissions;
-`neighbors_interval` has a one-hour floor for the same reason, and a
-round also runs once when the broker session first lands. Rounds run
+`neighbours_interval=` is therefore operator consent to those
+emissions — setting the cadence is the switch — with a 30-minute
+floor for the same reason, and a round also runs once when the
+broker session first lands. Rounds run
 off the observer's loop — frames keep flowing while a slow neighbour
 is being waited out.
 
@@ -115,7 +116,9 @@ Most community brokers authenticate the device by its own identity: a
 JWT-shaped token as the password, the fixed username
 `v1_{UPPERCASE_PUBKEY}`. Shaped, not standard — the third segment is
 the ed25519 signature over `header.payload` in **uppercase hex**, not
-base64url. Claims: `publicKey` (uppercase hex), `aud`, `iat`, `exp`.
+base64url. Claims: `publicKey` (uppercase hex), `aud`, `iat`, `exp`, and
+`owner` when the operator set one — the claim the platforms use to
+tie a feed to an account.
 Setting `audience=` switches a connection to this mode; tokens are
 minted fresh at every (re)connect by the paho credentials provider,
 signed by the watched relay's node identity, `token_lifetime`
@@ -148,15 +151,15 @@ against, pinned to the schema by test:
 | `token` | string | "" | for meshrank-style layouts |
 | `topic` | string | `meshcore/{iata}/{device}/{type}` | template |
 | `relay` | string | the only relay | whose identity and frames |
-| `status` | bool | true | publish STATUS |
 | `packets` | bool | true | publish PACKET |
 | `raw` | bool | false | publish RAW |
 | `rx` | bool | true | received frames |
 | `tx` | enum off/self-adverts/all | self-adverts | sent frames (reference default) |
 | `types` | words | all | payload-type filter, by name |
-| `status_interval` | duration | 5m | |
-| `neighbors` | bool | false | the active round above — RF consent |
-| `neighbors_interval` | duration | 24h | floor 1h |
+| `status_interval` | duration | 5m | the heartbeat's whole switch; 0 silences it |
+| `neighbours_interval` | duration | off | setting it IS the RF consent; floor 30m |
+| `origin` | string | the relay's name | publish under another banner |
+| `owner` | string | "" | operator key (64 hex), claimed in the device token |
 
 ### Data path
 

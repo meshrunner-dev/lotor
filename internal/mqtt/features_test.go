@@ -32,7 +32,7 @@ func TestAuthTokenMatchesTheContract(t *testing.T) {
 	pubHex := "2e880db04bf3b68828188746fff92f2d104d573f85c41973beaaafa445288c76"
 	now := time.Unix(1756350000, 0)
 
-	token, err := AuthToken(pubHex, "mqtt.example.net", 0, now,
+	token, err := AuthToken(pubHex, "mqtt.example.net", "", 0, now,
 		func(msg []byte) ([]byte, error) { return ed25519.Sign(key, msg), nil })
 	if err != nil {
 		t.Fatal(err)
@@ -83,6 +83,31 @@ func TestAuthTokenMatchesTheContract(t *testing.T) {
 	}
 	if got := JWTUsername(pubHex); got != "v1_"+strings.ToUpper(pubHex) {
 		t.Errorf("username: %s", got)
+	}
+
+	// With an owner, the claim rides after the window, as written.
+	owned, err := AuthToken(pubHex, "mqtt.example.net", strings.Repeat("ab", 32), 0, now,
+		func(msg []byte) ([]byte, error) { return ed25519.Sign(key, msg), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	mid, _ := base64.RawURLEncoding.DecodeString(strings.Split(owned, ".")[1])
+	if !strings.Contains(string(mid), `"owner":"`+strings.Repeat("ab", 32)+`"`) {
+		t.Errorf("owner claim missing: %s", mid)
+	}
+}
+
+func TestOwnerFollowsTheEcosystemRule(t *testing.T) {
+	if err := ValidOwner(""); err != nil {
+		t.Error("empty owner refused")
+	}
+	if err := ValidOwner(strings.Repeat("Ab3", 21) + "c"); err != nil {
+		t.Error("64 hex refused")
+	}
+	for _, bad := range []string{"abc", strings.Repeat("g", 64), strings.Repeat("a", 63)} {
+		if err := ValidOwner(bad); err == nil {
+			t.Errorf("ValidOwner(%q) accepted", bad)
+		}
 	}
 }
 

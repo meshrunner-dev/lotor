@@ -63,6 +63,26 @@ func NormalizeIATA(s string) (string, error) {
 	return strings.ToUpper(s), nil
 }
 
+// ValidOwner holds the owner key to the ecosystem's rule: exactly 64
+// hex characters — a 32-byte public key — any case, kept as written.
+// Empty passes: the claim is optional.
+func ValidOwner(s string) error {
+	if s == "" {
+		return nil
+	}
+	if len(s) != 64 {
+		return fmt.Errorf("owner %q — a public key is 64 hex characters", s)
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return fmt.Errorf("owner %q — a public key is 64 hex characters", s)
+		}
+	}
+	return nil
+}
+
 // The parameter names the schema, the presets and the code share.
 const (
 	keyURL       = "url"
@@ -93,16 +113,25 @@ type Params struct {
 	Topic string `yaml:"topic"`
 	Relay string `yaml:"relay"`
 
-	Status  *bool    `yaml:"status"`
 	Packets *bool    `yaml:"packets"`
 	Raw     bool     `yaml:"raw"`
 	RX      *bool    `yaml:"rx"`
 	TX      string   `yaml:"tx"`
 	Types   []string `yaml:"types"`
 
-	StatusInterval    Duration `yaml:"status_interval"`
-	Neighbors         bool     `yaml:"neighbors"`
-	NeighborsInterval Duration `yaml:"neighbors_interval"`
+	// StatusInterval is the heartbeat's whole switch: absent takes
+	// the default cadence, an explicit zero silences it.
+	StatusInterval *Duration `yaml:"status_interval"`
+	// NeighboursInterval enables the neighbourhood round by giving it
+	// a cadence — setting it IS the consent to the emissions each
+	// round makes. Absent means off.
+	NeighboursInterval Duration `yaml:"neighbours_interval"`
+
+	// Origin overrides the name published; empty speaks the relay's
+	// own. Owner is the operator's public key, an optional claim in
+	// the device token — how a feed is claimed on the platforms.
+	Origin string `yaml:"origin"`
+	Owner  string `yaml:"owner"`
 }
 
 // Schema declares the console's view of Params, one attribute per
@@ -133,8 +162,6 @@ func Schema() []schema.Attr {
 			Doc: "topic template; empty takes meshcore/{iata}/{device}/{type}"},
 		{Name: "relay", Type: schema.String,
 			Doc: "whose frames to watch; empty takes the only relay"},
-		{Name: "status", Type: schema.Bool, Apply: schema.Hot,
-			Doc: "publish the periodic heartbeat (default true)"},
 		{Name: "packets", Type: schema.Bool, Apply: schema.Hot,
 			Doc: "publish each frame, analysed (default true)"},
 		{Name: "raw", Type: schema.Bool, Apply: schema.Hot,
@@ -147,10 +174,13 @@ func Schema() []schema.Attr {
 		{Name: "types", Type: schema.Words, Apply: schema.Hot,
 			Doc: "payload types to share, by name; empty shares all"},
 		{Name: "status_interval", Type: schema.Duration, Apply: schema.Hot,
-			Doc: "how often the heartbeat goes out (default 5m)"},
-		{Name: "neighbors", Type: schema.Bool, Apply: schema.Hot,
-			Doc: "publish the neighbourhood, asking each neighbour its scopes over the air"},
-		{Name: "neighbors_interval", Type: schema.Duration, Apply: schema.Hot,
-			Doc: "how often the neighbourhood goes out (default 24h, floor 1h)"},
+			Doc: "how often the heartbeat goes out (default 5m; 0 silences it)"},
+		{Name: "neighbours_interval", Type: schema.Duration, Apply: schema.Hot,
+			Doc: "publish the neighbourhood this often, asking each neighbour its scopes " +
+				"over the air — setting it is consent to those emissions (floor 30m)"},
+		{Name: "origin", Type: schema.String,
+			Doc: "the name published; empty speaks the relay's own"},
+		{Name: "owner", Type: schema.String,
+			Doc: "the operator's public key (64 hex), claimed in the device token"},
 	}
 }
