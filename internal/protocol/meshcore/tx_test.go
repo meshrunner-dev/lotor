@@ -1019,3 +1019,59 @@ func TestRequeueIsPacedNotImmediate(t *testing.T) {
 		t.Errorf("requeue pacing %v — want the LBT retry band around %v", wait, lbtRetryNominal)
 	}
 }
+
+func TestRequeueAgesOutUnderTheDropPolicy(t *testing.T) {
+	// The clock is the engine's, not the entry's: it measures one
+	// continuous busy spell, the way Dispatcher::cad_busy_start does.
+	e, _, sub, _ := txRig(t, "on-air")
+	e.policy.LBTExhausted = "drop"
+	e.busySince = time.Now().Add(-lbtMaxWait - time.Second)
+	e.requeue(txEntry{kind: "relay-flood", origin: txn.New()})
+
+	if n := len(e.queue.entries); n != 0 {
+		t.Errorf("the aged entry was requeued anyway (%d in the queue)", n)
+	}
+	select {
+	case ev := <-sub.C:
+		d, ok := ev.(bus.TxDropped)
+		if !ok || d.Reason != "lbt" {
+			t.Fatalf("published %#v, want a TxDropped for lbt", ev)
+		}
+	default:
+		t.Fatal("nothing published for the dropped frame")
+	}
+}
+
+func TestRequeueKeepsWaitingUnderTheTransmitPolicy(t *testing.T) {
+	// The radio refuses to key over a reception whatever the policy
+	// says, so transmit-anyway waits rather than drops.
+	e, _, _, _ := txRig(t, "on-air") //nolint:dogsled // the rig answers four things; this needs one
+	e.policy.LBTExhausted = "transmit"
+	e.busySince = time.Now().Add(-lbtMaxWait - time.Second)
+	e.requeue(txEntry{kind: "relay-flood", origin: txn.New()})
+	if len(e.queue.entries) != 1 {
+		t.Fatal("the entry was dropped under a transmit policy")
+	}
+}
+
+func TestABusySpellStartsOnceAndEndsOnAClearChannel(t *testing.T) {
+	e, dev, _, _ := txRig(t, "on-air")
+	e.policy.LBTExhausted = "drop"
+	e.requeue(txEntry{kind: "relay-flood", origin: txn.New()})
+	started := e.busySince
+	if started.IsZero() {
+		t.Fatal("the first refusal did not start the spell")
+	}
+	e.requeue(txEntry{kind: "relay-flood", origin: txn.New()})
+	if !e.busySince.Equal(started) {
+		t.Errorf("a second refusal restarted the spell: %v then %v", started, e.busySince)
+	}
+	// A clear channel ends it, so sparse refusals never accumulate
+	// into a drop the way a continuous spell does.
+	if _, err := e.clearChannel(context.Background(), dev, zap.NewNop(), txn.New()); err != nil {
+		t.Fatalf("clearChannel: %v", err)
+	}
+	if !e.busySince.IsZero() {
+		t.Errorf("a clear channel left the spell running: %v", e.busySince)
+	}
+}

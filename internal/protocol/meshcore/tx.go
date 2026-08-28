@@ -693,17 +693,30 @@ func (e *engine) key(ctx context.Context, dev radio.Device, raw []byte) (radio.T
 // requeue puts an entry back for the next pass; a queue that filled
 // meanwhile refuses it, counted like any other refusal.
 func (e *engine) requeue(entry txEntry) {
-	// A requeue means the radio was busy receiving. The channel is as
-	// occupied as a CAD-busy channel — so the retry keeps the same
-	// pacing, instead of spinning SPI polls against a chip that is
-	// mid-demodulation for the whole of a frame's airtime. Our own
-	// reception completing wakes the receive loop on its edge either
-	// way; only the retransmit attempt is paced.
-	entry.notBefore = time.Now().Add(
+	now := time.Now()
+	if e.busySince.IsZero() {
+		e.busySince = now
+	}
+	if now.Sub(e.busySince) > lbtMaxWait && e.policy.LBTExhausted == "drop" {
+		// Only drop is honourable here: the radio refuses to key over
+		// a reception whatever the policy says, so a site that asked
+		// to transmit anyway waits for the air instead.
+		e.log.Warn("radio busy receiving past the LBT bound, dropping",
+			zap.String("txn", entry.origin.Short()), zap.String("kind", entry.kind))
+		e.bus.Publish(bus.TxDropped{
+			Relay: e.relay, Txn: entry.origin, At: now, Reason: "lbt",
+		})
+		return
+	}
+	// The channel is as occupied as a CAD-busy channel, so the retry
+	// keeps the same pacing instead of spinning SPI polls against a
+	// chip mid-demodulation. Our own reception completing wakes the
+	// receive loop on its edge either way; only the retry is paced.
+	entry.notBefore = now.Add(
 		lbtRetryNominal/2 + rand.N(lbtRetryNominal)) //nolint:gosec // backoff jitter, not security
 	if !e.queue.push(entry) {
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: "queue-full",
+			Relay: e.relay, Txn: entry.origin, At: now, Reason: "queue-full",
 		})
 	}
 }
@@ -724,6 +737,7 @@ func (e *engine) clearChannel(ctx context.Context, dev radio.Device, log *zap.Lo
 		case err != nil:
 			return lbtDrop, err
 		case !busy:
+			e.busySince = time.Time{} // the air is free; the spell ended
 			return lbtGo, nil
 		}
 		if time.Now().After(deadline) {

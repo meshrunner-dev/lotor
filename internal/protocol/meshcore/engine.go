@@ -198,6 +198,10 @@ type engine struct {
 	sessionsAsk chan *sessionsOrder
 	wakeMu      sync.Mutex
 	wakeRx      context.CancelFunc
+	// busySince starts a continuous busy spell and is cleared by the
+	// first clear channel — Dispatcher::cad_busy_start's clock, not
+	// the age of any one frame.
+	busySince time.Time
 }
 
 // paramsFrom is the strict decode both build and the config checker
