@@ -141,6 +141,10 @@ type RelayInfo struct {
 	// lands and closing when the window ends; nil when the protocol
 	// has no scan to run.
 	Discover func() (<-chan Neighbour, time.Time, error)
+	// ScanWindow reports when a scan already listening closes — the
+	// window a refused Discover may join by waiting; nil when the
+	// protocol has none.
+	ScanWindow func() (time.Time, bool)
 	// TriggerAdvert queues one operator announcement (flood or
 	// zero-hop); nil when the engine has no transmit pipeline.
 	TriggerAdvert func(flood bool) error

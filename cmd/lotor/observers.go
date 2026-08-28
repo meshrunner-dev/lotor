@@ -225,16 +225,25 @@ func observerDial(p mqtt.Params, name string, info cli.RelayInfo,
 // runs off the observer's loop and reads the manager's live view, so
 // a bounced relay's successor answers.
 func (m *manager) neighboursRound(relayName string, log *zap.Logger,
-) func(ctx context.Context) ([]mqtt.NeighborEntry, int) {
-	return func(ctx context.Context) ([]mqtt.NeighborEntry, int) {
+) func(ctx context.Context) ([]mqtt.NeighborEntry, int, bool) {
+	return func(ctx context.Context) ([]mqtt.NeighborEntry, int, bool) {
 		m.mu.Lock()
 		info, ok := m.infos[relayName]
 		m.mu.Unlock()
 		if !ok || info.Neighbours == nil {
-			return nil, 0
+			return nil, 0, false
+		}
+		// A round is emissions: discover, then a question per
+		// neighbour. A gate that cannot key the radio has nothing to
+		// run — and publishing all-send_failed would dress a posture
+		// up as an outage.
+		if info.TXMode != config.TXOnAir && info.TXMode != config.TXOnAirZeroHop {
+			log.Info("neighbourhood round skipped — the transmit gate does not key the radio",
+				zap.String("tx_mode", info.TXMode))
+			return nil, 0, false
 		}
 		if !refreshNeighbours(ctx, info, log) {
-			return nil, 0
+			return nil, 0, false
 		}
 		rows := info.Neighbours()
 		entries := make([]mqtt.NeighborEntry, 0, len(rows))
@@ -270,7 +279,7 @@ func (m *manager) neighboursRound(relayName string, log *zap.Logger,
 		}
 		log.Info("neighbourhood round done",
 			zap.Int("neighbours", len(entries)), zap.Int("queried", queried))
-		return entries, queried
+		return entries, queried, true
 	}
 }
 
@@ -284,6 +293,11 @@ func refreshNeighbours(ctx context.Context, info cli.RelayInfo, log *zap.Logger)
 		return true
 	}
 	answers, until, err := info.Discover()
+	if errors.Is(err, enginemc.ErrScanListening) {
+		// Another round already keyed the scan; its answers land in
+		// the shared table, so joining is waiting the window out.
+		return joinScanWindow(ctx, info, log)
+	}
 	if err != nil {
 		log.Debug("neighbourhood refresh skipped — table as it stands", zap.Error(err))
 		return true
@@ -307,6 +321,25 @@ func refreshNeighbours(ctx context.Context, info cli.RelayInfo, log *zap.Logger)
 				return true
 			}
 		}
+	}
+}
+
+// joinScanWindow waits out the scan another asker keyed — the shared
+// table fills either way — and proceeds with what it gathered. false
+// only when cancelled.
+func joinScanWindow(ctx context.Context, info cli.RelayInfo, log *zap.Logger) bool {
+	until := time.Now().Add(65 * time.Second) // a window and a breath, when nobody will say
+	if info.ScanWindow != nil {
+		if end, ok := info.ScanWindow(); ok {
+			until = end.Add(2 * time.Second)
+		}
+	}
+	log.Debug("joining the scan already listening", zap.Time("window_closes", until))
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(time.Until(until)):
+		return true
 	}
 }
 

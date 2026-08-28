@@ -219,8 +219,8 @@ func TestObserverSpeaksOnConnectAndWalksNeighbours(t *testing.T) {
 		Instance: "t", Relay: "r", IATA: "PAR", OriginID: "feed", Origin: "n",
 		Topic: DefaultTopic, Status: true, StatusInterval: time.Hour, Retain: true,
 		Connects: connects, NeighborsInterval: time.Hour,
-		Neighbors: func(context.Context) ([]NeighborEntry, int) {
-			return []NeighborEntry{{PubKey: "aaaa", SNR: 1, Status: "responded"}}, 1
+		Neighbors: func(context.Context) ([]NeighborEntry, int, bool) {
+			return []NeighborEntry{{PubKey: "aaaa", SNR: 1, Status: "responded"}}, 1, true
 		},
 	}
 	o := New(cfg, sink, zap.NewNop())

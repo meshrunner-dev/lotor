@@ -771,6 +771,7 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		Sign:          signOf(eng),
 		AskScopes:     askScopesOf(eng),
 		Discover:      discoverOf(eng),
+		ScanWindow:    scanWindowOf(eng),
 		TriggerAdvert: advertTrigger(eng),
 		Neighbours:    neighboursOf(eng),
 		AirSessions:   airSessionsOf(eng),
@@ -779,6 +780,15 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		NodeName:      nodeNameOf(eng),
 		Traffic:       trafficOf(eng),
 	}
+}
+
+// scanWindowOf exposes the open scan window, for the joiners.
+func scanWindowOf(eng protocol.Engine) func() (time.Time, bool) {
+	w, ok := eng.(interface{ ScanWindow() (time.Time, bool) })
+	if !ok {
+		return nil
+	}
+	return w.ScanWindow
 }
 
 // defaultScopeOf reads which scope the relay itself speaks under.

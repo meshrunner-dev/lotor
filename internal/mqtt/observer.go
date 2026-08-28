@@ -57,8 +57,11 @@ type Config struct {
 
 	// Neighbors runs one neighbourhood round — walking the table and
 	// asking each neighbour its scopes takes real airtime, so it is a
-	// closure of the relay's, and nil means the feature is off.
-	Neighbors         func(ctx context.Context) ([]NeighborEntry, int)
+	// closure of the relay's, and nil means the feature is off. ran
+	// false says the round could not run at all — a dry gate, a
+	// cancelled cycle — and nothing is published, where an empty
+	// neighbourhood is still an answer.
+	Neighbors         func(ctx context.Context) (entries []NeighborEntry, queried int, ran bool)
 	NeighborsInterval time.Duration
 	// The self block of the neighbourhood message.
 	SelfScopes, DefaultScope string
@@ -180,8 +183,8 @@ func (o *Observer) startNeighbors(ctx context.Context, busy *bool, done chan<- s
 	*busy = true
 	go func() {
 		defer func() { done <- struct{}{} }()
-		entries, queried := o.cfg.Neighbors(ctx)
-		if ctx.Err() != nil {
+		entries, queried, ran := o.cfg.Neighbors(ctx)
+		if !ran || ctx.Err() != nil {
 			return
 		}
 		payload, err := NeighborsJSON(time.Now(), o.cfg.Origin, o.cfg.OriginID,

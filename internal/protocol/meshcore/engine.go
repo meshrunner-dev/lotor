@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -192,6 +193,9 @@ type engine struct {
 	// is the window currently open, engine-goroutine only.
 	sweepAsk     chan *sweep
 	pendingSweep *sweep
+	// sweepUntil mirrors the open window's end for readers outside
+	// the loop — zero when no scan listens.
+	sweepUntil atomic.Int64
 	// sessionsAsk carries the console's request for a snapshot of the
 	// client table. It asks for no emission, so unlike the others it
 	// is served whatever the gate's mode.
@@ -401,6 +405,16 @@ func (e *engine) IdentitySign(message []byte) []byte {
 
 // DefaultScope is the transport scope this relay speaks under.
 func (e *engine) DefaultScope() string { return e.p.DefaultScope }
+
+// ScanWindow reports when the scan currently listening closes; ok is
+// false when none does.
+func (e *engine) ScanWindow() (time.Time, bool) {
+	ns := e.sweepUntil.Load()
+	if ns == 0 || time.Now().UnixNano() > ns {
+		return time.Time{}, false
+	}
+	return time.Unix(0, ns), true
+}
 
 // TxPower reports the configured transmit power choice; explicit is
 // false for "auto", which resolves against the radio's cap.

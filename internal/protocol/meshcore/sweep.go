@@ -91,12 +91,18 @@ func (s *sweep) refuse(err error) {
 	close(s.found)
 }
 
+// ErrScanListening says a scan window is already open — its answers
+// land in the shared neighbourhood, so a second asker's best move is
+// to wait for it rather than shout over it.
+var ErrScanListening = errors.New("a scan is already listening — its answers join the neighbourhood either way")
+
 // drainSweepAsk sends a scan the operator asked for, and closes one
 // whose window has run out.
 func (e *engine) drainSweepAsk(dev radio.Device, now time.Time) {
 	if e.pendingSweep != nil && now.After(e.pendingSweep.until) {
 		close(e.pendingSweep.found)
 		e.pendingSweep = nil
+		e.sweepUntil.Store(0)
 	}
 	select {
 	case s := <-e.sweepAsk:
@@ -104,9 +110,7 @@ func (e *engine) drainSweepAsk(dev radio.Device, now time.Time) {
 			// One window at a time: two scans at once make every
 			// responder answer both, into the same jitter, and the
 			// collisions cost more answers than the second scan buys.
-			s.refuse(fmt.Errorf(
-				"a scan is already listening, %s left of its window — "+
-					"its answers join the neighbourhood either way",
+			s.refuse(fmt.Errorf("%w (%s left)", ErrScanListening,
 				time.Until(e.pendingSweep.until).Round(time.Second)))
 			return
 		}
@@ -128,6 +132,7 @@ func (e *engine) drainSweepAsk(dev radio.Device, now time.Time) {
 		// The window starts when the question does, not when it was
 		// typed: the wait above is short but it is not nothing.
 		s.until = now.Add(sweepWindow)
+		e.sweepUntil.Store(s.until.UnixNano())
 		// The loop only turns when the air says something; on a quiet
 		// channel nothing would close the window on time. Wake the
 		// receiver at the deadline so expiry does not wait for luck.
