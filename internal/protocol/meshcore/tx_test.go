@@ -777,6 +777,18 @@ func TestOperatorAdvertNeedsALiveGate(t *testing.T) {
 	}
 }
 
+func TestDryEngineAsksHowLongItMayListen(t *testing.T) {
+	// Every receive window asks the pipeline when it next needs the
+	// radio — before it asks whether there is a pipeline at all. A dry
+	// run has no queue, and the question must still have an answer:
+	// seen on the air as a segfault the moment the first relay came up
+	// receive-only.
+	e := &engine{} // dry: never armed
+	if wait, ok := e.txWait(time.Now()); ok {
+		t.Fatalf("a dry engine claims something is due in %s", wait)
+	}
+}
+
 func TestZeroHopRungKeysOnlyTheNeighbourhood(t *testing.T) {
 	// The ladder's third rung: local adverts and discovery answers are
 	// really keyed, everything routable stays on paper — the parity

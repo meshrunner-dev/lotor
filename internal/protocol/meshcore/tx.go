@@ -117,7 +117,12 @@ func (q *txQueue) pop(now time.Time) (txEntry, bool) {
 }
 
 // nextDue reports how long until something is due; false when empty.
+// A dry run never arms the pipeline, so the queue may not exist at
+// all: nothing queued and nothing to queue answer the same way.
 func (q *txQueue) nextDue(now time.Time) (time.Duration, bool) {
+	if q == nil {
+		return 0, false
+	}
 	var soonest time.Time
 	for _, e := range q.entries {
 		if soonest.IsZero() || e.notBefore.Before(soonest) {
