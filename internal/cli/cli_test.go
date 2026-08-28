@@ -100,6 +100,16 @@ func testKinds() []schema.Kind {
 			Name: "radio", Doc: "one transceiver", ChoiceAttr: "driver",
 			Attrs: []schema.Attr{{Name: "driver", Type: schema.String, Doc: "the driver"}},
 		},
+		{
+			Name: "mqtt", Doc: "observer connections",
+			Attrs: []schema.Attr{
+				{Name: "profile", Type: schema.String, Doc: "the preset"},
+				{Name: "url", Type: schema.String, Doc: "the broker"},
+			},
+			Profiles: func(string) []string {
+				return []string{"analyzer-eu", "analyzer-us", "meshmapper"}
+			},
+		},
 		{Name: "sentinel", Doc: "the journal", Singleton: true,
 			Attrs: config.SentinelAttrs()},
 		{Name: "system", Doc: "what this installation calls itself", Singleton: true,

@@ -223,6 +223,38 @@ func TestSlashJoinedPathsReachTheSamePlace(t *testing.T) {
 	}
 }
 
+func TestProfileValuesComplete(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	// One candidate left: it finishes, custom included in the offer.
+	for _, c := range []struct{ line, add string }{
+		{"/mqtt/add eu profile=meshm", "apper "},
+		{"/mqtt/add eu profile=cus", "tom "},
+	} {
+		add, hints := s.complete(c.line)
+		if add != c.add || hints != nil {
+			t.Errorf("complete(%q) = %q %v, want %q", c.line, add, hints, c.add)
+		}
+	}
+	// Two analyzers: the shared prefix advances, both show as hints.
+	if _, hints := s.complete("/mqtt/add eu profile=analyzer"); len(hints) != 2 {
+		t.Errorf("analyzer hints = %v", hints)
+	}
+}
+
+func TestAddRefusesAnAttributeAsTheName(t *testing.T) {
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	deps.Create = func(context.Context, string, string, map[string]string, string) (string, error) {
+		t.Fatal("a bad line reached the manager")
+		return "", nil
+	}
+	deps.Remove = func(context.Context, string, string, string) (string, error) { return "", nil }
+	out := run(t, deps, "/mqtt/add profile=analyzer-eu")
+	if !strings.Contains(out, "the name comes first") {
+		t.Errorf("guard did not speak:\n%s", out)
+	}
+}
+
 func TestTreeSetGoesThroughTheOneDoor(t *testing.T) {
 	deps := testDeps(t)
 	deps.Privilege = Admin

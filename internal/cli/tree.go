@@ -463,6 +463,10 @@ func (s *session) treeCreateRemove(ctx context.Context, path []string, verb stri
 		return fmt.Errorf("usage: %s <name> [attr=value …]", verb)
 	}
 	name, rest := args[0], args[1:]
+	if verb == verbAdd && strings.Contains(name, "=") {
+		return fmt.Errorf("%q reads like an attribute — the name comes first: %s <name> [attr=value …]",
+			name, verbAdd)
+	}
 	if verb == verbRemove {
 		if len(rest) > 0 {
 			return errors.New("remove takes one name and nothing else")
@@ -474,13 +478,9 @@ func (s *session) treeCreateRemove(ctx context.Context, path []string, verb stri
 		fmt.Fprintf(s.out, "%s\r\n", msg)
 		return nil
 	}
-	attrs := map[string]string{}
-	for _, a := range rest {
-		k, v, ok := strings.Cut(a, "=")
-		if !ok {
-			return fmt.Errorf("%q — add wants attr=value after the name", a)
-		}
-		attrs[k] = v
+	attrs, err := attrPairs(rest)
+	if err != nil {
+		return err
 	}
 	msg, err := s.deps.Create(ctx, kind, name, attrs, "console")
 	if err != nil {
@@ -488,6 +488,19 @@ func (s *session) treeCreateRemove(ctx context.Context, path []string, verb stri
 	}
 	fmt.Fprintf(s.out, "%s\r\n", msg)
 	return nil
+}
+
+// attrPairs reads the attr=value words of an add line.
+func attrPairs(words []string) (map[string]string, error) {
+	attrs := map[string]string{}
+	for _, a := range words {
+		k, v, ok := strings.Cut(a, "=")
+		if !ok {
+			return nil, fmt.Errorf("%q — add wants attr=value after the name", a)
+		}
+		attrs[k] = v
+	}
+	return attrs, nil
 }
 
 // treeSet applies one line of changes: every attr=value on it lands
@@ -1520,6 +1533,20 @@ func (s *session) completeValue(path, rest []string, attr, val string) (string, 
 			return s.finishPlain(val, a.Enum, cAttr)
 		}
 	}
+	// The profile attribute completes from its kind's preset catalog,
+	// resolved against whatever choice the line or the instance has
+	// already made — plus "custom", the empty base every catalog
+	// implies.
+	if attr == "profile" && len(path) >= 1 {
+		if k := s.kindByName(path[0]); k != nil && k.Profiles != nil {
+			words := k.Profiles(s.choiceOn(k, path, rest))
+			if !slices.Contains(words, "custom") {
+				words = append(words, "custom")
+			}
+			sort.Strings(words)
+			return s.finishPlain(val, words, cAttr)
+		}
+	}
 	// A flag that knows its own values completes from them, declared
 	// beside the flag rather than in a second list.
 	if c := lookup(rest[0]); c != nil {
@@ -1541,6 +1568,26 @@ func (s *session) completeValue(path, rest []string, attr, val string) (string, 
 		return s.finishPlain(val, words, cPath)
 	}
 	return "", nil
+}
+
+// choiceOn resolves which choice governs a line: the instance's own
+// when standing on one, overridden by a choice attribute already
+// written on the line — the add case, where the object is not in the
+// store yet.
+func (s *session) choiceOn(k *schema.Kind, path, rest []string) string {
+	choice := ""
+	if k.ChoiceAttr == "" {
+		return choice
+	}
+	if len(path) == 2 {
+		choice = s.instances(path[0])[path[1]]
+	}
+	for _, t := range rest[1:] {
+		if v, ok := strings.CutPrefix(t, k.ChoiceAttr+"="); ok {
+			choice = v
+		}
+	}
+	return choice
 }
 
 // completeArgs finishes what comes after a verb.

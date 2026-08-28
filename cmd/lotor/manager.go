@@ -495,7 +495,7 @@ func (m *manager) Create(ctx context.Context, kind, name string,
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if name == "" || strings.ContainsAny(name, " /\"") {
+	if name == "" || strings.ContainsAny(name, " /\"=") {
 		return "", fmt.Errorf("%q is not a usable name", name)
 	}
 	next, err := cloneFile(m.file)
