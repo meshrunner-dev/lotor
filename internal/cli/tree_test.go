@@ -151,6 +151,39 @@ func TestPaintClassifiesTokens(t *testing.T) {
 	if plain := (&session{deps: s.deps}).paintLine("/relay print"); plain != "/relay print" {
 		t.Errorf("plain session painted anyway: %q", plain)
 	}
+
+	// A quoted value holds its spaces: the painter cuts the line the
+	// way the parser does, so the value never bleeds into a second,
+	// unresolvable word — even while the closing quote is not yet
+	// typed. Stripped of its colours, the line reads back as typed.
+	for _, line := range []string{
+		`/relay meshcore-868 set node_name="new name" identity=x`,
+		`/relay meshcore-868 set node_name="new na`,
+		`/relay meshcore-868  set  node_name=x`,
+	} {
+		painted := s.paintLine(line)
+		if strings.Contains(painted, cUnres) {
+			t.Errorf("quoted value painted unresolved: %q", painted)
+		}
+		if stripped := stripSGR(painted); stripped != line {
+			t.Errorf("painting altered the line: %q vs %q", stripped, line)
+		}
+	}
+}
+
+// stripSGR removes the colour codes, leaving the characters as typed.
+func stripSGR(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0x1b {
+			for i < len(s) && s[i] != 'm' {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 func TestPaintMarksWhatItHasNotResolved(t *testing.T) {

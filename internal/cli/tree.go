@@ -1786,18 +1786,53 @@ func (s *session) paintLine(line string) string {
 		w.path = nil
 	}
 	var b strings.Builder
-	rest := line
-	for rest != "" {
-		token, after, _ := strings.Cut(rest, " ")
-		if token != "" {
-			b.WriteString(w.paint(token))
+	for _, seg := range paintSegments(line) {
+		if seg.space {
+			b.WriteString(seg.text)
+			continue
 		}
-		if after != "" || strings.HasSuffix(rest, " ") {
-			b.WriteString(" ")
-		}
-		rest = after
+		b.WriteString(w.paint(seg.text))
 	}
 	return b.String()
+}
+
+// paintSegment is one stretch of the line: a token as typed, or the
+// whitespace between tokens.
+type paintSegment struct {
+	text  string
+	space bool
+}
+
+// paintSegments cuts the line the way splitArgs does — a quote holds
+// its spaces, closed or not yet — while keeping every character as
+// typed, quotes and runs of blanks included, because the painter
+// redraws the exact line under the operator's fingers.
+func paintSegments(line string) []paintSegment {
+	var out []paintSegment
+	start, inQuote, spacing := 0, false, true
+	for i, r := range line {
+		if r == '"' {
+			inQuote = !inQuote
+		}
+		isSpace := !inQuote && (r == ' ' || r == '	')
+		if isSpace != spacing {
+			if i > start {
+				out = append(out, paintSegment{line[start:i], spacing})
+			}
+			start, spacing = i, isSpace
+		}
+	}
+	if len(line) > start {
+		out = append(out, paintSegment{line[start:], spacing})
+	}
+	return out
+}
+
+// unquoted is the word as the parser will read it — the quotes gone,
+// their spaces kept — for classifying a token whose painted face
+// keeps them.
+func unquoted(s string) string {
+	return strings.ReplaceAll(s, "\"", "")
 }
 
 // lineWalk follows a line the way the grammar does, so the painter and
@@ -1887,12 +1922,12 @@ func (w *lineWalk) paintArg(token string) string {
 		// against the one list that says what it accepts. What is
 		// left is a value, and marking a value unresolved would say
 		// the console expected to recognise it.
-		if !slices.Contains(w.args, token) && w.takesValue {
+		if !slices.Contains(w.args, unquoted(token)) && w.takesValue {
 			return token
 		}
-		return w.s.mark(cAttr, w.args, token)
+		return w.s.mark(cAttr, w.args, unquoted(token))
 	}
-	return w.s.mark(cAttr, w.args, name) + w.s.color(cPunct, "=") + value
+	return w.s.mark(cAttr, w.args, unquoted(name)) + w.s.color(cPunct, "=") + value
 }
 
 // takesValue reports whether a verb reads a word the operator chose
