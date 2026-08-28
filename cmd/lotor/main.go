@@ -144,7 +144,29 @@ type updateSelfcheckCmd struct {
 // configuration: the stage runs it on the downloaded binary before
 // asking anyone privileged to act. It opens nothing but the database.
 func (c *updateSelfcheckCmd) Run() error {
-	store, f, err := openConfig(c.DB, zap.NewNop())
+	// The staged binary proves it can lift and read this store — on a
+	// copy. Migrating the live store from here would pull it out from
+	// under the running daemon, and out from under the rollback path
+	// that may still restart it.
+	ctx := context.Background()
+	source, err := confdb.Open(ctx, c.DB)
+	if err != nil {
+		return err
+	}
+	probe := c.DB + ".selfcheck"
+	_ = os.Remove(probe)
+	err = source.CopyTo(ctx, probe)
+	_ = source.Close()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		matches, _ := filepath.Glob(probe + "*")
+		for _, m := range matches {
+			_ = os.Remove(m)
+		}
+	}()
+	store, f, err := openConfig(probe, zap.NewNop())
 	if err != nil {
 		return err
 	}

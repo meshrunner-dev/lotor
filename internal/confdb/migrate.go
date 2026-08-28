@@ -29,6 +29,14 @@ type Migration struct {
 	Run func(ctx context.Context, tx *sql.Tx) error
 }
 
+// CopyTo writes a consistent snapshot of the store to a fresh file —
+// the probe copy a selfcheck migrates and reads so the live store is
+// never touched from outside the daemon that owns it.
+func (s *Store) CopyTo(ctx context.Context, path string) error {
+	_, err := s.db.ExecContext(ctx, "VACUUM INTO ?", path)
+	return err
+}
+
 // Shape reads the store's current shape.
 func (s *Store) Shape(ctx context.Context) (int, error) {
 	var text string
