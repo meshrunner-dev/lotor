@@ -160,6 +160,7 @@ func (m *manager) stopRelay(name string) {
 	h.cancel()
 	<-h.done
 	delete(m.running, name)
+	m.log.Info("relay stopped", zap.String("relay", name))
 }
 
 // The live views the console reads. Each returns a copy: sessions

@@ -31,6 +31,10 @@ func ServeTelnet(ctx context.Context, addr string, deps Deps, log *zap.Logger) e
 // bad moment. Sessions are waited for on the way out, so their last
 // output is flushed, not truncated.
 func ServeListener(ctx context.Context, ln net.Listener, deps Deps) error {
+	log := deps.Log
+	if log == nil {
+		log = zap.NewNop()
+	}
 	unlisten := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer unlisten()
 	defer func() { _ = ln.Close() }()
@@ -43,6 +47,7 @@ func ServeListener(ctx context.Context, ln net.Listener, deps Deps) error {
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
 			}
+			log.Debug("cli accept failed — riding it out", zap.Error(err))
 			select {
 			case <-ctx.Done():
 				return nil
@@ -54,6 +59,16 @@ func ServeListener(ctx context.Context, ln net.Listener, deps Deps) error {
 			hangup := context.AfterFunc(ctx, func() { _ = conn.Close() })
 			defer hangup()
 			defer func() { _ = conn.Close() }()
+			transport, peer := "telnet", conn.RemoteAddr().String()
+			if _, unix := conn.(*net.UnixConn); unix {
+				transport, peer = "console", ""
+			}
+			slog := log.With(zap.String("transport", transport), zap.String("peer", peer))
+			slog.Info("cli session opened")
+			opened := time.Now()
+			defer func() {
+				slog.Info("cli session closed", zap.Duration("after", time.Since(opened)))
+			}()
 			// Character-at-a-time with the daemon echoing: real telnet
 			// clients honour it, the console client raw-modes its
 			// terminal, and scripts through pipes simply see their

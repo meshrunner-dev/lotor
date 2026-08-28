@@ -533,6 +533,7 @@ func consoleDeps(mgr *manager, b *bus.Bus, sen *sentinel.Sentinel) cli.Deps {
 		LiveRelays: mgr.RelayInfos,
 		LiveRadios: mgr.RadioInfos,
 		LiveMQTTs:  mgr.MQTTInfos,
+		Log:        mgr.log.Named("cli"),
 		LiveTraces: mgr.Traces,
 		Mutate:     mgr.Mutate,
 		Undo:       mgr.Undo,

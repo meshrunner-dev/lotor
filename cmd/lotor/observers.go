@@ -250,6 +250,8 @@ func (m *manager) neighboursRound(relayName string, log *zap.Logger,
 			}
 			entries = append(entries, e)
 		}
+		log.Debug("neighbourhood round done",
+			zap.Int("neighbours", len(entries)), zap.Int("queried", queried))
 		return entries, queried
 	}
 }
@@ -345,6 +347,7 @@ func (m *manager) stopObserver(name string) {
 	h.cancel()
 	<-h.done
 	delete(m.observers, name)
+	m.log.Named("mqtt").Info("observer stopped", zap.String("observer", name))
 }
 
 // bounceObserver restarts one connection under the daemon's own

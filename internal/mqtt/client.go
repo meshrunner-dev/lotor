@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"time"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
@@ -53,6 +54,34 @@ type Options struct {
 	// OnConnect is told about every established session, first and
 	// re-established alike — the observer\'s cue to speak.
 	OnConnect func()
+}
+
+// connectionLadder tells the connection's life as it happens:
+// attempts and their failures in debug — the socket's abnormal life —
+// and the state changes an operator acts on in info: connected,
+// lost, reconnected.
+func connectionLadder(brokerURL string, log *zap.Logger) paho.ConnectionNotificationHandler {
+	var sessions atomic.Uint32
+	return func(_ paho.Client, n paho.ConnectionNotification) {
+		url := zap.String("url", brokerURL)
+		switch e := n.(type) {
+		case paho.ConnectionNotificationConnecting:
+			log.Debug("observer broker dialing", url,
+				zap.Int("attempt", e.Attempt), zap.Bool("reconnect", e.IsReconnect))
+		case paho.ConnectionNotificationBrokerFailed:
+			log.Debug("observer broker attempt failed", url, zap.Error(e.Reason))
+		case paho.ConnectionNotificationFailed:
+			log.Debug("observer broker round failed — backing off", url, zap.Error(e.Reason))
+		case paho.ConnectionNotificationConnected:
+			word := "observer broker connected"
+			if sessions.Add(1) > 1 {
+				word = "observer broker reconnected"
+			}
+			log.Info(word, url)
+		case paho.ConnectionNotificationLost:
+			log.Info("observer broker lost", url, zap.Error(e.Reason))
+		}
+	}
 }
 
 // Broker is the production Sink.
@@ -101,14 +130,11 @@ func Dial(o Options, log *zap.Logger) (*Broker, error) {
 		opts.SetTLSConfig(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12})
 	}
 	opts.OnConnect = func(paho.Client) {
-		log.Info("observer broker connected", zap.String("url", o.URL))
 		if o.OnConnect != nil {
 			o.OnConnect()
 		}
 	}
-	opts.OnConnectionLost = func(_ paho.Client, err error) {
-		log.Warn("observer broker lost", zap.String("url", o.URL), zap.Error(err))
-	}
+	opts.OnConnectionNotification = connectionLadder(o.URL, log)
 	b := &Broker{client: paho.NewClient(opts), log: log}
 	// Connect in the background: a broker that is down at start must
 	// not hold the daemon\'s assembly, and Paho\'s retry keeps dialing.

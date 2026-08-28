@@ -9,6 +9,8 @@ import (
 	"bytes"
 	"sync"
 
+	"go.uber.org/zap"
+
 	"meshrunner.dev/lotor/internal/schema"
 
 	"bufio"
@@ -188,6 +190,10 @@ type RadioInfo struct {
 // Deps is everything the commands may consult. Sentinel may be nil —
 // the commands that need it say so instead of pretending.
 type Deps struct {
+	// Log tells the sessions' life — opened, closed, accept trouble.
+	// Nil is quiet, which is what the tests want.
+	Log *zap.Logger
+
 	Version  string
 	Started  time.Time
 	Relays   []RelayInfo
