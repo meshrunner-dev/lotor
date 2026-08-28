@@ -26,6 +26,7 @@ import (
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/sentinel"
+	"meshrunner.dev/lotor/internal/update"
 )
 
 // Command vocabulary reused across parsers.
@@ -53,6 +54,8 @@ const (
 	cmdUndo      = "undo"
 	verbList     = "list"
 	cmdJournal   = "journal"
+	cmdCheck     = "check"
+	kindUpdate   = "update"
 	// helpWord asks about whatever it follows.
 	helpWord = "?"
 	// wordHelp and wordExit are the spelled-out halves of the two
@@ -193,6 +196,9 @@ type Deps struct {
 	// the listeners so any session can see the others. Nil means no
 	// introspection.
 	Sessions *Sessions
+	// UpdateTrust resolves the verification keys for the update
+	// channels; nil takes the built-in store. Tests inject theirs.
+	UpdateTrust func() ([]update.PublicKey, error)
 	// SystemName is what this installation calls itself — the prompt's
 	// right-hand side, and the name a browser will show. Nil falls
 	// back to the product's own name.

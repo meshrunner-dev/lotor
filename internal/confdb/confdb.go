@@ -41,6 +41,7 @@ const (
 	KindSentinel = "sentinel"
 	KindCLI      = "cli"
 	KindSystem   = "system"
+	KindUpdate   = "update"
 )
 
 const schemaDDL = `
@@ -187,6 +188,12 @@ func assign(f *config.File, kind, name string, attrs []byte) error {
 			return err
 		}
 		f.System = &sys
+	case KindUpdate:
+		u, err := fromAttrs[config.Update](attrs)
+		if err != nil {
+			return err
+		}
+		f.Update = &u
 	default:
 		return fmt.Errorf("unknown object kind %q", kind)
 	}
@@ -216,6 +223,9 @@ func (s *Store) ImportFile(ctx context.Context, f *config.File, principal string
 	}
 	if f.System != nil {
 		objects = append(objects, object{KindSystem, "", *f.System})
+	}
+	if f.Update != nil {
+		objects = append(objects, object{KindUpdate, "", *f.Update})
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)

@@ -181,6 +181,18 @@ type System struct {
 	Name string `yaml:"name"`
 }
 
+// Update is where this relay looks for newer versions of itself.
+type Update struct {
+	// Channel names what to follow: release, rc, beta, dev, or a
+	// try-<slug> a workflow published.
+	Channel string `yaml:"channel"`
+	// URL is the manifest tree; empty takes the project's own host.
+	URL string `yaml:"url"`
+	// Token rides as a bearer on artifact downloads — a private
+	// fork's assets, typically.
+	Token string `yaml:"token"`
+}
+
 // File is the top-level configuration.
 type File struct {
 	Radios   map[string]Radio `yaml:"radios"`
@@ -188,6 +200,7 @@ type File struct {
 	Sentinel *Sentinel        `yaml:"sentinel"`
 	CLI      *CLI             `yaml:"cli"`
 	System   *System          `yaml:"system"`
+	Update   *Update          `yaml:"update"`
 }
 
 // Load reads, decodes and cross-validates a configuration file.

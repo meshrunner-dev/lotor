@@ -649,7 +649,15 @@ func (s *session) mountsHere(path []string, verb string) bool {
 		}
 		return slices.Contains(site.d.itemVerbs, verb)
 	}
-	return s.placeAt(path) == atInstance && s.mountedVerb(path[0], verb)
+	switch s.placeAt(path) {
+	case atInstance:
+		return s.mountedVerb(path[0], verb)
+	case atSingleton:
+		c := lookup(verb)
+		return c != nil && c.onOne && c.on == path[0]
+	default:
+		return false
+	}
 }
 
 // scopeFlags names what the place stands for, in the words the command
@@ -658,7 +666,7 @@ func (s *session) mountsHere(path []string, verb string) bool {
 func (s *session) scopeFlags(path []string) []string {
 	site := s.drawerSiteAt(path)
 	var out []string
-	if site == nil || site.instance != "" {
+	if (site == nil || site.instance != "") && len(path) >= 2 {
 		out = append(out, path[0]+"="+path[1])
 	}
 	if site != nil && site.item != "" {
@@ -1189,8 +1197,15 @@ func (s *session) verbNamesAt(path []string) []string {
 		// shows what stands below, export takes the whole tree.
 		return []string{verbPrint, verbExport}
 	case s.isSingleton(path):
-		// One block, always there: set it, clear it, take it away.
-		return []string{verbPrint, verbSet, verbUnset, verbExport, verbRemove}
+		// One block, always there: set it, clear it, take it away —
+		// and whatever commands name the block as their subject.
+		verbs := []string{verbPrint, verbSet, verbUnset, verbExport, verbRemove}
+		for _, v := range commandNames() {
+			if c := lookup(v); c != nil && c.onOne && c.on == path[0] {
+				verbs = append(verbs, v)
+			}
+		}
+		return verbs
 	case len(path) == 1:
 		return []string{verbPrint, verbAdd, verbRemove, verbExport}
 	default:

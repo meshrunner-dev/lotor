@@ -287,6 +287,9 @@ func commandHome(c *command) string {
 		}
 	}
 	if c.on != "" {
+		if c.onOne {
+			return "/" + c.on // a singleton is its own instance
+		}
 		return "/" + c.on + "/<name>"
 	}
 	return ""

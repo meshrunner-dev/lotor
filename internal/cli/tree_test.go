@@ -3,7 +3,11 @@ package cli
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -11,6 +15,7 @@ import (
 
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/schema"
+	"meshrunner.dev/lotor/internal/update"
 )
 
 func TestTreeNavigationChangesThePrompt(t *testing.T) {
@@ -1539,5 +1544,68 @@ func TestAirSessionsAreADrawerOnTheRelay(t *testing.T) {
 	deps.Relays[0].AirSessions = nil
 	if none := run(t, deps, "/relay/meshcore-868/sessions/print"); !strings.Contains(none, "keeps no over-the-air sessions") {
 		t.Errorf("the absence was not named:\n%s", none)
+	}
+}
+
+func TestUpdateCheckIsAVerbOnItsBlock(t *testing.T) {
+	sec, pub, err := update.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := update.Manifest{
+		Product: "lotor", Channel: "release", Version: "9.9.9",
+		Published: time.Now().UTC().Truncate(time.Second),
+		Artifacts: map[string]update.Artifact{
+			runtime.GOOS + "/" + runtime.GOARCH: {
+				URL: "https://example.org/lotor", SHA256: strings.Repeat("0", 64), Size: 42},
+		},
+		Notes: "everything, полностью",
+	}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := update.Sign(raw, sec, "channel:release")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/release/manifest.json", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(raw) })
+	mux.HandleFunc("/release/manifest.json.minisig", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(sig) })
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	deps := testDeps(t)
+	deps.Version = "0.1.0"
+	deps.UpdateTrust = func() ([]update.PublicKey, error) { return []update.PublicKey{pub}, nil }
+	deps.Kinds = append(deps.Kinds, schema.Kind{
+		Name: "update", Doc: "where this relay looks for newer versions of itself",
+		Singleton: true, Attrs: config.UpdateAttrs(),
+	})
+	deps.Traces["update"] = []config.Trace{
+		{Key: "channel", Value: "release", Source: "config"},
+		{Key: "url", Value: srv.URL, Source: "config"},
+	}
+
+	out := run(t, deps, "/update/check")
+	for _, want := range []string{"9.9.9", "0.1.0", "signed by"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the check does not say %q:\n%s", want, out)
+		}
+	}
+	// The verb lives on its block: offered there, refused at the root
+	// with the pointer home.
+	if help := run(t, deps, "/update ?"); !strings.Contains(help, cmdCheck) {
+		t.Errorf("the block does not offer check:\n%s", help)
+	}
+	if refused := run(t, deps, "check"); !strings.Contains(refused, "lives in /update") {
+		t.Errorf("the root did not point home:\n%s", refused)
+	}
+	// A channel already running is said plainly.
+	deps.Version = "9.9.9"
+	if same := run(t, deps, "/update/check"); !strings.Contains(same, "nothing newer") {
+		t.Errorf("parity was not named:\n%s", same)
+	}
+	// No trusted keys is the honest state before a key is minted.
+	deps.UpdateTrust = func() ([]update.PublicKey, error) { return nil, nil }
+	if none := run(t, deps, "/update/check"); !strings.Contains(none, "no trusted keys") {
+		t.Errorf("keylessness was not named:\n%s", none)
 	}
 }

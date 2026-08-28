@@ -298,7 +298,8 @@ func buildKinds() []schema.Kind {
 		sort.Strings(names)
 		return names
 	}
-	return []schema.Kind{
+	kinds := make([]schema.Kind, 0, 6)
+	kinds = append(kinds, []schema.Kind{
 		{
 			Name: confdb.KindRelay, Doc: "one protocol instance, owning one radio",
 			Attrs: config.RelayAttrs(), ChoiceAttr: attrProtocol,
@@ -335,6 +336,14 @@ func buildKinds() []schema.Kind {
 				return sortedNames(d.Presets)
 			},
 		},
+	}...)
+	return append(kinds, singletonKinds()...)
+}
+
+// singletonKinds are the blocks that exist once: no instance step, no
+// choice attribute, just their own attributes.
+func singletonKinds() []schema.Kind {
+	return []schema.Kind{
 		{
 			Name: confdb.KindSentinel, Doc: "the observation journal", Singleton: true,
 			Attrs: config.SentinelAttrs(),
@@ -346,6 +355,10 @@ func buildKinds() []schema.Kind {
 		{
 			Name: confdb.KindSystem, Doc: "what this installation calls itself", Singleton: true,
 			Attrs: config.SystemAttrs(),
+		},
+		{
+			Name: confdb.KindUpdate, Doc: "where this relay looks for newer versions of itself",
+			Singleton: true, Attrs: config.UpdateAttrs(),
 		},
 	}
 }

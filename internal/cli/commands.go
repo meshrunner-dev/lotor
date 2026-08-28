@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -13,9 +14,11 @@ import (
 	"time"
 
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/relay"
 	"meshrunner.dev/lotor/internal/sentinel"
+	"meshrunner.dev/lotor/internal/update"
 )
 
 func (s *session) status(ctx context.Context, _ input) error {
@@ -1138,4 +1141,65 @@ func (s *session) frameVocabulary() (types, verdicts []string) {
 		return nil, nil
 	}
 	return types, verdicts
+}
+
+// updateConfig is the /update singleton as resolved, defaults filled:
+// what the operator did not set still has one answer.
+func (s *session) updateConfig() (channel, url, token string) {
+	channel, url = "release", config.DefaultUpdateURL
+	for _, t := range s.traces()[kindUpdate] {
+		v := fmt.Sprintf("%v", t.Value)
+		switch t.Key {
+		case "channel":
+			channel = v
+		case "url":
+			url = v
+		case "token":
+			token = v
+		}
+	}
+	return channel, url, token
+}
+
+// updateCheck asks the configured channel what it offers and compares
+// with what runs. It fetches, verifies and reports — nothing is
+// downloaded and nothing changes.
+func (s *session) updateCheck(ctx context.Context, _ input) error {
+	channel, url, token := s.updateConfig()
+	trust := s.deps.UpdateTrust
+	if trust == nil {
+		trust = func() ([]update.PublicKey, error) { return update.Trusted(update.TrustedKeysDir) }
+	}
+	keys, err := trust()
+	if err != nil {
+		return err
+	}
+	client := &update.Client{Base: url, Token: token, Trusted: keys}
+	got, err := client.Check(ctx, channel, "")
+	if err != nil {
+		return err
+	}
+	m := got.Manifest
+	platform := runtime.GOOS + "/" + runtime.GOARCH
+	art, err := m.ArtifactFor(platform)
+	if err != nil {
+		return err
+	}
+	running := s.deps.Version
+	if !update.Newer(m, running, 0) {
+		fmt.Fprintf(s.out, "running %s — channel %s offers %s, nothing newer\r\n",
+			running, channel, m.Version)
+		return nil
+	}
+	tb := s.table()
+	tb.row("available", m.Version)
+	tb.row("running", running)
+	tb.row("channel", channel)
+	tb.row("published", m.Published.Format("2006-01-02 15:04:05"))
+	tb.row("artifact", fmt.Sprintf("%s, %d bytes", platform, art.Size))
+	tb.row("signed by", "key "+got.Key.Hex())
+	if m.Notes != "" {
+		tb.row("notes", m.Notes)
+	}
+	return tb.flush(s.out)
 }

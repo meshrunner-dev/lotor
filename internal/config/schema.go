@@ -62,6 +62,22 @@ func SystemAttrs() []schema.Attr {
 	}
 }
 
+// UpdateAttrs describes where the relay looks for newer versions of
+// itself.
+func UpdateAttrs() []schema.Attr {
+	return []schema.Attr{
+		{Name: "channel", Type: schema.String,
+			Doc: "what to follow: release, rc, beta, dev, or a try-<slug>"},
+		{Name: "url", Type: schema.String,
+			Doc: "the manifest tree; empty takes " + DefaultUpdateURL},
+		{Name: "token", Type: schema.String, Secret: true,
+			Doc: "bearer for artifact downloads — a private fork's assets"},
+	}
+}
+
+// DefaultUpdateURL is the project's own manifest tree.
+const DefaultUpdateURL = "https://updates.meshrunner.dev/lotor"
+
 // CLIAttrs describes the operator listener.
 func CLIAttrs() []schema.Attr {
 	return []schema.Attr{

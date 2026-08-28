@@ -66,7 +66,10 @@ type command struct {
 	// command lives in its context and nowhere else: at the root
 	// nobody has said which one, and the old answer — quietly picking
 	// the only relay — was multi-relay hidden rather than handled.
-	on string
+	// onOne says the kind is a singleton: the block is its own
+	// instance, and the command mounts one step higher.
+	on    string
+	onOne bool
 	// takes is the one word a command reads without naming it,
 	// declared like every other so help can describe it and the painter
 	// can tell a chosen value from a mistake. A command without one
@@ -94,6 +97,7 @@ func init() {
 	commands = append(commands, daemonCommands()...)
 	commands = append(commands, relayCommands()...)
 	commands = append(commands, journalCommands()...)
+	commands = append(commands, updateCommands()...)
 	commands = append(commands, sessionCommands()...)
 }
 
@@ -249,6 +253,24 @@ func journalCommands() []*command {
 			name:  cmdJournal,
 			forms: []form{{cmdJournal, "the journal's own state"}},
 			run:   (*session).sentinelStatus,
+		},
+	}
+}
+
+// updateCommands ask the release channels about this daemon.
+func updateCommands() []*command {
+	return []*command{
+		{
+			name:  cmdCheck,
+			on:    kindUpdate,
+			onOne: true,
+			forms: []form{{cmdCheck, "ask the channel what it offers"}},
+			detail: []string{
+				cmdCheck,
+				"fetches the channel's signed manifest, verifies it, and",
+				"compares with what runs; nothing is downloaded or changed",
+			},
+			run: (*session).updateCheck,
 		},
 	}
 }
