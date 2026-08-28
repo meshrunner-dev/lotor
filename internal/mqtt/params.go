@@ -7,6 +7,7 @@ package mqtt
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -39,6 +40,28 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 
 // Std is the standard-library value.
 func (d Duration) Std() time.Duration { return time.Duration(d) }
+
+// NormalizeIATA holds the region code to the ecosystem's rule:
+// exactly three letters or digits, spoken uppercase — it lands
+// directly in topic paths, where anything else is a hole or a
+// separator. Empty passes through: whether a topic needs one is the
+// template's question, not this one's.
+func NormalizeIATA(s string) (string, error) {
+	if s == "" {
+		return "", nil
+	}
+	if len(s) != 3 {
+		return "", fmt.Errorf("iata %q — exactly three letters or digits (e.g. DEN)", s)
+	}
+	for _, c := range s {
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		default:
+			return "", fmt.Errorf("iata %q — exactly three letters or digits (e.g. DEN)", s)
+		}
+	}
+	return strings.ToUpper(s), nil
+}
 
 // The parameter names the schema, the presets and the code share.
 const (
@@ -103,7 +126,7 @@ func Schema() []schema.Attr {
 		{Name: keyRetain, Type: schema.Bool, Apply: schema.Hot,
 			Doc: "retain the heartbeat and neighbour snapshots where the broker allows"},
 		{Name: "iata", Type: schema.String,
-			Doc: "the site's three-letter region code, for the topic"},
+			Doc: "the site's region code, exactly three letters or digits (e.g. DEN)"},
 		{Name: "token", Type: schema.String,
 			Doc: "per-connection token some topic layouts carry"},
 		{Name: "topic", Type: schema.String,

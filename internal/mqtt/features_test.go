@@ -238,3 +238,17 @@ func TestObserverSpeaksOnConnectAndWalksNeighbours(t *testing.T) {
 		}
 	}
 }
+
+func TestIATAFollowsTheEcosystemRule(t *testing.T) {
+	for in, want := range map[string]string{"": "", "par": "PAR", "DEN": "DEN", "9h1": "9H1"} {
+		got, err := NormalizeIATA(in)
+		if err != nil || got != want {
+			t.Errorf("NormalizeIATA(%q) = %q %v, want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"pa", "pari", "p@r", "p r", "pa/", "célé"} {
+		if _, err := NormalizeIATA(bad); err == nil {
+			t.Errorf("NormalizeIATA(%q) accepted", bad)
+		}
+	}
+}

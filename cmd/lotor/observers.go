@@ -70,6 +70,11 @@ func resolveMQTTParams(mq config.MQTT) (mqtt.Params, error) {
 		return mqtt.Params{}, fmt.Errorf(
 			"neighbors_interval under %s — each round asks every neighbour over the air", neighboursFloor)
 	}
+	iata, err := mqtt.NormalizeIATA(p.IATA)
+	if err != nil {
+		return mqtt.Params{}, err
+	}
+	p.IATA = iata
 	// The topic must already build with what is configured — finding a
 	// hole per published frame is a journal full of refusals, not an
 	// answer the operator can act on.
