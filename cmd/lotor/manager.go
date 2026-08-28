@@ -42,6 +42,7 @@ import (
 // them for the console; these are the write path's spellings.
 const (
 	attrProtocol     = "protocol"
+	attrIdentity     = "identity"
 	attrRadio        = "radio"
 	attrDriver       = "driver"
 	attrProfile      = "profile"
@@ -382,11 +383,32 @@ func (m *manager) Mutate(ctx context.Context, kind, name string,
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// identity=new mints in place, the way Create does: the operator
+	// asks for a key rather than pasting one, and the seed never
+	// leaves the daemon. Replacing a live identity is a real act —
+	// the mesh learns a new node and forgets the paths to the old —
+	// so the minted public key is returned for the console to show.
+	minted := ""
+	if kind == confdb.KindRelay && set[attrIdentity] == "new" {
+		seed, pub, err := mintIdentity()
+		if err != nil {
+			return "", err
+		}
+		set = maps.Clone(set)
+		set[attrIdentity], minted = seed, pub
+	}
 	typed, err := m.parseChanges(kind, name, set, unset)
 	if err != nil {
 		return "", err
 	}
-	return m.applyTyped(ctx, kind, name, typed, unset, principal, opOf(set, unset))
+	msg, err := m.applyTyped(ctx, kind, name, typed, unset, principal, opOf(set, unset))
+	if err != nil {
+		return "", err
+	}
+	if minted != "" {
+		msg += fmt.Sprintf(" (new identity, pubkey %s)", minted)
+	}
+	return msg, nil
 }
 
 // Undo inverts the newest recorded mutation — the old values become
@@ -628,12 +650,12 @@ func (m *manager) createRelay(next *config.File, name string,
 		}
 		rest[k] = v
 	}
-	if rest["identity"] == "new" {
+	if rest[attrIdentity] == "new" {
 		seed, pub, err := mintIdentity()
 		if err != nil {
 			return "", err
 		}
-		rest["identity"], minted = seed, pub
+		rest[attrIdentity], minted = seed, pub
 	}
 	next.Relays[name] = rc
 	typed, err := m.parseAgainst(confdb.KindRelay, rc.Protocol, rest, nil)
@@ -645,7 +667,7 @@ func (m *manager) createRelay(next *config.File, name string,
 		if _, err := setRelayAttr(&rc, attr, v); err != nil {
 			return "", err
 		}
-		if attr == "identity" && minted != "" {
+		if attr == attrIdentity && minted != "" {
 			// The seed is a secret from birth: the revision records
 			// that an identity exists, never what it is.
 			change[attr] = confdb.Change{New: maskedChange}

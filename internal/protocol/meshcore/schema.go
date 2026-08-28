@@ -69,7 +69,8 @@ func policySchema() []schema.Attr {
 		{Name: "owner_info", Type: schema.String,
 			Doc: "who answers for this node, served to owner questions"},
 		{Name: "identity", Type: schema.String, Secret: true,
-			Doc: "the node's private key — whoever reads it IS the node"},
+			Doc: `the node's private key, hex — or "new" to mint one; ` +
+				"whoever reads it IS the node"},
 
 		{Name: "default_scope", Type: schema.String,
 			Doc: "the transport scope stamped on what this relay originates"},

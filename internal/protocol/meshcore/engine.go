@@ -286,26 +286,45 @@ func normalizeGuest(p *params) error {
 	return nil
 }
 
+// check is the console's dry run: everything build validates, minus
+// the building. It must refuse exactly what build refuses — a value
+// the console accepts and the engine then rejects is a relay that
+// reports "applied" and dies at its next start.
 func check(cfg map[string]any) error {
-	_, err := paramsFrom(cfg)
+	_, _, err := resolve(cfg)
 	return err
 }
 
-func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (protocol.Engine, error) {
+// resolve reads the configuration into the parameters and the identity
+// the engine runs on. It is the single validation path: check discards
+// what it returns, build keeps it, and neither can drift from the
+// other by validating something the other does not.
+func resolve(cfg map[string]any) (params, *meshcore.LocalIdentity, error) {
 	p, err := paramsFrom(cfg)
 	if err != nil {
-		return nil, err
+		return p, nil, err
 	}
 	if p.SessionLimit < 0 {
-		return nil, fmt.Errorf(
+		return p, nil, fmt.Errorf(
 			"meshcore params: session_limit %d — a budget below zero answers nothing at all",
 			p.SessionLimit)
 	}
-	var id *meshcore.LocalIdentity
-	if p.Identity != "" {
-		if id, err = identityFromConfig(p.Identity); err != nil {
-			return nil, err
-		}
+	if p.Identity == "" {
+		return p, nil, nil
+	}
+	id, err := identityFromConfig(p.Identity)
+	if err != nil {
+		return p, nil, err
+	}
+	return p, id, nil
+}
+
+func build(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (protocol.Engine, error) {
+	p, id, err := resolve(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if id != nil {
 		log.Info("node identity",
 			zap.String("pubkey", hex.EncodeToString(id.PubKey[:])[:keyPrefixLen]))
 	}

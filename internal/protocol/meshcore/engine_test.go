@@ -159,3 +159,33 @@ func TestTxPowerReadsTheScalarWhateverItsTag(t *testing.T) {
 		t.Error("a word that is not auto parsed as a power")
 	}
 }
+
+func TestCheckRefusesEverythingBuildRefuses(t *testing.T) {
+	// The console dry-runs a set through check and commits if it
+	// passes; the relay then runs build. A value check accepts and
+	// build rejects is a set that reports "applied" and a relay that
+	// dies at its next start — seen on the air with identity=new,
+	// which build read as hex and could not.
+	base := func(identity string) map[string]any {
+		return map[string]any{
+			"frequency_hz": 869618000, "spreading_factor": 8, "bandwidth_hz": 62500,
+			"coding_rate": 8, "preamble": 32, "sync_word": 0x12, "crc": true,
+			"duty_cycle_pct": 10.0, "node_name": "n", "identity": identity,
+		}
+	}
+	for _, identity := range []string{"new", "banana", "abcd", ""} {
+		cfg := base(identity)
+		checkErr := check(cfg)
+		_, buildErr := build("r", cfg, bus.New(), zap.NewNop())
+		if (checkErr == nil) != (buildErr == nil) {
+			t.Errorf("identity=%q: check=%v but build=%v — they must agree",
+				identity, checkErr, buildErr)
+		}
+	}
+	// And session_limit, the other thing build alone used to police.
+	cfg := base("")
+	cfg["session_limit"] = -1
+	if check(cfg) == nil {
+		t.Error("check accepted a negative session_limit")
+	}
+}
