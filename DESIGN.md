@@ -81,6 +81,11 @@ feeds the driver's chip `Config`, relay config feeds the channel
 `Params`, and the cap semantics mirror the driver's: it refuses excess
 power, it never clamps.
 
+A pin the radio owns is written `offset` or `chip:offset`: the bare
+form is a line on the radio's `gpiochip`, which is what a board on a
+header looks like, and the qualified form names its own chip, because
+nothing promises a board keeps every line on one of them.
+
 Failure model: a relay whose radio does not answer its identity check
 comes up in a visible `error` state and retries with backoff — the
 daemon and its other relays keep running. Never start blind on dead

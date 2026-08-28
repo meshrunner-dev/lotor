@@ -110,23 +110,23 @@ func attach(s Settings) (lora.SPI, lora.Pins, []lora.OutputPin, error) {
 	}
 
 	pins := lora.Pins{}
-	if pins.Reset, err = linux.Output(s.GPIOChip, s.ResetPin, true); err != nil {
-		return fail(fmt.Errorf("reset pin %d: %w", s.ResetPin, err), pins, nil)
+	if pins.Reset, err = linux.Output(s.ResetPin.Chip, s.ResetPin.Offset, true); err != nil {
+		return fail(fmt.Errorf("reset pin %s: %w", s.ResetPin, err), pins, nil)
 	}
-	if pins.Busy, err = linux.Input(s.GPIOChip, s.BusyPin); err != nil {
-		return fail(fmt.Errorf("busy pin %d: %w", s.BusyPin, err), pins, nil)
+	if pins.Busy, err = linux.Input(s.BusyPin.Chip, s.BusyPin.Offset); err != nil {
+		return fail(fmt.Errorf("busy pin %s: %w", s.BusyPin, err), pins, nil)
 	}
-	if pins.DIO1, err = linux.Interrupt(s.GPIOChip, s.DIO1Pin); err != nil {
-		return fail(fmt.Errorf("dio1 pin %d: %w", s.DIO1Pin, err), pins, nil)
+	if pins.DIO1, err = linux.Interrupt(s.DIO1Pin.Chip, s.DIO1Pin.Offset); err != nil {
+		return fail(fmt.Errorf("dio1 pin %s: %w", s.DIO1Pin, err), pins, nil)
 	}
 
 	// Front-end enables are held high for the whole session; the chip
 	// steers TX/RX itself over DIO2 when the board is wired that way.
 	held := make([]lora.OutputPin, 0, len(s.EnablePins))
 	for _, n := range s.EnablePins {
-		p, err := linux.Output(s.GPIOChip, n, true)
+		p, err := linux.Output(n.Chip, n.Offset, true)
 		if err != nil {
-			return fail(fmt.Errorf("enable pin %d: %w", n, err), pins, held)
+			return fail(fmt.Errorf("enable pin %s: %w", n, err), pins, held)
 		}
 		held = append(held, p)
 	}

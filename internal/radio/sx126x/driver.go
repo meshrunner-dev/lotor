@@ -20,15 +20,23 @@ type Settings struct {
 	SPI   string `yaml:"spi"`
 	SPIHz uint32 `yaml:"spi_hz"`
 
+	// GPIOChip is the board's chip: what a pin means when it names no
+	// chip of its own. Every line below is a Pin, so any one of them
+	// may sit on another chip where the board wires it that way.
+	//
+	// The three the chip cannot run without are pointers, so that
+	// absent and zero read differently: offset 0 is a real line on
+	// every chip, and a configuration that forgot to name a pin must
+	// be told so rather than handed whatever line 0 is wired to.
 	GPIOChip string `yaml:"gpiochip"`
-	ResetPin int    `yaml:"reset_pin"`
-	BusyPin  int    `yaml:"busy_pin"`
-	DIO1Pin  int    `yaml:"dio1_pin"`
+	ResetPin *Pin   `yaml:"reset_pin"`
+	BusyPin  *Pin   `yaml:"busy_pin"`
+	DIO1Pin  *Pin   `yaml:"dio1_pin"`
 
 	// EnablePins are held high for the board's whole session (front-end
 	// module enables); the chip steers TX/RX itself when DIO2RFSwitch
 	// is set.
-	EnablePins   []int  `yaml:"enable_pins"`
+	EnablePins   []Pin  `yaml:"enable_pins"`
 	DIO2RFSwitch bool   `yaml:"dio2_rf_switch"`
 	TCXO         string `yaml:"tcxo"` // "", "1.6", "1.8", "3.3", ...
 	DCDC         bool   `yaml:"dcdc"`
@@ -105,7 +113,31 @@ func settingsFrom(cfg map[string]any) (Settings, error) {
 	if s.GPIOChip == "" {
 		s.GPIOChip = "gpiochip0"
 	}
+	// From here every pin names its chip, so nothing downstream has to
+	// remember which default applied.
+	if s.ResetPin, err = requirePin("reset_pin", s.ResetPin, s.GPIOChip); err != nil {
+		return s, err
+	}
+	if s.BusyPin, err = requirePin("busy_pin", s.BusyPin, s.GPIOChip); err != nil {
+		return s, err
+	}
+	if s.DIO1Pin, err = requirePin("dio1_pin", s.DIO1Pin, s.GPIOChip); err != nil {
+		return s, err
+	}
+	for i := range s.EnablePins {
+		s.EnablePins[i] = s.EnablePins[i].Resolve(s.GPIOChip)
+	}
 	return s, nil
+}
+
+// requirePin insists the line was named — the chip does not run
+// without it — and fills in the board's chip when the pin named none.
+func requirePin(name string, p *Pin, chip string) (*Pin, error) {
+	if p == nil {
+		return nil, fmt.Errorf("sx126x-spi settings: %s is required", name)
+	}
+	resolved := p.Resolve(chip)
+	return &resolved, nil
 }
 
 // Inspect is the driver's config dry run: strict decode plus the
