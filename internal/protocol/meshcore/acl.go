@@ -16,10 +16,14 @@ type PersistedSession struct {
 	PubKey        [meshcore.PubKeySize]byte
 	Perms         byte
 	LastTimestamp uint32
-	OutPath       []byte
-	OutPathLen    uint8
-	Learned       time.Time
-	LastActive    time.Time
+	// HasOut says the client taught a route, told apart from the path
+	// bytes: a zero-hop route is adjacent — empty path, still present
+	// — which is not the same as no route at all, where answers flood.
+	HasOut     bool
+	OutPath    []byte
+	OutPathLen uint8
+	Learned    time.Time
+	LastActive time.Time
 }
 
 // SessionStore persists the session table, so a companion — an admin
@@ -91,6 +95,7 @@ func (c *client) persisted() PersistedSession {
 		LastTimestamp: c.lastTimestamp, LastActive: c.lastActive,
 	}
 	if c.out != nil {
+		p.HasOut = true
 		p.OutPath = c.out.path
 		p.OutPathLen = c.out.pathLen
 		p.Learned = c.out.learned
@@ -139,7 +144,7 @@ func (a *acl) load(secret func(pubKey []byte) ([]byte, error)) {
 			pubKey: p.PubKey, secret: sec, perms: p.Perms,
 			lastTimestamp: p.LastTimestamp, lastActive: p.LastActive,
 		}
-		if p.OutPath != nil {
+		if p.HasOut {
 			c.out = &outPath{pathLen: p.OutPathLen, path: p.OutPath, learned: p.Learned}
 		}
 		a.by[p.PubKey] = c

@@ -185,7 +185,7 @@ func (a *aclStore) LoadSessions() ([]enginemc.PersistedSession, error) {
 	for _, r := range rows {
 		p := enginemc.PersistedSession{
 			Perms: r.Perms, LastTimestamp: r.LastTimestamp,
-			OutPath: r.OutPath, OutPathLen: r.OutPathLen,
+			HasOut: r.HasOut, OutPath: r.OutPath, OutPathLen: r.OutPathLen,
 			Learned: r.Learned, LastActive: r.LastActive,
 		}
 		copy(p.PubKey[:], r.PubKey)
@@ -197,7 +197,7 @@ func (a *aclStore) LoadSessions() ([]enginemc.PersistedSession, error) {
 func (a *aclStore) SaveSession(p enginemc.PersistedSession) error {
 	return a.store.SaveACL(context.Background(), a.relay, confdb.ACLRow{
 		PubKey: p.PubKey[:], Perms: p.Perms, LastTimestamp: p.LastTimestamp,
-		OutPath: p.OutPath, OutPathLen: p.OutPathLen,
+		HasOut: p.HasOut, OutPath: p.OutPath, OutPathLen: p.OutPathLen,
 		Learned: p.Learned, LastActive: p.LastActive,
 	})
 }

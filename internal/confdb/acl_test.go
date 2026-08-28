@@ -20,7 +20,7 @@ func TestACLRoundTripsAndForgets(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	row := ACLRow{
 		PubKey: key, Perms: 3, LastTimestamp: 1756000000,
-		OutPath: []byte{0x11, 0x22}, OutPathLen: 2,
+		HasOut: true, OutPath: []byte{0x11, 0x22}, OutPathLen: 2,
 		Learned: now.Add(-time.Minute), LastActive: now,
 	}
 	if err := s.SaveACL(ctx, "mc", row); err != nil {

@@ -70,6 +70,24 @@ func TestSessionsSurviveABounce(t *testing.T) {
 	if got.out == nil || got.out.pathLen != 2 {
 		t.Errorf("the route home was lost: %+v", got.out)
 	}
+
+	// The distinction that bit in flight: a zero-hop adjacent client
+	// — empty path, still a route — must not reload as flood.
+	var adj [meshcore.PubKeySize]byte
+	adj[0] = 0x77
+	ac := &client{pubKey: adj, secret: []byte("s"), perms: permGuest,
+		lastTimestamp: 1, lastActive: time.Now()}
+	ac.out = &outPath{pathLen: 0, path: nil, learned: time.Now()} // adjacent
+	a.put(ac)
+	e := newACL(store)
+	e.load(func([]byte) ([]byte, error) { return []byte("x"), nil })
+	got2 := e.get(adj[:])
+	if got2 == nil || got2.out == nil {
+		t.Fatalf("adjacent session reloaded as flood: %+v", got2)
+	}
+	if got2.out.pathLen != 0 {
+		t.Errorf("adjacent route grew hops: %d", got2.out.pathLen)
+	}
 	if string(got.secret) != "recomputed" {
 		t.Errorf("secret = %q, want the recomputed one", got.secret)
 	}

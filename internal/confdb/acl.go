@@ -20,10 +20,13 @@ type ACLRow struct {
 	PubKey        []byte
 	Perms         byte
 	LastTimestamp uint32
-	OutPath       []byte // nil when the client taught no route
-	OutPathLen    uint8
-	Learned       time.Time // zero when no route
-	LastActive    time.Time
+	// HasOut tells a taught route from none, the zero-hop adjacent
+	// route (empty path, still a route) kept distinct from flood.
+	HasOut     bool
+	OutPath    []byte
+	OutPathLen uint8
+	Learned    time.Time
+	LastActive time.Time
 }
 
 // LoadACL reads one relay's sessions, freshest bound applied by the
@@ -52,6 +55,7 @@ func (s *Store) LoadACL(ctx context.Context, relay string) ([]ACLRow, error) {
 		r.LastTimestamp = uint32(lastTS)
 		r.OutPath = outPath
 		if outLen.Valid {
+			r.HasOut = true
 			r.OutPathLen = uint8(outLen.Int64)
 		}
 		if learned.Valid && learned.String != "" {
@@ -72,8 +76,11 @@ func (s *Store) SaveACL(ctx context.Context, relay string, r ACLRow) error {
 	if !r.Learned.IsZero() {
 		learned = r.Learned.UTC().Format(time.RFC3339Nano)
 	}
+	// out_path_len is the presence signal: non-NULL (0 included) is a
+	// route, NULL is none. The path bytes may be empty for a zero-hop
+	// adjacent client, which is still a route.
 	var outLen any
-	if r.OutPath != nil {
+	if r.HasOut {
 		outLen = int64(r.OutPathLen)
 	}
 	_, err := s.db.ExecContext(ctx,
