@@ -347,3 +347,60 @@ func TestObserverShapeHeals(t *testing.T) {
 		t.Error("a settled shape was rewritten")
 	}
 }
+
+func TestTypedObserversLiftIntoTheLayers(t *testing.T) {
+	// The exact shape the lab stored before the layering — the row a
+	// strict load refuses whole, taking the daemon's boot with it.
+	old := `{"iata":"par","password":"","raw":false,"relay":"","status":false,` +
+		`"status_interval":"30s","token":"","topic":"","tx":"","types":[],` +
+		`"url":"tcp://127.0.0.1:1883"}`
+	healed, changed, err := healTypedObserver(old)
+	if err != nil || !changed {
+		t.Fatalf("lift: %v changed=%v", err, changed)
+	}
+	var o map[string]any
+	if err := json.Unmarshal([]byte(healed), &o); err != nil {
+		t.Fatal(err)
+	}
+	overrides, ok := o["overrides"].(map[string]any)
+	if !ok {
+		t.Fatalf("no overrides: %v", o)
+	}
+	kv, ok := overrides["custom"].(map[string]any)
+	if !ok {
+		t.Fatalf("no custom scope: %v", overrides)
+	}
+	// Zero values dropped, the silenced heartbeat kept its silence
+	// through the settlement, the region code lifted uppercase.
+	if kv["url"] != "tcp://127.0.0.1:1883" || kv["iata"] != "PAR" || kv["status_interval"] != "0s" {
+		t.Errorf("lifted wrong: %v", kv)
+	}
+	for _, gone := range []string{"password", "token", "topic", "tx", "raw", "types", "relay", "status"} {
+		if _, held := kv[gone]; held {
+			t.Errorf("zero value %s survived", gone)
+		}
+	}
+	// A layered row passes untouched.
+	if _, changed, _ := healTypedObserver(healed); changed {
+		t.Error("a layered row was rewritten")
+	}
+	// And the lifted shape decodes under the strict door.
+	if _, err := resolveMQTTParams(mustDecodeMQTT(t, healed)); err != nil {
+		t.Errorf("lifted shape still refused: %v", err)
+	}
+}
+
+// mustDecodeMQTT round-trips healed JSON through the same strict door
+// the loader uses.
+func mustDecodeMQTT(t *testing.T, attrs string) config.MQTT {
+	t.Helper()
+	var o map[string]any
+	if err := json.Unmarshal([]byte(attrs), &o); err != nil {
+		t.Fatal(err)
+	}
+	mq, err := config.Decode[config.MQTT](o)
+	if err != nil {
+		t.Fatalf("strict decode: %v", err)
+	}
+	return mq
+}

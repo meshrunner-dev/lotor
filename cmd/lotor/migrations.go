@@ -23,16 +23,26 @@ func storeMigrations() []confdb.Migration {
 		Doc: "observer keys settle: neighbours_interval absorbs neighbors, " +
 			"status_interval absorbs status, iata speaks uppercase",
 		Run: migrateObserverKeys,
+	}, {
+		To: 3,
+		Doc: "observers stored typed — url and friends at the top level, " +
+			"from before the layering — move into an override scope",
+		Run: migrateTypedObservers,
 	}}
 }
 
 // migrateObserverKeys heals the observer overrides the 2026-08-28
 // parameter settlement renamed and collapsed by hand on the lab.
 func migrateObserverKeys(ctx context.Context, tx *sql.Tx) error {
-	patches, err := collectObserverPatches(ctx, tx)
+	patches, err := collectPatches(ctx, tx, healObserverAttrs)
 	if err != nil {
 		return err
 	}
+	return applyPatches(ctx, tx, patches)
+}
+
+// applyPatches writes the healed rows back.
+func applyPatches(ctx context.Context, tx *sql.Tx, patches []observerPatch) error {
 	for _, p := range patches {
 		if _, err := tx.ExecContext(ctx,
 			"UPDATE objects SET attrs = ? WHERE kind = 'mqtt' AND name = ?",
@@ -46,10 +56,11 @@ func migrateObserverKeys(ctx context.Context, tx *sql.Tx) error {
 // observerPatch is one row's healed replacement.
 type observerPatch struct{ name, attrs string }
 
-// collectObserverPatches reads every observer row and heals what
-// needs it, the writes left for the caller so the reader closes
-// first.
-func collectObserverPatches(ctx context.Context, tx *sql.Tx) ([]observerPatch, error) {
+// collectPatches reads every observer row through one healer, the
+// writes left for the caller so the reader closes first.
+func collectPatches(ctx context.Context, tx *sql.Tx,
+	heal func(string) (string, bool, error),
+) ([]observerPatch, error) {
 	rows, err := tx.QueryContext(ctx,
 		"SELECT name, attrs FROM objects WHERE kind = 'mqtt'")
 	if err != nil {
@@ -62,7 +73,7 @@ func collectObserverPatches(ctx context.Context, tx *sql.Tx) ([]observerPatch, e
 		if err := rows.Scan(&name, &attrs); err != nil {
 			return nil, err
 		}
-		healed, changed, err := healObserverAttrs(attrs)
+		healed, changed, err := heal(attrs)
 		if err != nil {
 			return nil, err
 		}
@@ -71,6 +82,65 @@ func collectObserverPatches(ctx context.Context, tx *sql.Tx) ([]observerPatch, e
 		}
 	}
 	return patches, rows.Err()
+}
+
+// migrateTypedObservers lifts the observers stored before the
+// layering: their keys sat at the top level of the object, where the
+// strict decode of the layered shape refuses them — a daemon that
+// met one at load would not boot. Values move into the custom
+// override scope, zero values dropped, then the key settlement of
+// the previous rung applies to what moved.
+func migrateTypedObservers(ctx context.Context, tx *sql.Tx) error {
+	patches, err := collectPatches(ctx, tx, healTypedObserver)
+	if err != nil {
+		return err
+	}
+	return applyPatches(ctx, tx, patches)
+}
+
+// healTypedObserver rewrites one pre-layering observer; a row that
+// already speaks overrides passes untouched.
+func healTypedObserver(attrs string) (string, bool, error) {
+	var o map[string]any
+	if err := json.Unmarshal([]byte(attrs), &o); err != nil {
+		return "", false, err
+	}
+	if _, layered := o["overrides"]; layered {
+		return attrs, false, nil
+	}
+	scope := map[string]any{}
+	for key, v := range o {
+		switch v := v.(type) {
+		case nil:
+			continue
+		case string:
+			if v == "" {
+				continue
+			}
+		case bool:
+			if !v && key != "status" {
+				continue // false is the default everywhere but the old status switch
+			}
+		case []any:
+			if len(v) == 0 {
+				continue
+			}
+		}
+		scope[key] = v
+	}
+	next := map[string]any{
+		"profile":   "",
+		"disabled":  false,
+		"overrides": map[string]any{"custom": scope},
+	}
+	raw, err := json.Marshal(next)
+	if err != nil {
+		return "", false, err
+	}
+	// The previous rung's settlement applies to what moved: the old
+	// status switch collapses, the region code speaks uppercase.
+	healed, _, err := healObserverAttrs(string(raw))
+	return healed, true, err
 }
 
 // healObserverAttrs rewrites one observer's stored shape into the
