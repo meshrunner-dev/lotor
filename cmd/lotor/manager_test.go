@@ -706,6 +706,28 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	if out := m.runOTA("mc", "air:test", "get rxdelay"); out != "> 12" {
 		t.Errorf("set rxdelay read back %q", out)
 	}
+	// The width and orbit knobs read back this node's own defaults —
+	// mode 1 and minimal, the two deliberate steps past the reference.
+	if out := m.runOTA("mc", "air:test", "get path.hash.mode"); out != "> 1" {
+		t.Errorf("unset path.hash.mode got %q", out)
+	}
+	if out := m.runOTA("mc", "air:test", "get loop.detect"); out != "> minimal" {
+		t.Errorf("unset loop.detect got %q", out)
+	}
+	if out := m.runOTA("mc", "air:test", "set loop.detect strict"); out != "OK" {
+		t.Errorf("set loop.detect got %q", out)
+	}
+	if o := <-m.air; o.set["loop_detect"] != "strict" {
+		t.Errorf("loop.detect order = %+v", o.set)
+	}
+	if out := m.runOTA("mc", "air:test", "set path.hash.mode 3"); !strings.HasPrefix(out, "ERR: ") ||
+		!strings.Contains(out, "0, 1 or 2") {
+		t.Errorf("path.hash.mode 3 got %q", out)
+	}
+	if out := m.runOTA("mc", "air:test", "set loop.detect banana"); !strings.HasPrefix(out, "ERR: ") ||
+		!strings.Contains(out, "strict") {
+		t.Errorf("loop.detect banana got %q", out)
+	}
 	// The deliberate absences answer like any unknown word.
 	for _, cmd := range []string{"reboot", "clkreboot", "tempradio 869525000 62500 8 8 10", "poweroff"} {
 		if out := m.runOTA("mc", "air:test", cmd); out != otaUnknown {

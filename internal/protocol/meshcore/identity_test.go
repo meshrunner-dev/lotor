@@ -92,21 +92,48 @@ func TestDirectAddressingJudgedWithIdentity(t *testing.T) {
 	}
 }
 
-func TestFloodLoopDetected(t *testing.T) {
+func TestFloodLoopThresholds(t *testing.T) {
 	e, sub := identifiedEngine(t)
-
 	ours := e.id.PubKey[0]
-	looped := []byte{0x01 | 0x05<<2, 0x03, 0x11, ours, 0x22, 0xDD, 0xEE}
-	clean := []byte{0x01 | 0x05<<2, 0x03, 0x11, ^ours, 0x22, 0xDD, 0xEF}
-	e.judge(newFakeDevice(), frame(looped))
-	e.judge(newFakeDevice(), frame(clean))
 
-	judged := drainJudged(t, sub)
-	if judged[0].Verdict != "would-drop-flood-loop" {
-		t.Errorf("looped flood = %q", judged[0].Verdict)
+	// flood1 builds a one-byte-width flood whose path holds our hash
+	// n times; seq keeps every frame out of the dedup's way.
+	flood1 := func(n int, seq byte) []byte {
+		f := []byte{0x01 | 0x05<<2, byte(n + 1), 0x11}
+		for range n {
+			f = append(f, ours)
+		}
+		return append(f, 0xDD, seq)
 	}
-	if judged[1].Verdict != "would-relay-flood" {
-		t.Errorf("clean flood = %q", judged[1].Verdict)
+	// At one byte a match is a collision once per 256 hops: minimal —
+	// the default — tolerates three apparent visits and refuses four.
+	e.judge(newFakeDevice(), frame(flood1(1, 0x01)))
+	e.judge(newFakeDevice(), frame(flood1(3, 0x02)))
+	e.judge(newFakeDevice(), frame(flood1(4, 0x03)))
+	// strict is the old armour: the first apparent visit refuses.
+	e.p.LoopDetect = "strict"
+	e.judge(newFakeDevice(), frame(flood1(1, 0x04)))
+	// off leaves orbit control to the dedup alone.
+	e.p.LoopDetect = "off"
+	e.judge(newFakeDevice(), frame(flood1(4, 0x05)))
+	// Two-byte hashes collide 256 times less: minimal refuses at two.
+	e.p.LoopDetect = ""
+	o2 := e.id.PubKey[:2]
+	wide := []byte{0x01 | 0x05<<2, 0x40 | 0x03, o2[0], o2[1], o2[0], o2[1], 0x22, 0x33, 0xDD, 0x06}
+	e.judge(newFakeDevice(), frame(wide))
+
+	want := []string{
+		"would-relay-flood", "would-relay-flood", "would-drop-flood-loop",
+		"would-drop-flood-loop", "would-relay-flood", "would-drop-flood-loop",
+	}
+	judged := drainJudged(t, sub)
+	if len(judged) != len(want) {
+		t.Fatalf("judged %d frames, want %d: %+v", len(judged), len(want), judged)
+	}
+	for i, w := range want {
+		if judged[i].Verdict != w {
+			t.Errorf("frame %d: verdict %q, want %q (%s)", i, judged[i].Verdict, w, judged[i].Detail)
+		}
 	}
 }
 

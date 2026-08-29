@@ -81,6 +81,25 @@ type params struct {
 	// accepts 0..20 and ships at 0 — off — which unset follows.
 	RxDelayBase float64 `yaml:"rx_delay_base"`
 
+	// PathHashMode picks the per-hop hash width this node's own
+	// floods declare: mode+1 bytes, the reference's 0..2. Every
+	// relayer appends its hash at the width the originator declared,
+	// so the choice buys the whole path its collision room at one
+	// byte per hop per step. Unset takes mode 1 — two-byte hashes, a
+	// deliberate step past the reference's one-byte default: one byte
+	// collides once per 256 hops, and the loop gate then reads
+	// relays this node never made.
+	PathHashMode *int `yaml:"path_hash_mode"`
+	// LoopDetect arms the flood orbit gate: how many times this
+	// node's hash may already ride a path before the relay is
+	// refused, thresholds per hash width since a narrow hash makes
+	// apparent visits out of collisions. off, minimal, moderate or
+	// strict — the reference's ladder, shipped off there. Unset takes
+	// minimal, deliberately: the dedup guards while it remembers, and
+	// minimal keeps the orbit armour after it forgets without
+	// strict's false refusals on long one-byte paths.
+	LoopDetect string `yaml:"loop_detect"`
+
 	// AdvertFloodInterval paces the routable self-announcement a
 	// repeater owes the mesh's directories; applied only when the
 	// transmit pipeline runs. The reference takes 3..168 hours and
@@ -284,16 +303,32 @@ func paramsFrom(cfg map[string]any) (params, error) {
 		return p, fmt.Errorf(
 			"meshcore params: advert_flood_interval %s — the reference accepts 3..168 hours; negative disables", v)
 	}
+	return p, checkRelayingBounds(p)
+}
+
+// checkRelayingBounds holds the relaying knobs to the reference's own
+// operator ranges — outside them its CLI refuses the setting, and so
+// does this config.
+func checkRelayingBounds(p params) error {
 	if v := p.TxDelayFactor; v != nil && !inRange(*v, 0, 2) {
-		return p, fmt.Errorf("meshcore params: tx_delay_factor %g — the reference accepts 0..2", *v)
+		return fmt.Errorf("meshcore params: tx_delay_factor %g — the reference accepts 0..2", *v)
 	}
 	if v := p.DirectTxDelayFactor; v != nil && !inRange(*v, 0, 2) {
-		return p, fmt.Errorf("meshcore params: direct_tx_delay_factor %g — the reference accepts 0..2", *v)
+		return fmt.Errorf("meshcore params: direct_tx_delay_factor %g — the reference accepts 0..2", *v)
 	}
 	if v := p.RxDelayBase; !inRange(v, 0, 20) {
-		return p, fmt.Errorf("meshcore params: rx_delay_base %g — the reference accepts 0..20, 0 holding nothing", v)
+		return fmt.Errorf("meshcore params: rx_delay_base %g — the reference accepts 0..20, 0 holding nothing", v)
 	}
-	return p, nil
+	if v := p.PathHashMode; v != nil && (*v < 0 || *v > 2) {
+		return fmt.Errorf("meshcore params: path_hash_mode %d — the reference accepts 0, 1 or 2", *v)
+	}
+	switch p.LoopDetect {
+	case "", loopOff, loopMinimal, loopModerate, loopStrict:
+		return nil
+	default:
+		return fmt.Errorf(
+			"meshcore params: loop_detect %q — off, minimal, moderate or strict", p.LoopDetect)
+	}
 }
 
 // inRange is a bounds check a NaN cannot slip through: both
@@ -330,6 +365,24 @@ func (p params) directTxDelayFactor() float64 {
 		return defaultDirectTxDelayFactor
 	}
 	return *p.DirectTxDelayFactor
+}
+
+// pathHashWidth is the hash width this node's own floods declare, in
+// bytes — the origination half of the width story; the relay half
+// mirrors whatever arrives.
+func (p params) pathHashWidth() int {
+	if p.PathHashMode == nil {
+		return defaultPathHashWidth
+	}
+	return *p.PathHashMode + 1
+}
+
+// loopDetect resolves the orbit gate's mode, unset taking minimal.
+func (p params) loopDetect() string {
+	if p.LoopDetect == "" {
+		return loopMinimal
+	}
+	return p.LoopDetect
 }
 
 // How a stranger may open a session.

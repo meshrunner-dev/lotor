@@ -558,6 +558,10 @@ func (e *engine) advert(dev radio.Device, now time.Time, kind string, local bool
 		pkt.Header = meshcore.MakeHeader(meshcore.RouteDirect,
 			meshcore.PayloadTypeAdvert, meshcore.PayloadVer1)
 	} else {
+		// Our own flood declares the hash width every relayer will
+		// append at — path_hash_mode, the origination half of the
+		// width story (relays mirror whatever arrives).
+		pkt.SetPathHashSizeAndCount(e.p.pathHashWidth(), 0)
 		// A routable announcement travels in the scope this relay
 		// speaks, so the mesh that carries it is the one that agreed
 		// to. The zero-hop one stays plain, as the reference's own

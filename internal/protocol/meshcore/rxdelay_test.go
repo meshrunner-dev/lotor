@@ -152,6 +152,66 @@ func TestDelayParamBounds(t *testing.T) {
 	}
 }
 
+func TestPathHashAndLoopParams(t *testing.T) {
+	base := func() map[string]any { return map[string]any{"frequency_hz": 869_618_000} }
+	for _, good := range []int{0, 1, 2} {
+		cfg := base()
+		cfg["path_hash_mode"] = good
+		if _, err := paramsFrom(cfg); err != nil {
+			t.Errorf("path_hash_mode %d refused: %v", good, err)
+		}
+	}
+	for _, bad := range []int{-1, 3} {
+		cfg := base()
+		cfg["path_hash_mode"] = bad
+		if _, err := paramsFrom(cfg); err == nil {
+			t.Errorf("path_hash_mode %d accepted", bad)
+		}
+	}
+	for _, good := range []string{"off", "minimal", "moderate", "strict"} {
+		cfg := base()
+		cfg["loop_detect"] = good
+		if _, err := paramsFrom(cfg); err != nil {
+			t.Errorf("loop_detect %s refused: %v", good, err)
+		}
+	}
+	cfg := base()
+	cfg["loop_detect"] = "banana"
+	if _, err := paramsFrom(cfg); err == nil {
+		t.Error("loop_detect banana accepted")
+	}
+	// Unset resolves to this node's deliberate defaults: two-byte
+	// origination, minimal orbit armour.
+	var p params
+	if w := p.pathHashWidth(); w != 2 {
+		t.Errorf("unset width %d, want 2", w)
+	}
+	if m := p.loopDetect(); m != loopMinimal {
+		t.Errorf("unset loop mode %q, want minimal", m)
+	}
+	// An explicit mode 0 is the reference's own one-byte choice.
+	zero := 0
+	p.PathHashMode = &zero
+	if w := p.pathHashWidth(); w != 1 {
+		t.Errorf("mode 0 width %d, want 1", w)
+	}
+}
+
+func TestFloodAdvertDeclaresItsWidth(t *testing.T) {
+	e := armedEngine(t, "on-air")
+	e.advert(newFakeDevice(), time.Now(), "advert-flood", false)
+	entry, ok := e.queue.pop(time.Now().Add(time.Minute))
+	if !ok {
+		t.Fatal("no advert queued")
+	}
+	if w := entry.pkt.PathHashSize(); w != 2 {
+		t.Errorf("flood advert declares %d-byte hashes, want 2", w)
+	}
+	if n := entry.pkt.PathHashCount(); n != 0 {
+		t.Errorf("fresh advert carries %d hops", n)
+	}
+}
+
 func TestDelayFactorsResolveDefaults(t *testing.T) {
 	var p params
 	if got := p.txDelayFactor(); got != defaultTxDelayFactor {

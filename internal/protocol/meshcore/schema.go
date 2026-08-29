@@ -9,7 +9,8 @@ import "meshrunner.dev/lotor/internal/schema"
 
 // Schema describes every attribute a meshcore relay accepts.
 func Schema() []schema.Attr {
-	return append(waveformSchema(), policySchema()...)
+	out := append(waveformSchema(), relayingSchema()...)
+	return append(out, policySchema()...)
 }
 
 // waveformSchema is the air side: a mesh agreement, exact or the
@@ -34,15 +35,10 @@ func waveformSchema() []schema.Attr {
 	}
 }
 
-// policySchema is the node side: what this relay does with the mesh
-// it hears.
-func policySchema() []schema.Attr {
+// relayingSchema is the relaying behaviour: how frames move through
+// this node — pacing, memory, path width, orbit armour, distance.
+func relayingSchema() []schema.Attr {
 	return []schema.Attr{
-		{Name: "tx_power_dbm", Type: schema.String,
-			Doc: `"auto" (the board's cap) or a dBm figure the cap must allow`},
-		{Name: "duty_cycle_pct", Type: schema.Float,
-			Doc: "airtime budget per sliding hour, percent — the band's regulatory ceiling"},
-
 		{Name: "tx_delay_factor", Type: schema.Float,
 			Doc: "flood relay jitter as a factor of the frame's airtime (0..2; unset takes 0.5)"},
 		{Name: "direct_tx_delay_factor", Type: schema.Float,
@@ -55,12 +51,29 @@ func policySchema() []schema.Attr {
 		{Name: "dedup_entries", Type: schema.Int,
 			Doc: "how many seen packets stay remembered (0 = the reference's 160)"},
 
+		{Name: "path_hash_mode", Type: schema.Int,
+			Doc: "hash width this node's own floods declare, mode+1 bytes (0..2; unset takes 1: two-byte hashes)"},
+		{Name: "loop_detect", Type: schema.String,
+			Enum: []string{loopOff, loopMinimal, loopModerate, loopStrict},
+			Doc:  "flood orbit gate: apparent visits of our hash tolerated per width (unset takes minimal)"},
+
 		{Name: "flood_max_hops", Type: schema.Int,
 			Doc: "hop ceiling for any flood"},
 		{Name: "flood_max_unscoped_hops", Type: schema.Int,
 			Doc: "hop ceiling for plain (unscoped) floods"},
 		{Name: "flood_max_advert_hops", Type: schema.Int,
 			Doc: "hop ceiling for flooded adverts"},
+	}
+}
+
+// policySchema is the node side: what this relay does with the mesh
+// it hears.
+func policySchema() []schema.Attr {
+	return []schema.Attr{
+		{Name: "tx_power_dbm", Type: schema.String,
+			Doc: `"auto" (the board's cap) or a dBm figure the cap must allow`},
+		{Name: "duty_cycle_pct", Type: schema.Float,
+			Doc: "airtime budget per sliding hour, percent — the band's regulatory ceiling"},
 
 		{Name: "advert_flood_interval", Type: schema.Duration,
 			Doc: "cadence of the flooded self-announcement (3h..168h; 0 takes 47h)"},

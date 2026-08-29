@@ -36,6 +36,8 @@ var otaSetting = map[string]string{
 	"repeat":                "tx.mode",
 	"advert.interval":       "advert_local_interval",
 	"flood.advert.interval": "advert_flood_interval",
+	"path.hash.mode":        "path_hash_mode",
+	"loop.detect":           "loop_detect",
 	"flood.max":             "flood_max_hops",
 	"flood.max.unscoped":    "flood_max_unscoped_hops",
 	"flood.max.advert":      "flood_max_advert_hops",
@@ -80,6 +82,8 @@ var otaRender = map[string]func(string) string{
 	"txdelay":        otaDefaulted("0.5"),
 	"direct.txdelay": otaDefaulted("0.3"),
 	"rxdelay":        otaDefaulted("0"),
+	"path.hash.mode": otaDefaulted("1"),
+	"loop.detect":    otaDefaulted("minimal"),
 }
 
 // otaDefaulted renders a stored value as-is and an unset one as its

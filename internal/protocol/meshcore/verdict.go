@@ -214,17 +214,49 @@ func (e *engine) floodVerdict(rx *reception, advertOK bool) (string, string) {
 	if t == meshcore.PayloadTypeAdvert && hops >= maxAdvertHops {
 		return verdictDropFloodHops, fmt.Sprintf("%d advert hops, limit %d", hops, maxAdvertHops)
 	}
-	// The repeater's loop gate: our hash already in the path means we
-	// relayed this packet once — flooding it again would orbit.
-	if e.id != nil {
+	// The repeater's orbit gate: count how many times our hash
+	// already rides the path. At narrow widths a match may be another
+	// node's collision — one in 256 per hop at one byte — so each
+	// mode tolerates a per-width number of apparent visits before the
+	// refusal, exactly the reference's isLooped and its tables.
+	if e.id != nil && e.p.loopDetect() != loopOff {
 		size := pkt.PathHashSize()
+		limit := loopMaxima[e.p.loopDetect()][min(size, 3)]
+		n := 0
 		for i := 0; i+size <= len(pkt.Path); i += size {
 			if e.id.HashMatches(pkt.Path[i : i+size]) {
-				return verdictDropLoop, ""
+				n++
 			}
+		}
+		if n >= limit {
+			return verdictDropLoop, fmt.Sprintf(
+				"our hash rides the path %d times — %s tolerates %d", n, e.p.loopDetect(), limit-1)
 		}
 	}
 	return verdictRelayFlood, ""
+}
+
+// The orbit gate's vocabulary and thresholds. loopMaxima[mode][w] is
+// how many appearances of our own hash refuse the relay at hash width
+// w (index 3 also serves the wire's fourth width, which the reference
+// tables never covered: at that width a match is no collision).
+const (
+	loopOff      = "off"
+	loopMinimal  = "minimal"
+	loopModerate = "moderate"
+	loopStrict   = "strict"
+
+	// defaultPathHashWidth is what this node's own floods declare
+	// when path_hash_mode is unset — two bytes, one step wider than
+	// the reference ships, chosen for meshes dense enough that a
+	// one-byte path reads as visited by everyone.
+	defaultPathHashWidth = 2
+)
+
+var loopMaxima = map[string][4]int{
+	loopMinimal:  {0, 4, 2, 1},
+	loopModerate: {0, 2, 1, 1},
+	loopStrict:   {0, 1, 1, 1},
 }
 
 // traceVerdict walks a direct TRACE the reference's way: the payload
