@@ -63,6 +63,9 @@ func (m *manager) startSampler(ctx context.Context, name string) {
 		return drv.Open(cfg, log)
 	}, every, log)
 	m.samplers[name] = &managedSampler{cancel: cancel, done: done, smp: smp}
+	m.viewMu.Lock()
+	m.sensorViews[name] = smp
+	m.viewMu.Unlock()
 	m.wg.Go(func() {
 		defer close(done)
 		smp.Run(sctx)
@@ -88,6 +91,9 @@ func (m *manager) stopSampler(name string) {
 	}
 	h.cancel()
 	delete(m.samplers, name)
+	m.viewMu.Lock()
+	delete(m.sensorViews, name)
+	m.viewMu.Unlock()
 	log := m.log.Named("sensor").With(zap.String("sensor", name))
 	select {
 	case <-h.done:

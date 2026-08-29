@@ -65,30 +65,44 @@ func (e *engine) telemetryBody(permMask byte, budget int) []byte {
 	// the end of the list — never as a buffer cut mid-record, which
 	// LPP cannot survive.
 	enc := meshcore.NewLPPEncoderWithin(budget)
+	// The voltage leads, as the reference's does: a companion reads
+	// this field as the node's battery, and a payload without it is
+	// one such a client will not show at all. Zero when nothing
+	// measures the supply — parsable, and honestly empty.
+	volts := float64(0)
+	if e.supply != nil {
+		if v, ok := e.supply(); ok {
+			volts = v
+		}
+	}
 	if err := enc.Add(meshcore.LPPReading{
-		Channel: telemChannelSelf, Type: meshcore.LPPVoltage, Value: float64(0),
+		Channel: telemChannelSelf, Type: meshcore.LPPVoltage, Value: volts,
 	}); err != nil {
 		// A rejected reading leaves its header in the buffer, so the
 		// payload would decode as truncated rather than short.
 		e.log.Warn("telemetry voltage refused by the encoder", zap.Error(err))
 		return nil
 	}
-	if c, ok := hostTemperature(); ok {
-		if err := enc.Add(meshcore.LPPReading{
-			Channel: telemChannelSelf, Type: meshcore.LPPTemperature, Value: c,
-		}); err != nil {
-			e.log.Warn("telemetry temperature refused by the encoder", zap.Error(err))
-			return nil
-		}
-	}
-	// The base readings above are everyone's; what follows is the
-	// sensors', under the permission mask — the reference queries its
-	// SensorManager here, and this seam is where that work lands.
-	// The hook always runs and the mask always travels: which sensor
-	// a mask admits is the sensors' own judgement, not this file's.
+	// Then the sensors', under the permission mask — the reference
+	// queries its SensorManager here. The hook always runs and the
+	// mask always travels: which sensor a mask admits is the sensors'
+	// own judgement, not this file's.
 	if e.telemetry != nil {
 		if err := e.telemetry(permMask, enc); err != nil && !errors.Is(err, meshcore.ErrLPPFull) {
 			e.log.Warn("sensor telemetry refused", zap.Error(err))
+			return nil
+		}
+	}
+	// The host's own thermometer comes last, deliberately: the
+	// reference calls it the default "overridden by external sensors
+	// (if any)", and a client honouring that precedence needs the
+	// real one to arrive first. Coming last also makes it the first
+	// thing a tight budget drops, which is the right one to lose.
+	if c, ok := hostTemperature(); ok {
+		if err := enc.Add(meshcore.LPPReading{
+			Channel: telemChannelSelf, Type: meshcore.LPPTemperature, Value: c,
+		}); err != nil && !errors.Is(err, meshcore.ErrLPPFull) {
+			e.log.Warn("telemetry temperature refused by the encoder", zap.Error(err))
 			return nil
 		}
 	}

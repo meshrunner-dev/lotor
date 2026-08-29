@@ -111,6 +111,10 @@ type manager struct {
 	infos    map[string]cli.RelayInfo
 	radios   map[string]cli.RadioInfo
 	traces   map[string][]config.Trace
+	// sensorViews is every running sampler, under viewMu with the rest
+	// of the view: a telemetry answer is composed on the engine's
+	// goroutine, which may never take mu.
+	sensorViews map[string]*sensor.Sampler
 	// cfgs holds each relay's resolved engine configuration, under
 	// viewMu with the rest of the view: the over-the-air deep check
 	// clones one and asks the protocol, exactly what assembly asks.
@@ -127,13 +131,14 @@ func newManager(store *confdb.Store, f *config.File, b *bus.Bus,
 ) *manager {
 	return &manager{
 		store: store, file: f, bus: b, sen: sen, kinds: kinds, log: log,
-		running:   map[string]*managedRelay{},
-		observers: map[string]*managedObserver{},
-		obsCause:  map[string]string{},
-		samplers:  map[string]*managedSampler{},
-		infos:     map[string]cli.RelayInfo{},
-		radios:    map[string]cli.RadioInfo{},
-		traces:    map[string][]config.Trace{},
+		running:     map[string]*managedRelay{},
+		observers:   map[string]*managedObserver{},
+		obsCause:    map[string]string{},
+		samplers:    map[string]*managedSampler{},
+		sensorViews: map[string]*sensor.Sampler{},
+		infos:       map[string]cli.RelayInfo{},
+		radios:      map[string]cli.RadioInfo{},
+		traces:      map[string][]config.Trace{},
 	}
 }
 
@@ -342,7 +347,8 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 	rc := m.file.Relays[name]
 	var r *relay.Relay
 	asm, err := assemble(ctx, name, rc, m.file.Radios[rc.Radio], m.bus, m.log, m.sen,
-		m.sessionStore(name), m.regionStore(name), m.otaCommands(name))
+		m.sessionStore(name), m.regionStore(name), m.otaCommands(name),
+		sensorFeed{supply: m.supplyVoltage, sensors: m.sensorTelemetry})
 	if err != nil {
 		m.log.Error("relay configuration failed",
 			zap.String("relay", name), zap.Error(err))

@@ -785,9 +785,17 @@ type assembled struct {
 // returns what to answer.
 type otaRunner = func(line string, admin []byte) string
 
+// sensorFeed is what the machine's parts offer an engine: the supply
+// it runs on, and everything else they measure. Both are read on the
+// engine's own goroutine, so both answer from a cache.
+type sensorFeed struct {
+	supply  enginemc.SupplyVoltage
+	sensors enginemc.TelemetrySensors
+}
+
 func assemble(ctx context.Context, name string, rc config.Relay, radioSpec config.Radio,
 	b *bus.Bus, log *zap.Logger, sen *sentinel.Sentinel, sessions enginemc.SessionStore,
-	regions enginemc.RegionStore, commands otaRunner,
+	regions enginemc.RegionStore, commands otaRunner, parts sensorFeed,
 ) (*assembled, error) {
 	rlog := log.With(zap.String("relay", name))
 	p, err := prepare(name, rc, radioSpec, spentAirtime(ctx, name, rc, sen), b, rlog)
@@ -832,6 +840,19 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 		if a, ok := p.eng.(interface{ AttachCommands(run otaRunner) }); ok {
 			a.AttachCommands(commands)
 		}
+	}
+	// What the machine's parts measure: its own supply on the base
+	// channel, and each part's readings on its own. An engine that
+	// asks for neither simply reports what it knows about itself.
+	if a, ok := p.eng.(interface {
+		AttachSupply(read enginemc.SupplyVoltage)
+	}); ok && parts.supply != nil {
+		a.AttachSupply(parts.supply)
+	}
+	if a, ok := p.eng.(interface {
+		AttachTelemetry(read enginemc.TelemetrySensors)
+	}); ok && parts.sensors != nil {
+		a.AttachTelemetry(parts.sensors)
 	}
 	r := relay.New(name, p.res.drv, p.res.radioCfg, p.eng, b, log, rc.NoiseHistory, p.policy.Mode)
 	return &assembled{

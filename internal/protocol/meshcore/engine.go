@@ -224,6 +224,10 @@ type engine struct {
 	// under the permission mask the request carried — nil while no
 	// sensors exist, which is what the base readings already cover.
 	telemetry TelemetrySensors
+	// supply reports this node's own voltage, the reading the
+	// reference takes from its board; nil leaves the base zero that
+	// keeps a companion's battery field parsable.
+	supply SupplyVoltage
 	// commands runs one administration line for a logged-in admin and
 	// returns what to answer; nil leaves over-the-air administration
 	// unserved, which is what a relay with no mutation door behind it
@@ -553,6 +557,18 @@ func (e *engine) TrafficStats() StatsSnapshot { return e.stats.Snapshot() }
 // same — and order readings most-important first, since the tail is
 // what a long list loses.
 type TelemetrySensors func(permMask byte, enc *meshcore.LPPEncoder) error
+
+// SupplyVoltage reports what this node is running on, in volts. It is
+// the daemon's answer to the reference's board.getBattMilliVolts():
+// the engine cannot know what measures a supply, only that the base
+// telemetry owes one. False leaves the base zero.
+type SupplyVoltage func() (float64, bool)
+
+// AttachSupply gives the engine the node's own voltage. Called once,
+// before Run.
+func (e *engine) AttachSupply(read SupplyVoltage) {
+	e.supply = read
+}
 
 // AttachTelemetry gives the engine its sensor readings. Called once,
 // before Run.
