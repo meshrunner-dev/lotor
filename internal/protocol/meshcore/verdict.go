@@ -21,6 +21,7 @@ const (
 	verdictDropLoop       = "would-drop-flood-loop"      // our hash already rides the path: we relayed this already
 	verdictDropScoped     = "would-drop-flood-scoped"    // transport-scoped flood, and no scoping exists here
 	verdictSelfAdvert     = "self-advert"                // our own advert echoing back
+	verdictCommand        = "administration"             // a logged-in admin's command line
 	verdictZeroHop        = "heard-zero-hop"             // direct, empty path: addressed to whoever hears it
 	verdictNotAddressed   = "direct-not-addressed"       // the path's next hop is not us (or no identity exists)
 	verdictDiscover       = "discover-request"           // a zero-hop neighbourhood scan asking who hears it
@@ -114,6 +115,9 @@ func (e *engine) addressedToUs(rx *reception) (verdict, why string, handled bool
 	case meshcore.PayloadTypeReq:
 		// Only a live session's MAC can claim an authenticated one.
 		return e.reqVerdict(rx)
+	case meshcore.PayloadTypeTxtMsg:
+		// A logged-in admin's command line; anything else routes on.
+		return e.cmdVerdict(rx)
 	case meshcore.PayloadTypePath:
 		// A client teaching us its route home; anything else routes
 		// on.

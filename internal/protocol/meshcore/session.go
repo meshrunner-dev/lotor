@@ -76,8 +76,12 @@ const (
 func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, origin txn.ID) {
 	pkt := rx.pkt
 	// Named permissively or not at all: an access mode nobody resolved
-	// is a door nobody opened.
-	if e.p.GuestAccess != guestPassword && e.p.GuestAccess != guestOpen {
+	// is a door nobody opened. The admin word is its own door, though:
+	// a site that administers from the field without letting guests
+	// read anything is an ordinary posture, and gating logins on the
+	// guest mode alone would lock its owner out.
+	if e.p.AdminPassword == "" &&
+		e.p.GuestAccess != guestPassword && e.p.GuestAccess != guestOpen {
 		return
 	}
 	// Charged before the password is even read: a limiter that only

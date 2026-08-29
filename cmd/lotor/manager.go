@@ -130,7 +130,11 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 	rc := m.file.Relays[name]
 	var r *relay.Relay
 	asm, err := assemble(ctx, name, rc, m.file.Radios[rc.Radio], m.bus, m.log, m.sen,
-		m.sessionStore(name))
+		m.sessionStore(name),
+		//nolint:contextcheck // deliberate: a mutation ordered from the air
+		// outlives the reception that carried it, like a console one
+		// outlives its session.
+		m.otaCommands(m.ctx, name))
 	if err != nil {
 		m.log.Error("relay configuration failed",
 			zap.String("relay", name), zap.Error(err))

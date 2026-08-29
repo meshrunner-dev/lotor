@@ -630,3 +630,30 @@ func TestAdminEqualsGuestIsRefused(t *testing.T) {
 		t.Fatal("one word granting two roles was accepted")
 	}
 }
+
+func TestAdminOnlyPostureStillAcceptsItsAdmin(t *testing.T) {
+	// Guests blocked, administration from the field: an ordinary
+	// posture, and gating logins on the guest mode alone locked the
+	// owner out of their own repeater.
+	e, dev, sub, peer := txRig(t, "on-air")
+	e.p.GuestAccess, e.p.AdminPassword = guestBlocked, "mask"
+	runEngine(t, e, dev)
+
+	frame, secret := login(t, e.id, peer, nowTS(600), "mask", false)
+	dev.frames <- frame
+	if sent := awaitSent(t, sub); sent.Kind != "login-resp" {
+		t.Fatalf("the admin was refused its own door: %+v", sent)
+	}
+	if _, body := openReply(t, <-dev.sent, secret); body[2] != 1 {
+		t.Fatalf("login reply = % x — want the admin bit", body)
+	}
+
+	// A guest word still earns nothing here.
+	frame, _ = login(t, e.id, peer, nowTS(601), "raccoon", false)
+	dev.frames <- frame
+	select {
+	case raw := <-dev.sent:
+		t.Fatalf("a guest password opened a blocked door: % x", raw[:8])
+	case <-time.After(700 * time.Millisecond):
+	}
+}

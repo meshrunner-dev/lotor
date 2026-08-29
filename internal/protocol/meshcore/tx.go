@@ -268,6 +268,8 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict string) {
 		e.respondAnon(rx, origin)
 	case verdictRequest:
 		e.respondRequest(rx, origin)
+	case verdictCommand:
+		e.runCommand(rx, origin)
 	case verdictRelayTrace:
 		// A trace whose next target hop is us walks on: our SNR
 		// reading — quarter-dB, one raw byte — joins the walked path

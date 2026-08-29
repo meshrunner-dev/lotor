@@ -196,6 +196,11 @@ type engine struct {
 	// is the window currently open, engine-goroutine only.
 	sweepAsk     chan *sweep
 	pendingSweep *sweep
+	// commands runs one administration line for a logged-in admin and
+	// returns what to answer; nil leaves over-the-air administration
+	// unserved, which is what a relay with no mutation door behind it
+	// must do.
+	commands func(line string, admin []byte) string
 	// sweepUntil mirrors the open window's end for readers outside
 	// the loop — zero when no scan listens.
 	sweepUntil atomic.Int64
@@ -401,6 +406,12 @@ func (e *engine) NodeName() string { return e.p.NodeName }
 
 // TrafficStats copies the lifetime tally out, for observers.
 func (e *engine) TrafficStats() StatsSnapshot { return e.stats.Snapshot() }
+
+// AttachCommands gives the engine the door administration runs
+// through. Called once, before Run.
+func (e *engine) AttachCommands(run func(line string, admin []byte) string) {
+	e.commands = run
+}
 
 // AttachSessions gives the engine somewhere to persist its session
 // table and loads what is already there, the shared secret recomputed

@@ -736,8 +736,13 @@ type assembled struct {
 	relayTraces []config.Trace
 }
 
+// otaRunner runs one administration line for a logged-in admin and
+// returns what to answer.
+type otaRunner = func(line string, admin []byte) string
+
 func assemble(ctx context.Context, name string, rc config.Relay, radioSpec config.Radio,
 	b *bus.Bus, log *zap.Logger, sen *sentinel.Sentinel, sessions enginemc.SessionStore,
+	commands otaRunner,
 ) (*assembled, error) {
 	res, err := resolveConfigs(rc, radioSpec)
 	if err != nil {
@@ -761,6 +766,13 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 			AttachSessions(store enginemc.SessionStore)
 		}); ok {
 			a.AttachSessions(sessions)
+		}
+	}
+	// Administration from the air runs through the same door the
+	// console uses; a protocol with no such door simply has none.
+	if commands != nil {
+		if a, ok := eng.(interface{ AttachCommands(run otaRunner) }); ok {
+			a.AttachCommands(commands)
 		}
 	}
 	env, err := bindEnvelope(res.drv, res.radioCfg, eng)
