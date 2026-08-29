@@ -1066,7 +1066,7 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 			// Both attributes are read live.
 			m.applyLogLevel()
 			return fmt.Sprintf("applied — this system is now %s, logging at %s",
-				m.systemName(), m.liveLevelName()), nil
+				cli.TerminalSafe(m.systemName()), m.liveLevelName()), nil
 		case confdb.KindSentinel, confdb.KindCLI:
 			return "applied — takes effect when the daemon restarts", nil
 		case confdb.KindUpdate:

@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -99,6 +100,9 @@ func TestLegacyNamesAreHealedWithEverythingThatPointsAtThem(t *testing.T) {
 	// Two legacy names that canonicalise onto the same handle: the
 	// second must land somewhere of its own, not overwrite the first.
 	plant(confdb.KindMQTT, "obs/one", map[string]any{"relay": "mc one"})
+	// Empty is invalid for an instance but canonical for a singleton:
+	// filtering by kind, rather than by name, keeps that distinction.
+	plant(confdb.KindSensor, "", map[string]any{"driver": "bme280"})
 	if err := s.SaveACL(ctx, "mc one", confdb.ACLRow{
 		PubKey: []byte{1, 2}, LastActive: time.Now(),
 	}); err != nil {
@@ -131,6 +135,9 @@ func TestLegacyNamesAreHealedWithEverythingThatPointsAtThem(t *testing.T) {
 	}
 	if _, ok := f.Radios["slot-1"]; !ok {
 		t.Errorf("radios = %v", keysOfRadios(f.Radios))
+	}
+	if _, ok := f.Sensors["unnamed"]; !ok {
+		t.Errorf("the empty legacy instance was not healed: sensors = %v", f.Sensors)
 	}
 	first, second := f.MQTT["obs-one"], f.MQTT["obs-one-2"]
 	if len(f.MQTT) != 2 {
@@ -211,5 +218,100 @@ func TestHealedNamesSurviveTheObjectsTheyKey(t *testing.T) {
 	if got.Driver != "sx126x-spi" ||
 		got.Layered.Overrides["custom"]["spi"] != "/dev/spidev0.0" {
 		t.Errorf("the rename disturbed the object: %+v", got)
+	}
+}
+
+func TestNameMigrationLeavesSingletonKeysAlone(t *testing.T) {
+	// A singleton's empty name is not an invalid instance handle: it is
+	// the canonical key every Replace and Remove uses. Shape 12 must
+	// leave all four there, with no renamed row left to shadow a later
+	// mutation when the store is opened again.
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "config.db")
+	s, err := confdb.Open(ctx, path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := []struct {
+		kind    string
+		section any
+	}{
+		{confdb.KindSystem, config.System{Name: "old"}},
+		{confdb.KindCLI, config.CLI{Listen: "127.0.0.1:2323"}},
+		{confdb.KindSentinel, config.Sentinel{Journal: ":memory:", Retention: time.Hour}},
+		{confdb.KindUpdate, config.Update{Channel: "dev"}},
+	}
+	for _, one := range old {
+		if err := s.Replace(ctx, one.kind, "", one.section, "test", "set", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Migrate(ctx, storeMigrations()); err != nil {
+		t.Fatal(err)
+	}
+	for _, one := range old {
+		if err := s.Remove(ctx, one.kind, "", "test"); err != nil {
+			t.Fatalf("%s moved away from its empty key: %v", one.kind, err)
+		}
+	}
+	empty, err := s.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.System != nil || empty.CLI != nil || empty.Sentinel != nil || empty.Update != nil {
+		t.Fatalf("a renamed singleton survived removal: %+v", empty)
+	}
+
+	newSystem := config.System{Name: "new"}
+	newCLI := config.CLI{Listen: "127.0.0.1:2424"}
+	newSentinel := config.Sentinel{Journal: ":memory:", Retention: 2 * time.Hour}
+	newUpdate := config.Update{Channel: "beta"}
+	for _, one := range []struct {
+		kind    string
+		section any
+	}{
+		{confdb.KindSystem, newSystem},
+		{confdb.KindCLI, newCLI},
+		{confdb.KindSentinel, newSentinel},
+		{confdb.KindUpdate, newUpdate},
+	} {
+		if err := s.Replace(ctx, one.kind, "", one.section, "test", "set", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = confdb.Open(ctx, path, shapeCeiling())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	got, err := s.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.System == nil || *got.System != newSystem ||
+		got.CLI == nil || got.CLI.Listen != newCLI.Listen ||
+		got.Sentinel == nil || got.Sentinel.Journal != newSentinel.Journal ||
+		got.Sentinel.Retention != newSentinel.Retention ||
+		got.Update == nil || *got.Update != newUpdate {
+		t.Fatalf("singleton mutations did not survive reopen: %+v", got)
+	}
+}
+
+func TestSystemMutationReplyNeutralisesControls(t *testing.T) {
+	// Banner and prompt already use the terminal renderer; the mutation
+	// reply must not give the same stored name one raw opportunity in
+	// between to execute an escape sequence.
+	m, b := replayManager(t, nil)
+	name := "lab\x1b[2J"
+	out := adminConsole(t, m, b, "/system set64 name="+
+		base64.StdEncoding.EncodeToString([]byte(name))+"\n")
+	if strings.Contains(out, "\x1b[2J") {
+		t.Fatalf("the system mutation reply emitted the stored ESC: %q", out)
+	}
+	if !strings.Contains(out, "this system is now lab?[2J") {
+		t.Fatalf("the neutralised name is not visible in the reply: %q", out)
 	}
 }

@@ -123,10 +123,12 @@ func (t *table) markFor(n, col int) string {
 	return t.weight[n]
 }
 
-// printable neutralises what the mesh may try to type into the
+// TerminalSafe neutralises what free text may try to type into the
 // operator's terminal: control and formatting runes — escape
-// sequences, bidi overrides — become '?', graphic runes pass.
-func printable(s string) string {
+// sequences, bidi overrides — become '?', graphic runes pass. It is
+// exported inside the daemon so replies assembled by the manager use
+// the same policy as the CLI's own views.
+func TerminalSafe(s string) string {
 	return strings.Map(func(r rune) rune {
 		if unicode.IsGraphic(r) {
 			return r
@@ -134,6 +136,9 @@ func printable(s string) string {
 		return '?'
 	}, s)
 }
+
+// printable is the local spelling used throughout the CLI views.
+func printable(s string) string { return TerminalSafe(s) }
 
 // quoted wraps a mesh-sourced string in double quotes so its start
 // and end are unmistakable among keywords and column gaps — names

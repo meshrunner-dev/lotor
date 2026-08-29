@@ -133,7 +133,14 @@ type nameRename struct{ kind, from, to string }
 // canonical form, and a suffix when two legacy names would canonicalise
 // onto the same handle or onto one already taken.
 func planNameRenames(ctx context.Context, tx *sql.Tx) ([]nameRename, error) {
-	rows, err := tx.QueryContext(ctx, "SELECT kind, name FROM objects ORDER BY kind, name")
+	// Only collections have instance names. Singletons deliberately live
+	// under name=""; treating that key as an invalid instance name moves
+	// the row away from every Replace and Remove that addresses it.
+	rows, err := tx.QueryContext(ctx, `
+		SELECT kind, name FROM objects
+		WHERE kind IN (?, ?, ?, ?)
+		ORDER BY kind, name`,
+		confdb.KindRadio, confdb.KindRelay, confdb.KindSensor, confdb.KindMQTT)
 	if err != nil {
 		return nil, err
 	}
