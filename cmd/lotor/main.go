@@ -32,6 +32,7 @@ import (
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/cli"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/product"
 	"meshrunner.dev/lotor/internal/protocol"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/relay"
@@ -285,7 +286,7 @@ func main() {
 	root := commandLine{}
 	parser, err := kong.New(&root,
 		kong.Name("lotor"),
-		kong.Description("A mesh relay daemon."),
+		kong.Description(product.Description+"."),
 		kong.Vars{
 			"version":     version,
 			"default_cli": config.DefaultCLIListen,

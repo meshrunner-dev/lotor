@@ -1,5 +1,7 @@
 # Lotor
 
+<https://meshrunner.dev/lotor>
+
 Lotor is a mesh relay daemon: one machine, one daemon, one or more
 **relays** — each an instance of a mesh protocol bound to its radio
 hardware. MeshCore is the first supported protocol.

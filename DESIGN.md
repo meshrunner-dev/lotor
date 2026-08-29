@@ -1,6 +1,6 @@
 # Lotor — design notes
 
-Lotor is a mesh relay daemon. It listens to LoRa mesh networks and
+Lotor is a mesh relay daemon — <https://meshrunner.dev/lotor>. It listens to LoRa mesh networks and
 extends them: one machine, one daemon, one or more **relays** — each an
 instance of a mesh protocol bound to its radio hardware.
 

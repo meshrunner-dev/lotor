@@ -6,7 +6,10 @@ package config
 // to them by test. The nested tx block flattens to dotted names, the
 // shape a one-line console command can reach.
 
-import "meshrunner.dev/lotor/internal/schema"
+import (
+	"meshrunner.dev/lotor/internal/product"
+	"meshrunner.dev/lotor/internal/schema"
+)
 
 // RelayAttrs describes a relay's own structure.
 func RelayAttrs() []schema.Attr {
@@ -99,7 +102,7 @@ func UpdateAttrs() []schema.Attr {
 }
 
 // DefaultUpdateURL is the project's own manifest tree.
-const DefaultUpdateURL = "https://updates.meshrunner.dev/lotor"
+const DefaultUpdateURL = product.UpdateBase
 
 // CLIAttrs describes the operator listener.
 func CLIAttrs() []schema.Attr {

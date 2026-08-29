@@ -19,6 +19,8 @@ import (
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 	"go.uber.org/zap"
+
+	"meshrunner.dev/lotor/internal/product"
 )
 
 // publishWait bounds one delivery: a broker that cannot take a QoS 1
@@ -121,7 +123,7 @@ func Dial(o Options, log *zap.Logger) (*Broker, error) {
 	}
 	opts := paho.NewClientOptions().
 		AddBroker(o.URL).
-		SetClientID(fmt.Sprintf("lotor-%s-%s", o.Instance, hex.EncodeToString(salt[:]))).
+		SetClientID(fmt.Sprintf("%s-%s-%s", product.Slug, o.Instance, hex.EncodeToString(salt[:]))).
 		SetUsername(o.Username).
 		SetPassword(o.Password).
 		SetAutoReconnect(true).

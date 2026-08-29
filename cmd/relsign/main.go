@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"meshrunner.dev/lotor/internal/product"
 	"meshrunner.dev/lotor/internal/update"
 )
 
@@ -68,7 +69,7 @@ func manifest(args []string) error {
 			"usage: relsign manifest [-gzip] <channel> <version> <out.json> <platform>=<url>=<file> [more]")
 	}
 	m := update.Manifest{
-		Product:   "lotor",
+		Product:   product.Slug,
 		Channel:   args[0],
 		Version:   args[1],
 		Published: time.Now().UTC().Truncate(time.Second),

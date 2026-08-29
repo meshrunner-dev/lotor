@@ -61,6 +61,11 @@ tasks:
     cmds:
       - "{{.GOVULNCHECK}} ./..."
 
+  identity:check:
+    desc: Verify the product identity invariants in units and docs
+    cmds:
+      - ./scripts/identity-check.sh
+
   build:lean:
     desc: Compile the memory-lean variant (no CLI history, for tight hosts)
     cmds:

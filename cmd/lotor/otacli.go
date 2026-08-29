@@ -17,6 +17,7 @@ import (
 
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/product"
 	"meshrunner.dev/lotor/internal/protocol"
 	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 )
@@ -172,7 +173,7 @@ func (m *manager) runOTA(relay, principal, owner, line string) string {
 	case "neighbor.remove":
 		return m.otaRemoveNeighbour(relay, rest)
 	case "ver":
-		return "lotor " + version
+		return product.Slug + " " + version
 	case "clock":
 		if rest == "sync" {
 			// The host keeps its own clock, so what sync asks for is
