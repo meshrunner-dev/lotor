@@ -1885,3 +1885,60 @@ func TestACLDrawerGrantsAndRevokes(t *testing.T) {
 		t.Fatalf("revoke door saw %v", granted)
 	}
 }
+
+func TestACLEntryShowsItsKeyAndSetsItsRole(t *testing.T) {
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	var granted [][2]string // {pubkeyHex, role}
+	live := []Access{{Role: "admin", Granted: true, LastActive: time.Now()}}
+	for i := range live[0].PubKey {
+		live[0].PubKey[i] = byte(i)
+	}
+	fullKey := hex.EncodeToString(live[0].PubKey[:])
+	for i := range deps.Relays {
+		deps.Relays[i].Access = func() ([]Access, error) { return live, nil }
+		deps.Relays[i].GrantRole = func(pub []byte, role string) error {
+			granted = append(granted, [2]string{hex.EncodeToString(pub), role})
+			return nil
+		}
+	}
+	// The whole key shows only where print stands on the entry: grant
+	// wants it whole, and the listing's prefix is nowhere to copy it
+	// from — while the listing itself stays a table, not a key dump.
+	if out := run(t, deps, "/relay/meshcore-868/acl/000102030405/print"); !strings.Contains(out, fullKey) {
+		t.Errorf("entry print hides the whole key:\n%s", out)
+	}
+	if out := run(t, deps, "/relay meshcore-868 acl print"); strings.Contains(out, fullKey) {
+		t.Errorf("the listing spilled whole keys:\n%s", out)
+	}
+	// set role= from the entry: no key typed, the drawer names the
+	// subject, the engine gets the whole key.
+	run(t, deps, "/relay/meshcore-868/acl/000102030405/set role=read-write")
+	if len(granted) != 1 || granted[0][0] != fullKey || granted[0][1] != "read-write" {
+		t.Fatalf("role door saw %v", granted)
+	}
+	// Anything but the role is refused, and says what is settable.
+	if out := run(t, deps, "/relay/meshcore-868/acl/000102030405/set name=x"); !strings.Contains(out, "role") {
+		t.Errorf("wrong attribute not refused:\n%s", out)
+	}
+	// unset is not offered on an entry: removal is revoke's business,
+	// and the place says what it answers to.
+	if out := run(t, deps, "/relay/meshcore-868/acl/000102030405/unset role"); !strings.Contains(out, `no "unset" here`) {
+		t.Errorf("unset not refused:\n%s", out)
+	}
+	// A drawer with nothing settable never offers the verb at all.
+	if out := run(t, deps, "/relay/meshcore-868/neighbours/set x=y"); !strings.Contains(out, `no "set" here`) {
+		t.Errorf("drawer-level set not refused:\n%s", out)
+	}
+	if len(granted) != 1 {
+		t.Fatalf("a refused set reached the engine: %v", granted)
+	}
+	// The role door is the admin's, like the grant it goes through.
+	deps.Privilege = ReadOnly
+	if out := run(t, deps, "/relay/meshcore-868/acl/000102030405/set role=admin"); !strings.Contains(out, "admin verb") {
+		t.Errorf("non-admin set not refused:\n%s", out)
+	}
+	if len(granted) != 1 {
+		t.Fatalf("a non-admin set reached the engine: %v", granted)
+	}
+}

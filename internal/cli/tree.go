@@ -507,6 +507,12 @@ func attrPairs(words []string) (map[string]string, error) {
 // in one transaction, so a retune touching three attributes bounces
 // the relay once, not three times.
 func (s *session) treeSet(ctx context.Context, path []string, verb string, args []string) error {
+	// Standing in a drawer, set is the item's own — the access
+	// list's role — and never the config door: what a drawer holds
+	// is the mesh's doing, not the file's.
+	if site := s.drawerSiteAt(path); site != nil {
+		return s.drawerSet(ctx, site, verb, args)
+	}
 	if s.deps.Mutate == nil {
 		return errors.New("this daemon has no mutation channel")
 	}
@@ -549,6 +555,33 @@ func (s *session) treeSet(ctx context.Context, path []string, verb string, args 
 	}
 	fmt.Fprintf(s.out, "%s\r\n", msg)
 	return nil
+}
+
+// drawerSet is set standing in a drawer: refused everywhere except on
+// an item whose drawer offers one, under the same admin gate as the
+// drawer's other mutations.
+func (s *session) drawerSet(ctx context.Context, site *drawerSite, verb string, args []string) error {
+	if site.d.itemSet == nil || site.item == "" {
+		return fmt.Errorf("nothing is settable in a %s", site.d.name)
+	}
+	if verb == verbUnset {
+		return fmt.Errorf("nothing to unset here — %s removes the entry", cmdRevoke)
+	}
+	if s.deps.Privilege != Admin {
+		return fmt.Errorf("%s is an admin verb — use the local console socket", verb)
+	}
+	set := map[string]string{}
+	for _, a := range args {
+		name, value, has := strings.Cut(a, "=")
+		if !has {
+			return fmt.Errorf("%q — set wants attr=value", a)
+		}
+		set[name] = value
+	}
+	if len(set) == 0 {
+		return fmt.Errorf("usage: %s attr=value …", verbSet)
+	}
+	return site.d.itemSet(s, ctx, site, set)
 }
 
 // treeExport prints configuration as the absolute lines that would
@@ -1348,7 +1381,11 @@ func (s *session) verbNamesAt(path []string) []string {
 			if site.item == "" {
 				return append(verbs, site.d.verbs...)
 			}
-			return append(verbs, site.d.itemVerbs...)
+			verbs = append(verbs, site.d.itemVerbs...)
+			if site.d.itemSet != nil {
+				verbs = append(verbs, verbSet)
+			}
+			return verbs
 		}
 		verbs := []string{verbPrint, verbStatus, verbSet, verbUnset, verbExport}
 		if disableable(path[0]) {

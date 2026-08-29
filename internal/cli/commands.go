@@ -710,6 +710,46 @@ func (s *session) revokeAccess(_ context.Context, in input) error {
 	return nil
 }
 
+// accessSet changes the role of the entry being stood on — set
+// role=<word> with no key typed at all: the drawer names the entry,
+// the access list supplies the whole key, and the same grant door
+// records the change. Typing a key stays grant's business, whole key
+// only; this door has no key to mistype.
+func (s *session) accessSet(_ context.Context, site *drawerSite, set map[string]string) error {
+	role, named := set[optRole]
+	if !named || len(set) != 1 {
+		return fmt.Errorf("only the role is settable here — %s %s=%s|%s|%s",
+			verbSet, optRole, roleAdmin, roleReadWrite, roleReadOnly)
+	}
+	r, err := s.oneRelay(site.instance)
+	if err != nil {
+		return err
+	}
+	if err := working(r); err != nil {
+		return err
+	}
+	if r.GrantRole == nil || r.Access == nil {
+		return fmt.Errorf("relay %q keeps no access list", r.Name)
+	}
+	prefix, err := hex.DecodeString(site.item)
+	if err != nil {
+		return fmt.Errorf("%q is not a hex key prefix", site.item)
+	}
+	rows, err := r.Access()
+	if err != nil {
+		return err
+	}
+	full, err := matchAccess(rows, prefix)
+	if err != nil {
+		return err
+	}
+	if err := r.GrantRole(full[:], role); err != nil {
+		return err
+	}
+	fmt.Fprintf(s.out, "%s is now %s\r\n", site.item, role)
+	return nil
+}
+
 // matchAccess finds the one entry a prefix names, refusing a prefix
 // that names none or several.
 func matchAccess(rows []Access, prefix []byte) ([32]byte, error) {

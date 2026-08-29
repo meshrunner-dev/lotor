@@ -40,6 +40,10 @@ type drawer struct {
 	// view reads the drawer for printing; sel is the window the line
 	// asked for, meaningful only where windowed says so.
 	view func(s *session, ctx context.Context, instance string, sel frameSelectors) (drawerView, error)
+	// itemSet, when present, is the one mutation an item answers: set
+	// attr=value while standing on it, the item itself naming the
+	// subject. Everything else about a drawer stays read-only.
+	itemSet func(s *session, ctx context.Context, site *drawerSite, set map[string]string) error
 	// windowed says the drawer answers the temporal selectors — the
 	// vocabulary frames speaks, applied to what this drawer holds.
 	windowed bool
@@ -63,13 +67,20 @@ type field struct {
 	// went through the one function allowed to render it — so no view
 	// may wrap it again.
 	rendered bool
+	// detailOnly keeps the field out of the listings: it shows only
+	// when print stands on the single item — for a value too wide for
+	// a column, like a whole public key.
+	detailOnly bool
 }
 
 // cells is a row for a table, where the columns do the separating.
 func cells(row []field) []string {
-	out := make([]string, len(row))
-	for i, f := range row {
-		out[i] = f.value
+	out := make([]string, 0, len(row))
+	for _, f := range row {
+		if f.detailOnly {
+			continue
+		}
+		out = append(out, f.value)
 	}
 	return out
 }
@@ -78,13 +89,16 @@ func cells(row []field) []string {
 // early: what arrived rendered is left alone, the rest is quoted only
 // where it needs to be.
 func pairs(row []field) [][2]string {
-	out := make([][2]string, len(row))
-	for i, f := range row {
+	out := make([][2]string, 0, len(row))
+	for _, f := range row {
+		if f.detailOnly {
+			continue
+		}
 		v := f.value
 		if !f.rendered {
 			v = quoteIfSpaced(v)
 		}
-		out[i] = [2]string{f.name, v}
+		out = append(out, [2]string{f.name, v})
 	}
 	return out
 }
@@ -138,6 +152,7 @@ var drawers = []drawer{{
 	empty:     "nobody granted, nobody logged in",
 	keys:      (*session).accessKeys,
 	view:      (*session).accessView,
+	itemSet:   (*session).accessSet,
 }, {
 	name:     drawerHistory,
 	doc:      "the configuration's revision journal — who changed what, when",
@@ -408,6 +423,10 @@ func (s *session) accessView(ctx context.Context, instance string, _ frameSelect
 		key := hex.EncodeToString(a.PubKey[:6])
 		v.keys = append(v.keys, key)
 		v.rows[key] = []field{
+			// The whole key, print-on-the-item only: grant wants it
+			// whole, and the listing's prefix is nowhere to copy it
+			// from.
+			{name: "key", value: hex.EncodeToString(a.PubKey[:]), rendered: true, detailOnly: true},
 			{name: fieldName, value: meshName(named[key]), rendered: true},
 			{name: "role", value: a.Role},
 			{name: "how", value: accessHow(a)},
