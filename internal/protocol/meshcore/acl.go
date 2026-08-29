@@ -37,6 +37,13 @@ type SessionStore interface {
 	LoadSessions() ([]PersistedSession, error)
 	SaveSession(s PersistedSession) error
 	ForgetSession(pubKey [meshcore.PubKeySize]byte) error
+	// ReplaceSession installs one session and forgets another as a
+	// single durable step. The table holds a fixed number of places,
+	// so admitting a newcomer is really a swap — and doing it in two
+	// writes leaves a window where the store holds one session more
+	// than the table can, with no ordering to say which of them a
+	// restart would keep.
+	ReplaceSession(add PersistedSession, drop [meshcore.PubKeySize]byte) error
 }
 
 // outPath is a route home a client taught us, so an answer can travel
@@ -219,18 +226,31 @@ func (a *acl) put(c *client) error {
 			return errSessionsFull
 		}
 	}
-	if err := a.save(c); err != nil {
+	// The swap is one durable step. Two writes left the store holding
+	// thirty-three sessions for a table of thirty-two — and nothing
+	// said which of them a restart would drop, so an evicted session
+	// could come back while the newcomer, replay guard and all, went
+	// missing instead.
+	if err := a.persist(c, victim, evicting); err != nil {
 		return err
 	}
 	if evicting {
 		delete(a.by, victim)
-		// Best effort: a store still holding the ghost has it retired
-		// by the idle rule at the next load, the same end a slower
-		// eviction would have reached.
-		_ = a.forget(victim)
 	}
 	a.by[c.pubKey] = c
 	return nil
+}
+
+// persist writes the newcomer, and the eviction with it when there is
+// one. Nothing in the table moves unless this returns cleanly.
+func (a *acl) persist(c *client, victim [meshcore.PubKeySize]byte, evicting bool) error {
+	if a.store == nil {
+		return nil
+	}
+	if evicting {
+		return a.store.ReplaceSession(c.persisted(), victim)
+	}
+	return a.store.SaveSession(c.persisted())
 }
 
 // evictable names the session that would make room for a new one.

@@ -438,17 +438,31 @@ func (a *aclStore) LoadSessions() ([]enginemc.PersistedSession, error) {
 func (a *aclStore) SaveSession(p enginemc.PersistedSession) error {
 	ctx, cancel := aclStoreCtx()
 	defer cancel()
-	return a.store.SaveACL(ctx, a.relay, confdb.ACLRow{
-		PubKey: p.PubKey[:], Perms: p.Perms, Granted: p.Granted, LastTimestamp: p.LastTimestamp,
-		HasOut: p.HasOut, OutPath: p.OutPath, OutPathLen: p.OutPathLen,
-		Learned: p.Learned, LastActive: p.LastActive,
-	})
+	return a.store.SaveACL(ctx, a.relay, aclRowOf(p))
 }
 
 func (a *aclStore) ForgetSession(pubKey [meshcore.PubKeySize]byte) error {
 	ctx, cancel := aclStoreCtx()
 	defer cancel()
 	return a.store.ForgetACL(ctx, a.relay, pubKey[:])
+}
+
+func (a *aclStore) ReplaceSession(add enginemc.PersistedSession,
+	drop [meshcore.PubKeySize]byte,
+) error {
+	ctx, cancel := aclStoreCtx()
+	defer cancel()
+	return a.store.SwapACL(ctx, a.relay, aclRowOf(add), drop[:])
+}
+
+// aclRowOf is one session in the shape the store keeps it.
+func aclRowOf(p enginemc.PersistedSession) confdb.ACLRow {
+	return confdb.ACLRow{
+		PubKey: p.PubKey[:], Perms: p.Perms, Granted: p.Granted,
+		LastTimestamp: p.LastTimestamp,
+		HasOut:        p.HasOut, OutPath: p.OutPath, OutPathLen: p.OutPathLen,
+		Learned: p.Learned, LastActive: p.LastActive,
+	}
 }
 
 // stopRelay stops one relay and waits for it to let its radio go —

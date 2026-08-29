@@ -239,10 +239,17 @@ func (e *engine) applyGrant(o *aclOrder) error {
 	if err != nil {
 		return err
 	}
-	c := e.acl.get(o.pubKey[:])
-	if c == nil {
-		c = &client{asks: rateLimiter{max: e.p.SessionLimit, window: sessionLimitWindow}}
+	// Composed on a candidate and installed only once it is durable —
+	// admitLogin's discipline, for the same reason. Promoting the live
+	// session first meant a disk that refused the grant left the
+	// principal administering the node until the next restart, while
+	// the operator read "the grant would not persist".
+	var c client
+	if live := e.acl.get(o.pubKey[:]); live != nil {
+		c = *live
+	} else {
 		c.pubKey = o.pubKey
+		c.asks = rateLimiter{max: e.p.SessionLimit, window: sessionLimitWindow}
 	}
 	c.secret = secret
 	// The whole byte, as the reference stores it — upper bits are
@@ -253,7 +260,7 @@ func (e *engine) applyGrant(o *aclOrder) error {
 	if c.lastActive.IsZero() {
 		c.lastActive = time.Now()
 	}
-	if err := e.acl.put(c); err != nil {
+	if err := e.acl.put(&c); err != nil {
 		return fmt.Errorf("the grant would not persist: %w", err)
 	}
 	e.log.Info("permission granted",

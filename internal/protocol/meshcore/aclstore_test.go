@@ -24,9 +24,13 @@ import (
 type fakeStore struct {
 	rows                        []PersistedSession
 	loadErr, saveErr, forgetErr error
-	loads, saves, forgets       int
-	saved                       map[[meshcore.PubKeySize]byte]PersistedSession
-	forgotten                   []([meshcore.PubKeySize]byte)
+	// swapErr fails the atomic replacement alone, which is neither a
+	// plain save nor a plain forget.
+	swapErr               error
+	loads, saves, forgets int
+	swaps                 int
+	saved                 map[[meshcore.PubKeySize]byte]PersistedSession
+	forgotten             []([meshcore.PubKeySize]byte)
 }
 
 func newFakeStore() *fakeStore {
@@ -57,6 +61,22 @@ func (s *fakeStore) ForgetSession(k [meshcore.PubKeySize]byte) error {
 	}
 	delete(s.saved, k)
 	s.forgotten = append(s.forgotten, k)
+	return nil
+}
+
+// ReplaceSession is the one durable step a full table's admission
+// really is: the newcomer in, the victim out, both or neither.
+func (s *fakeStore) ReplaceSession(add PersistedSession, drop [meshcore.PubKeySize]byte) error {
+	s.swaps++
+	if s.swapErr != nil {
+		return s.swapErr
+	}
+	if s.saveErr != nil {
+		return s.saveErr
+	}
+	delete(s.saved, drop)
+	s.saved[add.PubKey] = add
+	s.forgotten = append(s.forgotten, drop)
 	return nil
 }
 
@@ -360,5 +380,139 @@ func TestIdentitylessEngineNeedsNoStore(t *testing.T) {
 	}
 	if store.loads != 0 {
 		t.Error("the store was read without an identity to derive secrets with")
+	}
+}
+
+func TestARefusedGrantLeavesTheLiveSessionAlone(t *testing.T) {
+	// The residual the remediation review found: the grant promoted
+	// the live session first and asked the disk after, so a refused
+	// write left the principal administering the node until the next
+	// restart while the operator read "the grant would not persist".
+	e, _ := identifiedEngine(t)
+	store := newFakeStore()
+	if err := e.AttachSessions(store); err != nil {
+		t.Fatal(err)
+	}
+	peer, err := meshcore.NewLocalIdentity(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An entry that already exists — the case the first round missed.
+	secret, err := e.id.SharedSecret(peer.PubKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	guest := &client{
+		pubKey: peer.PubKey, secret: secret, perms: permReadOnly,
+		lastTimestamp: 42, lastActive: time.Now(),
+	}
+	if err := e.acl.put(guest); err != nil {
+		t.Fatal(err)
+	}
+	before := *e.acl.by[peer.PubKey]
+
+	store.saveErr = errors.New("disk full")
+	o := &aclOrder{perms: permAdmin, prefixLen: meshcore.PubKeySize, done: newAck()}
+	copy(o.pubKey[:], peer.PubKey[:])
+	if err := e.applyGrant(o); err == nil {
+		t.Fatal("a grant the store refused reported success")
+	}
+	live := e.acl.by[peer.PubKey]
+	if live == nil {
+		t.Fatal("the refused grant retired the session")
+	}
+	if live.perms != before.perms || live.granted != before.granted {
+		t.Errorf("the refused grant promoted the live session: perms %#x granted %v, want %#x %v",
+			live.perms, live.granted, before.perms, before.granted)
+	}
+	if live.lastTimestamp != before.lastTimestamp {
+		t.Errorf("the refused grant moved the replay guard to %d", live.lastTimestamp)
+	}
+	// The disk recovers and the same grant lands, once and wholly.
+	store.saveErr = nil
+	if err := e.applyGrant(o); err != nil {
+		t.Fatal(err)
+	}
+	if live = e.acl.by[peer.PubKey]; !live.isAdmin() || !live.granted {
+		t.Errorf("the recovered grant did not land: %+v", live)
+	}
+	if p := store.saved[peer.PubKey]; p.Perms&permRoleMask != permAdmin || !p.Granted {
+		t.Errorf("the store holds %+v", p)
+	}
+}
+
+func TestAdmittingIntoAFullTableIsOneDurableStep(t *testing.T) {
+	// Two writes left the store holding thirty-three sessions for a
+	// table of thirty-two, and nothing said which a restart would
+	// drop: an evicted session could come back while the newcomer,
+	// replay guard and all, went missing instead.
+	fill := func(t *testing.T) (*engine, *fakeStore) {
+		t.Helper()
+		e, _ := identifiedEngine(t)
+		store := newFakeStore()
+		if err := e.AttachSessions(store); err != nil {
+			t.Fatal(err)
+		}
+		for i := range maxClients {
+			if err := e.acl.put(&client{
+				pubKey: aclKey(byte(i)), perms: permGuest,
+				lastActive: time.Now().Add(time.Duration(i) * time.Minute),
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return e, store
+	}
+
+	// The swap succeeds: the two sets agree exactly, and it took one
+	// durable step rather than two.
+	e, store := fill(t)
+	victim := aclKey(0) // the least recently active
+	newcomer := aclKey(0xEE)
+	if err := e.acl.put(&client{
+		pubKey: newcomer, perms: permGuest, lastActive: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if store.swaps != 1 {
+		t.Errorf("the admission took %d swaps, want one", store.swaps)
+	}
+	assertSetsAgree(t, e, store)
+	if _, gone := store.saved[victim]; gone {
+		t.Error("the victim is still persisted while the table dropped it")
+	}
+	if _, in := store.saved[newcomer]; !in {
+		t.Error("the newcomer never reached the store")
+	}
+
+	// The swap fails: neither side moves, and the login is refused.
+	e, store = fill(t)
+	store.swapErr = errors.New("disk full")
+	err := e.acl.put(&client{
+		pubKey: aclKey(0xFF), perms: permGuest, lastActive: time.Now().Add(time.Hour),
+	})
+	if err == nil {
+		t.Fatal("an admission the store refused reported success")
+	}
+	if _, leaked := e.acl.by[aclKey(0xFF)]; leaked {
+		t.Error("the refused newcomer was installed")
+	}
+	if _, gone := e.acl.by[aclKey(0)]; !gone {
+		t.Error("the victim was evicted for an admission that never persisted")
+	}
+	assertSetsAgree(t, e, store)
+}
+
+// assertSetsAgree proves the live table and the store hold exactly the
+// same sessions — the property two separate writes could not keep.
+func assertSetsAgree(t *testing.T, e *engine, store *fakeStore) {
+	t.Helper()
+	if len(e.acl.by) != len(store.saved) {
+		t.Fatalf("table holds %d sessions, store holds %d", len(e.acl.by), len(store.saved))
+	}
+	for k := range e.acl.by {
+		if _, ok := store.saved[k]; !ok {
+			t.Errorf("session %x lives only in the table", k[:4])
+		}
 	}
 }

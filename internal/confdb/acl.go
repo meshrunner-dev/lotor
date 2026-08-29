@@ -35,9 +35,12 @@ type ACLRow struct {
 // caller: the store keeps what it was told, and how stale is too
 // stale is the engine's policy, not the disk's.
 func (s *Store) LoadACL(ctx context.Context, relay string) ([]ACLRow, error) {
+	// Freshest first, and explicitly: which sessions a restart keeps
+	// when the store holds more than the table has places for is a
+	// policy, not whatever order the rows happen to come back in.
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT pubkey, perms, last_timestamp, out_path, out_path_len, learned, last_active, granted
-		   FROM acl WHERE relay = ?`, relay)
+		   FROM acl WHERE relay = ? ORDER BY last_active DESC, pubkey`, relay)
 	if err != nil {
 		return nil, err
 	}
@@ -76,6 +79,17 @@ func (s *Store) LoadACL(ctx context.Context, relay string) ([]ACLRow, error) {
 // SaveACL writes one session, replacing whatever it held: a login, a
 // timestamp advance, a route learned all pass here.
 func (s *Store) SaveACL(ctx context.Context, relay string, r ACLRow) error {
+	return saveACLTx(ctx, s.db, relay, r)
+}
+
+// execer is whichever of the connection and a transaction is writing.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// saveACLTx is the one place a session row is written, so a save and
+// the save inside a swap cannot describe the same session differently.
+func saveACLTx(ctx context.Context, db execer, relay string, r ACLRow) error {
 	var learned any
 	if !r.Learned.IsZero() {
 		learned = r.Learned.UTC().Format(time.RFC3339Nano)
@@ -91,7 +105,7 @@ func (s *Store) SaveACL(ctx context.Context, relay string, r ACLRow) error {
 	if r.Granted {
 		granted = 1
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := db.ExecContext(ctx,
 		`INSERT INTO acl(relay, pubkey, perms, last_timestamp, out_path, out_path_len, learned, last_active, granted)
 		   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(relay, pubkey) DO UPDATE SET
@@ -110,4 +124,26 @@ func (s *Store) ForgetACL(ctx context.Context, relay string, pubKey []byte) erro
 	_, err := s.db.ExecContext(ctx,
 		"DELETE FROM acl WHERE relay = ? AND pubkey = ?", relay, pubKey)
 	return err
+}
+
+// SwapACL admits one session and drops another in a single
+// transaction. The table upstream holds a fixed number of places, so
+// this is what admitting a newcomer into a full one really is: doing
+// it as two writes leaves the store briefly holding one session more
+// than the table can, and a crash in that window decides by accident
+// which of the two survives.
+func (s *Store) SwapACL(ctx context.Context, relay string, add ACLRow, drop []byte) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM acl WHERE relay = ? AND pubkey = ?", relay, drop); err != nil {
+		return err
+	}
+	if err := saveACLTx(ctx, tx, relay, add); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

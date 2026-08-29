@@ -26,6 +26,13 @@ func (m *memStore) LoadSessions() ([]PersistedSession, error) {
 func (m *memStore) SaveSession(p PersistedSession) error            { m.rows[p.PubKey] = p; return nil }
 func (m *memStore) ForgetSession(k [meshcore.PubKeySize]byte) error { delete(m.rows, k); return nil }
 
+// ReplaceSession is the swap the real store does in one transaction.
+func (m *memStore) ReplaceSession(add PersistedSession, drop [meshcore.PubKeySize]byte) error {
+	delete(m.rows, drop)
+	m.rows[add.PubKey] = add
+	return nil
+}
+
 func TestSessionsSurviveABounce(t *testing.T) {
 	store := newMemStore()
 
