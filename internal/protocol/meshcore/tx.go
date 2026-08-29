@@ -146,10 +146,10 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 		return errors.New("tx: announcing needs node_name — the advert carries it, " +
 			"and a config slug is not a name")
 	}
-	if e.p.DutyCyclePct <= 0 {
+	if !validDutyCyclePct(e.p.DutyCyclePct) || e.p.DutyCyclePct <= 0 {
 		return fmt.Errorf(
-			"tx: mode %s needs duty_cycle_pct on this relay's band — set the lawful ceiling, "+
-				"or 100 to state the band has none", p.Mode)
+			"tx: mode %s needs duty_cycle_pct in (0, 100] on this relay's band — "+
+				"set the lawful ceiling, or 100 to state the band has none", p.Mode)
 	}
 	e.policy = p
 	e.queue = &txQueue{depth: p.QueueDepth}

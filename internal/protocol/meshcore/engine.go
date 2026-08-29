@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -234,6 +235,9 @@ func paramsFrom(cfg map[string]any) (params, error) {
 	if p.FrequencyHz == 0 {
 		return p, errors.New("meshcore params: frequency_hz is required")
 	}
+	if !validDutyCyclePct(p.DutyCyclePct) {
+		return p, fmt.Errorf("meshcore params: duty_cycle_pct %g — want a finite percentage in 0..100", p.DutyCyclePct)
+	}
 	// The reference's operator ranges: outside them, its CLI refuses
 	// the setting — so does the config, or a site would run a cadence
 	// no reference node would.
@@ -261,6 +265,14 @@ func paramsFrom(cfg map[string]any) (params, error) {
 			"meshcore params: advert_flood_interval %s — the reference accepts 3..168 hours; negative disables", v)
 	}
 	return p, nil
+}
+
+// validDutyCyclePct keeps a configuration value inside the only range
+// the sliding one-hour ledger can honestly enforce. Zero is meaningful
+// before the transmit gate is armed; Arm requires a strictly positive
+// value whenever it opens that gate.
+func validDutyCyclePct(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 && v <= 100
 }
 
 // acceptUnscoped resolves the wildcard default: a relay carries plain

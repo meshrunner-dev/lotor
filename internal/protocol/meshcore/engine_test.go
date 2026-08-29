@@ -1,6 +1,7 @@
 package meshcore
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -33,6 +34,22 @@ func testEngine(t *testing.T) (*engine, *bus.Subscription) {
 		t.Fatalf("engine type %T", eng)
 	}
 	return e, sub
+}
+
+func TestDutyCyclePctIsFiniteAndBounded(t *testing.T) {
+	base := map[string]any{"frequency_hz": 869_618_000}
+	for _, good := range []float64{0, 10, 100} {
+		base["duty_cycle_pct"] = good
+		if _, err := paramsFrom(base); err != nil {
+			t.Errorf("duty_cycle_pct %v refused: %v", good, err)
+		}
+	}
+	for _, bad := range []float64{-0.01, 100.01, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		base["duty_cycle_pct"] = bad
+		if _, err := paramsFrom(base); err == nil {
+			t.Errorf("duty_cycle_pct %v accepted", bad)
+		}
+	}
 }
 
 func frame(payload []byte) radio.Frame {
