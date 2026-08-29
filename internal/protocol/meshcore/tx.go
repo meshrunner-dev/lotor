@@ -263,7 +263,7 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict string) {
 	switch verdict {
 	case verdictRelayFlood:
 		if err := cp.AppendPathHash(e.selfHash(cp.PathHashSize())); err != nil {
-			e.abandon(origin, "malformed", "flood relay path append failed", err)
+			e.abandonKind(origin, "malformed", "relay-flood", "flood relay path append failed", err)
 			return
 		}
 		// Priority = distance: the hop count with our hash appended.
@@ -274,7 +274,7 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict string) {
 			return
 		}
 		if _, err := cp.ConsumeNextHop(); err != nil {
-			e.abandon(origin, "malformed", "direct relay hop consume failed", err)
+			e.abandonKind(origin, "malformed", "relay-direct", "direct relay hop consume failed", err)
 			return
 		}
 		// The reference forwards ACKs with no delay at all: they are
@@ -298,31 +298,32 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict string) {
 		// reading — quarter-dB, one raw byte — joins the walked path
 		// (Mesh::onRecvPacket).
 		if err := cp.AppendTraceHop(snr); err != nil {
-			e.abandon(origin, "malformed", "trace path could not grow", err)
+			e.abandonKind(origin, "malformed", "relay-trace", "trace path could not grow", err)
 			return
 		}
 		e.enqueue(dev, &cp, "relay-trace", origin, prioTrace, e.p.directTxDelayFactor())
 	}
 }
 
-// abandon reports an emission the pipeline gave up on before it ever
-// reached the queue: the audit trail must show the refusal, not a
-// judgement that quietly led nowhere.
-func (e *engine) abandon(origin txn.ID, reason, msg string, err error) {
+// abandonKind reports an emission the pipeline gave up on before it
+// ever reached the queue, with the kind its caller was composing: the
+// audit trail must show the refusal, not a judgement that quietly led
+// nowhere.
+func (e *engine) abandonKind(origin txn.ID, reason, kind, msg string, err error) {
 	e.log.Warn(msg, zap.String("txn", origin.Short()), zap.Error(err))
 	e.bus.Publish(bus.TxDropped{
-		Relay: e.relay, Txn: origin, At: time.Now(), Reason: reason,
+		Relay: e.relay, Txn: origin, At: time.Now(), Reason: reason, Kind: kind,
 	})
 }
 
 // dropOnFault counts an emission lost to a radio fault. A daemon
 // shutting down is not a fault: that entry goes unsent like the rest
 // of the queue, and counting it would blame the radio for the stop.
-func (e *engine) dropOnFault(ctx context.Context, origin txn.ID, err error) {
+func (e *engine) dropOnFault(ctx context.Context, origin txn.ID, kind string, err error) {
 	if ctx.Err() != nil {
 		return
 	}
-	e.abandon(origin, "tx-failed", "emission lost to a radio fault", err)
+	e.abandonKind(origin, "tx-failed", kind, "emission lost to a radio fault", err)
 }
 
 // forwardMultipart unwraps a direct MULTIPART into the plain ACK it
@@ -337,24 +338,24 @@ func (e *engine) dropOnFault(ctx context.Context, origin txn.ID, err error) {
 func (e *engine) forwardMultipart(cp *meshcore.Packet, origin txn.ID) {
 	mp, stripped, err := cp.UnwrapMultipart()
 	if err != nil || mp.Inner != meshcore.PayloadTypeAck || len(mp.Data) < 4 {
-		e.abandon(origin, "malformed", "multipart wraps no ack", err)
+		e.abandonKind(origin, "malformed", "relay-direct", "multipart wraps no ack", err)
 		return
 	}
 	// Dedup on the unwrapped shape, exactly as the reference hashes it:
 	// the multipart header over the stripped payload.
 	if _, dup := e.seen.witness(stripped.Hash(), origin, time.Now()); dup {
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Txn: origin, At: time.Now(), Reason: "duplicate",
+			Relay: e.relay, Txn: origin, At: time.Now(), Reason: "duplicate", Kind: "relay-direct",
 		})
 		return
 	}
 	if _, err := stripped.ConsumeNextHop(); err != nil {
-		e.abandon(origin, "malformed", "multipart hop consume failed", err)
+		e.abandonKind(origin, "malformed", "relay-direct", "multipart hop consume failed", err)
 		return
 	}
 	ack, err := meshcore.BuildAck(mp.Data[:4])
 	if err != nil {
-		e.abandon(origin, "malformed", "multipart ack rebuild failed", err)
+		e.abandonKind(origin, "malformed", "relay-direct", "multipart ack rebuild failed", err)
 		return
 	}
 	// The unwrapped ACK travels the way its multipart did, scope
@@ -682,7 +683,7 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	outcome, err := e.clearChannel(ctx, dev, log, entry.origin, entry.kind)
 	switch {
 	case err != nil:
-		e.dropOnFault(ctx, entry.origin, err)
+		e.dropOnFault(ctx, entry.origin, entry.kind, err)
 		return err
 	case outcome == lbtRequeue:
 		e.requeue(entry)
@@ -716,7 +717,7 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 				// Nothing was radiated and nothing will be: the entry
 				// was already popped, so the session restart's queue
 				// purge cannot count it — this is its only witness.
-				e.dropOnFault(ctx, entry.origin, err)
+				e.dropOnFault(ctx, entry.origin, entry.kind, err)
 			}
 			return err
 		}

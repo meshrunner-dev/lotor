@@ -368,6 +368,9 @@ func (s *Sentinel) validate() error {
 	if s.Journal == "" {
 		return errors.New(`sentinel: journal path is required (":memory:" for RAM-only)`)
 	}
+	if s.MetricsRetention < 0 {
+		return errors.New("sentinel: metrics_retention cannot be negative")
+	}
 	if s.Retention < 0 {
 		return fmt.Errorf("sentinel: negative retention %s", s.Retention)
 	}

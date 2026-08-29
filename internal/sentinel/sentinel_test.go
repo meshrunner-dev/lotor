@@ -499,3 +499,85 @@ func TestJournalIsBornPrivate(t *testing.T) {
 		t.Errorf("journal mode = %o, want 600 — telemetry is not for every local account", info.Mode().Perm())
 	}
 }
+
+func TestMetricsRetentionBoundsEveryTier(t *testing.T) {
+	// The review's interaction: retention 30d and metrics_retention
+	// 24h left a 48h-old point alive in the hourly tier — the knob
+	// bounded only daily. Every tier answers to it now.
+	s := testSentinel(t)
+	ctx := context.Background()
+	old := time.Now().Add(-48 * time.Hour)
+	if err := s.store.insertMetric(ctx, "noise_floor", "r", old, -100); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.prune(ctx, time.Now(), 30*24*time.Hour, 24*time.Hour, 0); err != nil {
+		t.Fatal(err)
+	}
+	buckets, err := s.NoiseHistory(ctx, "r", time.Now().Add(-30*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 0 {
+		t.Errorf("buckets = %+v — a tier outlived metrics_retention", buckets)
+	}
+}
+
+func TestBusDropWarningsArePaced(t *testing.T) {
+	// The second amplification source of OBS-004: under sustained
+	// saturation every consume/publish cycle advanced the counter and
+	// earned its own WARN. The first loss logs at once; the rest fold
+	// until the window passes; the cumulative count stays in Health.
+	s := testSentinel(t)
+	sub := s.sub
+	for range 300 {
+		s.bus.Publish(bus.NoiseStarved{Relay: "r"})
+	}
+	drainOne := func() {
+		select {
+		case <-sub.C:
+		default:
+		}
+	}
+	warned := 0
+	for range 100 {
+		drainOne()
+		s.bus.Publish(bus.NoiseStarved{Relay: "r"})
+		s.bus.Publish(bus.NoiseStarved{Relay: "r"})
+		before := s.reported
+		s.reportDrops()
+		if s.reported != before {
+			warned++
+		}
+	}
+	if warned > 1 {
+		t.Errorf("%d warnings in one pacing window — the storm survived", warned)
+	}
+	if s.Health().BusDropped == 0 {
+		t.Error("the cumulative count vanished with the pacing")
+	}
+}
+
+func TestAnExposedJournalIsCorrectedOnOpen(t *testing.T) {
+	// The installations already at 0644 are precisely the ones the
+	// upgrade must protect.
+	ctx := context.Background()
+	path := t.TempDir() + "/journal.db"
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := openStore(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	// The main file and whatever sidecars WAL made while open.
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		info, err := os.Stat(p)
+		if err != nil {
+			continue // a sidecar may not exist yet
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			t.Errorf("%s mode = %o — still readable beyond the owner", p, info.Mode().Perm())
+		}
+	}
+}

@@ -28,6 +28,7 @@ type Sentinel struct {
 	maxFrames        int
 	journalPath      string
 	reported         uint64
+	dropWarnAt       time.Time
 	// The journal's health, kept where any goroutine may read it: the
 	// consumer writes, status and heartbeats read. warnedAt paces the
 	// failure logs on the consumer goroutine alone.
@@ -82,6 +83,12 @@ func Open(ctx context.Context, journalPath string, retention, metricsRetention t
 	// Subscribing here — not in Run — means the journal misses nothing
 	// published between construction and the consumer goroutine's first
 	// breath, the daemon's opening relay states included.
+	if metricsRetention <= 0 {
+		// The default resolves HERE, so MetricsRetention() answers
+		// the depth actually enforced, never a zero that means two
+		// years somewhere deeper.
+		metricsRetention = metricDailyKeep
+	}
 	sen := &Sentinel{
 		store: st, bus: b, sub: b.Subscribe(256),
 		log: log, retention: retention, metricsRetention: metricsRetention,
@@ -281,14 +288,28 @@ func (s *Sentinel) drain(ctx context.Context) {
 	}
 }
 
-// reportDrops warns as soon as the subscription lost events, not an
-// hour later: silent degradation is a bug by definition.
+// reportDrops warns when the subscription lost events — the FIRST
+// loss at once, the rest folded into paced deltas, the same
+// discipline the write failures follow: under sustained saturation
+// every consumed event can free a slot two publications refill and
+// overflow, and a WARN per cycle is log volume proportional to the
+// very traffic that caused it. The cumulative count stays readable
+// in Health whatever the pacing.
 func (s *Sentinel) reportDrops() {
-	if d := s.sub.Dropped(); d > s.reported {
-		s.log.Warn("journal fell behind the bus",
-			zap.Uint64("events_dropped", d-s.reported))
-		s.reported = d
+	d := s.sub.Dropped()
+	if d <= s.reported {
+		return
 	}
+	first := s.reported == 0
+	if !first && time.Since(s.dropWarnAt) < healthLogEvery {
+		return
+	}
+	s.dropWarnAt = time.Now()
+	s.log.Warn("journal fell behind the bus",
+		zap.Uint64("events_dropped", d-s.reported),
+		zap.Uint64("events_dropped_total", d),
+		zap.Bool("first", first))
+	s.reported = d
 }
 
 // Process journals one event synchronously. Run feeds it from the

@@ -402,6 +402,6 @@ func (e *engine) storeRefused(origin txn.ID, what string, err error) {
 	e.log.Warn("session store refused the replay guard — "+what+" not served",
 		zap.String("txn", origin.Short()), zap.Error(err))
 	e.bus.Publish(bus.TxDropped{
-		Relay: e.relay, Txn: origin, At: time.Now(), Reason: "session-store",
+		Relay: e.relay, Txn: origin, At: time.Now(), Reason: "session-store", Kind: "answer",
 	})
 }

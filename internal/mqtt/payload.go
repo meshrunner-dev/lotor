@@ -53,15 +53,17 @@ type statusMessage struct {
 }
 
 type statusStats struct {
-	UptimeSecs      *int  `json:"uptime_secs,omitempty"`
-	PacketsSent     *int  `json:"packets_sent,omitempty"`
-	PacketsReceived *int  `json:"packets_received,omitempty"`
-	Errors          *int  `json:"errors,omitempty"`
-	NoiseFloor      *int  `json:"noise_floor,omitempty"`
-	TxAirSecs       *int  `json:"tx_air_secs,omitempty"`
-	RxAirSecs       *int  `json:"rx_air_secs,omitempty"`
-	RecvErrors      *int  `json:"recv_errors,omitempty"`
-	JournalDegraded *bool `json:"journal_degraded,omitempty"`
+	UptimeSecs      *int   `json:"uptime_secs,omitempty"`
+	PacketsSent     *int   `json:"packets_sent,omitempty"`
+	PacketsReceived *int   `json:"packets_received,omitempty"`
+	Errors          *int   `json:"errors,omitempty"`
+	NoiseFloor      *int   `json:"noise_floor,omitempty"`
+	TxAirSecs       *int   `json:"tx_air_secs,omitempty"`
+	RxAirSecs       *int   `json:"rx_air_secs,omitempty"`
+	RecvErrors      *int   `json:"recv_errors,omitempty"`
+	JournalDegraded *bool  `json:"journal_degraded,omitempty"`
+	JournalFailures *int   `json:"journal_failures,omitempty"`
+	JournalLastErr  string `json:"journal_last_error,omitempty"`
 }
 
 // rawMessage is the frame without the analysis — the raw topic.
@@ -157,8 +159,12 @@ type Health struct {
 	RecvErrors      *int
 	// JournalDegraded says the archive is failing its writes — an
 	// outage the heartbeat must carry, because after a log rotation
-	// nothing else durable says it happened.
+	// nothing else durable says it happened. The counters ride along
+	// whenever anything ever failed, recovery included: the episode
+	// must survive its own end.
 	JournalDegraded *bool
+	JournalFailures *int
+	JournalLastErr  string
 }
 
 // StatusJSON builds the heartbeat.
@@ -182,6 +188,8 @@ func StatusJSON(at time.Time, origin, originID, model, firmware, radio,
 		NoiseFloor: h.NoiseFloor, TxAirSecs: h.TxAirSecs,
 		RxAirSecs: h.RxAirSecs, RecvErrors: h.RecvErrors,
 		JournalDegraded: h.JournalDegraded,
+		JournalFailures: h.JournalFailures,
+		JournalLastErr:  h.JournalLastErr,
 	}
 	if stats != (statusStats{}) {
 		m.Stats = &stats

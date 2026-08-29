@@ -54,7 +54,8 @@ func (s *session) sentinelRow(ctx context.Context, tb *table) {
 	h := s.deps.Sentinel.Health()
 	if !h.Healthy {
 		tb.row("sentinel", "degraded", path,
-			fmt.Sprintf("%d writes failed — last: %s", h.Failures, h.LastErr))
+			fmt.Sprintf("%d writes failed — last %s: %s",
+				h.Failures, ago(h.LastFailAt), h.LastErr))
 		return
 	}
 	extra := ""
@@ -66,7 +67,8 @@ func (s *session) sentinelRow(ctx context.Context, tb *table) {
 	}
 	tb.row("sentinel", "journalling", path,
 		fmt.Sprintf("%d frames", n),
-		fmt.Sprintf("%s retention", retention)+extra)
+		fmt.Sprintf("%s retention, %s metrics", retention,
+			s.deps.Sentinel.MetricsRetention())+extra)
 }
 
 // relayList renders the relays as a table — the tree's print at the
@@ -565,28 +567,42 @@ func (s *session) txn(ctx context.Context, in input) error {
 			fmt.Fprintf(s.out, " — %s", w)
 		}
 		fmt.Fprint(s.out, "\r\n")
-		// The transaction's full life: what the pipeline sent for it.
+		// The transaction's full life: what the pipeline sent for it —
+		// and what it gave up on, which is an outcome too: a reception
+		// judged worth relaying that then dropped on duty must not
+		// read as leading nowhere.
 		sent, err := sen.SentFor(ctx, f.Txn)
 		if err != nil {
 			return err
 		}
 		s.printSent(sent)
+		drops, err := sen.DropsFor(ctx, f.Txn)
+		if err != nil {
+			return err
+		}
+		s.printDrops(drops)
 	}
 	return nil
 }
 
 // originatedTxn renders a transaction the daemon started itself, or
-// reports that nothing anywhere carries the prefix.
+// reports that nothing anywhere carries the prefix. An origination
+// that only ever DROPPED is still a transaction with a story.
 func (s *session) originatedTxn(ctx context.Context, sen *sentinel.Sentinel, prefix string) error {
 	sent, err := sen.SentFor(ctx, prefix)
 	if err != nil {
 		return err
 	}
-	if len(sent) == 0 {
+	drops, err := sen.DropsFor(ctx, prefix)
+	if err != nil {
+		return err
+	}
+	if len(sent) == 0 && len(drops) == 0 {
 		return fmt.Errorf("no transaction matching %q", prefix)
 	}
 	fmt.Fprint(s.out, "originated — no reception behind it\r\n")
 	s.printSent(sent)
+	s.printDrops(drops)
 	return nil
 }
 
@@ -599,6 +615,18 @@ func (s *session) printSent(sent []sentinel.Sent) {
 		}
 		fmt.Fprintf(s.out, "  sent %s  %s  %s  airtime %s  %d dBm%s\r\n",
 			t.At.Format("15:04:05"), t.Relay, t.Kind, t.Airtime, t.PowerDBm, shadow)
+	}
+}
+
+// printDrops renders a transaction's refused emissions.
+func (s *session) printDrops(drops []sentinel.TxDropEvent) {
+	for _, d := range drops {
+		kind := d.Kind
+		if kind == "" {
+			kind = "?"
+		}
+		fmt.Fprintf(s.out, "  dropped %s  %s  %s  %s\r\n",
+			d.At.Format("15:04:05"), d.Relay, kind, d.Reason)
 	}
 }
 
@@ -1265,21 +1293,33 @@ func (s *session) noiseTable(buckets, spreads, starveds []sentinel.MetricBucket)
 		moments = append(moments, at)
 	}
 	slices.Sort(moments)
+	// Every cell renders from its OWN (value, present) pair: a bucket
+	// holding only spread must show that spread, a floor without one
+	// must not invent 0.0, and absent starvation is unknown — not a
+	// count that happens to be zero.
+	cell := func(label string, v float64, present bool, format string) string {
+		if !present {
+			return label + " —"
+		}
+		return label + " " + fmt.Sprintf(format, v)
+	}
 	tb := s.table()
 	for _, at := range moments {
 		when := time.UnixMilli(at).Format("02/01 15:04")
-		starved := fmt.Sprintf("starved %.0f", starvedAt[at])
-		if b, measured := floorAt[at]; measured {
-			tb.row(when,
-				fmt.Sprintf("min %.1f", b.Min), fmt.Sprintf("avg(p50) %.1f", b.Avg),
-				fmt.Sprintf("max %.1f", b.Max),
-				fmt.Sprintf("p90-p50 %.1f", spreadAt[at]),
-				starved, fmt.Sprintf("%d×", b.N))
-			continue
+		spread, hasSpread := spreadAt[at]
+		starved, hasStarved := starvedAt[at]
+		b, hasFloor := floorAt[at]
+		count := "0×"
+		if hasFloor {
+			count = fmt.Sprintf("%d×", b.N)
 		}
-		// No floor converged this hour: the measurements are unknown,
-		// not zero, and the starvation is the row's whole story.
-		tb.row(when, "min —", "avg(p50) —", "max —", "p90-p50 —", starved, "0×")
+		tb.row(when,
+			cell("min", b.Min, hasFloor, "%.1f"),
+			cell("avg(p50)", b.Avg, hasFloor, "%.1f"),
+			cell("max", b.Max, hasFloor, "%.1f"),
+			cell("p90-p50", spread, hasSpread, "%.1f"),
+			cell("starved", starved, hasStarved, "%.0f"),
+			count)
 	}
 	return tb
 }

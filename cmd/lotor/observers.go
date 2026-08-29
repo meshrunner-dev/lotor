@@ -14,6 +14,7 @@ import (
 	"meshrunner.dev/lotor/internal/product"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -42,6 +43,9 @@ type managedObserver struct {
 	broker *mqtt.Broker
 	url    string
 	relay  string
+	// live gates this incarnation's connection callbacks: flipped off
+	// at stop, so a late Paho notification cannot speak after it.
+	live *atomic.Bool
 }
 
 // resolveMQTTParams turns one observer's layers into its effective
@@ -370,9 +374,12 @@ func (m *manager) observerHealth(relayName string) func() mqtt.Health {
 		m.viewMu.RUnlock()
 		h := mqtt.Health{}
 		if m.sen != nil {
-			if jh := m.sen.Health(); !jh.Healthy {
-				degraded := true
+			if jh := m.sen.Health(); !jh.Healthy || jh.Failures > 0 {
+				degraded := !jh.Healthy
+				failures := int(jh.Failures)
 				h.JournalDegraded = &degraded
+				h.JournalFailures = &failures
+				h.JournalLastErr = jh.LastErr
 			}
 		}
 		if !ok {
@@ -431,7 +438,15 @@ func (m *manager) startObserver(ctx context.Context, name string) {
 	m.viewMu.RLock()
 	dialInfo := m.infos[cfg.Relay]
 	m.viewMu.RUnlock()
-	broker, err := mqtt.Dial(observerDial(p, name, dialInfo, connects, m.bus.Publish, log), log)
+	// "started" goes out BEFORE the dial: Paho's callbacks run
+	// concurrently and a fast local broker connected before the start
+	// event landed, writing history backwards. The liveness gate
+	// keeps a late callback of THIS incarnation from speaking after
+	// its stop — or into its successor's timeline.
+	live := &atomic.Bool{}
+	live.Store(true)
+	m.bus.Publish(bus.ObserverState{Observer: name, At: time.Now(), State: "started"})
+	broker, err := mqtt.Dial(observerDial(p, name, dialInfo, connects, gatedPublish(live, m.bus.Publish), log), log)
 	if err != nil {
 		m.observerDown(name, err, log)
 		return
@@ -442,7 +457,7 @@ func (m *manager) startObserver(ctx context.Context, name string) {
 	done := make(chan struct{})
 	m.observers[name] = &managedObserver{
 		cancel: cancel, done: done, obs: obs, sub: sub, broker: broker,
-		url: p.URL, relay: cfg.Relay,
+		url: p.URL, relay: cfg.Relay, live: live,
 	}
 	m.wg.Go(func() {
 		defer close(done)
@@ -450,11 +465,6 @@ func (m *manager) startObserver(ctx context.Context, name string) {
 		obs.Run(octx, sub)
 	})
 	delete(m.obsCause, name)
-	// "started" is the honest word: the goroutine runs and Paho is
-	// dialing, but no broker session exists yet — connected, lost and
-	// reconnected arrive from the connection's own callbacks, so the
-	// archive can date a real outage.
-	m.bus.Publish(bus.ObserverState{Observer: name, At: time.Now(), State: "started"})
 	log.Info("observer started", zap.String("broker", p.URL), zap.String("relay", cfg.Relay))
 }
 
@@ -474,6 +484,9 @@ func (m *manager) stopObserver(name string) {
 	h, ok := m.observers[name]
 	if !ok {
 		return
+	}
+	if h.live != nil {
+		h.live.Store(false) // this incarnation's callbacks fall silent
 	}
 	h.cancel()
 	<-h.done
@@ -586,5 +599,16 @@ func regionSelfOf(info cli.RelayInfo) func() (string, string) {
 			return "", ""
 		}
 		return strings.Join(r.Served, ","), r.Default
+	}
+}
+
+// gatedPublish wraps the bus behind one incarnation's liveness: a
+// Paho callback that fires after the observer stopped must not write
+// into history — least of all into a successor's.
+func gatedPublish(live *atomic.Bool, publish func(bus.Event)) func(bus.Event) {
+	return func(ev bus.Event) {
+		if live.Load() {
+			publish(ev)
+		}
 	}
 }

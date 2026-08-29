@@ -161,17 +161,43 @@ type store struct {
 	db *sql.DB
 }
 
+// tightenJournal births a missing journal 0600 and CORRECTS an
+// existing one: the installations already exposed at 0644 are
+// precisely the ones an upgrade must protect, and the WAL sidecars
+// inherit the main file's mode when SQLite recreates them. Failures
+// surface — a journal that cannot be protected is worth stopping for.
+func tightenJournal(path string) error {
+	st, err := os.Stat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		// #nosec G304 -- the journal's own path
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("journal create: %w", err)
+		}
+		return f.Close()
+	case err != nil:
+		return fmt.Errorf("journal stat: %w", err)
+	case st.Mode().Perm() != 0o600:
+		if err := os.Chmod(path, 0o600); err != nil {
+			return fmt.Errorf("journal cannot be protected: %w", err)
+		}
+	}
+	// Sidecars a previous, looser life left behind.
+	for _, side := range []string{path + "-wal", path + "-shm"} {
+		if st, err := os.Stat(side); err == nil && st.Mode().Perm() != 0o600 {
+			if err := os.Chmod(side, 0o600); err != nil {
+				return fmt.Errorf("journal sidecar cannot be protected: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
 func openStore(ctx context.Context, path string) (*store, error) {
 	if path != MemoryJournal {
-		// Born 0600: the journal holds no key, but hours, routes,
-		// node names, key prefixes and TX activity are telemetry the
-		// other local accounts have no business reading — and the WAL
-		// sidecars inherit the main file's mode.
-		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-			// #nosec G304 -- the journal's own path
-			if f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err == nil {
-				_ = f.Close()
-			}
+		if err := tightenJournal(path); err != nil {
+			return nil, err
 		}
 	}
 	db, err := sql.Open("sqlite", path)
@@ -391,6 +417,9 @@ func (s *store) rollupMetrics(ctx context.Context, now time.Time, retention, met
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if metricsRetention <= 0 {
+		metricsRetention = metricDailyKeep
+	}
 	rawCut := (now.Add(-metricRawKeep).UnixMilli() / hourMS) * hourMS
 	if _, err := tx.ExecContext(ctx, rollupRawSQL, rawCut, hourMS); err != nil {
 		return err
@@ -407,12 +436,15 @@ func (s *store) rollupMetrics(ctx context.Context, now time.Time, retention, met
 		`DELETE FROM metrics_hourly WHERE at_ms < ?`, hourlyCut); err != nil {
 		return err
 	}
-	if metricsRetention <= 0 {
-		metricsRetention = metricDailyKeep
-	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM metrics_daily WHERE at_ms < ?`, now.Add(-metricsRetention).UnixMilli()); err != nil {
-		return err
+	// metrics_retention bounds the WHOLE metric history, tier by
+	// tier: a knob that only trimmed daily left hourly buckets alive
+	// past the depth it announced whenever it undercut retention.
+	metricsCut := now.Add(-metricsRetention).UnixMilli()
+	for _, table := range []string{"metrics_raw", "metrics_hourly", "metrics_daily"} {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM `+table+` WHERE at_ms < ?`, metricsCut); err != nil { // #nosec G202 -- fixed table names
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -989,9 +1021,10 @@ type TxDropEvent struct {
 // DropsFor lists the refusals recorded under one transaction prefix,
 // oldest first — the missing half of the heard → judged → sent chain.
 func (s *store) DropsFor(ctx context.Context, txnPrefix string) ([]TxDropEvent, error) {
+	lo, hi := prefixRange(txnPrefix)
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT at_ms, relay, txn, reason, kind FROM tx_drop_events
-		  WHERE txn LIKE ? || '%' ORDER BY at_ms`, txnPrefix)
+		  WHERE txn >= ? AND txn < ? ORDER BY at_ms`, lo, hi)
 	if err != nil {
 		return nil, err
 	}

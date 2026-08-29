@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -75,16 +76,36 @@ func connectionLadder(brokerURL string, notify func(state, cause string),
 			notify(state, cause)
 		}
 	}
+	// One mutex serialises the whole timeline: Paho's callbacks run
+	// concurrently, and two transitions racing each other would write
+	// history out of order.
+	var mu sync.Mutex
 	return func(_ paho.Client, n paho.ConnectionNotification) {
+		mu.Lock()
+		defer mu.Unlock()
 		url := zap.String("url", brokerURL)
 		switch e := n.(type) {
 		case paho.ConnectionNotificationConnecting:
 			log.Debug("observer broker dialing", url,
 				zap.Int("attempt", e.Attempt), zap.Bool("reconnect", e.IsReconnect))
+			if e.Attempt <= 1 {
+				// The first attempt of a round is the transition; the
+				// retries within it are the socket's own noise.
+				state := "connecting"
+				if e.IsReconnect {
+					state = "reconnecting"
+				}
+				tell(state, "")
+			}
 		case paho.ConnectionNotificationBrokerFailed:
 			log.Debug("observer broker attempt failed", url, zap.Error(e.Reason))
 		case paho.ConnectionNotificationFailed:
 			log.Debug("observer broker round failed — backing off", url, zap.Error(e.Reason))
+			cause := ""
+			if e.Reason != nil {
+				cause = e.Reason.Error()
+			}
+			tell("failed", cause)
 		case paho.ConnectionNotificationConnected:
 			word, state := "observer broker connected", "connected"
 			if sessions.Add(1) > 1 {

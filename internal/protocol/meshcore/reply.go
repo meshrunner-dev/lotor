@@ -72,7 +72,7 @@ func (e *engine) reply(inbound *meshcore.Packet, a answer, origin txn.ID) {
 			// receives, and for an authenticated question the replay
 			// guard is already spent — so the refusal is counted
 			// against its transaction rather than logged and lost.
-			e.abandon(origin, "malformed",
+			e.abandonKind(origin, "malformed", "answer",
 				"reply too large to compose ("+a.kind+")", err)
 			return
 		}
@@ -84,7 +84,7 @@ func (e *engine) reply(inbound *meshcore.Packet, a answer, origin txn.ID) {
 
 	pkt, err := meshcore.BuildResponse(a.destHash, srcHash, a.secret, a.tag, a.body)
 	if err != nil {
-		e.abandon(origin, "malformed",
+		e.abandonKind(origin, "malformed", "answer",
 			"reply too large to compose ("+a.kind+")", err)
 		return
 	}
