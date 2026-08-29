@@ -745,10 +745,11 @@ func (e *engine) passingBy(pkt *meshcore.Packet) (string, bool) {
 	if !pkt.IsRouteDirect() || pkt.PathHashCount() == 0 {
 		return "", false
 	}
-	switch pkt.PayloadType() {
-	case meshcore.PayloadTypeTrace, meshcore.PayloadTypeControl:
+	// A trace's target does not ride the path head, and the high-bit
+	// control subset is answered rather than routed. Every other
+	// control packet is ordinary directed traffic.
+	if pkt.PayloadType() == meshcore.PayloadTypeTrace || highBitControl(pkt) {
 		return "", false
-	default:
 	}
 	if e.id != nil && e.id.HashMatches(pkt.Path[:min(pkt.PathHashSize(), len(pkt.Path))]) {
 		return "", false // ours to relay: witnessed and judged like anything else
@@ -827,6 +828,20 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 	if err != nil {
 		log.Info("frame judged", zap.String("verdict", verdictMalformed), zap.Error(err))
 		e.bus.Publish(bus.FrameJudged{Relay: e.relay, Txn: id, Verdict: verdictMalformed})
+		return
+	}
+	// The version gate stands here, where the reference's dispatcher
+	// puts it: ahead of the score hold, the duplicate table, the
+	// signature check and the neighbourhood. A frame this engine says
+	// it cannot read must have no effect at all, and an advert
+	// wearing a version we reject was still naming neighbours.
+	if unsupportedVersion(pkt) {
+		log.Info("frame judged", zap.String("verdict", verdictBadVersion))
+		e.bus.Publish(bus.FrameJudged{
+			Relay: e.relay, Txn: id, Verdict: verdictBadVersion,
+			Type: pkt.PayloadType().String(), Route: pkt.Route().String(),
+			PathLen: pkt.PathHashCount(),
+		})
 		return
 	}
 	// The score hold, the reference dispatcher's gesture: a flood we

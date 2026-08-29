@@ -131,7 +131,7 @@ func TestSeenTableExpires(t *testing.T) {
 	e, sub := testEngine(t)
 	e.seen = newSeenTable(time.Millisecond, 8)
 
-	grpTxt := []byte{0x01 | 0x05<<2, 0x00, 0xDD, 0xEE}
+	grpTxt := []byte{0x01 | 0x05<<2, 0x00, 0xDD, 0xEE, 0x11, 0x22, 0x33}
 	e.judge(newFakeDevice(), frame(grpTxt))
 	time.Sleep(5 * time.Millisecond)
 	e.judge(newFakeDevice(), frame(grpTxt))

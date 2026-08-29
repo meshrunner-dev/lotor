@@ -69,12 +69,14 @@ func newLimits() limits {
 	}
 }
 
-// controlVerdict judges a direct CONTROL packet. The reference admits
-// only the zero-hop, high-bit subset (Mesh::onRecvPacket: "just
-// zero-hop control packets allowed"); anything else is released.
+// controlVerdict judges a direct CONTROL packet of the high-bit
+// subset — its caller admits no other. The reference answers those
+// only at zero hops and releases the rest (Mesh::onRecvPacket: "just
+// zero-hop control packets allowed"): a subset packet that walked a
+// path is nobody's to carry onward.
 func (e *engine) controlVerdict(rx *reception) (string, string) {
 	pkt := rx.pkt
-	if pkt.PathHashCount() != 0 || len(pkt.Payload) == 0 || pkt.Payload[0]&0x80 == 0 {
+	if pkt.PathHashCount() != 0 {
 		return verdictIgnored, "control outside the zero-hop subset"
 	}
 	if v, why, handled := e.sweepAnswer(rx); handled {

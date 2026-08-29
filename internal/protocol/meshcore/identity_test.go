@@ -103,7 +103,9 @@ func TestFloodLoopThresholds(t *testing.T) {
 		for range n {
 			f = append(f, ours)
 		}
-		return append(f, 0xDD, seq)
+		// A whole envelope: dest, src, MAC and data. A payload too
+		// short for its type is refused before the orbit gate.
+		return append(f, 0xDD, 0xEE, 0x11, 0x22, seq)
 	}
 	// At one byte a match is a collision once per 256 hops: minimal —
 	// the default — tolerates three apparent visits and refuses four.
@@ -119,7 +121,9 @@ func TestFloodLoopThresholds(t *testing.T) {
 	// Two-byte hashes collide 256 times less: minimal refuses at two.
 	e.p.LoopDetect = ""
 	o2 := e.id.PubKey[:2]
-	wide := []byte{0x01 | 0x05<<2, 0x40 | 0x03, o2[0], o2[1], o2[0], o2[1], 0x22, 0x33, 0xDD, 0x06}
+	wide := []byte{0x01 | 0x05<<2, 0x40 | 0x03,
+		o2[0], o2[1], o2[0], o2[1], 0x22, 0x33,
+		0xDD, 0xEE, 0x11, 0x22, 0x06}
 	e.judge(newFakeDevice(), frame(wide))
 
 	want := []string{

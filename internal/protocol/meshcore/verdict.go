@@ -15,6 +15,7 @@ const (
 	verdictRelayDirect    = "would-relay-direct"         // our hash heads the path: the reference relays and consumes it
 	verdictRelayTrace     = "would-relay-trace"          // our hash is the trace's next target hop
 	verdictDropFloodType  = "would-drop-flood-type"      // the reference never re-floods this payload type
+	verdictDropFloodShort = "would-drop-flood-truncated" // the payload does not hold the envelope its type declares
 	verdictDropBadAdvert  = "would-drop-invalid-advert"  // flood advert whose signature fails
 	verdictDropPathFull   = "would-drop-flood-path-full" // appending our hash would exceed the path
 	verdictDropFloodHops  = "would-drop-flood-hops"      // the flood travelled past its hop limit
@@ -95,6 +96,53 @@ var floodRoutable = map[meshcore.PayloadType]bool{
 	meshcore.PayloadTypeAdvert:   true,
 }
 
+// unsupportedVersion reports a payload version this engine does not
+// read. The reference refuses one in its dispatcher, before any
+// application decoding at all — which is where the refusal has to be:
+// a version we say we do not understand must not name a neighbour,
+// take a place in the duplicate table, or be held for a score delay
+// on the strength of fields we just admitted we cannot read.
+func unsupportedVersion(pkt *meshcore.Packet) bool {
+	return pkt.PayloadVer() > meshcore.PayloadVer1
+}
+
+// floodEnvelopeIntact reports whether a flood's payload actually
+// holds the envelope its type declares. The reference reaches
+// routeRecvPacket only past its own length gate — an incomplete ACK
+// or data packet is released, never carried — so judging on the type
+// alone had this node spreading through its own neighbourhood frames
+// that every reference repeater stops. The shapes are the codec's:
+// asking the parsers is what keeps the two from drifting.
+func floodEnvelopeIntact(pkt *meshcore.Packet) bool {
+	var err error
+	switch pkt.PayloadType() {
+	case meshcore.PayloadTypeAck:
+		_, err = meshcore.ParseAck(pkt.Payload)
+	case meshcore.PayloadTypePath, meshcore.PayloadTypeReq,
+		meshcore.PayloadTypeResponse, meshcore.PayloadTypeTxtMsg:
+		_, err = meshcore.ParseDatagram(pkt.Payload)
+	case meshcore.PayloadTypeAnonReq:
+		_, err = meshcore.ParseAnonDatagram(pkt.Payload)
+	case meshcore.PayloadTypeGrpData, meshcore.PayloadTypeGrpTxt:
+		_, err = meshcore.ParseGroupDatagram(pkt.Payload)
+	default:
+		// ADVERT stands on its signature, which the verdict already
+		// checked; nothing else reaches here.
+	}
+	return err == nil
+}
+
+// highBitControl names the CONTROL subset the reference singles out:
+// the first payload byte with its high bit set (Mesh::onRecvPacket).
+// Those are answered when they arrive zero-hop and released
+// otherwise. A CONTROL without that bit is ordinary directed traffic
+// and continues through the normal routing, which is what keeps this
+// relay transparent to a control type it does not itself speak.
+func highBitControl(pkt *meshcore.Packet) bool {
+	return pkt.PayloadType() == meshcore.PayloadTypeControl &&
+		len(pkt.Payload) > 0 && pkt.Payload[0]&0x80 != 0
+}
+
 // verdict states what a transmitting relay would do with the packet,
 // walking the reference's gates in the reference's order. advertOK
 // reports the advert signature check when the type is ADVERT;
@@ -133,7 +181,7 @@ func (e *engine) addressedToUs(rx *reception) (verdict, why string, handled bool
 
 func (e *engine) verdict(rx *reception) (string, string) {
 	pkt := rx.pkt
-	if pkt.PayloadVer() > meshcore.PayloadVer1 {
+	if unsupportedVersion(pkt) {
 		return verdictBadVersion, ""
 	}
 	// Requests addressed to us are examined before any routing: the
@@ -160,7 +208,7 @@ func (e *engine) verdict(rx *reception) (string, string) {
 		if pkt.PayloadType() == meshcore.PayloadTypeTrace {
 			return e.traceVerdict(pkt)
 		}
-		if pkt.PayloadType() == meshcore.PayloadTypeControl {
+		if highBitControl(pkt) {
 			return e.controlVerdict(rx)
 		}
 		if pkt.PathHashCount() == 0 {
@@ -192,6 +240,9 @@ func (e *engine) floodVerdict(rx *reception, advertOK bool) (string, string) {
 	}
 	if t == meshcore.PayloadTypeAdvert && !advertOK {
 		return verdictDropBadAdvert, ""
+	}
+	if !floodEnvelopeIntact(pkt) {
+		return verdictDropFloodShort, "the payload is shorter than its own envelope"
 	}
 	// Both halves of what appending our hash requires: the bytes must
 	// fit, and the count must stay inside its 6-bit field. Judging on
