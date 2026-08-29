@@ -21,8 +21,12 @@ type managedSampler struct {
 	smp    *sensor.Sampler
 }
 
-// opened reports whether this part is answering, for the view.
-func (h *managedSampler) opened() bool { return h.smp.Opened() }
+// opened reports whether this part is answering, and why not when it
+// is not — the truth a status line owes an operator, rather than a
+// pointer at a journal that rotates.
+func (h *managedSampler) opened() (bool, string) {
+	return h.smp.Opened(), h.smp.Cause()
+}
 
 // startSampler opens one part and gives it its goroutine. A part that
 // will not open is logged and skipped: a missing sensor is no reason

@@ -53,6 +53,10 @@ type Sampler struct {
 	mu     sync.Mutex
 	last   []Reading
 	opened bool
+	// cause is why the part is not answering, kept because a journal
+	// on an embedded host rotates and a status line is what the
+	// operator actually reads.
+	cause string
 }
 
 // NewSampler prepares a sampler. It does not open anything: opening is
@@ -74,6 +78,15 @@ func (s *Sampler) Opened() bool {
 	return s.opened
 }
 
+// Cause is why the part is not answering, empty while it is. It is
+// the last refusal, not a history: what an operator needs is the
+// reason it is failing now.
+func (s *Sampler) Cause() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cause
+}
+
 // Run opens the part, retrying while it refuses, then reads until the
 // context ends and closes it. It samples once before waiting, so a
 // relay that asks for telemetry in the first seconds of its life has
@@ -85,7 +98,7 @@ func (s *Sampler) Run(ctx context.Context) {
 	}
 	defer func() {
 		s.mu.Lock()
-		s.opened = false
+		s.opened, s.cause = false, "stopped"
 		s.mu.Unlock()
 		if err := dev.Close(); err != nil && s.log != nil {
 			s.log.Warn("sensor close", zap.Error(err))
@@ -113,10 +126,13 @@ func (s *Sampler) opening(ctx context.Context) Device {
 		dev, err := s.open()
 		if err == nil {
 			s.mu.Lock()
-			s.opened = true
+			s.opened, s.cause = true, ""
 			s.mu.Unlock()
 			return dev
 		}
+		s.mu.Lock()
+		s.cause = err.Error()
+		s.mu.Unlock()
 		if s.log != nil {
 			s.log.Error("sensor not open", zap.Error(err), zap.Duration("retry_in", wait))
 		}

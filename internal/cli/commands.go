@@ -234,7 +234,11 @@ func (s *session) sensorStatus(name string) error {
 			// The part did not open. The journal says why; the
 			// console says that it did not, so nobody reads an empty
 			// list as a quiet part.
-			tb.row("state", "not running — the journal says why")
+			why := sn.Cause
+			if why == "" {
+				why = "no reason recorded yet"
+			}
+			tb.row("state", "not running — "+why)
 		case len(sn.Readings) == 0:
 			tb.row("state", "running, nothing read yet")
 		default:

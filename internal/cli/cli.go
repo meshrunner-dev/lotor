@@ -285,6 +285,8 @@ type SensorInfo struct {
 	// Running is false for a part that would not open — a bus that is
 	// not there, a permission the unit does not grant.
 	Running bool
+	// Cause is why it is not running, in the driver's own words.
+	Cause string
 	// Readings is the sampler's last answer, empty until it has one.
 	Readings []sensor.Reading
 }

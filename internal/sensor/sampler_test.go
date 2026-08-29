@@ -205,3 +205,45 @@ func TestAPartThatNeverOpensStopsWithTheContext(t *testing.T) {
 		t.Error("Opened is true for a part that never opened")
 	}
 }
+
+func TestTheReasonSurvivesForTheStatusLine(t *testing.T) {
+	// A journal on an embedded host rotates; the reason a part is not
+	// answering has to be readable now, in the driver's own words.
+	open := func() (Device, error) { return nil, errors.New("permission denied") }
+	s := NewSampler(open, time.Hour, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); s.Run(ctx) }()
+
+	waitFor(t, func() bool { return s.Cause() != "" }, "no reason was kept")
+	if got := s.Cause(); got != "permission denied" {
+		t.Errorf("cause = %q", got)
+	}
+	if s.Opened() {
+		t.Error("Opened is true for a part that refused")
+	}
+	cancel()
+	<-done
+}
+
+func TestOpeningClearsTheReason(t *testing.T) {
+	dev := &fakeDevice{entered: make(chan struct{}, 2)}
+	var tries atomic.Int32
+	open := func() (Device, error) {
+		if tries.Add(1) < 2 {
+			return nil, errors.New("no such bus")
+		}
+		return dev, nil
+	}
+	s := NewSampler(open, time.Hour, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); s.Run(ctx) }()
+
+	waitFor(t, s.Opened, "the part never opened")
+	if got := s.Cause(); got != "" {
+		t.Errorf("a part that is answering still carries %q", got)
+	}
+	cancel()
+	<-done
+}

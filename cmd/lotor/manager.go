@@ -585,10 +585,11 @@ func (m *manager) SensorInfos() []cli.SensorInfo {
 	for name, sn := range m.file.Sensors {
 		info := cli.SensorInfo{
 			Name: name, Driver: sn.Driver, SampleInterval: sn.SampleInterval,
-			Running: false, Readings: nil,
+			Running: false, Cause: "", Readings: nil,
 		}
 		if h, live := m.samplers[name]; live {
-			info.Running, info.Readings = h.opened(), h.smp.Latest()
+			info.Running, info.Cause = h.opened()
+			info.Readings = h.smp.Latest()
 		}
 		out = append(out, info)
 	}
