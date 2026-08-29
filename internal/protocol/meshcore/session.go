@@ -330,7 +330,11 @@ func (e *engine) answerRequest(c *client, args []byte) (body []byte, answered bo
 		b := e.neighboursBody(args)
 		return b, b != nil
 	case meshcore.ReqGetOwnerInfo:
-		return []byte("lotor " + version.Version + "\n" + e.p.NodeName + "\n" + e.p.OwnerInfo), true
+		// Three lines, the reference's own: the firmware version,
+		// the node's name, then whatever the owner wrote — which
+		// carries its own newlines, and is last so they cannot be
+		// mistaken for a fourth field.
+		return []byte(version.Version + "\n" + e.p.NodeName + "\n" + e.p.OwnerInfo), true
 	case meshcore.ReqKeepAlive:
 		// The reference answers nothing here either, and the session's
 		// clock has already moved on the request that carried it.

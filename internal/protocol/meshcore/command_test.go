@@ -324,3 +324,40 @@ func TestThePairingPrefixComesBackOnTheAnswer(t *testing.T) {
 		t.Errorf("bare line mangled: %v", lines)
 	}
 }
+
+func TestOwnerInfoAnswersThreeLines(t *testing.T) {
+	// The reference's shape: firmware version, node name, then the
+	// owner's own words — last, because they carry newlines of their
+	// own and a reader counts fields from the front.
+	e, dev, sub, peer := txRig(t, "on-air")
+	e.p.GuestAccess = guestOpen
+	e.p.NodeName = "Raccoon City"
+	e.p.OwnerInfo = "Raton\nlaveur"
+	runEngine(t, e, dev)
+
+	frame, secret := login(t, e.id, peer, nowTS(980), "", false)
+	dev.frames <- frame
+	awaitSent(t, sub)
+	<-dev.sent
+
+	dev.frames <- request(t, e.id, peer, nowTS(981), []byte{meshcore.ReqGetOwnerInfo, 0, 0, 0, 0})
+	if sent := awaitSent(t, sub); sent.Kind != "req-resp" {
+		t.Fatalf("no owner info: %+v", sent)
+	}
+	_, body := openReply(t, <-dev.sent, secret)
+	// Cipher padding follows the text; the three lines are its head.
+	text := strings.TrimRight(string(body), "\x00")
+	lines := strings.SplitN(text, "\n", 3)
+	if len(lines) != 3 {
+		t.Fatalf("owner info = %q", text)
+	}
+	if lines[0] == "" || strings.Contains(lines[0], " ") {
+		t.Errorf("first line should be a bare version: %q", lines[0])
+	}
+	if lines[1] != "Raccoon City" {
+		t.Errorf("name line = %q", lines[1])
+	}
+	if !strings.HasPrefix(lines[2], "Raton\nlaveur") {
+		t.Errorf("owner line = %q", lines[2])
+	}
+}

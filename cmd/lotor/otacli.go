@@ -58,6 +58,11 @@ var otaRender = map[string]func(string) string{
 		}
 		return repeatOff
 	},
+	// The wire carries a multi-line owner info on one line, bars
+	// standing in for the newlines.
+	settingOwner: func(v string) string {
+		return strings.ReplaceAll(v, "\n", "|")
+	},
 	// The wire speaks megahertz where the store keeps hertz.
 	"freq": func(v string) string {
 		hz, err := strconv.ParseFloat(v, 64)
@@ -82,10 +87,12 @@ var otaReadOnly = map[string]bool{
 	"frequency_hz": true,
 }
 
-// The reference's two words for the repeat gate, spelled once.
+// The reference's two words for the repeat gate, spelled once — and
+// the one setting whose value the wire folds onto a single line.
 const (
-	repeatOn  = "on"
-	repeatOff = "off"
+	repeatOn     = "on"
+	repeatOff    = "off"
+	settingOwner = "owner.info"
 )
 
 // otaUnknown is the reference's exact answer for a word it does not
@@ -159,14 +166,14 @@ func (m *manager) otaGet(relay, name string) string {
 	}
 	// "> value", the reference's get shape — through the setting's
 	// own renderer when the wire speaks another vocabulary than the
-	// store.
-	if v, ok := m.relayValue(relay, attr); ok {
-		if render, translated := otaRender[name]; translated {
-			v = render(v)
-		}
-		return "> " + v
+	// store. A value nobody set reads as the empty one it is: the
+	// wire has no word for absence here, and inventing a placeholder
+	// puts it on the asker's screen as if it were the setting.
+	v := m.relayValue(relay, attr)
+	if render, translated := otaRender[name]; translated {
+		v = render(v)
 	}
-	return "> (unset)"
+	return "> " + v
 }
 
 // otaSet applies one setting through the mutation door.
@@ -183,6 +190,11 @@ func (m *manager) otaSet(relay, principal, rest string) string {
 		return "ERR: console only"
 	}
 	value = strings.TrimSpace(value)
+	if name == settingOwner {
+		// The bars the wire uses for newlines become newlines here,
+		// which is what the store and the advert carry.
+		value = strings.ReplaceAll(value, "|", "\n")
+	}
 	if attr == "tx.mode" {
 		// repeat on/off is the reference's word for the transmit gate.
 		switch value {
@@ -198,7 +210,7 @@ func (m *manager) otaSet(relay, principal, rest string) string {
 	// immutable, the choice and the resolved configuration read from
 	// the view — so a bad value earns its honest refusal now instead
 	// of a false ok and a line in a journal the admin cannot see.
-	choice, _ := m.relayValue(relay, attrProtocol)
+	choice := m.relayValue(relay, attrProtocol)
 	typed, err := m.parseAgainst(confdb.KindRelay, choice,
 		map[string]string{attr: value}, nil)
 	if err != nil {

@@ -469,7 +469,7 @@ func TestViewsAnswerWhileTheLifecycleLockIsHeld(t *testing.T) {
 		done <- "health " + h.Repeat
 	}()
 	go func() {
-		v, _ := m.relayValue("mc", "node_name")
+		v := m.relayValue("mc", "node_name")
 		done <- "get " + v
 	}()
 	go func() {
@@ -649,6 +649,23 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	}
 	if len(removed) != 2 || len(removed[0]) != 0 || len(removed[1]) != 3 {
 		t.Errorf("removals = %v", removed)
+	}
+	// Owner info: the wire carries newlines as bars, both ways, and a
+	// value nobody set reads as empty — never as a word this daemon
+	// invented, which the app would show as if it were the setting.
+	if out := m.runOTA("mc", "air:test", "get owner.info"); out != "> " {
+		t.Errorf("unset owner.info got %q", out)
+	}
+	if out := m.runOTA("mc", "air:test", "set owner.info Raton|laveur"); out != "OK" {
+		t.Errorf("set owner.info got %q", out)
+	}
+	if o := <-m.air; o.set["owner_info"] != "Raton\nlaveur" {
+		t.Errorf("bars did not become newlines: %+v", o.set)
+	}
+	m.traces["relay mc"] = append(m.traces["relay mc"],
+		config.Trace{Key: "owner_info", Value: "Raton\nlaveur", Source: "config"})
+	if out := m.runOTA("mc", "air:test", "get owner.info"); out != "> Raton|laveur" {
+		t.Errorf("newlines did not become bars: %q", out)
 	}
 	// The deliberate absences answer like any unknown word.
 	for _, cmd := range []string{"reboot", "clkreboot", "tempradio 869525000 62500 8 8 10", "poweroff"} {

@@ -286,16 +286,19 @@ func (m *manager) relayCfgCopy(relay string) map[string]any {
 }
 
 // relayValue reads one effective attribute from the live view — safe
-// from any goroutine, the engine's included.
-func (m *manager) relayValue(relay, attr string) (string, bool) {
+// from any goroutine, the engine's included. A value nobody set reads
+// as the empty one it is: absence and emptiness are the same answer
+// to "what is this set to", and the callers that must tell them apart
+// have the traces themselves.
+func (m *manager) relayValue(relay, attr string) string {
 	m.viewMu.RLock()
 	defer m.viewMu.RUnlock()
 	for _, t := range m.traces["relay "+relay] {
 		if t.Key == attr {
-			return fmt.Sprintf("%v", t.Value), true
+			return fmt.Sprintf("%v", t.Value)
 		}
 	}
-	return "", false
+	return ""
 }
 
 // Wait blocks until every relay has stopped — the shutdown's phase
