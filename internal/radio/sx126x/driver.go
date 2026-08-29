@@ -178,6 +178,9 @@ func settingsFrom(cfg map[string]any) (Settings, error) {
 	}
 	for i := range s.EnablePins {
 		s.EnablePins[i] = s.EnablePins[i].Resolve(s.GPIOChip)
+		if err := s.EnablePins[i].checkChip(); err != nil {
+			return s, fmt.Errorf("sx126x-spi settings: enable_pins[%d]: %w", i, err)
+		}
 	}
 	return s, s.checkPinsDistinct()
 }
@@ -235,6 +238,9 @@ func requirePin(name string, p *Pin, chip string) (*Pin, error) {
 		return nil, fmt.Errorf("sx126x-spi settings: %s is required", name)
 	}
 	resolved := p.Resolve(chip)
+	if err := resolved.checkChip(); err != nil {
+		return nil, fmt.Errorf("sx126x-spi settings: %s: %w", name, err)
+	}
 	return &resolved, nil
 }
 

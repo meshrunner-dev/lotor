@@ -295,17 +295,29 @@ func TestGpiochipSpellingsCollapse(t *testing.T) {
 	// The GPIO library reads "gpiochip0" and "/dev/gpiochip0" as the
 	// same chip; two spellings of one line used to pass the
 	// uniqueness check and fail at acquisition.
-	// The lexical aliases open(2) collapses — "." and repeated
-	// separators — must collapse here too, not just the /dev/ prefix.
+	// The one blessed path spelling collapses onto the bare name…
+	cfg := board()
+	cfg["reset_pin"] = "gpiochip0:16"
+	cfg["busy_pin"] = "/dev/gpiochip0:16"
+	if _, err := Inspect(cfg); err == nil {
+		t.Error("/dev/gpiochip0 beside gpiochip0 was accepted — one chip, two spellings")
+	} else if !strings.Contains(err.Error(), "one line serves one role") {
+		t.Errorf("refused for the wrong reason: %v", err)
+	}
+	// …and every freer spelling is refused by the grammar itself: the
+	// GPIO library prefixes /dev/ onto anything not already spelled
+	// that way and open(2) folds dots and doubled separators, so each
+	// of these is another name for gpiochip0 that a pure uniqueness
+	// check cannot see.
 	for _, alias := range []string{
-		"/dev/gpiochip0:16", "./gpiochip0:16", "/dev/./gpiochip0:16", "/dev//gpiochip0:16",
+		"./gpiochip0:16", "/dev/./gpiochip0:16", "/dev//gpiochip0:16",
+		"/gpiochip0:16", "../gpiochip0:16", "/dev/../dev/gpiochip0:16",
 	} {
 		cfg := board()
-		cfg["reset_pin"] = "gpiochip0:16"
-		cfg["busy_pin"] = alias
+		cfg["reset_pin"] = alias
 		if _, err := Inspect(cfg); err == nil {
-			t.Errorf("%q beside gpiochip0:16 was accepted — one chip, two spellings", alias)
-		} else if !strings.Contains(err.Error(), "one line serves one role") {
+			t.Errorf("%q was accepted — the chip grammar should refuse it", alias)
+		} else if !strings.Contains(err.Error(), "nothing freer") {
 			t.Errorf("%q refused for the wrong reason: %v", alias, err)
 		}
 	}

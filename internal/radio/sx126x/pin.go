@@ -4,7 +4,6 @@ package sx126x
 
 import (
 	"fmt"
-	"path"
 	"strconv"
 	"strings"
 
@@ -61,22 +60,32 @@ func (p Pin) String() string {
 }
 
 // Resolve fills in the board's default chip for a pin that named
-// none, and canonicalises the chip's spelling the way the kernel will
-// read it: the GPIO library prefixes a relative name with /dev/, and
-// open(2) collapses "." and repeated separators, so "gpiochip0",
-// "/dev/gpiochip0", "./gpiochip0" and "/dev//gpiochip0" all name one
-// chip. This seam must reach the same identity — purely lexically,
-// symlinks excluded — or two spellings of one line pass the
-// uniqueness check and fail deterministically at acquisition, where
-// the kernel hands a line to a single requester.
+// none, and collapses the one blessed path spelling: "/dev/<name>"
+// and the bare "<name>" are the same chip. Anything else the chip
+// grammar refuses outright — see checkChip.
 func (p Pin) Resolve(defaultChip string) Pin {
 	if p.Chip == "" {
 		p.Chip = defaultChip
 	}
-	full := p.Chip
-	if !strings.HasPrefix(full, "/") {
-		full = "/dev/" + full
-	}
-	p.Chip = strings.TrimPrefix(path.Clean(full), "/dev/")
+	p.Chip = strings.TrimPrefix(p.Chip, "/dev/")
 	return p
+}
+
+// checkChip enforces the chip grammar on a resolved pin: a bare chip
+// name, or its /dev path (already collapsed by Resolve) — no other
+// paths, no "." or ".." components. The GPIO library prefixes "/dev/"
+// onto anything not already spelled that way and open(2) then folds
+// dots and doubled separators, so freer spellings make several names
+// for one line: two of them pass the uniqueness check and fail
+// deterministically at acquisition, where the kernel hands a line to
+// a single requester. Refusing the freedom keeps the check pure —
+// and rules out symlinks, which no lexical rule can see through.
+func (p Pin) checkChip() error {
+	if p.Chip == "" || p.Chip == "." || p.Chip == ".." ||
+		strings.ContainsRune(p.Chip, '/') {
+		return fmt.Errorf(
+			"pin %s: chip %q — a chip is a bare name (\"gpiochip0\") or its /dev path, nothing freer",
+			p, p.Chip)
+	}
+	return nil
 }
