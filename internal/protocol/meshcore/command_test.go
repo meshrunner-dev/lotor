@@ -236,3 +236,41 @@ func TestTheAccessListAnswersItsAdminAlone(t *testing.T) {
 	case <-time.After(700 * time.Millisecond):
 	}
 }
+
+func TestTelemetryMaskReachesTheSensors(t *testing.T) {
+	// The contract the sensor work will land on: the wire's reserved
+	// byte arrives inverted, a guest is forced past it to zero, and
+	// the hook always runs — which sensor a mask admits is the
+	// sensors' own judgement.
+	e, dev, sub, peer := txRig(t, "on-air")
+	e.p.AdminPassword = "mask"
+	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
+	var masks []byte
+	e.AttachTelemetry(func(permMask byte, enc *meshcore.LPPEncoder) error {
+		masks = append(masks, permMask)
+		return nil
+	})
+	runEngine(t, e, dev)
+
+	frame, _ := login(t, e.id, peer, nowTS(950), "mask", false)
+	dev.frames <- frame
+	awaitSent(t, sub)
+	<-dev.sent
+	// An admin asking with reserved byte 0x0F gets ^0x0F = 0xF0.
+	dev.frames <- request(t, e.id, peer, nowTS(951), []byte{meshcore.ReqGetTelemetry, 0x0F, 0, 0, 0})
+	awaitSent(t, sub)
+	<-dev.sent
+
+	frame, _ = login(t, e.id, peer, nowTS(960), "raccoon", false)
+	dev.frames <- frame
+	awaitSent(t, sub)
+	<-dev.sent
+	// A guest asking for everything is forced to the base readings.
+	dev.frames <- request(t, e.id, peer, nowTS(961), []byte{meshcore.ReqGetTelemetry, 0x00, 0, 0, 0})
+	awaitSent(t, sub)
+	<-dev.sent
+
+	if len(masks) != 2 || masks[0] != 0xF0 || masks[1] != 0x00 {
+		t.Fatalf("masks = %#v — want [0xF0 0x00]", masks)
+	}
+}

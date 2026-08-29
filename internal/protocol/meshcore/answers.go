@@ -55,7 +55,7 @@ func (e *engine) statusBody() []byte {
 // this host exposes no rail either, so zero stands in — transparently
 // not measured, the answer statusBody already gives for the same
 // reason.
-func (e *engine) telemetryBody() []byte {
+func (e *engine) telemetryBody(permMask byte) []byte {
 	enc := meshcore.NewLPPEncoder()
 	if err := enc.Add(meshcore.LPPReading{
 		Channel: telemChannelSelf, Type: meshcore.LPPVoltage, Value: float64(0),
@@ -70,6 +70,17 @@ func (e *engine) telemetryBody() []byte {
 			Channel: telemChannelSelf, Type: meshcore.LPPTemperature, Value: c,
 		}); err != nil {
 			e.log.Warn("telemetry temperature refused by the encoder", zap.Error(err))
+			return nil
+		}
+	}
+	// The base readings above are everyone's; what follows is the
+	// sensors', under the permission mask — the reference queries its
+	// SensorManager here, and this seam is where that work lands.
+	// The hook always runs and the mask always travels: which sensor
+	// a mask admits is the sensors' own judgement, not this file's.
+	if e.telemetry != nil {
+		if err := e.telemetry(permMask, enc); err != nil {
+			e.log.Warn("sensor telemetry refused", zap.Error(err))
 			return nil
 		}
 	}

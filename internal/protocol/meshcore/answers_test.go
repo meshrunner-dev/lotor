@@ -40,7 +40,7 @@ func TestTelemetryAlwaysLeadsWithAVoltage(t *testing.T) {
 	// the self channel, and every emitter in the reference sends one
 	// first. A relay with no battery still owes them the reading.
 	e := &engine{}
-	body := e.telemetryBody()
+	body := e.telemetryBody(0xFF)
 	if len(body) < 4 {
 		t.Fatalf("telemetry body is %d bytes, want at least one reading", len(body))
 	}

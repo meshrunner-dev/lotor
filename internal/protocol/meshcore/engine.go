@@ -196,6 +196,10 @@ type engine struct {
 	// is the window currently open, engine-goroutine only.
 	sweepAsk     chan *sweep
 	pendingSweep *sweep
+	// telemetry extends the telemetry answer with sensor readings,
+	// under the permission mask the request carried — nil while no
+	// sensors exist, which is what the base readings already cover.
+	telemetry TelemetrySensors
 	// commands runs one administration line for a logged-in admin and
 	// returns what to answer; nil leaves over-the-air administration
 	// unserved, which is what a relay with no mutation door behind it
@@ -412,6 +416,19 @@ func (e *engine) NodeName() string { return e.p.NodeName }
 
 // TrafficStats copies the lifetime tally out, for observers.
 func (e *engine) TrafficStats() StatsSnapshot { return e.stats.Snapshot() }
+
+// TelemetrySensors extends a telemetry answer with sensor readings.
+// permMask is the request's gate, already resolved: the inverse of
+// the wire's reserved byte, forced to zero for a guest. Which sensor
+// a mask admits is the implementation's own judgement, mirroring the
+// reference's SensorManager::querySensors.
+type TelemetrySensors func(permMask byte, enc *meshcore.LPPEncoder) error
+
+// AttachTelemetry gives the engine its sensor readings. Called once,
+// before Run.
+func (e *engine) AttachTelemetry(read TelemetrySensors) {
+	e.telemetry = read
+}
 
 // AttachCommands gives the engine the door administration runs
 // through. Called once, before Run.

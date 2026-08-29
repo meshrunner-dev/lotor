@@ -314,7 +314,18 @@ func (e *engine) answerRequest(c *client, args []byte) (body []byte, answered bo
 		}
 		return e.accessListBody(), true
 	case meshcore.ReqGetTelemetry:
-		return e.telemetryBody(), true
+		// The first reserved byte is an inverse permission mask, and
+		// a guest is forced past it to the base readings alone — the
+		// reference's gate, plumbed before the sensors exist so that
+		// work lands on a correct contract.
+		mask := byte(0xFF)
+		if len(args) >= 2 {
+			mask = ^args[1]
+		}
+		if c.perms&permRoleMask == permGuest {
+			mask = 0
+		}
+		return e.telemetryBody(mask), true
 	case meshcore.ReqGetNeighbours:
 		b := e.neighboursBody(args)
 		return b, b != nil
