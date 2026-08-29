@@ -668,6 +668,38 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	if out := m.runOTA("mc", "air:test", "get owner.info"); out != "> Raton|laveur" {
 		t.Errorf("newlines did not become bars: %q", out)
 	}
+	// The delay knobs read back the default actually in force when
+	// nobody set them: an empty answer here would show on the asker's
+	// screen as "no jitter", which is not what the relay runs on.
+	if out := m.runOTA("mc", "air:test", "get txdelay"); out != "> 0.5" {
+		t.Errorf("unset txdelay got %q", out)
+	}
+	if out := m.runOTA("mc", "air:test", "get direct.txdelay"); out != "> 0.3" {
+		t.Errorf("unset direct.txdelay got %q", out)
+	}
+	if out := m.runOTA("mc", "air:test", "get rxdelay"); out != "> 0" {
+		t.Errorf("unset rxdelay got %q", out)
+	}
+	if out := m.runOTA("mc", "air:test", "set txdelay 0.7"); out != "OK" {
+		t.Errorf("set txdelay got %q", out)
+	}
+	if o := <-m.air; o.set["tx_delay_factor"] != "0.7" {
+		t.Errorf("txdelay order = %+v", o.set)
+	}
+	// Out of the reference's range: refused now, the bound named.
+	if out := m.runOTA("mc", "air:test", "set txdelay 2.5"); !strings.HasPrefix(out, "ERR: ") ||
+		!strings.Contains(out, "0..2") {
+		t.Errorf("txdelay 2.5 got %q", out)
+	}
+	if out := m.runOTA("mc", "air:test", "set rxdelay 21"); !strings.HasPrefix(out, "ERR: ") ||
+		!strings.Contains(out, "0..20") {
+		t.Errorf("rxdelay 21 got %q", out)
+	}
+	m.traces["relay mc"] = append(m.traces["relay mc"],
+		config.Trace{Key: "rx_delay_base", Value: "12", Source: "config"})
+	if out := m.runOTA("mc", "air:test", "get rxdelay"); out != "> 12" {
+		t.Errorf("set rxdelay read back %q", out)
+	}
 	// The deliberate absences answer like any unknown word.
 	for _, cmd := range []string{"reboot", "clkreboot", "tempradio 869525000 62500 8 8 10", "poweroff"} {
 		if out := m.runOTA("mc", "air:test", cmd); out != otaUnknown {

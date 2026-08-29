@@ -25,10 +25,10 @@ import (
 const (
 	// Retransmission jitter desynchronises repeaters that heard the
 	// same frame: a random delay in [0, 5×airtime×factor), the
-	// reference's mechanism and factors. (Its score-based rx-delay
-	// exists too but ships disabled there; parity keeps it out.)
-	floodDelayFactor  = 0.5
-	directDelayFactor = 0.3
+	// reference's mechanism, and these its shipped factors — what
+	// tx_delay_factor and direct_tx_delay_factor override.
+	defaultTxDelayFactor       = 0.5
+	defaultDirectTxDelayFactor = 0.3
 
 	// LBT retry pacing: the reference's 200 ms nominal, jittered so
 	// two repeaters backing off together do not re-collide, bounded to
@@ -244,7 +244,7 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict string) {
 			return
 		}
 		// Priority = distance: the hop count with our hash appended.
-		e.enqueue(dev, &cp, "relay-flood", origin, cp.PathHashCount(), floodDelayFactor)
+		e.enqueue(dev, &cp, "relay-flood", origin, cp.PathHashCount(), e.p.txDelayFactor())
 	case verdictRelayDirect:
 		if cp.PayloadType() == meshcore.PayloadTypeMultipart {
 			e.forwardMultipart(&cp, origin)
@@ -257,7 +257,7 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict string) {
 		// The reference forwards ACKs with no delay at all: they are
 		// the confirmation a sender is timing out on, and every hop's
 		// jitter is latency it pays (Mesh::routeDirectRecvAcks).
-		jitter := directDelayFactor
+		jitter := e.p.directTxDelayFactor()
 		if cp.PayloadType() == meshcore.PayloadTypeAck {
 			jitter = 0
 		}
@@ -278,7 +278,7 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict string) {
 			e.abandon(origin, "malformed", "trace path could not grow", err)
 			return
 		}
-		e.enqueue(dev, &cp, "relay-trace", origin, prioTrace, directDelayFactor)
+		e.enqueue(dev, &cp, "relay-trace", origin, prioTrace, e.p.directTxDelayFactor())
 	}
 }
 
@@ -346,11 +346,14 @@ func (e *engine) forwardMultipart(cp *meshcore.Packet, origin txn.ID) {
 func (e *engine) selfHash(size int) []byte { return e.id.PubKey[:size] }
 
 // txWait reports how long Receive may block before the pipeline needs
-// the radio: the earliest of the queue's schedule and the advert
-// clocks. ok is false when nothing is ever due.
+// the radio: the earliest of the queue's schedule, the advert clocks
+// and a held flood's release. ok is false when nothing is ever due.
 func (e *engine) txWait(now time.Time) (time.Duration, bool) {
 	var waits []time.Duration
 	if d, ok := e.queue.nextDue(now); ok {
+		waits = append(waits, d)
+	}
+	if d, ok := e.heldWait(now); ok {
 		waits = append(waits, d)
 	}
 	if !e.nextFloodAdvert.IsZero() {

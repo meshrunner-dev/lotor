@@ -65,6 +65,22 @@ type params struct {
 	// presets carry the lawful figure.
 	DutyCyclePct float64 `yaml:"duty_cycle_pct"`
 
+	// TxDelayFactor and DirectTxDelayFactor scale the retransmission
+	// jitter — the random delay in [0, 5×airtime×factor) that
+	// desynchronises repeaters relaying the same frame — flood and
+	// routed traffic each under their own. The reference accepts 0..2
+	// and ships at 0.5 and 0.3; unset follows it, and the pointers are
+	// what let an explicit 0 — relay with no jitter at all — be a
+	// choice rather than an absence.
+	TxDelayFactor       *float64 `yaml:"tx_delay_factor"`
+	DirectTxDelayFactor *float64 `yaml:"direct_tx_delay_factor"`
+	// RxDelayBase staggers flood handling by reception score: a heard
+	// flood is held (base^(0.85−score)−1)×airtime before it is judged,
+	// so the repeater that heard it best relays first and everyone
+	// else hears that relay as the duplicate it now is. The reference
+	// accepts 0..20 and ships at 0 — off — which unset follows.
+	RxDelayBase float64 `yaml:"rx_delay_base"`
+
 	// AdvertFloodInterval paces the routable self-announcement a
 	// repeater owes the mesh's directories; applied only when the
 	// transmit pipeline runs. The reference takes 3..168 hours and
@@ -197,6 +213,10 @@ type engine struct {
 	// is the window currently open, engine-goroutine only.
 	sweepAsk     chan *sweep
 	pendingSweep *sweep
+	// held are the floods waiting out their score delay — see
+	// rxdelay.go; engine-goroutine only, and empty while rx_delay_base
+	// stays at its zero default.
+	held []heldRx
 	// telemetry extends the telemetry answer with sensor readings,
 	// under the permission mask the request carried — nil while no
 	// sensors exist, which is what the base readings already cover.
@@ -264,7 +284,22 @@ func paramsFrom(cfg map[string]any) (params, error) {
 		return p, fmt.Errorf(
 			"meshcore params: advert_flood_interval %s — the reference accepts 3..168 hours; negative disables", v)
 	}
+	if v := p.TxDelayFactor; v != nil && !inRange(*v, 0, 2) {
+		return p, fmt.Errorf("meshcore params: tx_delay_factor %g — the reference accepts 0..2", *v)
+	}
+	if v := p.DirectTxDelayFactor; v != nil && !inRange(*v, 0, 2) {
+		return p, fmt.Errorf("meshcore params: direct_tx_delay_factor %g — the reference accepts 0..2", *v)
+	}
+	if v := p.RxDelayBase; !inRange(v, 0, 20) {
+		return p, fmt.Errorf("meshcore params: rx_delay_base %g — the reference accepts 0..20, 0 holding nothing", v)
+	}
 	return p, nil
+}
+
+// inRange is a bounds check a NaN cannot slip through: both
+// comparisons are asserted rather than their complements denied.
+func inRange(v, lo, hi float64) bool {
+	return v >= lo && v <= hi
 }
 
 // validDutyCyclePct keeps a configuration value inside the only range
@@ -279,6 +314,22 @@ func validDutyCyclePct(v float64) bool {
 // floods unless told otherwise.
 func (p params) acceptUnscoped() bool {
 	return p.AcceptUnscoped == nil || *p.AcceptUnscoped
+}
+
+// txDelayFactor and directTxDelayFactor resolve the retransmission
+// jitter factors, unset taking the reference repeater's defaults.
+func (p params) txDelayFactor() float64 {
+	if p.TxDelayFactor == nil {
+		return defaultTxDelayFactor
+	}
+	return *p.TxDelayFactor
+}
+
+func (p params) directTxDelayFactor() float64 {
+	if p.DirectTxDelayFactor == nil {
+		return defaultDirectTxDelayFactor
+	}
+	return *p.DirectTxDelayFactor
 }
 
 // How a stranger may open a session.
@@ -540,6 +591,7 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 	for {
 		e.drainSessionsAsk(time.Now())
 		e.drainACLAsk()
+		e.drainHeld(dev, time.Now())
 		// Reception blocks until the pipeline next needs the radio —
 		// the queue's earliest schedule or an advert clock. Nothing
 		// pending means no deadline at all.
@@ -596,7 +648,14 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 	case len(e.sessionsAsk) > 0 || len(e.aclAsk) > 0 || len(e.aclListAsk) > 0:
 		rctx, cancel = context.WithDeadline(ctx, time.Now())
 	case !e.txEnabled():
-		rctx, cancel = context.WithCancel(ctx)
+		// A dry gate schedules no emission, but a held flood is still
+		// owed its judgement: a hold that only released on the next
+		// reception would stretch with the silence around it.
+		if hw, held := e.heldWait(time.Now()); held {
+			rctx, cancel = context.WithDeadline(ctx, time.Now().Add(hw))
+		} else {
+			rctx, cancel = context.WithCancel(ctx)
+		}
 	case len(e.advertAsk) > 0 || len(e.scopeAsk) > 0 || len(e.sweepAsk) > 0:
 		rctx, cancel = context.WithDeadline(ctx, time.Now())
 	case ok:
@@ -710,9 +769,29 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 		e.bus.Publish(bus.FrameJudged{Relay: e.relay, Txn: id, Verdict: verdictMalformed})
 		return
 	}
+	// The score hold, the reference dispatcher's gesture: a flood we
+	// heard weakly waits before it is judged at all — dedup included,
+	// so a better-placed repeater's relay arriving meanwhile turns our
+	// copy into the duplicate it should be.
+	if pkt.IsRouteFlood() {
+		if d := e.rxDelay(frame); d > 0 {
+			log.Debug("flood held by score delay", zap.Duration("hold", d))
+			e.held = append(e.held, heldRx{pkt: pkt, frame: frame, id: id, due: time.Now().Add(d)})
+			return
+		}
+	}
+	e.process(dev, pkt, frame, id)
+}
+
+// process is judgement past the hold: dedup, verdict, and whatever
+// the verdict schedules. Everything before it already happened at
+// reception — the audit heard the frame when the air carried it, not
+// when the hold released it.
+func (e *engine) process(dev radio.Device, pkt *meshcore.Packet, frame radio.Frame, id txn.ID) {
 	// PathLen is the hop count the path descriptor declares, not its
 	// byte length: hashes are 1-4 bytes wide.
 	hops := pkt.PathHashCount()
+	log := e.log.With(zap.String("txn", id.Short()))
 	log = log.With(
 		zap.Stringer("type", pkt.PayloadType()),
 		zap.Stringer("route", pkt.Route()),

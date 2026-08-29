@@ -40,6 +40,9 @@ var otaSetting = map[string]string{
 	"flood.max.unscoped":    "flood_max_unscoped_hops",
 	"flood.max.advert":      "flood_max_advert_hops",
 	"dutycycle":             "duty_cycle_pct",
+	"txdelay":               "tx_delay_factor",
+	"direct.txdelay":        "direct_tx_delay_factor",
+	"rxdelay":               "rx_delay_base",
 	"tx":                    "tx_power_dbm",
 	"freq":                  "frequency_hz",
 	"guest.password":        "guest_password",
@@ -71,6 +74,23 @@ var otaRender = map[string]func(string) string{
 		}
 		return strconv.FormatFloat(hz/1e6, 'f', 3, 64)
 	},
+	// The delay knobs read back the default actually in force when
+	// nobody set them: unlike owner.info, an empty answer here is not
+	// the value the relay runs on.
+	"txdelay":        otaDefaulted("0.5"),
+	"direct.txdelay": otaDefaulted("0.3"),
+	"rxdelay":        otaDefaulted("0"),
+}
+
+// otaDefaulted renders a stored value as-is and an unset one as its
+// active default.
+func otaDefaulted(def string) func(string) string {
+	return func(v string) string {
+		if v == "" {
+			return def
+		}
+		return v
+	}
 }
 
 // otaReadOnly are the words a companion may read but never write from

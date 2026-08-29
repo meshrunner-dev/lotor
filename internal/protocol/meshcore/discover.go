@@ -21,7 +21,7 @@ import (
 const (
 	discoverLimitMax    = 4
 	discoverLimitWindow = 2 * time.Minute
-	discoverDelayFactor = 4 * floodDelayFactor
+	discoverDelayWiden  = 4
 )
 
 // rateLimiter is a fixed window: so many events from the window's
@@ -120,5 +120,5 @@ func (e *engine) respondDiscover(dev radio.Device, pkt *meshcore.Packet, origin 
 		e.log.Warn("discovery response build failed", zap.Error(err))
 		return
 	}
-	e.enqueue(dev, resp, "discover-resp", origin, prioDirect, discoverDelayFactor)
+	e.enqueue(dev, resp, "discover-resp", origin, prioDirect, discoverDelayWiden*e.p.txDelayFactor())
 }

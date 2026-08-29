@@ -43,6 +43,13 @@ func policySchema() []schema.Attr {
 		{Name: "duty_cycle_pct", Type: schema.Float,
 			Doc: "airtime budget per sliding hour, percent — the band's regulatory ceiling"},
 
+		{Name: "tx_delay_factor", Type: schema.Float,
+			Doc: "flood relay jitter as a factor of the frame's airtime (0..2; unset takes 0.5)"},
+		{Name: "direct_tx_delay_factor", Type: schema.Float,
+			Doc: "routed relay jitter, same shape (0..2; unset takes 0.3)"},
+		{Name: "rx_delay_base", Type: schema.Float,
+			Doc: "score-staggered hold before judging a flood, exponent base (0..20; 0 holds nothing)"},
+
 		{Name: "dedup_ttl", Type: schema.Duration,
 			Doc: "how long a seen packet stays remembered; 0 keeps the reference's count-only ring"},
 		{Name: "dedup_entries", Type: schema.Int,
