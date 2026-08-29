@@ -39,6 +39,14 @@ const (
 	openBackoffMax = time.Minute
 )
 
+// readFailuresBeforeReopen is how many samples in a row may fail
+// before the part is closed and opened again. One failure is usually
+// the bus being busy and says nothing; a run of them is a descriptor
+// that has outlived its device — a board unplugged, an adapter reset
+// — which no amount of reading will mend. Reopening on the first
+// would thrash a bus that is merely contended.
+const readFailuresBeforeReopen = 3
+
 // Sampler owns one device and reads it on its own goroutine. Every
 // other goroutine sees only the last answer, through Latest.
 type Sampler struct {
@@ -87,32 +95,61 @@ func (s *Sampler) Cause() string {
 	return s.cause
 }
 
-// Run opens the part, retrying while it refuses, then reads until the
-// context ends and closes it. It samples once before waiting, so a
-// relay that asks for telemetry in the first seconds of its life has
-// something true to say.
+// Run keeps the part read for as long as the context lasts: it opens,
+// retrying while the part refuses, reads until the context ends or the
+// part stops answering, and opens again. A descriptor that has
+// outlived its device is not something reading harder fixes.
 func (s *Sampler) Run(ctx context.Context) {
-	dev := s.opening(ctx)
-	if dev == nil {
-		return // the context ended before the part ever answered
-	}
-	defer func() {
-		s.mu.Lock()
-		s.opened, s.cause = false, "stopped"
-		s.mu.Unlock()
-		if err := dev.Close(); err != nil && s.log != nil {
-			s.log.Warn("sensor close", zap.Error(err))
+	for {
+		dev := s.opening(ctx)
+		if dev == nil {
+			return // the context ended before the part ever answered
 		}
-	}()
+		s.reading(ctx, dev)
+		s.closing(dev)
+		if ctx.Err() != nil {
+			return
+		}
+	}
+}
+
+// reading samples until the context ends or the part has refused
+// readFailuresBeforeReopen times running. It samples once before
+// waiting, so a relay asked for telemetry in the first seconds of its
+// life has something true to say.
+func (s *Sampler) reading(ctx context.Context, dev Device) {
 	t := time.NewTicker(s.every)
 	defer t.Stop()
+	failures := 0
 	for {
-		s.sample(ctx, dev)
+		err := s.sample(ctx, dev)
+		if err == nil {
+			failures = 0
+		} else if failures++; failures >= readFailuresBeforeReopen {
+			s.mu.Lock()
+			s.cause = err.Error()
+			s.mu.Unlock()
+			if s.log != nil && ctx.Err() == nil {
+				s.log.Error("sensor stopped answering — opening it again",
+					zap.Error(err), zap.Int("failures", failures))
+			}
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
+	}
+}
+
+// closing gives the device back and says the part is not answering.
+func (s *Sampler) closing(dev Device) {
+	s.mu.Lock()
+	s.opened = false
+	s.mu.Unlock()
+	if err := dev.Close(); err != nil && s.log != nil {
+		s.log.Warn("sensor close", zap.Error(err))
 	}
 }
 
@@ -150,7 +187,7 @@ func (s *Sampler) opening(ctx context.Context) Device {
 // sample takes one reading set. A failure keeps what was there: the
 // readings carry the moment they were taken, so a consumer can see
 // the answer going stale, which is more use than an empty one.
-func (s *Sampler) sample(ctx context.Context, dev Device) {
+func (s *Sampler) sample(ctx context.Context, dev Device) error {
 	read, cancel := context.WithTimeout(ctx, readBound)
 	defer cancel()
 	got, err := dev.Read(read)
@@ -158,10 +195,11 @@ func (s *Sampler) sample(ctx context.Context, dev Device) {
 		if s.log != nil && ctx.Err() == nil {
 			s.log.Warn("sensor read", zap.Error(err))
 		}
-		return
+		return err
 	}
 	if len(got) == 0 {
-		return
+		// A part with nothing to say yet is warming up, not failing.
+		return nil
 	}
 	// Copied, not kept: a driver is free to refill its own buffer,
 	// and Latest would otherwise hand out memory the bus is writing.
@@ -170,6 +208,7 @@ func (s *Sampler) sample(ctx context.Context, dev Device) {
 	s.mu.Lock()
 	s.last = kept
 	s.mu.Unlock()
+	return nil
 }
 
 // Latest copies the last readings. Safe from any goroutine, and it

@@ -149,7 +149,7 @@ func TestADriverMayRefillItsOwnBuffer(t *testing.T) {
 	buf := []Reading{{Quantity: Voltage, Value: 3.9}}
 	dev := &fakeDevice{entered: make(chan struct{}, 1), give: buf}
 	s := NewSampler(opens(dev), time.Hour, nil)
-	s.sample(context.Background(), dev)
+	_ = s.sample(context.Background(), dev)
 	<-dev.entered
 
 	buf[0] = Reading{Quantity: Current, Value: 0.2}
@@ -243,6 +243,55 @@ func TestOpeningClearsTheReason(t *testing.T) {
 	waitFor(t, s.Opened, "the part never opened")
 	if got := s.Cause(); got != "" {
 		t.Errorf("a part that is answering still carries %q", got)
+	}
+	cancel()
+	<-done
+}
+
+func TestAPartThatStopsAnsweringIsOpenedAgain(t *testing.T) {
+	// A descriptor that outlives its device — a board unplugged, an
+	// adapter reset — is not mended by reading harder.
+	dev := &fakeDevice{
+		entered: make(chan struct{}, 16),
+		give:    []Reading{{Quantity: Voltage, Value: 5.0}},
+	}
+	var opens atomic.Int32
+	var gone atomic.Bool
+	open := func() (Device, error) {
+		opens.Add(1)
+		if gone.Load() {
+			// The board is not there any more, so neither is the
+			// descriptor it would hand back.
+			return nil, errors.New("no such device")
+		}
+		return dev, nil
+	}
+	s := NewSampler(open, time.Millisecond, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); s.Run(ctx) }()
+
+	waitFor(t, func() bool { return len(s.Latest()) == 1 }, "the first sample never landed")
+	if n := opens.Load(); n != 1 {
+		t.Fatalf("opened %d times before anything failed", n)
+	}
+
+	// The part goes away. After readFailuresBeforeReopen in a row the
+	// sampler gives the descriptor back and asks for another.
+	dev.mu.Lock()
+	dev.give, dev.err = nil, errors.New("input/output error")
+	dev.mu.Unlock()
+	gone.Store(true)
+
+	waitFor(t, func() bool { return opens.Load() > 1 }, "a part that stopped answering was never reopened")
+	if !dev.wasClosed() {
+		t.Error("the dead descriptor was not given back before reopening")
+	}
+	// It is back in the opening loop, so it says so rather than
+	// claiming to run while its readings age.
+	waitFor(t, func() bool { return !s.Opened() }, "still claims to be running with a dead part")
+	if got := s.Cause(); got != "no such device" {
+		t.Errorf("cause = %q, want the refusal's own words", got)
 	}
 	cancel()
 	<-done
