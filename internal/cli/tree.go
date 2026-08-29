@@ -336,9 +336,7 @@ func (s *session) treeVerb(ctx context.Context, path []string,
 	case verb == cmdQuit || verb == wordExit:
 		s.dispatch(ctx, rest)
 	case verb == verbExport:
-		// Every depth answers export — the root's is the whole
-		// configuration, the backup an operator can read.
-		return s.treeExport(path)
+		return s.treeExportGated(path)
 	case verb == verbPrint:
 		return s.treePrint(ctx, path, args)
 	case verb == verbStatus && len(path) == 2:
@@ -659,15 +657,76 @@ func (s *session) exportInstance(kind, name string) {
 	if !ok {
 		return
 	}
+	profile, overrides, layered := "", map[string]map[string]any(nil), false
+	if s.deps.Layers != nil {
+		profile, overrides, layered = s.deps.Layers(kind, name)
+	}
+	if !layered {
+		// The resolved view alone: structural attributes and the
+		// active overrides, which is all it knows.
+		var pairs [][2]string
+		for _, t := range traces {
+			if strings.HasPrefix(t.Source, "profile:") {
+				continue // the preset restates itself
+			}
+			pairs = append(pairs, [2]string{t.Key, exportValue(t.Value)})
+		}
+		s.exportLine(kind, verbAdd, name, pairs)
+		return
+	}
+	// The persisted form whole: the add line carries the structural
+	// attributes and the ACTIVE scope's overrides; every other scope —
+	// the settings kept for other bands, boards and brokers — follows
+	// as its own profile switch and sets, and a last switch restores
+	// the profile actually selected. Pasted in order, the store comes
+	// back identical, which is the one thing an export has to be.
+	active := profile
+	if active == "" {
+		active = config.CustomProfile
+	}
 	var pairs [][2]string
 	for _, t := range traces {
-		if strings.HasPrefix(t.Source, "profile:") {
-			continue // the preset restates itself
+		if strings.HasPrefix(t.Source, "profile:") ||
+			strings.HasPrefix(t.Source, "override:") {
+			continue // presets restate themselves; overrides go by scope
 		}
 		pairs = append(pairs, [2]string{t.Key, exportValue(t.Value)})
 	}
+	pairs = append(pairs, scopePairs(overrides[active])...)
 	s.exportLine(kind, verbAdd, name, pairs)
+
+	others := make([]string, 0, len(overrides))
+	for scope, kv := range overrides {
+		if scope != active && len(kv) > 0 {
+			others = append(others, scope)
+		}
+	}
+	sort.Strings(others)
+	for _, scope := range others {
+		line := append([][2]string{{attrKeyProfile, scope}}, scopePairs(overrides[scope])...)
+		s.exportLine(kind, verbSet, name, line)
+	}
+	if len(others) > 0 {
+		s.exportLine(kind, verbSet, name, [][2]string{{attrKeyProfile, active}})
+	}
 }
+
+// scopePairs renders one override scope's keys, sorted.
+func scopePairs(kv map[string]any) [][2]string {
+	keys := make([]string, 0, len(kv))
+	for k := range kv {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([][2]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, [2]string{k, exportValue(kv[k])})
+	}
+	return out
+}
+
+// attrKeyProfile is the layering knob's name, as set accepts it.
+const attrKeyProfile = "profile"
 
 // exportSingleton prints one set line for a block that exists.
 func (s *session) exportSingleton(kind string) {
@@ -852,6 +911,10 @@ func (s *session) printArgsFrom(path, args []string) (printArgs, error) {
 		case key == argDetail && !valued:
 			want.detail = true
 		case key == argSecrets && !valued:
+			// Lifting the mask is the same capability as exporting it.
+			if err := s.canReveal(); err != nil {
+				return want, err
+			}
 			want.secrets = true
 		case key == argInterval && !valued:
 			return want, fmt.Errorf("%s wants a value — %s=2s", argInterval, argInterval)
@@ -2083,4 +2146,27 @@ func (s *session) mark(class string, cands []string, word string) string {
 // what turns a prefix into a name.
 func resolves(cands []string, word string) bool {
 	return slices.Contains(cands, word)
+}
+
+// treeExportGated is export behind the reveal capability: it
+// withholds nothing, secrets included, so it is the admin's alone —
+// the read-only listener is unauthenticated, and an export there
+// handed the node's identity to whoever could open a socket.
+func (s *session) treeExportGated(path []string) error {
+	if err := s.canReveal(); err != nil {
+		return fmt.Errorf("%s recreates everything, secrets included — %w", verbExport, err)
+	}
+	return s.treeExport(path)
+}
+
+// canReveal says whether this session may lift the secrets mask — the
+// one capability behind export and show-secrets, granted to the admin
+// privilege alone. The read-only TCP listener carries no
+// authentication, so anything it can see, anyone who can reach the
+// port can see.
+func (s *session) canReveal() error {
+	if s.deps.Privilege != Admin {
+		return errors.New("secrets answer to the admin console alone — use the local socket")
+	}
+	return nil
 }

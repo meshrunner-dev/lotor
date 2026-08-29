@@ -359,7 +359,9 @@ func TestTreeSetIsAdminOnly(t *testing.T) {
 }
 
 func TestTreeExportIsPasteableAndWhole(t *testing.T) {
-	out := run(t, testDeps(t), "/relay meshcore-868 export")
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	out := run(t, deps, "/relay meshcore-868 export")
 	// The line is absolute — pasteable from anywhere — and quoted
 	// values keep their quotes.
 	if !strings.Contains(out, "/relay add meshcore-868 ") ||
@@ -375,6 +377,7 @@ func TestTreeExportIsPasteableAndWhole(t *testing.T) {
 
 func TestRootExportCoversEverything(t *testing.T) {
 	deps := testDeps(t)
+	deps.Privilege = Admin
 	deps.Traces["sentinel"] = []config.Trace{
 		{Key: "journal", Value: "/var/lib/lotor/journal.db", Source: "config"},
 	}
@@ -483,6 +486,7 @@ func TestCompletionReachesAttributesAndEnums(t *testing.T) {
 
 func TestTheRootIsAContextLikeAnyOther(t *testing.T) {
 	deps := testDeps(t)
+	deps.Privilege = Admin
 	deps.Traces["sentinel"] = []config.Trace{
 		{Key: "journal", Value: "/var/lib/lotor/journal.db", Source: "config"},
 	}
@@ -1102,21 +1106,23 @@ func TestProvenanceMarksTheSourceCellAlone(t *testing.T) {
 }
 
 func TestOnlyAskingForSecretsByNameShowsThem(t *testing.T) {
-	masked := run(t, testDeps(t), "/relay meshcore-868 print")
+	adminDeps := testDeps(t)
+	adminDeps.Privilege = Admin
+	masked := run(t, adminDeps, "/relay meshcore-868 print")
 	if !strings.Contains(masked, maskedValue) || strings.Contains(masked, "b5445dd625d531fc") {
 		t.Errorf("print did not mask the identity:\n%s", masked)
 	}
-	shown := run(t, testDeps(t), "/relay meshcore-868 print show-secrets")
+	shown := run(t, adminDeps, "/relay meshcore-868 print show-secrets")
 	if !strings.Contains(shown, "b5445dd625d531fc") {
 		t.Errorf("the mask did not lift when asked:\n%s", shown)
 	}
 	// The two words are about different things, and neither does the
 	// other's job: unfolding a listing does not lift the mask.
-	folded := run(t, testDeps(t), "/relay print detail")
+	folded := run(t, adminDeps, "/relay print detail")
 	if !strings.Contains(folded, maskedValue) || strings.Contains(folded, "b5445dd625d531fc") {
 		t.Errorf("detail lifted a mask it was not asked to:\n%s", folded)
 	}
-	both := run(t, testDeps(t), "/relay print detail show-secrets")
+	both := run(t, adminDeps, "/relay print detail show-secrets")
 	if !strings.Contains(both, "b5445dd625d531fc") {
 		t.Errorf("the two words do not compose:\n%s", both)
 	}
@@ -1132,7 +1138,9 @@ func TestPrintDetailUnfoldsACollection(t *testing.T) {
 }
 
 func TestPrintRefusesAWordWhereItWouldMeanNothing(t *testing.T) {
-	out := run(t, testDeps(t), "/relay meshcore-868 print zz")
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	out := run(t, deps, "/relay meshcore-868 print zz")
 	if !strings.Contains(out, "zz") || !strings.Contains(out, argSecrets) {
 		t.Errorf("the refusal does not name what print takes here:\n%s", out)
 	}
@@ -1143,7 +1151,7 @@ func TestPrintRefusesAWordWhereItWouldMeanNothing(t *testing.T) {
 		t.Errorf("an instance accepted detail:\n%s", inst)
 	}
 	// And a listing shows no attributes for a mask to hide.
-	if coll := run(t, testDeps(t), "/relay print show-secrets"); !strings.Contains(coll, argDetail) {
+	if coll := run(t, deps, "/relay print show-secrets"); !strings.Contains(coll, argDetail) {
 		t.Errorf("a listing accepted show-secrets without detail:\n%s", coll)
 	}
 	if root := run(t, testDeps(t), "/print detail"); !strings.Contains(root, "nothing here") {
@@ -1345,6 +1353,7 @@ func TestADrawerIsSomewhereToStand(t *testing.T) {
 
 func TestADrawerHoldsNothingThatWasConfigured(t *testing.T) {
 	deps := withNeighbour(t)
+	deps.Privilege = Admin
 	// Nothing here was set, so a drawer answers to none of the verbs
 	// that read or write configuration — and it refuses them the way
 	// it refuses any word it does not list.
@@ -1987,5 +1996,82 @@ func TestEnvelopeTextReadsThePresenceBit(t *testing.T) {
 	}
 	if got := envelopeText(radio.Envelope{}); got != "envelope undeclared" {
 		t.Errorf("an empty envelope shows %q", got)
+	}
+}
+
+func TestSecretsAnswerToTheAdminAlone(t *testing.T) {
+	// The non-disclosure matrix: the read-only listener carries no
+	// authentication, so every mask-lifting surface — export at any
+	// depth, show-secrets with and without detail — refuses below
+	// Admin, and none of the refusals leak the value.
+	seed := "abab1212abab1212abab1212abab1212abab1212abab1212abab1212abab1212"
+	arm := func(p Privilege) Deps {
+		deps := testDeps(t)
+		deps.Privilege = p
+		deps.Traces["relay meshcore-868"] = append(deps.Traces["relay meshcore-868"],
+			config.Trace{Key: "identity", Value: seed, Source: "override:custom"})
+		return deps
+	}
+	surfaces := []string{
+		"/export",
+		"/relay export",
+		"/relay meshcore-868 export",
+		"/relay meshcore-868 print show-secrets",
+		"/relay print detail show-secrets",
+	}
+	for _, p := range []Privilege{ReadOnly, ""} {
+		for _, line := range surfaces {
+			out := run(t, arm(p), line)
+			if strings.Contains(out, seed) {
+				t.Errorf("privilege %q: %q disclosed the identity:\n%s", p, line, out)
+			}
+			if !strings.Contains(out, "admin") {
+				t.Errorf("privilege %q: %q does not say who may:\n%s", p, line, out)
+			}
+		}
+	}
+	// The admin still gets the whole truth — an export that silently
+	// masked would recreate a different node.
+	for _, line := range surfaces {
+		if out := run(t, arm(Admin), line); !strings.Contains(out, seed) {
+			t.Errorf("admin: %q withheld the identity:\n%s", line, out)
+		}
+	}
+	// And the plain read-only print still answers, masked.
+	out := run(t, arm(ReadOnly), "/relay meshcore-868 print")
+	if strings.Contains(out, seed) {
+		t.Errorf("plain detail disclosed the identity:\n%s", out)
+	}
+	if !strings.Contains(out, "identity") {
+		t.Errorf("plain detail lost the attribute row:\n%s", out)
+	}
+}
+
+func TestExportCarriesInactiveScopes(t *testing.T) {
+	// The design promise: switching profiles is non-destructive, so an
+	// export that recreates the configuration must carry every scope —
+	// the settings prepared for the other band survive the round trip,
+	// and the last line restores the profile actually selected.
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	deps.Layers = func(kind, name string) (string, map[string]map[string]any, bool) {
+		if kind != scopeRelay || name != "meshcore-868" {
+			return "", nil, false
+		}
+		return "eu-868-narrow", map[string]map[string]any{
+			"eu-868-narrow": {"node_name": "Raccoon City"},
+			"eu-433":        {"node_name": "Winter Den", "tx_power_dbm": "3"},
+		}, true
+	}
+	out := run(t, deps, "/relay meshcore-868 export")
+	main := strings.Index(out, `node_name="Raccoon City"`)
+	other := strings.Index(out, "profile=eu-433")
+	kept := strings.Index(out, `node_name="Winter Den"`)
+	restore := strings.LastIndex(out, "profile=eu-868-narrow")
+	if main == -1 || other == -1 || kept == -1 || restore == -1 {
+		t.Fatalf("export lost a scope:\n%s", out)
+	}
+	if main >= other || other > kept || kept >= restore {
+		t.Errorf("export order broken (%d %d %d %d):\n%s", main, other, kept, restore, out)
 	}
 }
