@@ -361,3 +361,88 @@ func TestOwnerInfoAnswersThreeLines(t *testing.T) {
 		t.Errorf("owner line = %q", lines[2])
 	}
 }
+
+// typedCommandPacket is one text message at a chosen subtype, built
+// as the companion's app would.
+func typedCommandPacket(t *testing.T, self, peer *meshcore.LocalIdentity,
+	at time.Time, txtType uint8, line string,
+) (*meshcore.Packet, []byte) {
+	t.Helper()
+	secret, err := peer.SharedSecret(self.PubKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := meshcore.BuildTextPlaintext(at, txtType, line)
+	pkt, err := meshcore.BuildDatagram(meshcore.PayloadTypeTxtMsg,
+		self.PubKey[:meshcore.PathHashSize], peer.PubKey[:meshcore.PathHashSize],
+		secret, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt.Header = meshcore.MakeHeader(meshcore.RouteDirect,
+		meshcore.PayloadTypeTxtMsg, meshcore.PayloadVer1)
+	return pkt, plain
+}
+
+// adminSession installs a granted admin for peer on e.
+func adminSession(t *testing.T, e *engine, peer *meshcore.LocalIdentity, ts uint32) *client {
+	t.Helper()
+	secret, err := e.id.SharedSecret(peer.PubKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &client{
+		pubKey: peer.PubKey, secret: secret, perms: permAdmin, granted: true,
+		lastTimestamp: ts, lastActive: time.Now(),
+		asks: rateLimiter{max: 6, window: time.Minute},
+	}
+	if err := e.acl.put(c); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func TestOnlyCommandSubtypesReachTheMutationDoor(t *testing.T) {
+	// The MAC says who is speaking; the flags byte says what they
+	// meant. A signed conversation carrying command-shaped words is
+	// not an order, and the reference runs exactly two subtypes.
+	cases := []struct {
+		name    string
+		txtType uint8
+		command bool
+	}{
+		{"plain", meshcore.TxtTypePlain, true},
+		{"cli data", meshcore.TxtTypeCLIData, true},
+		{"signed plain", meshcore.TxtTypeSignedPlain, false},
+		{"unknown subtype", 9, false},
+	}
+	for i, c := range cases {
+		e, _, _, peer := txRig(t, "on-air")
+		ran := 0
+		e.AttachCommands(func(string, []byte) string { ran++; return "OK" })
+		adminSession(t, e, peer, nowTS(0))
+		pkt, _ := typedCommandPacket(t, e.id, peer,
+			time.Unix(int64(nowTS(uint32(10+i))), 0), c.txtType, "set repeat off")
+
+		rx := rxOf(e, pkt)
+		verdict, _ := e.verdict(rx)
+		if c.command {
+			if verdict != verdictCommand {
+				t.Errorf("%s: verdict %q, want a command", c.name, verdict)
+				continue
+			}
+			e.runCommand(rx, rx.id)
+			if ran != 1 {
+				t.Errorf("%s: the mutation door ran %d times", c.name, ran)
+			}
+			continue
+		}
+		if verdict == verdictCommand {
+			t.Errorf("%s: judged a command", c.name)
+		}
+		e.runCommand(rx, rx.id)
+		if ran != 0 {
+			t.Errorf("%s: reached the mutation door", c.name)
+		}
+	}
+}

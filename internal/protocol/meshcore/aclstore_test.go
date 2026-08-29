@@ -281,7 +281,12 @@ func TestACommandIsNotRunWhenItsGuardCannotPersist(t *testing.T) {
 	}
 	pkt.Header = meshcore.MakeHeader(meshcore.RouteDirect,
 		meshcore.PayloadTypeTxtMsg, meshcore.PayloadVer1)
-	rx := &reception{pkt: pkt, id: txn.New(), opened: &opened{session: c, secret: secret, plain: plain}}
+	// Through the verdict, as production does: it is what admits the
+	// subtype and hands the decode on.
+	rx := rxOf(e, pkt)
+	if rx.opened == nil || rx.opened.text == nil {
+		t.Fatal("the verdict did not admit the command")
+	}
 	e.runCommand(rx, rx.id)
 	if ran != 0 {
 		t.Fatal("the command ran on a replay guard that never reached the disk")
@@ -291,7 +296,7 @@ func TestACommandIsNotRunWhenItsGuardCannotPersist(t *testing.T) {
 	}
 	// The disk recovers and the same line is served, once.
 	store.saveErr = nil
-	e.runCommand(rx, rx.id)
+	e.runCommand(rxOf(e, pkt), rx.id)
 	if ran != 1 {
 		t.Errorf("the recovered command ran %d times, want 1", ran)
 	}

@@ -51,4 +51,7 @@ type opened struct {
 	// req is the decoded anonymous question, nil when the plaintext
 	// held a password rather than one of the typed questions.
 	req *meshcore.AnonRequest
+	// text is the decoded TXT_MSG content, whose subtype the verdict
+	// already admitted; nil for everything that is not one.
+	text *meshcore.TextPlaintext
 }

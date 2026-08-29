@@ -27,9 +27,16 @@ import (
 const commandMaxReply = 150
 
 // cmdVerdict judges a text message: ours to run only when a live
-// admin session's MAC verifies over it. A guest's text is not an
-// error — it is simply not a command, and routes on like any other
-// traffic this node is not the destination of.
+// admin session's MAC verifies over it, and only when the wire type
+// asked for a command at all. A guest's text is not an error — it is
+// simply not a command, and routes on like any other traffic this
+// node is not the destination of.
+//
+// The subtype is the second half of the authentication, and the half
+// that was missing: the MAC says who is speaking, the flags byte says
+// what they meant. A signed conversation addressed to an admin that
+// happens to contain the words "set repeat off" is not an order, and
+// the reference runs exactly two subtypes for that reason.
 func (e *engine) cmdVerdict(rx *reception) (verdict, why string, handled bool) {
 	c, plain := e.openText(rx.pkt)
 	if c == nil {
@@ -38,7 +45,18 @@ func (e *engine) cmdVerdict(rx *reception) (verdict, why string, handled bool) {
 	if !c.isAdmin() {
 		return "", "", false
 	}
-	rx.opened = &opened{session: c, secret: c.secret, plain: plain}
+	text, err := meshcore.ParseTextPlaintext(plain)
+	if err != nil {
+		return "", "", false
+	}
+	if text.Type != meshcore.TxtTypePlain && text.Type != meshcore.TxtTypeCLIData {
+		// Authenticated, addressed here, and not a command: it is the
+		// admin's own traffic, judged like anyone else's.
+		return "", "", false
+	}
+	// The decode is kept: running it twice would let the verdict and
+	// the action disagree about what was said.
+	rx.opened = &opened{session: c, secret: c.secret, plain: plain, text: text}
 	return verdictCommand, "administration from a logged-in admin", true
 }
 
@@ -62,14 +80,10 @@ func (e *engine) openText(pkt *meshcore.Packet) (*client, []byte) {
 // timestamp is the client asking again for an answer it missed, and
 // re-running the command would apply a mutation twice.
 func (e *engine) runCommand(rx *reception, origin txn.ID) {
-	if rx.opened == nil || rx.opened.session == nil || e.commands == nil {
+	if rx.opened == nil || rx.opened.session == nil || rx.opened.text == nil || e.commands == nil {
 		return
 	}
-	pkt, c, plain := rx.pkt, rx.opened.session, rx.opened.plain
-	text, err := meshcore.ParseTextPlaintext(plain)
-	if err != nil {
-		return
-	}
+	pkt, c, text := rx.pkt, rx.opened.session, rx.opened.text
 	ts := uint32(text.Timestamp.Unix())
 	if ts < c.lastTimestamp {
 		e.log.Debug("command replay refused", zap.String("txn", origin.Short()))
