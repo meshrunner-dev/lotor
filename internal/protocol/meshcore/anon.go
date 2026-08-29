@@ -102,6 +102,20 @@ func (e *engine) answerBudget(inbound *meshcore.Packet) int {
 	return meshcore.ResponseBodyBudget()
 }
 
+// withinBudget cuts a text answer at the last whole line that fits.
+// A line half-sent reads at the far end as a shorter answer rather
+// than a truncated one, which is the worse of the two.
+func withinBudget(text string, budget int) []byte {
+	if len(text) <= budget {
+		return []byte(text)
+	}
+	cut := text[:max(0, budget)]
+	if i := strings.LastIndexByte(cut, '\n'); i >= 0 {
+		cut = cut[:i]
+	}
+	return []byte(cut)
+}
+
 // joinWithin joins names with the wire's comma, stopping at the last
 // whole one that fits. A truncated name would read at the far end as
 // a scope nobody carries.

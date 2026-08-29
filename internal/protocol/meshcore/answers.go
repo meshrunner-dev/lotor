@@ -107,7 +107,7 @@ func orderNeighbours(all []Neighbour, orderBy byte) {
 // neighboursBody answers the neighbourhood query: the total known, how
 // many are returned, then each one's key prefix, how long ago it was
 // heard, and the SNR it was heard at.
-func (e *engine) neighboursBody(args []byte) []byte {
+func (e *engine) neighboursBody(args []byte, budget int) []byte {
 	q, err := meshcore.ParseNeighboursQuery(args)
 	if err != nil {
 		return nil
@@ -125,5 +125,15 @@ func (e *engine) neighboursBody(args []byte) []byte {
 			SNR:          n.SNR,
 		})
 	}
-	return meshcore.FrameNeighbours(len(all), rows)
+	// Dropped one whole neighbour at a time until the frame fits the
+	// route it will travel. The codec decides what a row costs; this
+	// only decides how many there is room for, which is the honest
+	// division of labour when a layout is not this file's to know.
+	for {
+		body := meshcore.FrameNeighbours(len(all), rows)
+		if len(body) <= budget || len(rows) == 0 {
+			return body
+		}
+		rows = rows[:len(rows)-1]
+	}
 }

@@ -125,14 +125,15 @@ type aclListOrder struct {
 // six-byte key prefix and the permission byte — guests skipped like
 // the reference skips them, the list cut where the reply would
 // outgrow the packet. Sorted by key so two asks read alike.
-func (e *engine) accessListBody() []byte {
+func (e *engine) accessListBody(bodyMax int) []byte {
 	const entrySize = 6 + 1
-	// What actually fits, asked of the codec rather than guessed: the
-	// envelope, the MAC and the cipher's block rounding all take their
-	// share, and a list sized on the raw payload was composed whole
-	// and then refused — twenty-five entries were enough — leaving the
-	// asker with no answer at all and its replay guard already spent.
-	bodyMax := meshcore.ResponseBodyBudget()
+	// bodyMax is what the route this answer will travel can actually
+	// carry, resolved by the caller: a list sized on the raw payload
+	// was composed whole and then refused — twenty-five entries were
+	// enough — and one sized on the direct budget was refused again
+	// whenever the question had arrived flooded, since a path return
+	// pays for the path it came by. Either way the asker got nothing
+	// and its replay guard was already spent.
 	rows := e.acl.entries()
 	sort.Slice(rows, func(i, j int) bool {
 		return bytes.Compare(rows[i].PubKey[:], rows[j].PubKey[:]) < 0

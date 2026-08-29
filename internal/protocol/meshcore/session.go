@@ -298,7 +298,14 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 		e.storeRefused(origin, "request", err)
 		return
 	}
-	body, answered := e.answerRequest(c, args)
+	// The budget is the route's, resolved before a byte is composed:
+	// a question that arrived flooded is answered inside a path
+	// return that pays for the path it came by, and that envelope is
+	// far smaller than a direct response. Sizing on the direct budget
+	// and discovering the route afterwards produced answers that
+	// could not be sealed — with the replay guard already spent, so
+	// the client's identical retry was refused as a replay.
+	body, answered := e.answerRequest(c, args, e.answerBudget(pkt))
 	if len(args) > 0 {
 		logging.Trace(e.log, "session request answered",
 			zap.String("txn", origin.Short()), zap.String("request", reqName(args[0])),
@@ -321,7 +328,7 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 // is false for a question this node does not serve — which is not the
 // same as an answer that happens to be empty: a node with no sensor
 // still owes the asker a reply saying so.
-func (e *engine) answerRequest(c *client, args []byte) (body []byte, answered bool) {
+func (e *engine) answerRequest(c *client, args []byte, budget int) (body []byte, answered bool) {
 	switch args[0] {
 	case meshcore.ReqGetStatus:
 		return e.statusBody(), true
@@ -332,7 +339,7 @@ func (e *engine) answerRequest(c *client, args []byte) (body []byte, answered bo
 		if !c.isAdmin() || len(args) < 3 || args[1] != 0 || args[2] != 0 {
 			return nil, false
 		}
-		return e.accessListBody(), true
+		return e.accessListBody(budget), true
 	case meshcore.ReqGetTelemetry:
 		// The first reserved byte is an inverse permission mask, and
 		// a guest is forced past it to the base readings alone — the
@@ -347,14 +354,15 @@ func (e *engine) answerRequest(c *client, args []byte) (body []byte, answered bo
 		}
 		return e.telemetryBody(mask), true
 	case meshcore.ReqGetNeighbours:
-		b := e.neighboursBody(args)
+		b := e.neighboursBody(args, budget)
 		return b, b != nil
 	case meshcore.ReqGetOwnerInfo:
 		// Three lines, the reference's own: the firmware version,
 		// the node's name, then whatever the owner wrote — which
 		// carries its own newlines, and is last so they cannot be
 		// mistaken for a fourth field.
-		return []byte(version.Version + "\n" + e.p.NodeName + "\n" + e.p.OwnerInfo), true
+		return withinBudget(
+			version.Version+"\n"+e.p.NodeName+"\n"+e.p.OwnerInfo, budget), true
 	case meshcore.ReqKeepAlive:
 		// The reference answers nothing here either, and the session's
 		// clock has already moved on the request that carried it.

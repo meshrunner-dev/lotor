@@ -455,6 +455,9 @@ func (e *engine) dueAdverts(dev radio.Device, now time.Time) {
 			e.windLocalAdvert(now)
 		}
 	case !e.nextLocalAdvert.IsZero() && !now.Before(e.nextLocalAdvert):
+		// The same arbitration on the scheduled side: a flood due
+		// inside this second wins it, and the local one waits for the
+		// next — the two must never share a signature.
 		if !e.advert(dev, now, "advert-local", true) {
 			return
 		}
@@ -570,9 +573,19 @@ func (e *engine) drainAdvertAsk(dev radio.Device, now time.Time) {
 }
 
 // floodAdvertDue reports that the routable announcement's own clock
-// has struck.
+// has struck, or will strike inside the very second this one would be
+// signed in.
+//
+// The wire counts in seconds — BuildAdvert signs now.Unix() — while
+// the clocks are nanosecond instants, and comparing the instants let
+// a flood five hundred milliseconds away count as "not yet". It would
+// then carry the identical timestamp, hence the identical packet
+// hash, as the local advert going out now: the neighbour hears the
+// zero-hop copy first and judges the routable one a duplicate it need
+// not relay. The arbitration has to happen in the units the signature
+// actually uses.
 func (e *engine) floodAdvertDue(now time.Time) bool {
-	return !e.nextFloodAdvert.IsZero() && !now.Before(e.nextFloodAdvert)
+	return !e.nextFloodAdvert.IsZero() && e.nextFloodAdvert.Unix() <= now.Unix()
 }
 
 // windLocalAdvert schedules the next local advert, or stops the clock

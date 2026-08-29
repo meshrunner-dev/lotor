@@ -51,10 +51,13 @@ func TestSessionSnapshotCarriesTheRouteButNeverTheSecret(t *testing.T) {
 	}
 }
 
-func TestTheAccessListIsCutWhereTheAnswerFits(t *testing.T) {
-	// A list sized on the raw payload composed whole and was then
-	// refused — twenty-five entries were enough — leaving the asker
-	// with no answer at all and its replay guard already spent.
+func TestAnswersFitTheRouteTheyWillTravel(t *testing.T) {
+	// The residual the remediation review found: the body was sized on
+	// the direct budget and the route discovered afterwards. A question
+	// that arrived flooded is answered inside a path return that pays
+	// for the path it came by — a far smaller envelope — so the answer
+	// could not be sealed, while the replay guard was already spent and
+	// the client's identical retry was refused as a replay.
 	e, _ := identifiedEngine(t)
 	if err := e.AttachSessions(newFakeStore()); err != nil {
 		t.Fatal(err)
@@ -67,27 +70,48 @@ func TestTheAccessListIsCutWhereTheAnswerFits(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	body := e.accessListBody()
-	if n := len(body); n%7 != 0 {
-		t.Errorf("the list was cut mid-record: %d bytes", n)
-	}
-	if len(body) > meshcore.ResponseBodyBudget() {
-		t.Fatalf("body of %d bytes past the %d the codec can seal",
-			len(body), meshcore.ResponseBodyBudget())
-	}
-	// And what it produced actually composes, which is the only test
-	// that matters: the whole table's worth of grants, sealed.
 	secret := bytes.Repeat([]byte{0x11}, meshcore.SharedSecretSize)
-	if _, err := meshcore.BuildResponse(e.id.PubKey[:meshcore.PathHashSize],
-		e.id.PubKey[:meshcore.PathHashSize], secret, 1, body); err != nil {
-		t.Fatalf("the access list this node would send cannot be sealed: %v", err)
+	hash := e.id.PubKey[:meshcore.PathHashSize]
+
+	// Every route the answer may take, from a direct question to a
+	// flood that walked a long way home.
+	for _, pathBytes := range []int{0, 1, 12, 32, 48} {
+		inbound := &meshcore.Packet{
+			Header:  meshcore.MakeHeader(meshcore.RouteFlood, meshcore.PayloadTypeReq, meshcore.PayloadVer1),
+			Path:    make([]byte, pathBytes),
+			PathLen: byte(pathBytes),
+		}
+		body := e.accessListBody(e.answerBudget(inbound))
+		if len(body)%7 != 0 {
+			t.Errorf("path %d: the list was cut mid-record: %d bytes", pathBytes, len(body))
+		}
+		// The composition the reply will actually attempt.
+		framed := meshcore.FrameAdmin(1, body)
+		if _, err := meshcore.BuildPathReturn(hash, hash, secret,
+			byte(pathBytes), make([]byte, pathBytes),
+			byte(meshcore.PayloadTypeResponse), framed); err != nil {
+			t.Errorf("path %d: the answer this node would send cannot be sealed: %v",
+				pathBytes, err)
+		}
 	}
-	// One record more would not, which is what makes the cut the
-	// boundary rather than a guess.
-	tooBig := append(append([]byte(nil), body...), make([]byte, 7)...)
-	if _, err := meshcore.BuildResponse(e.id.PubKey[:meshcore.PathHashSize],
-		e.id.PubKey[:meshcore.PathHashSize], secret, 1, tooBig); err == nil {
-		t.Error("the cut left a whole record of room unused")
+
+	// And the direct route still uses its own, larger budget: the fix
+	// must not have shrunk every answer to the worst case.
+	direct := &meshcore.Packet{
+		Header: meshcore.MakeHeader(meshcore.RouteDirect, meshcore.PayloadTypeReq, meshcore.PayloadVer1),
+	}
+	wide := e.accessListBody(e.answerBudget(direct))
+	narrow := e.accessListBody(e.answerBudget(&meshcore.Packet{
+		Header:  meshcore.MakeHeader(meshcore.RouteFlood, meshcore.PayloadTypeReq, meshcore.PayloadVer1),
+		Path:    make([]byte, 48),
+		PathLen: 48,
+	}))
+	if len(wide) <= len(narrow) {
+		t.Errorf("direct answer %d bytes, flooded %d — the direct route carries more",
+			len(wide), len(narrow))
+	}
+	if _, err := meshcore.BuildResponse(hash, hash, secret, 1, wide); err != nil {
+		t.Errorf("the direct answer cannot be sealed: %v", err)
 	}
 }
 

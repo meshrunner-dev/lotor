@@ -1391,3 +1391,85 @@ func TestTheCADKnobIsADeclaredDivergence(t *testing.T) {
 		t.Errorf("the channel was assessed %d times with CAD off", 3-dev.busy)
 	}
 }
+
+func TestAdvertsNeverShareTheSecondTheySign(t *testing.T) {
+	// The wire counts in seconds: BuildAdvert signs now.Unix(), so two
+	// adverts composed inside one second carry the same payload and
+	// hash alike. Comparing nanosecond instants let a flood half a
+	// second away read as "not yet" — and the zero-hop local, at
+	// priority 0, then taught the neighbour to dedup the routable one.
+	//
+	// now is pinned just after a second boundary so "same second" and
+	// "next second" are unambiguous.
+	base := time.Unix(time.Now().Unix(), 0).Add(100 * time.Millisecond)
+
+	// An ordered local advert, with the flood due later in this second.
+	ordered := func(t *testing.T, floodAt time.Time) error {
+		t.Helper()
+		e, dev, _, _ := txRig(t, "on-air")
+		e.queue.depth = 8
+		e.nextFloodAdvert = floodAt
+		e.nextLocalAdvert = base.Add(time.Hour)
+		o := &advertOrder{kind: "advert-local", started: newAck()}
+		e.advertAsk <- o
+		e.drainAdvertAsk(dev, base)
+		return o.started.wait("advert")
+	}
+	if err := ordered(t, base.Add(500*time.Millisecond)); err == nil {
+		t.Error("an ordered local advert went out in the second the flood will sign")
+	}
+	// A flood in the next second is a different signature: no conflict.
+	if err := ordered(t, base.Add(1500*time.Millisecond)); err != nil {
+		t.Errorf("an ordered local advert a second clear of the flood: %v", err)
+	}
+
+	// The scheduled side of the same conflict, which the operator
+	// never touches: both clocks due inside one second.
+	scheduled := func(t *testing.T, floodAt time.Time) []string {
+		t.Helper()
+		e, dev, _, _ := txRig(t, "on-air")
+		e.queue.depth = 8
+		e.nextFloodAdvert = floodAt
+		e.nextLocalAdvert = base
+		e.dueAdverts(dev, base)
+		kinds := make([]string, 0, len(e.queue.entries))
+		for _, entry := range e.queue.entries {
+			kinds = append(kinds, entry.kind)
+		}
+		return kinds
+	}
+	got := scheduled(t, base.Add(500*time.Millisecond))
+	if len(got) != 1 || got[0] != "advert-flood" {
+		t.Errorf("both clocks inside one second queued %v, want the flood alone", got)
+	}
+	// A second apart, the local one is served on its own turn.
+	got = scheduled(t, base.Add(1500*time.Millisecond))
+	if len(got) != 1 || got[0] != "advert-local" {
+		t.Errorf("clocks a second apart queued %v, want the local one", got)
+	}
+}
+
+func TestTwoAdvertsInOneSecondWouldHashAlike(t *testing.T) {
+	// What the arbitration is protecting against, stated directly: the
+	// signature covers a whole-second timestamp, so two adverts
+	// composed inside one second are one packet as far as a
+	// neighbour's duplicate table is concerned.
+	e := armedEngine(t, "on-air")
+	at := time.Unix(time.Now().Unix(), 0)
+	build := func(when time.Time) *meshcore.Packet {
+		pkt, err := meshcore.BuildAdvert(e.id, when, &meshcore.AdvertData{
+			Type: meshcore.AdvTypeRepeater, Name: e.p.NodeName,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkt
+	}
+	same := build(at).Hash()
+	if same != build(at.Add(900*time.Millisecond)).Hash() {
+		t.Error("two adverts inside one second hash differently — the premise moved")
+	}
+	if same == build(at.Add(time.Second)).Hash() {
+		t.Error("adverts a second apart hash alike")
+	}
+}
