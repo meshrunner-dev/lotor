@@ -999,7 +999,11 @@ func TestALiveSocketIsNotALeftover(t *testing.T) {
 	// more. A daemon on another base, or another program entirely,
 	// may own this path; unlinking its live socket silently cut every
 	// client off it.
-	path := filepath.Join(t.TempDir(), "console.sock")
+	//
+	// Bound from inside the directory, for the reason
+	// TestSocketPathRefusesWhatIsNotASocket gives.
+	t.Chdir(t.TempDir())
+	path := "console.sock"
 	first, err := listenConsole(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
