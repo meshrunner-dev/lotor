@@ -406,6 +406,8 @@ func (e *engine) AttachSessions(store SessionStore) {
 	e.acl.store = store
 	e.acl.load(func(pubKey []byte) ([]byte, error) {
 		return e.id.SharedSecret(pubKey)
+	}, func() rateLimiter {
+		return rateLimiter{max: e.p.SessionLimit, window: sessionLimitWindow}
 	})
 	if n := len(e.acl.by); n > 0 {
 		e.log.Info("sessions restored", zap.Int("count", n))

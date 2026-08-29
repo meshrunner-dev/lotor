@@ -122,8 +122,11 @@ func (a *acl) forget(k [meshcore.PubKeySize]byte) {
 
 // load rebuilds the table from the store, the secret recomputed per
 // session and the too-stale left behind. secret returns the shared
-// key for a peer, or an error a nil identity would raise.
-func (a *acl) load(secret func(pubKey []byte) ([]byte, error)) {
+// key for a peer, or an error a nil identity would raise; asks hands
+// each restored session a fresh rate budget — the zero-value limiter
+// grants nothing, which is exactly the silent no-answer a restored
+// session must not wake up into.
+func (a *acl) load(secret func(pubKey []byte) ([]byte, error), asks func() rateLimiter) {
 	if a.store == nil {
 		return
 	}
@@ -143,6 +146,7 @@ func (a *acl) load(secret func(pubKey []byte) ([]byte, error)) {
 		c := &client{
 			pubKey: p.PubKey, secret: sec, perms: p.Perms,
 			lastTimestamp: p.LastTimestamp, lastActive: p.LastActive,
+			asks: asks(),
 		}
 		if p.HasOut {
 			c.out = &outPath{pathLen: p.OutPathLen, path: p.OutPath, learned: p.Learned}

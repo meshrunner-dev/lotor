@@ -53,7 +53,7 @@ func TestSessionsSurviveABounce(t *testing.T) {
 	b.load(func(pubKey []byte) ([]byte, error) {
 		asked = true
 		return []byte("recomputed"), nil
-	})
+	}, func() rateLimiter { return rateLimiter{max: 8, window: time.Minute} })
 	got := b.get(key[:])
 	if got == nil {
 		t.Fatal("the session did not survive the bounce")
@@ -80,7 +80,8 @@ func TestSessionsSurviveABounce(t *testing.T) {
 	ac.out = &outPath{pathLen: 0, path: nil, learned: time.Now()} // adjacent
 	a.put(ac)
 	e := newACL(store)
-	e.load(func([]byte) ([]byte, error) { return []byte("x"), nil })
+	e.load(func([]byte) ([]byte, error) { return []byte("x"), nil },
+		func() rateLimiter { return rateLimiter{max: 8, window: time.Minute} })
 	got2 := e.get(adj[:])
 	if got2 == nil || got2.out == nil {
 		t.Fatalf("adjacent session reloaded as flood: %+v", got2)
@@ -97,11 +98,53 @@ func TestSessionsSurviveABounce(t *testing.T) {
 	stale.PubKey[0] = 0xff
 	store.SaveSession(stale)
 	d := newACL(store)
-	d.load(func([]byte) ([]byte, error) { return []byte("x"), nil })
+	d.load(func([]byte) ([]byte, error) { return []byte("x"), nil },
+		func() rateLimiter { return rateLimiter{max: 8, window: time.Minute} })
 	if d.get(stale.PubKey[:]) != nil {
 		t.Error("a stale session was restored")
 	}
 	if _, held := store.rows[stale.PubKey]; held {
 		t.Error("the stale session was not forgotten from the store")
+	}
+}
+
+func TestASessionAnswersAcrossARestart(t *testing.T) {
+	// The complaint this test answers: the console showed the restored
+	// session, and the companion still had to log in again — so prove
+	// survival at the wire, not in a view. First life: a login.
+	store := newMemStore()
+	e, dev, sub, peer := txRig(t, "on-air")
+	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
+	e.AttachSessions(store)
+	runEngine(t, e, dev)
+	frame, secret := login(t, e.id, peer, nowTS(100), "raccoon", false)
+	dev.frames <- frame
+	if sent := awaitSent(t, sub); sent.Kind != "login-resp" {
+		t.Fatalf("sent = %+v", sent)
+	}
+	<-dev.sent
+
+	// Second life: same identity, same store, a fresh engine — the
+	// daemon restarted. No login precedes the request.
+	e2, dev2, sub2, _ := txRig(t, "on-air")
+	e2.p.GuestAccess, e2.p.GuestPassword = guestPassword, "raccoon"
+	e2.AttachSessions(store)
+	runEngine(t, e2, dev2)
+	dev2.frames <- request(t, e2.id, peer, nowTS(200), []byte{meshcore.ReqGetStatus, 0, 0, 0, 0})
+	if sent := awaitSent(t, sub2); sent.Kind != "req-resp" {
+		t.Fatalf("the restored session did not answer: %+v", sent)
+	}
+	tag, _ := openReply(t, <-dev2.sent, secret)
+	if tag != nowTS(200) {
+		t.Fatalf("tag = %d, want the request timestamp reflected", tag)
+	}
+
+	// And the guard survived with it: a timestamp at the old high
+	// water mark is a replay, restart or no restart.
+	dev2.frames <- request(t, e2.id, peer, nowTS(100), []byte{meshcore.ReqGetStatus, 0, 0, 0, 0})
+	select {
+	case raw := <-dev2.sent:
+		t.Fatalf("a pre-restart replay was answered: % x", raw[:8])
+	case <-time.After(700 * time.Millisecond):
 	}
 }
