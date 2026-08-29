@@ -549,6 +549,12 @@ func (e *engine) TrafficStats() StatsSnapshot { return e.stats.Snapshot() }
 // the wire's reserved byte, forced to zero for a guest. Which sensor
 // a mask admits is the implementation's own judgement, mirroring the
 // reference's SensorManager::querySensors.
+//
+// The encoder is bounded to the route the answer will travel and
+// refuses a reading that would not fit with meshcore.ErrLPPFull.
+// Treat that as the end of the list — return it or nil, both read the
+// same — and order readings most-important first, since the tail is
+// what a long list loses.
 type TelemetrySensors func(permMask byte, enc *meshcore.LPPEncoder) error
 
 // AttachTelemetry gives the engine its sensor readings. Called once,

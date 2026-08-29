@@ -11,7 +11,7 @@ require (
 	golang.org/x/term v0.45.0
 	gopkg.in/yaml.v3 v3.0.1
 	meshrunner.dev/pkg/lora v0.5.3
-	meshrunner.dev/pkg/meshcore v1.5.0
+	meshrunner.dev/pkg/meshcore v1.6.0
 	modernc.org/sqlite v1.57.0
 )
 

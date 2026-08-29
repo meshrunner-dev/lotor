@@ -352,7 +352,7 @@ func (e *engine) answerRequest(c *client, args []byte, budget int) (body []byte,
 		if c.perms&permRoleMask == permGuest {
 			mask = 0
 		}
-		return e.telemetryBody(mask), true
+		return e.telemetryBody(mask, budget), true
 	case meshcore.ReqGetNeighbours:
 		b := e.neighboursBody(args, budget)
 		return b, b != nil

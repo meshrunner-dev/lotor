@@ -6,6 +6,7 @@ package meshcore
 // allowed to ask.
 
 import (
+	"errors"
 	"go.uber.org/zap"
 
 	"sort"
@@ -55,8 +56,15 @@ func (e *engine) statusBody() []byte {
 // this host exposes no rail either, so zero stands in — transparently
 // not measured, the answer statusBody already gives for the same
 // reason.
-func (e *engine) telemetryBody(permMask byte) []byte {
-	enc := meshcore.NewLPPEncoder()
+func (e *engine) telemetryBody(permMask byte, budget int) []byte {
+	// Bounded to the route this answer will travel, before anything
+	// is encoded: the sensors hook was the one variable producer left
+	// composing blind, and a reading list that outgrew the packet was
+	// refused after the asker's replay guard was already spent. The
+	// encoder refuses whole records, so running out of room reads as
+	// the end of the list — never as a buffer cut mid-record, which
+	// LPP cannot survive.
+	enc := meshcore.NewLPPEncoderWithin(budget)
 	if err := enc.Add(meshcore.LPPReading{
 		Channel: telemChannelSelf, Type: meshcore.LPPVoltage, Value: float64(0),
 	}); err != nil {
@@ -79,7 +87,7 @@ func (e *engine) telemetryBody(permMask byte) []byte {
 	// The hook always runs and the mask always travels: which sensor
 	// a mask admits is the sensors' own judgement, not this file's.
 	if e.telemetry != nil {
-		if err := e.telemetry(permMask, enc); err != nil {
+		if err := e.telemetry(permMask, enc); err != nil && !errors.Is(err, meshcore.ErrLPPFull) {
 			e.log.Warn("sensor telemetry refused", zap.Error(err))
 			return nil
 		}
