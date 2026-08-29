@@ -331,6 +331,13 @@ type Deps struct {
 	// LiveMQTTs lists the observer connections as they run.
 	LiveMQTTs  func() []MQTTInfo
 	LiveTraces func() map[string][]config.Trace
+	// Layers reads one instance's PERSISTED layering — the selected
+	// profile and every override scope, inactive ones included. The
+	// resolved traces cannot stand in for it: they only know the
+	// active scope, and an export built from them silently lost the
+	// settings prepared for every other band, board and broker. Nil
+	// falls back to the resolved view.
+	Layers func(kind, name string) (profile string, overrides map[string]map[string]any, ok bool)
 	// Mutate applies configuration changes — parse, validate, persist,
 	// bounce the owning relay — and says what happened. Nil when this
 	// daemon has no mutation channel.
