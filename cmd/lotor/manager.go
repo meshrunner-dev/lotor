@@ -335,6 +335,18 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 			zap.String("relay", name), zap.Error(err))
 		r = relay.Stillborn(name, err, m.bus, m.log)
 		m.viewMu.Lock()
+		// A predecessor's face must go with it: its resolved config,
+		// its provenance, its claim on the radio. A view that survived
+		// the failure would show this error beside a configuration
+		// that no longer runs anywhere.
+		delete(m.cfgs, name)
+		delete(m.traces, "relay "+name)
+		for radioName, info := range m.radios {
+			if info.Relay == name {
+				delete(m.radios, radioName)
+				delete(m.traces, "radio "+radioName)
+			}
+		}
 		m.infos[name] = cli.RelayInfo{
 			Name: name, Protocol: rc.Protocol, Radio: rc.Radio,
 			State: r.State, Err: r.Err,
@@ -912,8 +924,12 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 func deepCheck(next *config.File, kind, name, relayName string) error {
 	switch {
 	case relayName != "":
+		// The whole pre-hardware preparation, not just resolution: a
+		// transmit gate the assembly would refuse — no identity, no
+		// node name, no duty ceiling — must be refused here, while the
+		// running relay is still untouched and nothing has persisted.
 		rc := next.Relays[relayName]
-		if _, err := resolveConfigs(rc, next.Radios[rc.Radio]); err != nil {
+		if err := preflight(relayName, rc, next.Radios[rc.Radio]); err != nil {
 			return err
 		}
 	case kind == confdb.KindRadio:
@@ -987,7 +1003,7 @@ func (m *manager) commitCreate(ctx context.Context, next *config.File,
 	switch kind {
 	case confdb.KindRelay:
 		rc := next.Relays[name]
-		if _, err := resolveConfigs(rc, next.Radios[rc.Radio]); err != nil {
+		if err := preflight(name, rc, next.Radios[rc.Radio]); err != nil {
 			return "", err
 		}
 	case confdb.KindRadio:

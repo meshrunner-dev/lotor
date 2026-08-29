@@ -1,18 +1,24 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"maps"
+	"time"
+
+	"go.uber.org/zap"
+
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/cli"
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/protocol"
 	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 	"meshrunner.dev/lotor/internal/radio"
-	"time"
+	"meshrunner.dev/lotor/internal/relay"
 )
 
 func sampleFile() *config.File {
@@ -704,6 +710,113 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	for _, cmd := range []string{"reboot", "clkreboot", "tempradio 869525000 62500 8 8 10", "poweroff"} {
 		if out := m.runOTA("mc", "air:test", cmd); out != otaUnknown {
 			t.Errorf("%q got %q", cmd, out)
+		}
+	}
+}
+
+func TestDeepCheckRefusesAStillbornGate(t *testing.T) {
+	// Every precondition the assembly's arming enforces must refuse
+	// here, pre-persistence — or a mutation opening the transmit gate
+	// replaces a running relay with a corpse it validated too late.
+	seed := strings.Repeat("11", 32)
+	onAir := func(f *config.File) map[string]any {
+		rl := f.Relays["meshcore-868"]
+		rl.TX = &config.TX{Mode: config.TXOnAir}
+		f.Relays["meshcore-868"] = rl
+		return rl.Layered.Overrides["eu-868-narrow"]
+	}
+	cases := []struct {
+		name string
+		mut  func(ov map[string]any)
+		want string
+	}{
+		{"no identity", func(map[string]any) {}, "node identity"},
+		{"no node name", func(ov map[string]any) {
+			ov["identity"] = seed
+			delete(ov, "node_name")
+		}, "node_name"},
+		{"no duty ceiling", func(ov map[string]any) {
+			ov["identity"] = seed
+			ov["duty_cycle_pct"] = 0.0
+		}, "duty_cycle_pct"},
+	}
+	for _, c := range cases {
+		f := sampleFile()
+		c.mut(onAir(f))
+		err := deepCheck(f, confdb.KindRelay, "meshcore-868", "meshcore-868")
+		if err == nil {
+			t.Errorf("%s: on-air accepted", c.name)
+		} else if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: refused for the wrong reason: %v", c.name, err)
+		}
+	}
+	// A radio mutation that costs a transmit prerequisite is judged
+	// through the claiming relay's own preflight.
+	f0 := sampleFile()
+	onAir(f0)["identity"] = seed
+	f0.Radios["slot1"].Layered.Overrides["rak6421-13300x-slot1"]["chip"] = ""
+	err := deepCheck(f0, confdb.KindRadio, "slot1", "meshcore-868")
+	if err == nil || !strings.Contains(err.Error(), "chip") {
+		t.Errorf("chipless radio under an on-air relay: %v", err)
+	}
+	// With every prerequisite present, the same gate passes — the
+	// preflight refuses stillbirths, not transmission.
+	f := sampleFile()
+	onAir(f)["identity"] = seed
+	if err := deepCheck(f, confdb.KindRelay, "meshcore-868", "meshcore-868"); err != nil {
+		t.Fatalf("sound on-air refused: %v", err)
+	}
+	// And creation runs the same judgement: shadow needs the pipeline
+	// armed too, and this relay cannot arm it.
+	f = sampleFile()
+	rl := f.Relays["meshcore-868"]
+	rl.TX = &config.TX{Mode: config.TXShadow}
+	f.Relays["meshcore-868"] = rl
+	if err := preflight("meshcore-868", rl, f.Radios["slot1"]); err == nil {
+		t.Fatal("shadow without identity passed preflight")
+	}
+}
+
+func TestStillbornReplacesTheWholeView(t *testing.T) {
+	// A successor that fails assembly must not inherit its
+	// predecessor's face: resolved config, provenance and the radio
+	// claim all describe a relay that no longer runs.
+	f := sampleFile()
+	f.Radios["slot1"] = config.Radio{Driver: "no-such-driver"}
+	m := &manager{
+		file: f, bus: bus.New(), log: zap.NewNop(),
+		running: map[string]*managedRelay{},
+		infos: map[string]cli.RelayInfo{"meshcore-868": {
+			Name: "meshcore-868", State: func() string { return "running" },
+		}},
+		radios: map[string]cli.RadioInfo{"slot1": {Name: "slot1", Relay: "meshcore-868"}},
+		cfgs:   map[string]map[string]any{"meshcore-868": {"node_name": "old name"}},
+		traces: map[string][]config.Trace{
+			"relay meshcore-868": {{Key: "node_name", Value: "old name", Source: "config"}},
+			"radio slot1":        {{Key: "spi", Value: "/dev/spidev0.0", Source: "config"}},
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.startRelay(ctx, "meshcore-868")
+	t.Cleanup(func() {
+		cancel()
+		<-m.running["meshcore-868"].done
+	})
+
+	m.viewMu.RLock()
+	defer m.viewMu.RUnlock()
+	if info := m.infos["meshcore-868"]; info.State() != relay.StateError || info.Err() == "" {
+		t.Errorf("stillborn info: state %q, err %q", info.State(), info.Err())
+	}
+	if _, stale := m.cfgs["meshcore-868"]; stale {
+		t.Error("the predecessor's resolved config survived")
+	}
+	if _, stale := m.radios["slot1"]; stale {
+		t.Error("the predecessor's radio claim survived")
+	}
+	for _, key := range []string{"relay meshcore-868", "radio slot1"} {
+		if _, stale := m.traces[key]; stale {
+			t.Errorf("the predecessor's %s provenance survived", key)
 		}
 	}
 }

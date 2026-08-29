@@ -766,25 +766,19 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 	b *bus.Bus, log *zap.Logger, sen *sentinel.Sentinel, sessions enginemc.SessionStore,
 	commands otaRunner,
 ) (*assembled, error) {
-	res, err := resolveConfigs(rc, radioSpec)
-	if err != nil {
-		return nil, err
-	}
-
 	rlog := log.With(zap.String("relay", name))
-	logTraces(rlog, "radio config", res.radioTraces)
-	logTraces(rlog, "relay config", res.relayTraces)
-	announceOverrides(rlog, res.radioTraces, res.relayTraces)
-
-	eng, err := res.builder.Build(name, res.relayCfg, b, rlog)
+	p, err := prepare(name, rc, radioSpec, spentAirtime(ctx, name, rc, sen), b, rlog)
 	if err != nil {
 		return nil, err
 	}
+	logTraces(rlog, "radio config", p.res.radioTraces)
+	logTraces(rlog, "relay config", p.res.relayTraces)
+	announceOverrides(rlog, p.res.radioTraces, p.res.relayTraces)
 	// The session table persists where the protocol keeps one and a
 	// store was offered: a companion outlives the bounce, its replay
 	// guard with it.
 	if sessions != nil {
-		if a, ok := eng.(interface {
+		if a, ok := p.eng.(interface {
 			AttachSessions(store enginemc.SessionStore)
 		}); ok {
 			a.AttachSessions(sessions)
@@ -793,34 +787,75 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 	// Administration from the air runs through the same door the
 	// console uses; a protocol with no such door simply has none.
 	if commands != nil {
-		if a, ok := eng.(interface{ AttachCommands(run otaRunner) }); ok {
+		if a, ok := p.eng.(interface{ AttachCommands(run otaRunner) }); ok {
 			a.AttachCommands(commands)
 		}
+	}
+	r := relay.New(name, p.res.drv, p.res.radioCfg, p.eng, b, log, rc.NoiseHistory, p.policy.Mode)
+	return &assembled{
+		relay:    r,
+		relayCfg: p.res.relayCfg,
+		info:     relayInfo(name, rc, radioSpec, r, p.eng),
+		radio: cli.RadioInfo{
+			Name: rc.Radio, Driver: radioSpec.Driver, Envelope: p.env, Relay: name,
+		},
+		radioTraces: p.res.radioTraces,
+		relayTraces: p.res.relayTraces,
+	}, nil
+}
+
+// prepared is the pre-hardware half of one relay assembly: what a
+// configuration must prove before it may replace a running relay —
+// or be persisted at all.
+type prepared struct {
+	res    *resolvedConfigs
+	eng    protocol.Engine
+	env    radio.Envelope
+	policy protocol.TXPolicy
+}
+
+// prepare resolves, builds and arms one relay against everything but
+// the hardware itself: resolution, engine build, envelope binding,
+// transmit resolution, arming. preflight runs it as a judgement and
+// discards the result; assemble keeps it and goes on to the radio —
+// so the two cannot drift about what a configuration demands, and a
+// mutation that would leave a stillborn successor is refused before
+// anything persists. spent seeds the duty ledger and may be nil for
+// a pure judgement: the rows change what the pipeline may spend,
+// never whether the configuration is sound.
+func prepare(name string, rc config.Relay, radioSpec config.Radio,
+	spent []protocol.Spent, b *bus.Bus, log *zap.Logger,
+) (*prepared, error) {
+	res, err := resolveConfigs(rc, radioSpec)
+	if err != nil {
+		return nil, err
+	}
+	eng, err := res.builder.Build(name, res.relayCfg, b, log)
+	if err != nil {
+		return nil, err
 	}
 	env, err := bindEnvelope(res.drv, res.radioCfg, eng)
 	if err != nil {
 		return nil, fmt.Errorf("radio %q: %w", rc.Radio, err)
 	}
-
 	policy, err := resolveTX(rc, env, eng, res.drv, res.radioCfg)
 	if err != nil {
 		return nil, err
 	}
-	seedDuty(ctx, &policy, name, sen)
+	policy.Spent = spent
 	if err := armEngine(rc.Protocol, policy, eng); err != nil {
 		return nil, err
 	}
-	r := relay.New(name, res.drv, res.radioCfg, eng, b, log, rc.NoiseHistory, policy.Mode)
-	return &assembled{
-		relay:    r,
-		relayCfg: res.relayCfg,
-		info:     relayInfo(name, rc, radioSpec, r, eng),
-		radio: cli.RadioInfo{
-			Name: rc.Radio, Driver: radioSpec.Driver, Envelope: env, Relay: name,
-		},
-		radioTraces: res.radioTraces,
-		relayTraces: res.relayTraces,
-	}, nil
+	return &prepared{res: res, eng: eng, env: env, policy: policy}, nil
+}
+
+// preflight is prepare as a pure judgement: a throwaway bus, a silent
+// log, the built engine discarded. What it refuses, assemble would
+// have refused two seconds later — after the store was written and
+// the running relay stopped.
+func preflight(name string, rc config.Relay, radioSpec config.Radio) error {
+	_, err := prepare(name, rc, radioSpec, nil, bus.New(), zap.NewNop())
+	return err
 }
 
 // relayInfo is what the CLI gets to know about an assembled relay.
@@ -1109,21 +1144,24 @@ func dutyOf(eng protocol.Engine) func() (time.Duration, time.Duration, bool) {
 	return d.Duty
 }
 
-// seedDuty hands the new ledger the journal's memory of the sliding
-// hour, when a journal runs at all: the budget must not restart with
-// the process, or a crash-loop would launder it. Best effort — a sick
-// journal degrades to an empty hour, never to a dead relay.
-func seedDuty(ctx context.Context, policy *protocol.TXPolicy, relay string, sen *sentinel.Sentinel) {
-	if policy.Mode == config.TXDry || sen == nil {
-		return
+// spentAirtime reads the journal's memory of the sliding hour, when a
+// journal runs at all: the budget must not restart with the process,
+// or a crash-loop would launder it. Best effort — a sick journal
+// degrades to an empty hour, never to a dead relay. Dry spends
+// nothing and reads nothing.
+func spentAirtime(ctx context.Context, relay string, rc config.Relay, sen *sentinel.Sentinel) []protocol.Spent {
+	if rc.TXMode() == config.TXDry || sen == nil {
+		return nil
 	}
 	rows, err := sen.SpentAirtime(ctx, relay)
 	if err != nil {
-		return
+		return nil
 	}
+	spent := make([]protocol.Spent, 0, len(rows))
 	for _, r := range rows {
-		policy.Spent = append(policy.Spent, protocol.Spent{At: r.At, Airtime: r.Airtime})
+		spent = append(spent, protocol.Spent{At: r.At, Airtime: r.Airtime})
 	}
+	return spent
 }
 
 // armEngine hands a non-dry policy to the engine's pipeline; an
