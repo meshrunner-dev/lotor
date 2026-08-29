@@ -779,9 +779,15 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 	// guard with it.
 	if sessions != nil {
 		if a, ok := p.eng.(interface {
-			AttachSessions(store enginemc.SessionStore)
+			AttachSessions(store enginemc.SessionStore) error
 		}); ok {
-			a.AttachSessions(sessions)
+			// A store that cannot be read is a stillborn relay, not a
+			// relay that quietly starts with no sessions: the table
+			// holds every admin's replay guard, and coming up without
+			// it rewinds those clocks to zero.
+			if err := a.AttachSessions(sessions); err != nil {
+				return nil, err
+			}
 		}
 	}
 	// Administration from the air runs through the same door the

@@ -568,19 +568,26 @@ func (e *engine) AttachCommands(run func(line string, admin []byte) string) {
 // per session. Called once, before Run: a nil identity keeps the
 // table in memory, since a secret it cannot recompute is a session it
 // cannot restore.
-func (e *engine) AttachSessions(store SessionStore) {
+// A store that cannot be read refuses the attachment, and with it the
+// relay: the table holds every admin's replay guard, and coming up
+// without it would rewind those clocks to zero — a recent capture of
+// a login and its command replays straight through.
+func (e *engine) AttachSessions(store SessionStore) error {
 	if e.id == nil {
-		return
+		return nil
 	}
 	e.acl.store = store
-	e.acl.load(func(pubKey []byte) ([]byte, error) {
+	if err := e.acl.load(func(pubKey []byte) ([]byte, error) {
 		return e.id.SharedSecret(pubKey)
 	}, func() rateLimiter {
 		return rateLimiter{max: e.p.SessionLimit, window: sessionLimitWindow}
-	})
+	}); err != nil {
+		return fmt.Errorf("sessions: the store holds this node's replay guards and could not be read: %w", err)
+	}
 	if n := len(e.acl.by); n > 0 {
 		e.log.Info("sessions restored", zap.Int("count", n))
 	}
+	return nil
 }
 
 // IdentitySign signs a message under the node identity — the device

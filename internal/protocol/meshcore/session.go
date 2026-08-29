@@ -126,7 +126,16 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 
 	c.lastTimestamp, c.lastActive = ts, time.Now()
 	c.asks = rateLimiter{max: e.p.SessionLimit, window: sessionLimitWindow}
-	e.acl.put(c)
+	// The session is only real once the table takes it, and the table
+	// only takes what reached the store: a login answered from RAM
+	// alone is one the next restart forgets — its replay guard with
+	// it, so the very frame that opened it opens it again.
+	if err := e.acl.put(c); err != nil {
+		e.log.Warn("login refused: the session table would not take it",
+			zap.String("txn", origin.Short()),
+			zap.String("pubkey", shortKey(c.pubKey[:])), zap.Error(err))
+		return
+	}
 
 	role := "guest"
 	if c.isAdmin() {
@@ -150,30 +159,38 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 
 // admitLogin resolves a password attempt into a session, or nil when
 // it earns silence.
+//
+// Everything is composed on a candidate and nothing touches the live
+// session: a refused attempt — a wrong word, a replay — must leave
+// the table exactly as it found it. Writing the role first and
+// checking the timestamp after let an old guest login, captured
+// before that same key was promoted, demote the admin it replayed
+// against while being correctly refused.
 func (e *engine) admitLogin(senderPub, secret []byte, password string,
 	ts uint32, flood bool, origin txn.ID,
 ) *client {
-	c := e.acl.get(senderPub)
+	live := e.acl.get(senderPub)
+	var c client
+	if live != nil {
+		// A shallow copy: out is replaced, never written through, so
+		// the live session's own route is untouched until this one is
+		// installed in its place.
+		c = *live
+	} else {
+		copy(c.pubKey[:], senderPub)
+	}
 	switch {
-	case password == "" && c != nil:
+	case password == "" && live != nil:
 		// A blank password re-checks an existing session.
 	case e.p.AdminPassword != "" &&
 		subtle.ConstantTimeCompare([]byte(password), []byte(e.p.AdminPassword)) == 1:
 		// The admin word, checked first: with an open guest door every
 		// password admits someone, and the roles must not depend on
 		// which arm of a switch ran first.
-		if c == nil {
-			c = &client{}
-			copy(c.pubKey[:], senderPub)
-		}
 		c.perms = (c.perms &^ permRoleMask) | permAdmin
 		c.secret = secret
 	case e.p.GuestAccess == guestOpen ||
 		subtle.ConstantTimeCompare([]byte(password), []byte(e.p.GuestPassword)) == 1:
-		if c == nil {
-			c = &client{perms: permGuest}
-			copy(c.pubKey[:], senderPub)
-		}
 		// A password login sets the role the password earns — the
 		// reference rewrites the bits on every one, demotion
 		// included; only the blank login, the in-ACL recheck, keeps
@@ -202,7 +219,7 @@ func (e *engine) admitLogin(senderPub, secret []byte, password string,
 	if password != "" || flood {
 		c.out = nil
 	}
-	return c
+	return &c
 }
 
 // loginReply composes what the reference sends back: our clock, the
@@ -271,19 +288,22 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 		e.dropRateLimited(origin)
 		return
 	}
+	// The guard moves before the answer is served, and durably: a
+	// request answered on a timestamp that never reached the disk is
+	// one a recording replays after the next restart. A question we
+	// do not answer still moves it — the keep-alive exists for
+	// exactly that, and retiring the companion that sends one instead
+	// of polling would be perverse.
+	if err := e.acl.advance(c, ts, time.Now()); err != nil {
+		e.storeRefused(origin, "request", err)
+		return
+	}
 	body, answered := e.answerRequest(c, args)
 	if len(args) > 0 {
 		logging.Trace(e.log, "session request answered",
 			zap.String("txn", origin.Short()), zap.String("request", reqName(args[0])),
 			zap.Bool("answered", answered), zap.Int("body_bytes", len(body)))
 	}
-	// A question we do not answer still proves the client is there:
-	// the keep-alive exists for exactly that, and retiring the
-	// companion that sends one instead of polling would be perverse.
-	c.lastTimestamp, c.lastActive = ts, time.Now()
-	// The advanced timestamp must reach the store before the next
-	// restart, or the request just served would replay after it.
-	e.acl.save(c)
 	if !answered {
 		return // nothing to say, but the session lives on
 	}
@@ -360,6 +380,17 @@ func (e *engine) queueLen() int {
 // dropRateLimited counts a refusal that never became a packet.
 func (e *engine) dropRateLimited(origin txn.ID) {
 	e.bus.Publish(bus.TxDropped{
-		Relay: e.relay, Txn: origin, At: time.Now(), Reason: "rate-limited",
+		Relay: e.relay, Txn: origin, At: time.Now(), Reason: reasonRateLimited,
+	})
+}
+
+// storeRefused reports work abandoned because the replay guard could
+// not be made durable. Serving it anyway would leave the mesh with an
+// answer this node cannot promise not to give twice.
+func (e *engine) storeRefused(origin txn.ID, what string, err error) {
+	e.log.Warn("session store refused the replay guard — "+what+" not served",
+		zap.String("txn", origin.Short()), zap.Error(err))
+	e.bus.Publish(bus.TxDropped{
+		Relay: e.relay, Txn: origin, At: time.Now(), Reason: "session-store",
 	})
 }

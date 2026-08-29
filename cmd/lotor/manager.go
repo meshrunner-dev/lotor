@@ -400,8 +400,24 @@ type aclStore struct {
 	relay string
 }
 
+// aclStoreWait bounds one session-table operation. The engine's own
+// goroutine waits on these — a durable replay guard is the price of
+// serving the request that moved it — so an unbounded wait would let
+// disk contention stop reception itself. Past the bound the operation
+// is an error the caller must act on, which is the honest report: the
+// store did not take it. Generous next to SQLite's five-second busy
+// timeout, short next to a radio going deaf.
+const aclStoreWait = 10 * time.Second
+
+// bounded is one store operation's context.
+func aclStoreCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), aclStoreWait)
+}
+
 func (a *aclStore) LoadSessions() ([]enginemc.PersistedSession, error) {
-	rows, err := a.store.LoadACL(context.Background(), a.relay)
+	ctx, cancel := aclStoreCtx()
+	defer cancel()
+	rows, err := a.store.LoadACL(ctx, a.relay)
 	if err != nil {
 		return nil, err
 	}
@@ -419,7 +435,9 @@ func (a *aclStore) LoadSessions() ([]enginemc.PersistedSession, error) {
 }
 
 func (a *aclStore) SaveSession(p enginemc.PersistedSession) error {
-	return a.store.SaveACL(context.Background(), a.relay, confdb.ACLRow{
+	ctx, cancel := aclStoreCtx()
+	defer cancel()
+	return a.store.SaveACL(ctx, a.relay, confdb.ACLRow{
 		PubKey: p.PubKey[:], Perms: p.Perms, Granted: p.Granted, LastTimestamp: p.LastTimestamp,
 		HasOut: p.HasOut, OutPath: p.OutPath, OutPathLen: p.OutPathLen,
 		Learned: p.Learned, LastActive: p.LastActive,
@@ -427,7 +445,9 @@ func (a *aclStore) SaveSession(p enginemc.PersistedSession) error {
 }
 
 func (a *aclStore) ForgetSession(pubKey [meshcore.PubKeySize]byte) error {
-	return a.store.ForgetACL(context.Background(), a.relay, pubKey[:])
+	ctx, cancel := aclStoreCtx()
+	defer cancel()
+	return a.store.ForgetACL(ctx, a.relay, pubKey[:])
 }
 
 // stopRelay stops one relay and waits for it to let its radio go —

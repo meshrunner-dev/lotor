@@ -502,18 +502,26 @@ func TestAFreshLoginDropsTheRouteTheOldConversationTaught(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.respondAnon(rxOf(e, pkt), txn.New())
-	c := e.acl.get(peer.PubKey[:])
-	if c == nil {
-		t.Fatal("the first login made no session")
+	// Every login installs a fresh session object in the table's
+	// place — the composed-then-installed discipline a replayed login
+	// must not be able to short-circuit — so the route is read back
+	// from the table, never from a pointer taken before.
+	session := func() *client {
+		t.Helper()
+		c := e.acl.get(peer.PubKey[:])
+		if c == nil {
+			t.Fatal("the login made no session")
+		}
+		return c
 	}
-	c.out = &outPath{pathLen: 2, path: []byte{0x4f, 0xa2}, learned: time.Now()}
+	session().out = &outPath{pathLen: 2, path: []byte{0x4f, 0xa2}, learned: time.Now()}
 
 	frame, _ = login(t, e.id, peer, nowTS(301), "raccoon", false)
 	if pkt, err = meshcore.ParsePacket(frame.Payload); err != nil {
 		t.Fatal(err)
 	}
 	e.respondAnon(rxOf(e, pkt), txn.New())
-	if c.out != nil {
+	if session().out != nil {
 		t.Error("the stale route survived the new login")
 	}
 	if n := len(e.queue.entries); n < 2 {
@@ -526,13 +534,13 @@ func TestAFreshLoginDropsTheRouteTheOldConversationTaught(t *testing.T) {
 
 	// A blank-password recheck is a step inside the same conversation,
 	// and keeps the route it stands on.
-	c.out = &outPath{pathLen: 0, path: []byte{}, learned: time.Now()}
+	session().out = &outPath{pathLen: 0, path: []byte{}, learned: time.Now()}
 	frame, _ = login(t, e.id, peer, nowTS(302), "", false)
 	if pkt, err = meshcore.ParsePacket(frame.Payload); err != nil {
 		t.Fatal(err)
 	}
 	e.respondAnon(rxOf(e, pkt), txn.New())
-	if c.out == nil {
+	if session().out == nil {
 		t.Error("a recheck dropped the route it should stand on")
 	}
 
@@ -543,7 +551,7 @@ func TestAFreshLoginDropsTheRouteTheOldConversationTaught(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.respondAnon(rxOf(e, pkt), txn.New())
-	if c.out != nil {
+	if session().out != nil {
 		t.Error("a flood login kept a route it must rediscover")
 	}
 }

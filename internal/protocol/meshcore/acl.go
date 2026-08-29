@@ -5,6 +5,7 @@ package meshcore
 
 import (
 	"bytes"
+	"errors"
 	"time"
 
 	"meshrunner.dev/pkg/meshcore"
@@ -110,21 +111,43 @@ func (c *client) persisted() PersistedSession {
 	return p
 }
 
-// save mirrors one session to the store; a store that refuses does
-// not fail the session — the reference keeps a companion whose flash
-// write failed, and losing it over disk trouble would be worse than
-// forgetting it on the next restart.
-func (a *acl) save(c *client) {
-	if a.store != nil {
-		_ = a.store.SaveSession(c.persisted())
+// errSessionsFull refuses a new session when every one of the
+// table's places is held by an entry that outranks a login.
+var errSessionsFull = errors.New("the session table is full of grants and admins")
+
+// save mirrors one session to the store. The refusal is the caller's
+// to judge, and the judgement differs by what was being written: a
+// route learned may be lost to disk trouble and cost only a flood,
+// while a replay guard that never reached the disk is a command the
+// next restart would let through a second time.
+func (a *acl) save(c *client) error {
+	if a.store == nil {
+		return nil
 	}
+	return a.store.SaveSession(c.persisted())
 }
 
 // forget drops one session from the store.
-func (a *acl) forget(k [meshcore.PubKeySize]byte) {
-	if a.store != nil {
-		_ = a.store.ForgetSession(k)
+func (a *acl) forget(k [meshcore.PubKeySize]byte) error {
+	if a.store == nil {
+		return nil
 	}
+	return a.store.ForgetSession(k)
+}
+
+// advance moves a session's replay guard and makes it durable before
+// the caller acts on the request that moved it. A store that refuses
+// leaves the guard exactly where it was and the caller must serve
+// nothing: an executed command whose timestamp only ever lived in RAM
+// is one the next restart accepts again from a recording.
+func (a *acl) advance(c *client, ts uint32, now time.Time) error {
+	wasTS, wasActive := c.lastTimestamp, c.lastActive
+	c.lastTimestamp, c.lastActive = ts, now
+	if err := a.save(c); err != nil {
+		c.lastTimestamp, c.lastActive = wasTS, wasActive
+		return err
+	}
+	return nil
 }
 
 // load rebuilds the table from the store, the secret recomputed per
@@ -133,62 +156,103 @@ func (a *acl) forget(k [meshcore.PubKeySize]byte) {
 // each restored session a fresh rate budget — the zero-value limiter
 // grants nothing, which is exactly the silent no-answer a restored
 // session must not wake up into.
-func (a *acl) load(secret func(pubKey []byte) ([]byte, error), asks func() rateLimiter) {
+//
+// A store that cannot be read is an error, never an empty table: the
+// sessions it holds carry the replay guards of every admin, and
+// starting without them silently rewinds those clocks to zero.
+func (a *acl) load(secret func(pubKey []byte) ([]byte, error), asks func() rateLimiter) error {
 	if a.store == nil {
-		return
+		return nil
 	}
 	rows, err := a.store.LoadSessions()
 	if err != nil {
-		return
+		return err
 	}
-	for _, p := range rows {
-		if !p.Granted && time.Since(p.LastActive) > sessionIdle {
-			a.forget(p.PubKey)
-			continue
+	// Grants and admins first: a store holding more rows than the
+	// table has places must not spend them on whoever happens to be
+	// listed first.
+	for _, protectedPass := range []bool{true, false} {
+		for _, p := range rows {
+			if protectedFrom(p) != protectedPass || len(a.by) >= maxClients {
+				continue
+			}
+			if !p.Granted && time.Since(p.LastActive) > sessionIdle {
+				// An expiry, not a revocation: a store that keeps the
+				// row has it skipped again at the next load.
+				_ = a.forget(p.PubKey)
+				continue
+			}
+			sec, err := secret(p.PubKey[:])
+			if err != nil {
+				continue
+			}
+			c := &client{
+				pubKey: p.PubKey, secret: sec, perms: p.Perms, granted: p.Granted,
+				lastTimestamp: p.LastTimestamp, lastActive: p.LastActive,
+				asks: asks(),
+			}
+			if p.HasOut {
+				c.out = &outPath{pathLen: p.OutPathLen, path: p.OutPath, learned: p.Learned}
+			}
+			a.by[p.PubKey] = c
 		}
-		sec, err := secret(p.PubKey[:])
-		if err != nil {
-			continue
-		}
-		c := &client{
-			pubKey: p.PubKey, secret: sec, perms: p.Perms, granted: p.Granted,
-			lastTimestamp: p.LastTimestamp, lastActive: p.LastActive,
-			asks: asks(),
-		}
-		if p.HasOut {
-			c.out = &outPath{pathLen: p.OutPathLen, path: p.OutPath, learned: p.Learned}
-		}
-		a.by[p.PubKey] = c
 	}
+	return nil
 }
 
-// put adds or refreshes a session, evicting the least recently active
-// one when the table is full.
-func (a *acl) put(c *client) {
+// protectedFrom says whether a stored session outranks a plain login
+// — an explicit grant, or the admin role however it was earned.
+func protectedFrom(p PersistedSession) bool {
+	return p.Granted || p.Perms&permRoleMask == permAdmin
+}
+
+// put adds or refreshes a session, making room first when the table
+// is full. Nothing in the table moves unless the newcomer reached the
+// store: a session that exists only in RAM is one a restart forgets,
+// and for a login that means its own replay guard forgotten with it.
+func (a *acl) put(c *client) error {
+	var victim [meshcore.PubKeySize]byte
+	evicting := false
 	if _, known := a.by[c.pubKey]; !known {
-		a.evict()
+		var room bool
+		if victim, evicting, room = a.evictable(); !room {
+			return errSessionsFull
+		}
+	}
+	if err := a.save(c); err != nil {
+		return err
+	}
+	if evicting {
+		delete(a.by, victim)
+		// Best effort: a store still holding the ghost has it retired
+		// by the idle rule at the next load, the same end a slower
+		// eviction would have reached.
+		_ = a.forget(victim)
 	}
 	a.by[c.pubKey] = c
-	a.save(c)
+	return nil
 }
 
-// evict drops the least recently active session when the table is
-// full, forgetting it from the store too — an evicted session must
-// not resurrect on restart.
-func (a *acl) evict() {
+// evictable names the session that would make room for a new one.
+// room is false when the table is full and every place is held by a
+// grant or an admin — the reference skips exactly those when it hunts
+// for its victim (ClientACL::putClient), because a run of fresh guest
+// logins must not be able to unseat the node's only administrator.
+// evicting is false when there was a free place to begin with.
+func (a *acl) evictable() (victim [meshcore.PubKeySize]byte, evicting, room bool) {
 	if len(a.by) < maxClients {
-		return
+		return victim, false, true
 	}
-	var oldest [meshcore.PubKeySize]byte
 	var when time.Time
-	first := true
 	for k, v := range a.by {
-		if first || v.lastActive.Before(when) {
-			oldest, when, first = k, v.lastActive, false
+		if v.granted || v.isAdmin() {
+			continue
+		}
+		if !room || v.lastActive.Before(when) {
+			victim, when, room = k, v.lastActive, true
 		}
 	}
-	delete(a.by, oldest)
-	a.forget(oldest)
+	return victim, room, room
 }
 
 // matchPrefix finds the lowest-keyed entry a prefix names; found is
@@ -215,10 +279,15 @@ func (a *acl) matchPrefix(prefix []byte) (k [meshcore.PubKeySize]byte, found boo
 	return k, found
 }
 
-// remove drops one entry from the table and the store.
-func (a *acl) remove(k [meshcore.PubKeySize]byte) {
+// remove drops one entry from the table and the store. A store that
+// refuses keeps the entry: answering "revoked" to a revocation the
+// next restart undoes is the one answer worse than refusing it.
+func (a *acl) remove(k [meshcore.PubKeySize]byte) error {
+	if err := a.forget(k); err != nil {
+		return err
+	}
 	delete(a.by, k)
-	a.forget(k)
+	return nil
 }
 
 // entries is the access list as the console reads it: grants first
@@ -251,7 +320,7 @@ func (a *acl) live(k [meshcore.PubKeySize]byte) *client {
 	}
 	if !c.granted && time.Since(c.lastActive) > sessionIdle {
 		delete(a.by, k)
-		a.forget(k)
+		_ = a.forget(k) // an expiry: the idle rule retires it again next load
 		return nil
 	}
 	return c

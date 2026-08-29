@@ -221,7 +221,9 @@ func (e *engine) applyGrant(o *aclOrder) error {
 		if !found {
 			return ErrNoSuchEntry
 		}
-		e.acl.remove(k)
+		if err := e.acl.remove(k); err != nil {
+			return fmt.Errorf("the revocation would not persist: %w", err)
+		}
 		e.log.Info("permission revoked", zap.String("pubkey", shortKey(k[:])))
 		return nil
 	}
@@ -243,7 +245,9 @@ func (e *engine) applyGrant(o *aclOrder) error {
 	if c.lastActive.IsZero() {
 		c.lastActive = time.Now()
 	}
-	e.acl.put(c)
+	if err := e.acl.put(c); err != nil {
+		return fmt.Errorf("the grant would not persist: %w", err)
+	}
 	e.log.Info("permission granted",
 		zap.String("pubkey", shortKey(o.pubKey[:])), zap.Bool("admin", c.isAdmin()))
 	return nil

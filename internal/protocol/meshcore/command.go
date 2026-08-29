@@ -94,6 +94,15 @@ func (e *engine) runCommand(rx *reception, origin txn.ID) {
 	if len(line) > 4 && line[2] == '|' {
 		tag, line = line[:3], line[3:]
 	}
+	// The guard moves before the line runs, and durably: a mutation
+	// executed on a timestamp that never reached the disk is one a
+	// recording applies a second time after the next restart. Ordering
+	// it after the command was the whole exposure — the effect landed,
+	// then the proof it had landed was allowed to fail.
+	if err := e.acl.advance(c, ts, time.Now()); err != nil {
+		e.storeRefused(origin, "command", err)
+		return
+	}
 	var out string
 	if retry {
 		// The reference answers a retry with an empty reply rather
@@ -108,8 +117,6 @@ func (e *engine) runCommand(rx *reception, origin txn.ID) {
 			zap.String("command", line))
 		logging.Trace(e.log, "command answered", zap.String("reply", out))
 	}
-	c.lastTimestamp, c.lastActive = ts, time.Now()
-	e.acl.save(c)
 	if out == "" {
 		return
 	}

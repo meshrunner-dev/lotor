@@ -69,7 +69,11 @@ func (e *engine) learnOutPath(c *client, pr *meshcore.PathReturn) {
 		learned: time.Now(),
 	}
 	c.lastActive = time.Now()
-	e.acl.save(c)
+	// Best effort, and the one place it is: a route lost to disk
+	// trouble costs the next answer a flood, never a replay.
+	if err := e.acl.save(c); err != nil {
+		e.log.Warn("the taught route did not reach the store", zap.Error(err))
+	}
 	e.log.Info("a client taught us its route home",
 		zap.String("pubkey", shortKey(c.pubKey[:])),
 		zap.Int("hops", int(pr.PathLen&pathHopCountMask)))
