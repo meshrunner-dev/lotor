@@ -43,10 +43,23 @@ const (
 	Power   Quantity = "power"
 )
 
-// Units, stated once so nothing downstream has to guess: volts, amps,
-// watts. A driver converts at its own edge — the raw register scaling
-// is the datasheet's business, not this package's — and a quantity
-// added here brings its unit with it.
+// Unit is what a quantity is measured in. It lives beside the
+// constants because it is the meaning of Value, not a way of showing
+// it: a driver converts at its own edge — the raw register scaling is
+// the datasheet's business — and every consumer downstream is reading
+// the same volts. An unnamed quantity has no unit, which is what a
+// reader will notice.
+func (q Quantity) Unit() string {
+	switch q {
+	case Voltage:
+		return "V"
+	case Current:
+		return "A"
+	case Power:
+		return "W"
+	}
+	return ""
+}
 
 // Reading is one measurement and the moment it was taken. The moment
 // travels because a cached reading is only as good as its age, and

@@ -18,7 +18,6 @@ import (
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/relay"
-	"meshrunner.dev/lotor/internal/sensor"
 	"meshrunner.dev/lotor/internal/sentinel"
 	"meshrunner.dev/lotor/internal/update"
 )
@@ -189,13 +188,14 @@ func (s *session) radioList() error {
 // sensorList renders the configured parts as a table — the tree's
 // print at the collection. No owner column: nothing claims a sensor.
 func (s *session) sensorList() error {
-	if len(s.sensors()) == 0 {
+	sensors := s.sensors()
+	if len(sensors) == 0 {
 		fmt.Fprint(s.out, "no sensors configured\r\n")
 		return nil
 	}
 	tb := s.table()
 	tb.header("NAME", "DRIVER", "SAMPLED", "LAST")
-	for _, sn := range s.sensors() {
+	for _, sn := range sensors {
 		every := "default"
 		if sn.SampleInterval > 0 {
 			every = "every " + sn.SampleInterval.String()
@@ -203,16 +203,6 @@ func (s *session) sensorList() error {
 		tb.row(sn.Name, sn.Driver, every, sensorLast(sn))
 	}
 	return tb.flush(s.out)
-}
-
-// sensorUnits is what a quantity is measured in, for a reader. The
-// protocol side maps the same quantities to its own encoding; neither
-// table belongs in internal/sensor, which measures rather than
-// presents.
-var sensorUnits = map[sensor.Quantity]string{
-	sensor.Voltage: "V",
-	sensor.Current: "A",
-	sensor.Power:   "W",
 }
 
 // sensorStatus is one part as it is read: what it was told to be, and
@@ -245,7 +235,7 @@ func (s *session) sensorStatus(name string) error {
 			tb.row("state", "running")
 			for _, r := range sn.Readings {
 				tb.row(string(r.Quantity),
-					fmt.Sprintf("%.3f %s — %s", r.Value, sensorUnits[r.Quantity], ago(r.At)))
+					fmt.Sprintf("%.3f %s — %s", r.Value, r.Quantity.Unit(), ago(r.At)))
 			}
 		}
 		return tb.flush(s.out)

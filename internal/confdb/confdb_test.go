@@ -31,9 +31,22 @@ func sample() *config.File {
 				},
 			},
 		},
-		// No sensors here, but the map is what a loaded configuration
-		// carries — Load makes it, so the fixture must too.
-		Sensors: map[string]config.Sensor{},
+		// A sensor with a cadence: SampleInterval is the one field of
+		// a new kind whose type is not a string, and the store's
+		// round trip is the only thing that proves a Duration comes
+		// back as one.
+		Sensors: map[string]config.Sensor{
+			"bat": {
+				Driver:         "ina219",
+				SampleInterval: 45 * time.Second,
+				Layered: config.Layered{
+					Profile: "",
+					Overrides: map[string]map[string]any{
+						"custom": {"i2c": "/dev/i2c-2", "shunt_ohms": 0.01},
+					},
+				},
+			},
+		},
 		Relays: map[string]config.Relay{
 			"meshcore-868": {
 				Protocol:     "meshcore",
@@ -132,7 +145,7 @@ func TestEveryImportLeavesARevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(revs) != 4 { // radio, relay, sentinel, cli
+	if len(revs) != 5 { // radio, sensor, relay, sentinel, cli
 		t.Fatalf("revisions = %d, want one per object", len(revs))
 	}
 	for _, r := range revs {
