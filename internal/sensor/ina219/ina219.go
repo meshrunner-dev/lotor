@@ -10,6 +10,7 @@ package ina219
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"meshrunner.dev/lotor/internal/schema"
@@ -23,6 +24,17 @@ const (
 	addrLow     = 0x40
 	addrHigh    = 0x4f
 	addrDefault = addrLow
+)
+
+// The resistances a shunt can be. A milliohm is the smallest part
+// anyone fits; an ohm is already large for a current monitor, and
+// beyond it the drop the chip measures stops being a shunt's. The
+// range matters because the current is the measured drop divided by
+// this: a value near zero turns millivolts into thousands of amps and
+// reports them as fact.
+const (
+	shuntMinOhms = 0.001
+	shuntMaxOhms = 1.0
 )
 
 // shuntDefault is the resistor almost every INA219 breakout carries.
@@ -106,10 +118,12 @@ func decode(cfg map[string]any) (settings, error) {
 		}
 		s.ShuntOhms = f
 	}
-	// A shunt of zero would divide the current computation by nothing;
-	// a negative one describes no resistor that exists.
-	if s.ShuntOhms <= 0 {
-		return s, fmt.Errorf("ina219: shunt_ohms %v — a resistor is a positive number of ohms", s.ShuntOhms)
+	// Named rather than written as a comparison: NaN fails every
+	// comparison, so a bare `<= 0` lets it through and the current
+	// computed from it is NaN all the way to the air.
+	if math.IsNaN(s.ShuntOhms) || s.ShuntOhms < shuntMinOhms || s.ShuntOhms > shuntMaxOhms {
+		return s, fmt.Errorf("ina219: shunt_ohms %v — want a resistance in %g..%g ohms",
+			s.ShuntOhms, shuntMinOhms, shuntMaxOhms)
 	}
 	return s, nil
 }

@@ -71,3 +71,44 @@ func TestTheDatasheetsArithmetic(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeRefusesWhatNoPartCouldBe(t *testing.T) {
+	const bus = "/dev/i2c-2"
+	cases := []struct {
+		what string
+		cfg  map[string]any
+		ok   bool
+	}{
+		{"the bus alone, defaults for the rest", map[string]any{"i2c": bus}, true},
+		{"no bus at all", map[string]any{}, false},
+		{"a bus that is not a path", map[string]any{"i2c": 2}, false},
+
+		// The part answers on sixteen addresses and no others.
+		{"the lowest address", map[string]any{"i2c": bus, "address": addrLow}, true},
+		{"the highest address", map[string]any{"i2c": bus, "address": addrHigh}, true},
+		{"one below the range", map[string]any{"i2c": bus, "address": addrLow - 1}, false},
+		{"one above the range", map[string]any{"i2c": bus, "address": addrHigh + 1}, false},
+		{"an address that is not a number", map[string]any{"i2c": bus, "address": "0x40"}, false},
+
+		// A shunt divides the measured drop, so what it may be is
+		// what keeps the quotient a current.
+		{"the smallest shunt anyone fits", map[string]any{"i2c": bus, "shunt_ohms": shuntMinOhms}, true},
+		{"the largest", map[string]any{"i2c": bus, "shunt_ohms": shuntMaxOhms}, true},
+		{"zero divides by nothing", map[string]any{"i2c": bus, "shunt_ohms": 0.0}, false},
+		{"negative describes no resistor", map[string]any{"i2c": bus, "shunt_ohms": -0.1}, false},
+		{"a millionth of an ohm reports thousands of amps", map[string]any{"i2c": bus, "shunt_ohms": 1e-12}, false},
+		{"larger than any current monitor", map[string]any{"i2c": bus, "shunt_ohms": 100.0}, false},
+		// NaN fails every comparison, so a bare sign check lets it by.
+		{"not a number", map[string]any{"i2c": bus, "shunt_ohms": math.NaN()}, false},
+		{"infinite", map[string]any{"i2c": bus, "shunt_ohms": math.Inf(1)}, false},
+	}
+	for _, c := range cases {
+		err := inspect(c.cfg)
+		if c.ok && err != nil {
+			t.Errorf("%s: %v", c.what, err)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("%s: accepted %v", c.what, c.cfg)
+		}
+	}
+}
