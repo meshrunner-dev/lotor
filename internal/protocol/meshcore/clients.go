@@ -126,12 +126,13 @@ type aclListOrder struct {
 // the reference skips them, the list cut where the reply would
 // outgrow the packet. Sorted by key so two asks read alike.
 func (e *engine) accessListBody() []byte {
-	const (
-		entrySize = 6 + 1
-		// The reference bounds at MAX_PACKET_PAYLOAD minus the tag it
-		// writes first; the same arithmetic, the same wire.
-		bodyMax = 184 - 4
-	)
+	const entrySize = 6 + 1
+	// What actually fits, asked of the codec rather than guessed: the
+	// envelope, the MAC and the cipher's block rounding all take their
+	// share, and a list sized on the raw payload was composed whole
+	// and then refused — twenty-five entries were enough — leaving the
+	// asker with no answer at all and its replay guard already spent.
+	bodyMax := meshcore.ResponseBodyBudget()
 	rows := e.acl.entries()
 	sort.Slice(rows, func(i, j int) bool {
 		return bytes.Compare(rows[i].PubKey[:], rows[j].PubKey[:]) < 0

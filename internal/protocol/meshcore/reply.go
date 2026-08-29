@@ -1,8 +1,6 @@
 package meshcore
 
 import (
-	"go.uber.org/zap"
-
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/txn"
@@ -70,7 +68,12 @@ func (e *engine) reply(inbound *meshcore.Packet, a answer, origin txn.ID) {
 		pkt, err := meshcore.BuildPathReturn(a.destHash, srcHash, a.secret,
 			inbound.PathLen, inbound.Path, byte(meshcore.PayloadTypeResponse), framed)
 		if err != nil {
-			e.log.Warn("path return build failed", zap.String("kind", a.kind), zap.Error(err))
+			// An answer nobody can compose is an answer nobody
+			// receives, and for an authenticated question the replay
+			// guard is already spent — so the refusal is counted
+			// against its transaction rather than logged and lost.
+			e.abandon(origin, "malformed",
+				"reply too large to compose ("+a.kind+")", err)
 			return
 		}
 		pkt.SetPathHashSizeAndCount(inbound.PathHashSize(), 0)
@@ -81,7 +84,8 @@ func (e *engine) reply(inbound *meshcore.Packet, a answer, origin txn.ID) {
 
 	pkt, err := meshcore.BuildResponse(a.destHash, srcHash, a.secret, a.tag, a.body)
 	if err != nil {
-		e.log.Warn("response build failed", zap.String("kind", a.kind), zap.Error(err))
+		e.abandon(origin, "malformed",
+			"reply too large to compose ("+a.kind+")", err)
 		return
 	}
 	if home := a.routeHome(); home != nil {

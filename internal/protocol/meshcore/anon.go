@@ -86,6 +86,43 @@ func (e *engine) anonVerdict(rx *reception) (verdict, why string, handled bool) 
 // shared limiter. Logins were consumed by the judgement and stay
 // unanswered.
 
+// anonReplyClockLen is the clock FrameAnonReply writes ahead of the
+// text it carries.
+const anonReplyClockLen = 4
+
+// answerBudget is how many body bytes a reply to this reception may
+// carry, on whichever of the two shapes it will travel home: a
+// flooded question is answered with the path it came by, and pays for
+// it. Both figures come from the codec, so what this node composes is
+// what the codec can seal.
+func (e *engine) answerBudget(inbound *meshcore.Packet) int {
+	if inbound.IsRouteFlood() {
+		return meshcore.PathReturnBodyBudget(len(inbound.Path))
+	}
+	return meshcore.ResponseBodyBudget()
+}
+
+// joinWithin joins names with the wire's comma, stopping at the last
+// whole one that fits. A truncated name would read at the far end as
+// a scope nobody carries.
+func joinWithin(names []string, budget int) string {
+	var b strings.Builder
+	for _, n := range names {
+		next := len(n)
+		if b.Len() > 0 {
+			next++ // the separator this name would need
+		}
+		if b.Len()+next > budget {
+			break
+		}
+		if b.Len() > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(n)
+	}
+	return b.String()
+}
+
 func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 	if rx.opened == nil {
 		return
@@ -112,7 +149,11 @@ func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 	case meshcore.AnonReqClock:
 		// The clock alone is the whole answer.
 	case meshcore.AnonReqScopes:
-		text = strings.Join(e.scopes.served(), ",")
+		// Cut at the last whole name that fits, the way the reference
+		// bounds its own export: a list composed past the packet is a
+		// question left unanswered, and half a scope name at the far
+		// end is a scope nobody can derive a key for.
+		text = joinWithin(e.scopes.served(), e.answerBudget(pkt)-anonReplyClockLen)
 	default:
 		return // a question nobody defined stays unanswered
 	}
