@@ -1845,8 +1845,8 @@ func TestACLDrawerGrantsAndRevokes(t *testing.T) {
 	}
 	for i := range deps.Relays {
 		deps.Relays[i].Access = func() ([]Access, error) { return live, nil }
-		deps.Relays[i].GrantAdmin = func(pub []byte) error {
-			granted = append(granted, [2]any{hex.EncodeToString(pub), "grant"})
+		deps.Relays[i].GrantRole = func(pub []byte, role string) error {
+			granted = append(granted, [2]any{hex.EncodeToString(pub), "grant:" + role})
 			return nil
 		}
 		deps.Relays[i].Revoke = func(pub []byte) error {
@@ -1870,13 +1870,18 @@ func TestACLDrawerGrantsAndRevokes(t *testing.T) {
 	}
 	full := strings.Repeat("ab", 32)
 	run(t, deps, "/relay meshcore-868 acl grant key="+full)
-	if len(granted) != 1 || granted[0][0] != full || granted[0][1] != "grant" {
+	if len(granted) != 1 || granted[0][0] != full || granted[0][1] != "grant:admin" {
 		t.Fatalf("grant door saw %v", granted)
+	}
+	// A named lesser role travels by its word.
+	run(t, deps, "/relay meshcore-868 acl grant key="+full+" role=read-only")
+	if len(granted) != 2 || granted[1][1] != "grant:read-only" {
+		t.Fatalf("role word lost: %v", granted)
 	}
 	// revoke names an entry by prefix; the engine gets the whole key.
 	run(t, deps, "/relay/meshcore-868/acl/000102030405/revoke")
-	if len(granted) != 2 || granted[1][1] != "revoke" ||
-		granted[1][0] != "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" {
+	if len(granted) != 3 || granted[2][1] != "revoke" ||
+		granted[2][0] != "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" {
 		t.Fatalf("revoke door saw %v", granted)
 	}
 }

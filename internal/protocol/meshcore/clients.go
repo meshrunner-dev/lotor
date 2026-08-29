@@ -45,21 +45,34 @@ type sessionsOrder struct {
 // contract, where a guest is not persisted.
 type aclOrder struct {
 	pubKey [meshcore.PubKeySize]byte
-	perms  byte
-	reply  chan error
+	// prefixLen says how much of pubKey was given — a removal may
+	// name its entry by prefix.
+	prefixLen int
+	perms     byte
+	reply     chan error
 }
 
+// ErrNoSuchEntry says a removal named nobody the table holds.
+var ErrNoSuchEntry = errors.New("no such entry")
+
 // Grant records a permission byte for a public key — the role in its
-// low bits, zero taking the entry away. The full key is required: a
-// permission set to a prefix could name the wrong node.
+// low bits, zero taking the entry away. Granting requires the whole
+// key, because a permission set to a prefix could name the wrong
+// node; removal accepts a prefix, exactly as the reference's
+// applyPermissions does — what is being destroyed is looked up, not
+// created.
 func (e *engine) Grant(pubKey []byte, perms byte) error {
 	if e.id == nil {
 		return errors.New("this relay has no identity — it grants nothing")
 	}
-	if len(pubKey) != meshcore.PubKeySize {
+	removing := perms&permRoleMask == permGuest
+	if !removing && len(pubKey) != meshcore.PubKeySize {
 		return fmt.Errorf("a permission needs the whole %d-byte key", meshcore.PubKeySize)
 	}
-	o := &aclOrder{perms: perms, reply: make(chan error, 1)}
+	if removing && (len(pubKey) == 0 || len(pubKey) > meshcore.PubKeySize) {
+		return fmt.Errorf("a removal needs 1..%d key bytes", meshcore.PubKeySize)
+	}
+	o := &aclOrder{perms: perms, prefixLen: len(pubKey), reply: make(chan error, 1)}
 	copy(o.pubKey[:], pubKey)
 	select {
 	case e.aclAsk <- o:
@@ -140,18 +153,44 @@ func (e *engine) accessListBody() []byte {
 	return body
 }
 
+// The role words, spelled once — RoleName and RoleByte are the two
+// directions of the same dictionary.
+const (
+	RoleAdmin     = "admin"
+	RoleReadWrite = "read-write"
+	RoleReadOnly  = "read-only"
+	RoleGuest     = "guest"
+)
+
+// RoleByte is RoleName backwards: the byte a role's word means, for
+// the channels that speak words. ok is false for a word no role
+// carries.
+func RoleByte(name string) (byte, bool) {
+	switch name {
+	case RoleAdmin:
+		return permAdmin, true
+	case RoleReadWrite:
+		return permReadWrite, true
+	case RoleReadOnly:
+		return permReadOnly, true
+	case RoleGuest:
+		return permGuest, true
+	}
+	return 0, false
+}
+
 // RoleName names the role a permission byte carries — the reference's
 // four, by the low two bits. The one place the words exist.
 func RoleName(perms byte) string {
 	switch perms & permRoleMask {
 	case permAdmin:
-		return "admin"
+		return RoleAdmin
 	case permReadWrite:
-		return "read-write"
+		return RoleReadWrite
 	case permReadOnly:
-		return "read-only"
+		return RoleReadOnly
 	default:
-		return "guest"
+		return RoleGuest
 	}
 }
 
@@ -176,9 +215,14 @@ func (e *engine) drainACLAsk() {
 func (e *engine) applyGrant(o *aclOrder) error {
 	if o.perms&permRoleMask == permGuest {
 		// A guest role is not a grant; setting it, like the reference,
-		// removes the entry entirely.
-		e.acl.remove(o.pubKey)
-		e.log.Info("permission revoked", zap.String("pubkey", shortKey(o.pubKey[:])))
+		// removes the entry entirely — the first prefix match, as its
+		// getClient answers.
+		k, found := e.acl.matchPrefix(o.pubKey[:o.prefixLen])
+		if !found {
+			return ErrNoSuchEntry
+		}
+		e.acl.remove(k)
+		e.log.Info("permission revoked", zap.String("pubkey", shortKey(k[:])))
 		return nil
 	}
 	secret, err := e.id.SharedSecret(o.pubKey[:])

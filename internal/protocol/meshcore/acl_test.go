@@ -1,6 +1,7 @@
 package meshcore
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -223,5 +224,30 @@ func TestAReadOnlyGrantIsNotAnAdmin(t *testing.T) {
 	c := e.acl.get(peer.PubKey[:])
 	if c == nil || c.isAdmin() {
 		t.Fatal("a read-only grant reached the admin role")
+	}
+}
+
+func TestARemovalMayNameItsEntryByPrefix(t *testing.T) {
+	// applyPermissions' split: destroying looks the entry up, so a
+	// prefix serves; creating writes one, so the whole key must be
+	// said. And a prefix that names nobody is an error, not a shrug.
+	e, dev, _, peer := txRig(t, "on-air")
+	e.AttachSessions(newMemStore())
+	runEngine(t, e, dev)
+
+	if err := e.Grant(peer.PubKey[:4], PermAdmin); err == nil {
+		t.Fatal("a grant by prefix was accepted")
+	}
+	if err := e.Grant(peer.PubKey[:], PermAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Grant(peer.PubKey[:4], PermGuest); err != nil {
+		t.Fatalf("removal by prefix refused: %v", err)
+	}
+	if e.acl.get(peer.PubKey[:]) != nil {
+		t.Error("the entry survived its prefix removal")
+	}
+	if err := e.Grant(peer.PubKey[:4], PermGuest); !errors.Is(err, ErrNoSuchEntry) {
+		t.Errorf("removing nobody answered %v", err)
 	}
 }

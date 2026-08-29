@@ -536,8 +536,9 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 		t.Errorf("get shape: %q", out)
 	}
 
-	// setperm queues a grant; a short key is refused before the queue.
-	if out := m.runOTA("mc", "air:test", "setperm abcd 3"); !strings.Contains(out, "ERR") {
+	// A grant needs the whole key — the reference's exact words —
+	// where a removal below may use a prefix.
+	if out := m.runOTA("mc", "air:test", "setperm abcd 3"); out != "Err - invalid params" {
 		t.Errorf("short setperm key got %q", out)
 	}
 	full := strings.Repeat("ab", 32)
@@ -555,11 +556,18 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	if g := <-m.air; g.perms != enginemc.PermReadOnly {
 		t.Errorf("read-only flattened: %+v", g)
 	}
-	// A guest role is the reference's word for removal.
+	// A guest role is the reference's word for removal — and removal
+	// alone may name its entry by prefix.
 	if out := m.runOTA("mc", "air:test", "setperm "+full+" 0"); out != "OK" {
 		t.Errorf("setperm revoke got %q", out)
 	}
 	if g := <-m.air; !g.grant || g.perms != enginemc.PermGuest {
 		t.Errorf("revoke order = %+v", g)
+	}
+	if out := m.runOTA("mc", "air:test", "setperm abcd 0"); out != "OK" {
+		t.Errorf("prefix removal got %q", out)
+	}
+	if g := <-m.air; g.perms != enginemc.PermGuest || len(g.pubKey) != 2 {
+		t.Errorf("prefix removal order = %+v", g)
 	}
 }

@@ -16,6 +16,7 @@ import (
 
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/protocol"
+	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 )
 
 // otaSetting maps one CommonCLI variable onto the attribute it means
@@ -208,19 +209,22 @@ func otaErr(err error) string {
 func (m *manager) otaSetperm(relay, principal, rest string) string {
 	keyHex, permStr, ok := strings.Cut(rest, " ")
 	if !ok {
-		return "ERR: bad params"
+		return "Err - bad params" // the reference's own words, all three
 	}
 	pub, err := hex.DecodeString(strings.TrimSpace(keyHex))
-	if err != nil || len(pub) != 32 {
-		return "ERR: bad pubkey"
+	if err != nil || len(pub) == 0 || len(pub) > 32 {
+		return "Err - bad pubkey"
 	}
 	perms, err := strconv.Atoi(strings.TrimSpace(permStr))
 	if err != nil || perms < 0 || perms > 255 {
-		return "ERR: bad perms"
+		return "Err - bad params"
 	}
-	// The byte travels whole — the reference's own vocabulary, a
-	// guest role meaning removal, read-only and read-write kept as
-	// what they are rather than flattened into admin.
+	// The byte travels whole — a guest role meaning removal, which
+	// alone may name its entry by prefix; a grant needs the whole
+	// key, exactly the reference's applyPermissions split.
+	if byte(perms)&enginemc.PermRoleMask != enginemc.PermGuest && len(pub) != 32 {
+		return "Err - invalid params"
+	}
 	return m.orderAir(airOrder{
 		relay: relay, principal: principal, grant: true, pubKey: pub, perms: byte(perms),
 	}, "OK")

@@ -831,7 +831,7 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		AirSessions:   airSessionsOf(eng),
 		Access:        accessOf(eng),
 		Grant:         grantOf(eng),
-		GrantAdmin:    roleDoor(eng, enginemc.PermAdmin),
+		GrantRole:     grantRoleOf(eng),
 		Revoke:        roleDoor(eng, enginemc.PermGuest),
 		Identity:      eng.Identity(),
 		Started:       time.Now(),
@@ -934,6 +934,23 @@ func accessOf(eng protocol.Engine) func() ([]cli.Access, error) {
 			}
 		}
 		return out, nil
+	}
+}
+
+// grantRoleOf translates a role's word at the boundary — RoleByte is
+// the one dictionary — and refuses granting the guest word, which is
+// a removal and has its own verb.
+func grantRoleOf(eng protocol.Engine) func(pubKey []byte, role string) error {
+	g := grantOf(eng)
+	if g == nil {
+		return nil
+	}
+	return func(pubKey []byte, role string) error {
+		perms, ok := enginemc.RoleByte(role)
+		if !ok || perms == enginemc.PermGuest {
+			return fmt.Errorf("no role %q — admin, read-write or read-only", role)
+		}
+		return g(pubKey, perms)
 	}
 }
 

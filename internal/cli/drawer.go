@@ -325,7 +325,7 @@ func (s *session) airSessionView(ctx context.Context, instance string, _ frameSe
 // airRole names what a companion may do here.
 func airRole(c AirSession) string {
 	if c.Admin {
-		return "admin"
+		return roleAdmin
 	}
 	return "guest"
 }

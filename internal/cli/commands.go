@@ -651,7 +651,7 @@ func (s *session) grantAccess(_ context.Context, in input) error {
 	if err := working(r); err != nil {
 		return err
 	}
-	if r.GrantAdmin == nil {
+	if r.GrantRole == nil {
 		return fmt.Errorf("relay %q grants nothing", r.Name)
 	}
 	key := in.opts[optKey]
@@ -662,10 +662,14 @@ func (s *session) grantAccess(_ context.Context, in input) error {
 	if err != nil || len(pub) != 32 {
 		return fmt.Errorf("%s wants a whole 64-character hex public key", optKey)
 	}
-	if err := r.GrantAdmin(pub); err != nil {
+	role := in.opts[optRole]
+	if role == "" {
+		role = roleAdmin
+	}
+	if err := r.GrantRole(pub, role); err != nil {
 		return err
 	}
-	fmt.Fprintf(s.out, "granted admin to %s\r\n", key[:12])
+	fmt.Fprintf(s.out, "granted %s to %s\r\n", role, key[:12])
 	return nil
 }
 

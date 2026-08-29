@@ -4,6 +4,7 @@ package meshcore
 // still ask before the node stops answering.
 
 import (
+	"bytes"
 	"time"
 
 	"meshrunner.dev/pkg/meshcore"
@@ -188,6 +189,30 @@ func (a *acl) evict() {
 	}
 	delete(a.by, oldest)
 	a.forget(oldest)
+}
+
+// matchPrefix finds the lowest-keyed entry a prefix names; found is
+// false when it names none.
+func (a *acl) matchPrefix(prefix []byte) (k [meshcore.PubKeySize]byte, found bool) {
+	for key := range a.by {
+		if len(prefix) > len(key) {
+			continue
+		}
+		hit := true
+		for i := range prefix {
+			if key[i] != prefix[i] {
+				hit = false
+				break
+			}
+		}
+		if !hit {
+			continue
+		}
+		if !found || bytes.Compare(key[:], k[:]) < 0 {
+			k, found = key, true
+		}
+	}
+	return k, found
 }
 
 // remove drops one entry from the table and the store.

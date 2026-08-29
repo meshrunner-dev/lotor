@@ -107,17 +107,20 @@ func accessCommands() []*command {
 	return []*command{
 		{
 			name:  cmdGrant,
-			forms: []form{{cmdGrant + " key=<hex>", "grant this key the admin role, no password shared"}},
+			forms: []form{{cmdGrant + " key=<hex> [role=admin]", "grant this key a role, no password shared"}},
 			detail: []string{
-				cmdGrant + " key=<64-hex>",
-				"admin only. It records an admin permission for a whole",
-				"public key — the node need not have logged in, and the",
-				"grant outlives idle where a login does not. The key must",
-				"be complete: a prefix could name the wrong node.",
+				cmdGrant + " key=<64-hex> [role=admin|read-write|read-only]",
+				"admin only. It records a permission for a whole public",
+				"key — the node need not have logged in, and the grant",
+				"outlives idle where a login does not. The key must be",
+				"complete: a prefix could name the wrong node. The role",
+				"defaults to admin; only admin opens the command channel.",
 			},
 			flags: []flagSpec{
 				{name: scopeRelay, valued: true, doc: docRelay},
 				{name: optKey, valued: true, doc: "the whole public key, 64 hex characters"},
+				{name: optRole, valued: true, doc: "admin, read-write or read-only (default admin)",
+					values: func(*session) []string { return []string{roleAdmin, roleReadWrite, roleReadOnly} }},
 			},
 			admin: true,
 			run:   (*session).grantAccess,

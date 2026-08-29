@@ -58,13 +58,19 @@ const (
 	cmdGrant     = "grant"
 	cmdRevoke    = "revoke"
 	optKey       = "key"
-	cmdAdvert    = "advert"
-	cmdUndo      = "undo"
-	verbList     = "list"
-	cmdJournal   = "journal"
-	cmdCheck     = "check"
-	cmdInstall   = "install"
-	kindUpdate   = "update"
+	optRole      = "role"
+	// The role words the console speaks — the boundary's RoleByte is
+	// the authority; a word it refuses is refused at the door.
+	roleAdmin     = "admin"
+	roleReadWrite = "read-write"
+	roleReadOnly  = "read-only"
+	cmdAdvert     = "advert"
+	cmdUndo       = "undo"
+	verbList      = "list"
+	cmdJournal    = "journal"
+	cmdCheck      = "check"
+	cmdInstall    = "install"
+	kindUpdate    = "update"
 	// helpWord asks about whatever it follows.
 	helpWord = "?"
 	// wordHelp and wordExit are the spelled-out halves of the two
@@ -164,11 +170,11 @@ type RelayInfo struct {
 	// value, passed through whole for the channels that carry one;
 	// nil when the protocol grants nothing.
 	Grant func(pubKey []byte, perms byte) error
-	// GrantAdmin and Revoke are the console's two words for the
-	// same door, wired from the protocol's named roles so no number
-	// ever appears here.
-	GrantAdmin func(pubKey []byte) error
-	Revoke     func(pubKey []byte) error
+	// GrantRole and Revoke are the console's words for the same door,
+	// the role spoken by name and translated at the boundary so no
+	// number ever appears here.
+	GrantRole func(pubKey []byte, role string) error
+	Revoke    func(pubKey []byte) error
 	// Duty reports the sliding-hour airtime spent against the band's
 	// budget; may be nil, ok false when unbudgeted or not transmitting.
 	Duty func() (used, budget time.Duration, ok bool)
