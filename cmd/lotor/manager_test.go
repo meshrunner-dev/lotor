@@ -5,8 +5,12 @@ import (
 	"strings"
 	"testing"
 
+	"maps"
+	"meshrunner.dev/lotor/internal/cli"
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/protocol"
+	"time"
 )
 
 func sampleFile() *config.File {
@@ -434,5 +438,91 @@ func TestRevisionSecretsScrubWhereverTheyNest(t *testing.T) {
 	// Idempotent: a masked journal stays put.
 	if scrubSecrets(c) {
 		t.Error("a masked journal was rewritten")
+	}
+}
+
+func TestViewsAnswerWhileTheLifecycleLockIsHeld(t *testing.T) {
+	// The discipline the freeze taught: everything a joined goroutine
+	// calls — the observer's health, the neighbourhood round, an
+	// over-the-air get — must answer while mu is held, because the
+	// holder of mu may be waiting for that very goroutine to die.
+	m := &manager{kinds: buildKinds(), file: &config.File{},
+		infos:  map[string]cli.RelayInfo{},
+		radios: map[string]cli.RadioInfo{},
+		traces: map[string][]config.Trace{},
+	}
+	m.viewMu.Lock()
+	m.infos["mc"] = cli.RelayInfo{Name: "mc", TXMode: config.TXOnAir}
+	m.traces["relay mc"] = []config.Trace{
+		{Key: "protocol", Value: "meshcore", Source: "config"},
+		{Key: "node_name", Value: "Raccoon City", Source: "override:eu"},
+	}
+	m.viewMu.Unlock()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	done := make(chan string, 3)
+	go func() {
+		h := m.observerHealth("mc")()
+		done <- "health " + h.Repeat
+	}()
+	go func() {
+		v, _ := m.relayValue("mc", "node_name")
+		done <- "get " + v
+	}()
+	go func() {
+		done <- m.otaGet("mc", "name")
+	}()
+	seen := map[string]bool{}
+	for range 3 {
+		select {
+		case v := <-done:
+			seen[v] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("a view blocked behind the lifecycle lock — got only %v", seen)
+		}
+	}
+	if !seen["health on"] || !seen["get Raccoon City"] || !seen["name: Raccoon City"] {
+		t.Errorf("views answered wrong: %v", seen)
+	}
+}
+
+func TestOTASetIsHonestAboutGarbage(t *testing.T) {
+	m := &manager{kinds: buildKinds(), file: &config.File{},
+		infos: map[string]cli.RelayInfo{}, radios: map[string]cli.RadioInfo{},
+		traces: map[string][]config.Trace{
+			"relay mc": {{Key: "protocol", Value: "meshcore", Source: "config"}},
+		},
+		air: make(chan airOrder, 4),
+	}
+	// The engine's own judgement needs the whole resolved shape: a
+	// real band preset, the name assembly insists on.
+	builder, err := protocol.Lookup("meshcore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]any{"node_name": "Raccoon City"}
+	maps.Copy(cfg, builder.Presets["eu-868-narrow"])
+	m.cfgs = map[string]map[string]any{"mc": cfg}
+	// A value the schema refuses earns its refusal now, not a false
+	// ok and a journal line the admin cannot see.
+	if out := m.runOTA("mc", "air:test", "set tx banana"); !strings.Contains(out, "refused") {
+		t.Errorf("garbage got %q", out)
+	}
+	if len(m.air) != 0 {
+		t.Fatal("garbage reached the air channel")
+	}
+	// A sound value is queued and answered optimistically.
+	if out := m.runOTA("mc", "air:test", "set tx 6"); !strings.Contains(out, "applied") {
+		t.Errorf("sound value got %q", out)
+	}
+	o := <-m.air
+	if o.set["tx_power_dbm"] != "6" || o.principal != "air:test" {
+		t.Errorf("order = %+v", o)
+	}
+	// The unknown-word answer names the word, not a stack.
+	if out := m.runOTA("mc", "air:test", "set warp 9"); !strings.Contains(out, "unknown setting") {
+		t.Errorf("unknown setting got %q", out)
 	}
 }

@@ -10,6 +10,9 @@ package main
 
 import (
 	"encoding/hex"
+
+	"meshrunner.dev/lotor/internal/confdb"
+	"meshrunner.dev/lotor/internal/protocol"
 	"strings"
 	"time"
 )
@@ -119,12 +122,52 @@ func (m *manager) otaSet(relay, principal, rest string) string {
 			return "repeat wants on or off"
 		}
 	}
+	// Validated here, synchronously and lock-free — the schema is
+	// immutable, the choice and the resolved configuration read from
+	// the view — so a bad value earns its honest refusal now instead
+	// of a false ok and a line in a journal the admin cannot see.
+	choice, _ := m.relayValue(relay, attrProtocol)
+	typed, err := m.parseAgainst(confdb.KindRelay, choice,
+		map[string]string{attr: value}, nil)
+	if err != nil {
+		return "refused: " + err.Error()
+	}
+	if msg := m.otaDeepCheck(choice, relay, attr, typed[attr]); msg != "" {
+		return msg
+	}
 	// Never Mutate from here: this runs in the engine's goroutine, and
 	// a relay bounce joins that very goroutine. The order goes to a
-	// goroutine that can safely bounce, the reply optimistic.
+	// goroutine that can safely bounce, the reply optimistic past this
+	// point — the deep cross-field checks run there, journalled.
 	return m.orderAir(airOrder{
 		relay: relay, principal: principal, set: map[string]string{attr: value},
 	}, "applied — "+name+" will change, relay restarting")
+}
+
+// otaDeepCheck runs the engine's own validation on a copy of the
+// relay's resolved configuration with one value changed — the same
+// judgement assembly passes, which is what makes "applied" honest.
+// The types the schema cannot pin (tx_power_dbm accepts "auto") only
+// this catches. Empty means sound; a relay with no snapshot — one
+// that failed assembly — skips the check, since the change may be
+// its cure.
+func (m *manager) otaDeepCheck(choice, relay, attr string, value any) string {
+	if strings.HasPrefix(attr, "tx.") {
+		return "" // the transmit block is the daemon's, not the engine's
+	}
+	cfg := m.relayCfgCopy(relay)
+	if cfg == nil {
+		return ""
+	}
+	builder, err := protocol.Lookup(choice)
+	if err != nil {
+		return ""
+	}
+	cfg[attr] = value
+	if err := builder.Check(cfg); err != nil {
+		return "refused: " + err.Error()
+	}
+	return ""
 }
 
 // otaAdvert announces this node, flooded or to the neighbourhood.

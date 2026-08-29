@@ -72,16 +72,29 @@ type manager struct {
 	logKnob   zap.AtomicLevel
 	bootLevel zapcore.Level
 
-	// air carries mutations ordered over the air to a goroutine that
-	// is not the engine's: a relay bounce joins the engine goroutine,
-	// so the engine may never wait on a mutation itself. snapMu — its
-	// own lock, never held across a bounce — guards the read-only
-	// view an over-the-air get answers from without touching mu.
-	air    chan airOrder
-	snapMu sync.RWMutex
-	snaps  map[string]map[string]string
+	// air carries the work ordered over the air to a goroutine that is
+	// not the engine's: a relay bounce joins the engine goroutine, so
+	// the engine may never wait on the manager itself.
+	air chan airOrder
 
+	// The two-lock discipline, written once and load-bearing.
+	//
+	// mu is the lifecycle lock: the configuration file, the running
+	// and observer tables, the store transaction, and the right to
+	// bounce — which waits for goroutines to die. Nothing that runs
+	// inside a joined goroutine (the engine loop, an observer's Run)
+	// may ever acquire it: the goroutine would be waiting for a lock
+	// whose holder is waiting for the goroutine.
+	//
+	// viewMu is the view lock, a leaf: it guards the live views alone
+	// (infos, radios, traces), is held only across map reads and
+	// writes — never across a join, a dial, or anything that blocks —
+	// and mu may be held when taking it, never the reverse. The
+	// closures the engine and the observers call (health, rounds,
+	// over-the-air gets) read under viewMu only, which is what makes
+	// them safe while a mutation holds mu and waits.
 	mu        sync.Mutex
+	viewMu    sync.RWMutex
 	ctx       context.Context //nolint:containedctx // the daemon's lifetime, set once at Start
 	file      *config.File
 	wg        sync.WaitGroup
@@ -90,6 +103,10 @@ type manager struct {
 	infos     map[string]cli.RelayInfo
 	radios    map[string]cli.RadioInfo
 	traces    map[string][]config.Trace
+	// cfgs holds each relay's resolved engine configuration, under
+	// viewMu with the rest of the view: the over-the-air deep check
+	// clones one and asks the protocol, exactly what assembly asks.
+	cfgs map[string]map[string]any
 }
 
 type managedRelay struct {
@@ -162,12 +179,12 @@ const airReplyGrace = 2 * time.Second
 // serveAirOrder carries out one order off the engine's goroutine.
 func (m *manager) serveAirOrder(ctx context.Context, o airOrder) {
 	if o.advert {
-		// The reply is already queued; the announcement can go at once.
-		// Reading the trigger takes mu, which is safe here — this is
-		// not the engine goroutine the trigger's ack loop runs in.
-		m.mu.Lock()
+		// The reply is already queued; the announcement can go at
+		// once. This is the manager's own goroutine — waiting on the
+		// engine's ack loop is safe here, joining nothing.
+		m.viewMu.RLock()
 		info, ok := m.infos[o.relay]
-		m.mu.Unlock()
+		m.viewMu.RUnlock()
 		if ok && info.TriggerAdvert != nil {
 			if err := info.TriggerAdvert(o.flood); err != nil {
 				m.log.Warn("over-the-air advert refused",
@@ -204,34 +221,31 @@ func (m *manager) orderAir(o airOrder, ok string) string {
 	}
 }
 
-// snapshotRelay caches a relay's effective values for lock-free
-// over-the-air reads, refreshed after every change under snapMu, which
-// no bounce ever holds. The caller holds mu.
-func (m *manager) snapshotRelay(name string) {
-	rows := m.traces["relay "+name]
-	snap := make(map[string]string, len(rows))
-	for _, t := range rows {
-		snap[t.Key] = fmt.Sprintf("%v", t.Value)
+// relayCfgCopy clones one relay's resolved engine configuration for
+// a what-if check — safe from any goroutine, the engine's included.
+func (m *manager) relayCfgCopy(relay string) map[string]any {
+	m.viewMu.RLock()
+	defer m.viewMu.RUnlock()
+	cfg, ok := m.cfgs[relay]
+	if !ok {
+		return nil
 	}
-	m.snapMu.Lock()
-	if m.snaps == nil {
-		m.snaps = map[string]map[string]string{}
-	}
-	m.snaps[name] = snap
-	m.snapMu.Unlock()
+	out := make(map[string]any, len(cfg))
+	maps.Copy(out, cfg)
+	return out
 }
 
-// relayValue reads one effective attribute from the lock-free
-// snapshot; ok is false when nothing is known.
+// relayValue reads one effective attribute from the live view — safe
+// from any goroutine, the engine's included.
 func (m *manager) relayValue(relay, attr string) (string, bool) {
-	m.snapMu.RLock()
-	defer m.snapMu.RUnlock()
-	snap, ok := m.snaps[relay]
-	if !ok {
-		return "", false
+	m.viewMu.RLock()
+	defer m.viewMu.RUnlock()
+	for _, t := range m.traces["relay "+relay] {
+		if t.Key == attr {
+			return fmt.Sprintf("%v", t.Value), true
+		}
 	}
-	v, ok := snap[attr]
-	return v, ok
+	return "", false
 }
 
 // Wait blocks until every relay has stopped — the shutdown's phase
@@ -254,6 +268,7 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 		m.log.Error("relay configuration failed",
 			zap.String("relay", name), zap.Error(err))
 		r = relay.Stillborn(name, err, m.bus, m.log)
+		m.viewMu.Lock()
 		m.infos[name] = cli.RelayInfo{
 			Name: name, Protocol: rc.Protocol, Radio: rc.Radio,
 			State: r.State, Err: r.Err,
@@ -262,15 +277,21 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 			// was meant to stay silent.
 			TXMode: rc.TXMode(),
 		}
+		m.viewMu.Unlock()
 	} else {
 		r = asm.relay
+		m.viewMu.Lock()
+		if m.cfgs == nil {
+			m.cfgs = map[string]map[string]any{}
+		}
+		m.cfgs[name] = asm.relayCfg
 		m.infos[name] = asm.info
 		m.radios[rc.Radio] = asm.radio
 		m.traces["radio "+rc.Radio] = withStructural(asm.radioTraces,
 			radioStructural(m.file.Radios[rc.Radio]))
 		m.traces["relay "+name] = withStructural(asm.relayTraces, relayStructural(rc))
+		m.viewMu.Unlock()
 	}
-	m.snapshotRelay(name)
 	rctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	m.running[name] = &managedRelay{cancel: cancel, done: done}
@@ -345,6 +366,8 @@ func (m *manager) stopRelay(name string) {
 func (m *manager) RelayInfos() []cli.RelayInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.viewMu.RLock()
+	defer m.viewMu.RUnlock()
 	out := make([]cli.RelayInfo, 0, len(m.infos))
 	for _, i := range m.infos {
 		out = append(out, i)
@@ -356,6 +379,8 @@ func (m *manager) RelayInfos() []cli.RelayInfo {
 func (m *manager) RadioInfos() []cli.RadioInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.viewMu.RLock()
+	defer m.viewMu.RUnlock()
 	out := make([]cli.RadioInfo, 0, len(m.radios))
 	for _, i := range m.radios {
 		out = append(out, i)
@@ -374,8 +399,10 @@ func (m *manager) RadioInfos() []cli.RadioInfo {
 func (m *manager) Traces() map[string][]config.Trace {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.viewMu.RLock()
 	out := make(map[string][]config.Trace, len(m.traces)+2)
 	maps.Copy(out, m.traces)
+	m.viewMu.RUnlock()
 	// A radio nobody claims yet has no assembly to trace, but it is
 	// configuration all the same: resolve its layers without hardware
 	// so print and export see it like any other.
@@ -1212,7 +1239,9 @@ func (m *manager) Remove(ctx context.Context, kind, name, principal string) (str
 	m.file = next
 	if kind == confdb.KindRelay {
 		m.stopRelay(name)
+		m.viewMu.Lock()
 		delete(m.infos, name)
+		delete(m.cfgs, name)
 		delete(m.traces, "relay "+name)
 		for radioName, info := range m.radios {
 			if info.Relay == name {
@@ -1220,6 +1249,7 @@ func (m *manager) Remove(ctx context.Context, kind, name, principal string) (str
 				delete(m.traces, "radio "+radioName)
 			}
 		}
+		m.viewMu.Unlock()
 	}
 	if kind == confdb.KindMQTT {
 		m.stopObserver(name)

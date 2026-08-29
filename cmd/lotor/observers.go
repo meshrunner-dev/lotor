@@ -116,7 +116,9 @@ func (m *manager) observerConfig(name string, p mqtt.Params, log *zap.Logger) (m
 	if err != nil {
 		return mqtt.Config{}, err
 	}
+	m.viewMu.RLock()
 	info, ok := m.infos[relayName]
+	m.viewMu.RUnlock()
 	if !ok {
 		return mqtt.Config{}, fmt.Errorf("relay %q is not assembled", relayName)
 	}
@@ -227,9 +229,9 @@ func observerDial(p mqtt.Params, name string, info cli.RelayInfo,
 func (m *manager) neighboursRound(relayName string, log *zap.Logger,
 ) func(ctx context.Context) ([]mqtt.NeighborEntry, int, bool) {
 	return func(ctx context.Context) ([]mqtt.NeighborEntry, int, bool) {
-		m.mu.Lock()
+		m.viewMu.RLock()
 		info, ok := m.infos[relayName]
-		m.mu.Unlock()
+		m.viewMu.RUnlock()
 		if !ok || info.Neighbours == nil {
 			return nil, 0, false
 		}
@@ -348,9 +350,12 @@ func joinScanWindow(ctx context.Context, info cli.RelayInfo, log *zap.Logger) bo
 // successor answers, not a captured pointer to its predecessor.
 func (m *manager) observerHealth(relayName string) func() mqtt.Health {
 	return func() mqtt.Health {
-		m.mu.Lock()
+		// viewMu, never mu: this runs inside the observer's Run loop,
+		// which stopObserver joins while holding mu — the heartbeat
+		// racing a bounce used to deadlock the whole daemon here.
+		m.viewMu.RLock()
 		info, ok := m.infos[relayName]
-		m.mu.Unlock()
+		m.viewMu.RUnlock()
 		h := mqtt.Health{}
 		if !ok {
 			return h
@@ -404,7 +409,10 @@ func (m *manager) startObserver(ctx context.Context, name string) {
 	}
 	connects := make(chan struct{}, 1)
 	cfg.Connects = connects
-	broker, err := mqtt.Dial(observerDial(p, name, m.infos[cfg.Relay], connects, log), log)
+	m.viewMu.RLock()
+	dialInfo := m.infos[cfg.Relay]
+	m.viewMu.RUnlock()
+	broker, err := mqtt.Dial(observerDial(p, name, dialInfo, connects, log), log)
 	if err != nil {
 		log.Error("observer not started", zap.Error(err))
 		return

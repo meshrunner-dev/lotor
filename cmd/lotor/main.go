@@ -734,6 +734,9 @@ type assembled struct {
 	radio       cli.RadioInfo
 	radioTraces []config.Trace
 	relayTraces []config.Trace
+	// relayCfg is the resolved engine configuration, kept for the
+	// lock-free deep check an over-the-air set runs on a copy.
+	relayCfg map[string]any
 }
 
 // otaRunner runs one administration line for a logged-in admin and
@@ -790,8 +793,9 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 	}
 	r := relay.New(name, res.drv, res.radioCfg, eng, b, log, rc.NoiseHistory, policy.Mode)
 	return &assembled{
-		relay: r,
-		info:  relayInfo(name, rc, radioSpec, r, eng),
+		relay:    r,
+		relayCfg: res.relayCfg,
+		info:     relayInfo(name, rc, radioSpec, r, eng),
 		radio: cli.RadioInfo{
 			Name: rc.Radio, Driver: radioSpec.Driver, Envelope: env, Relay: name,
 		},
