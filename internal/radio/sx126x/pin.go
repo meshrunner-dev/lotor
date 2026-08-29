@@ -4,6 +4,7 @@ package sx126x
 
 import (
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 
@@ -60,15 +61,22 @@ func (p Pin) String() string {
 }
 
 // Resolve fills in the board's default chip for a pin that named
-// none, and canonicalises the chip's spelling: the GPIO library reads
-// "gpiochip0" and "/dev/gpiochip0" as the same chip, so this seam
-// must too — two spellings of one line used to pass the uniqueness
-// check and fail deterministically at acquisition, where the kernel
-// hands a line to a single requester.
+// none, and canonicalises the chip's spelling the way the kernel will
+// read it: the GPIO library prefixes a relative name with /dev/, and
+// open(2) collapses "." and repeated separators, so "gpiochip0",
+// "/dev/gpiochip0", "./gpiochip0" and "/dev//gpiochip0" all name one
+// chip. This seam must reach the same identity — purely lexically,
+// symlinks excluded — or two spellings of one line pass the
+// uniqueness check and fail deterministically at acquisition, where
+// the kernel hands a line to a single requester.
 func (p Pin) Resolve(defaultChip string) Pin {
 	if p.Chip == "" {
 		p.Chip = defaultChip
 	}
-	p.Chip = strings.TrimPrefix(p.Chip, "/dev/")
+	full := p.Chip
+	if !strings.HasPrefix(full, "/") {
+		full = "/dev/" + full
+	}
+	p.Chip = strings.TrimPrefix(path.Clean(full), "/dev/")
 	return p
 }

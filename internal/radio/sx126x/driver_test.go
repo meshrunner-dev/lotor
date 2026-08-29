@@ -295,13 +295,19 @@ func TestGpiochipSpellingsCollapse(t *testing.T) {
 	// The GPIO library reads "gpiochip0" and "/dev/gpiochip0" as the
 	// same chip; two spellings of one line used to pass the
 	// uniqueness check and fail at acquisition.
-	cfg := board()
-	cfg["reset_pin"] = "gpiochip0:16"
-	cfg["busy_pin"] = "/dev/gpiochip0:16"
-	if _, err := Inspect(cfg); err == nil {
-		t.Fatal("two spellings of the same GPIO line were accepted")
-	} else if !strings.Contains(err.Error(), "one line serves one role") {
-		t.Errorf("refused for the wrong reason: %v", err)
+	// The lexical aliases open(2) collapses — "." and repeated
+	// separators — must collapse here too, not just the /dev/ prefix.
+	for _, alias := range []string{
+		"/dev/gpiochip0:16", "./gpiochip0:16", "/dev/./gpiochip0:16", "/dev//gpiochip0:16",
+	} {
+		cfg := board()
+		cfg["reset_pin"] = "gpiochip0:16"
+		cfg["busy_pin"] = alias
+		if _, err := Inspect(cfg); err == nil {
+			t.Errorf("%q beside gpiochip0:16 was accepted — one chip, two spellings", alias)
+		} else if !strings.Contains(err.Error(), "one line serves one role") {
+			t.Errorf("%q refused for the wrong reason: %v", alias, err)
+		}
 	}
 	// And the canonical form is what settings carry from then on.
 	ok := board()
