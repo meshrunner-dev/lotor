@@ -16,26 +16,36 @@ jobs:
   meta:
     runs-on: ubuntu-latest
     outputs:
-      ref: ${{ steps.m.outputs.ref }}
+      sha: ${{ steps.m.outputs.sha }}
       slug: ${{ steps.m.outputs.slug }}
       version: ${{ steps.m.outputs.version }}
     steps:
+      - uses: actions/checkout@v4
       - id: m
+        # The mutable ref resolves to a SHA exactly ONCE, here; every
+        # later job pins that SHA. The version's date is the commit's,
+        # so a rerun of the same source mints the same identity.
         run: |
           ref="${{ inputs.ref }}"
           case "$ref" in
-            pr/*) slug="pr-${ref#pr/}"; ref="refs/pull/${ref#pr/}/head" ;;
-            *)    slug="branch-$(echo "$ref" | tr -c 'a-zA-Z0-9' '-' | tr -s '-' | sed 's/-$//')" ;;
+            pr/*) slug="pr-${ref#pr/}"; remote="refs/pull/${ref#pr/}/head" ;;
+            *)    slug="branch-$(echo "$ref" | tr -c 'a-zA-Z0-9' '-' | tr -s '-' | sed 's/-$//')"
+                  remote="refs/heads/$ref" ;;
           esac
-          { echo "ref=$ref"; echo "slug=$slug"
-            echo "version=0.1.0-try.${slug}.$(date -u +%Y%m%d%H%M%S)"; } >> "$GITHUB_OUTPUT"
+          sha="$(git ls-remote origin "$remote" | cut -f1)"
+          [ -n "$sha" ] || { echo "no commit at $remote"; exit 1; }
+          git fetch --depth 1 origin "$sha"
+          stamp="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d%H%M%S "$sha")"
+          { echo "sha=$sha"; echo "slug=$slug"
+            echo "version=0.0.0-try.${slug}.${stamp}.${sha::12}"; } >> "$GITHUB_OUTPUT"
 
   build:
     needs: meta
     uses: ./.github/workflows/build.yml
     with:
       version: ${{ needs.meta.outputs.version }}
-      ref: ${{ needs.meta.outputs.ref }}
+      ref: ${{ needs.meta.outputs.sha }}
+      expected_sha: ${{ needs.meta.outputs.sha }}
 
   publish:
     needs: [meta, build]

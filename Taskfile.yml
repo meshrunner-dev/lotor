@@ -72,16 +72,38 @@ tasks:
       - go build -tags lean ./...
 
   build:
-    desc: Build the daemon into ./bin
+    desc: Build the daemon into ./bin, through the one shared recipe
     cmds:
-      - go build -o bin/ ./cmd/...
+      - ./scripts/build -o bin/lotor
 
   build:arm64:
     desc: Cross-compile the daemon for a 64-bit ARM board
     cmds:
-      - GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o bin/lotor-arm64 ./cmd/lotor
+      - ./scripts/build -o bin/lotor-arm64 -goos linux -goarch arm64
 
   build:arm:
     desc: Cross-compile the daemon for a 32-bit ARM board (Cortex-A7 and up)
     cmds:
-      - GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o bin/lotor-arm ./cmd/lotor
+      - ./scripts/build -o bin/lotor-arm -goos linux -goarch arm -goarm 7
+
+  build:info:
+    desc: Build then print the binary's own account of itself
+    cmds:
+      - ./scripts/build -o bin/lotor
+      - go version -m bin/lotor
+      - bin/lotor version
+
+  build:repro:
+    desc: "Reproducibility proof: two clean builds must be byte-identical (publication path, not the per-commit gate)"
+    cmds:
+      - |
+        a="$(mktemp -d)"; b="$(mktemp -d)"
+        trap 'rm -rf "$a" "$b"' EXIT
+        ./scripts/build -o "$a/lotor" -goos linux -goarch arm64
+        ./scripts/build -o "$b/lotor" -goos linux -goarch arm64
+        ha="$(sha256sum "$a/lotor" | cut -d' ' -f1)"
+        hb="$(sha256sum "$b/lotor" | cut -d' ' -f1)"
+        if [ "$ha" != "$hb" ]; then
+          echo "build is not reproducible: $ha != $hb"; exit 1
+        fi
+        echo "reproducible: $ha"

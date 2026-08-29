@@ -1,7 +1,9 @@
 # The one build every channel shares: a matrix of platforms, the
 # version stamped into the binary, artifacts handed back to whichever
 # workflow called. Channels differ in what they do with the result,
-# never in how it was built.
+# never in how it was built — the recipe is scripts/build, the same
+# one `task build` runs on a laptop, and every binary is verified
+# against its own embedded metadata before it leaves.
 name: build
 on:
   workflow_call:
@@ -10,6 +12,13 @@ on:
         required: true
         type: string
       ref:
+        required: false
+        type: string
+        default: ""
+      # expected_sha pins a mutable ref: after checkout, HEAD must be
+      # exactly this commit — a branch that moved between jobs must
+      # fail, not silently build something else under the same name.
+      expected_sha:
         required: false
         type: string
         default: ""
@@ -27,19 +36,30 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+      - name: Pin the resolved commit
+        if: inputs.expected_sha != ''
+        run: |
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "${{ inputs.expected_sha }}" ]; then
+            echo "HEAD is $head, the caller resolved ${{ inputs.expected_sha }}"; exit 1
+          fi
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
       - name: Build
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          GOARM: ${{ matrix.goarm }}
-          CGO_ENABLED: "0"
         run: |
-          go build -trimpath \
-            -ldflags "-s -w -X meshrunner.dev/lotor/internal/version.Version=${{ inputs.version }}" \
-            -o "lotor_${{ matrix.goos }}_${{ matrix.goarch }}" ./cmd/lotor
+          slug="$(go run ./internal/product/cmd/meta -field slug)"
+          ./scripts/build -o "${slug}_${{ matrix.goos }}_${{ matrix.goarch }}" \
+            -version "${{ inputs.version }}" \
+            -goos "${{ matrix.goos }}" -goarch "${{ matrix.goarch }}" \
+            -goarm "${{ matrix.goarm }}"
+      - name: Verify the binary against its own metadata
+        run: |
+          slug="$(go run ./internal/product/cmd/meta -field slug)"
+          ./.github/scripts/verify-binary.sh \
+            "${slug}_${{ matrix.goos }}_${{ matrix.goarch }}" \
+            "${{ inputs.version }}" "$(git rev-parse HEAD)" \
+            "${{ matrix.goos }}" "${{ matrix.goarch }}" "${{ matrix.goarm }}"
       - uses: actions/upload-artifact@v4
         with:
           name: lotor_${{ matrix.goos }}_${{ matrix.goarch }}

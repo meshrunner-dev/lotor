@@ -20,7 +20,18 @@ key="$1" file="$2"
 s3() { aws s3api "$1" --endpoint-url "$S3_ENDPOINT" --bucket "$S3_BUCKET" "${@:2}"; }
 
 if s3 head-object --key "$key" >/dev/null 2>&1; then
-  echo "s3://${S3_BUCKET}/${key} already exists — artifacts are immutable, refusing" >&2
+  # Reproducible builds make reruns legitimate: an object already
+  # present with EXACTLY these bytes is the same publication, accepted
+  # idempotently. The same name over different bytes stays the error
+  # it always was.
+  tmp="$(mktemp)"
+  trap 'rm -f "$tmp"' EXIT
+  s3 get-object --key "$key" "$tmp" >/dev/null
+  if cmp -s "$tmp" "$file"; then
+    echo "s3://${S3_BUCKET}/${key} already holds these exact bytes — idempotent, ok"
+    exit 0
+  fi
+  echo "s3://${S3_BUCKET}/${key} exists with DIFFERENT bytes — refusing" >&2
   exit 1
 fi
 # Immutable bytes may say so to every cache on the way.

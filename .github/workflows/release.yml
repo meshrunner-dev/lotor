@@ -25,13 +25,16 @@ jobs:
             *-*)      echo "unknown pre-release suffix in $tag"; exit 1 ;;
             *)        channels="release rc beta"; prerelease=false ;;
           esac
-          { echo "version=$tag"; echo "channels=$channels"; echo "prerelease=$prerelease"; } >> "$GITHUB_OUTPUT"
+          # The product version drops the tag's v prefix; the update
+          # comparator tolerates both, so old manifests stay valid.
+          { echo "version=${tag#v}"; echo "channels=$channels"; echo "prerelease=$prerelease"; } >> "$GITHUB_OUTPUT"
 
   build:
     needs: meta
     uses: ./.github/workflows/build.yml
     with:
       version: ${{ needs.meta.outputs.version }}
+      expected_sha: ${{ github.sha }}
 
   publish:
     needs: [meta, build]

@@ -19,14 +19,22 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
+      - uses: actions/checkout@v4
       - id: v
-        run: echo "version=0.1.0-dev.$(date -u +%Y%m%d%H%M%S).${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+        # The date is the COMMIT's, not the job's: the version is a
+        # function of the source, and a rerun mints the same identity.
+        run: |
+          stamp="$(git show -s --format=%cd --date=format-local:%Y%m%d%H%M%S "$GITHUB_SHA")"
+          echo "version=0.0.0-dev.${stamp}.${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+        env:
+          TZ: UTC
 
   build:
     needs: version
     uses: ./.github/workflows/build.yml
     with:
       version: ${{ needs.version.outputs.version }}
+      expected_sha: ${{ github.sha }}
 
   publish:
     needs: [version, build]
