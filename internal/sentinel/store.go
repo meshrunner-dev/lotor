@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	// Pure-Go SQLite: the daemon cross-compiles with CGO disabled.
@@ -73,6 +74,13 @@ CREATE TABLE IF NOT EXISTS tx (
 	power_dbm  INTEGER NOT NULL,
 	shadow     INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS tx_drop_events (
+	at_ms  INTEGER NOT NULL,
+	relay  TEXT NOT NULL,
+	txn    TEXT NOT NULL,
+	reason TEXT NOT NULL,
+	kind   TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS tx_drops (
 	relay      TEXT NOT NULL,
 	reason     TEXT NOT NULL,
@@ -119,6 +127,8 @@ CREATE INDEX IF NOT EXISTS frames_verdict ON frames(verdict);
 CREATE INDEX IF NOT EXISTS relay_states_at ON relay_states(at_ms);
 CREATE INDEX IF NOT EXISTS observer_states_at ON observer_states(at_ms);
 CREATE INDEX IF NOT EXISTS tx_txn ON tx(txn);
+CREATE INDEX IF NOT EXISTS tx_drop_events_txn ON tx_drop_events(txn);
+CREATE INDEX IF NOT EXISTS tx_drop_events_at ON tx_drop_events(at_ms);
 CREATE INDEX IF NOT EXISTS tx_at ON tx(at_ms);
 CREATE INDEX IF NOT EXISTS metrics_raw_key ON metrics_raw(series, relay, at_ms);
 `
@@ -152,6 +162,18 @@ type store struct {
 }
 
 func openStore(ctx context.Context, path string) (*store, error) {
+	if path != MemoryJournal {
+		// Born 0600: the journal holds no key, but hours, routes,
+		// node names, key prefixes and TX activity are telemetry the
+		// other local accounts have no business reading — and the WAL
+		// sidecars inherit the main file's mode.
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			// #nosec G304 -- the journal's own path
+			if f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err == nil {
+				_ = f.Close()
+			}
+		}
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -263,53 +285,21 @@ func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]boo
 	return cols, rows.Err()
 }
 
-func (s *store) insertHeard(ctx context.Context, f Frame) error {
-	// The upsert touches only the heard columns: a redelivered
-	// FrameHeard must not blank a judgement already applied.
+// insertObserved lands one reception and its verdict as the single
+// row they are: the archive event carries both, so a bus drop can no
+// longer strand a row without its verdict or a verdict without its
+// reception — the two halves of the old heard/judged pair.
+func (s *store) insertObserved(ctx context.Context, f Frame) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO frames (txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms, signal_dbm, freq_err_hz)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(txn) DO UPDATE SET
-		   relay = excluded.relay, at_ms = excluded.at_ms, bytes = excluded.bytes,
-		   rssi_dbm = excluded.rssi_dbm, snr_db = excluded.snr_db,
-		   airtime_ms = excluded.airtime_ms, signal_dbm = excluded.signal_dbm,
-		   freq_err_hz = excluded.freq_err_hz`,
+		`INSERT OR REPLACE INTO frames (txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms,
+		        signal_dbm, freq_err_hz, ptype, route, scope, path_len, verdict, duplicate_of,
+		        node, pubkey, detail)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		f.Txn, f.Relay, f.At.UnixMilli(), f.Bytes, f.RSSI, f.SNR,
 		float64(f.Airtime)/float64(time.Millisecond), f.SignalRSSI, f.FreqErrHz,
-	)
-	return err
-}
-
-// errJudgementOrphan reports a judgement whose heard row never made
-// the journal (a bus drop between the two events); the row is created
-// from the judgement so the frame is not lost twice.
-var errJudgementOrphan = errors.New("judgement arrived for a frame the journal never heard")
-
-func (s *store) applyJudgement(ctx context.Context, txn string, relay string, f Frame) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE frames SET ptype = ?, route = ?, scope = ?, path_len = ?, verdict = ?, duplicate_of = ?,
-		        node = ?, pubkey = ?, detail = ?
-		 WHERE txn = ?`,
 		f.Type, f.Route, f.Scope, f.PathLen, f.Verdict, f.DuplicateOf,
-		f.Node, f.PubKey, f.Detail, txn,
-	)
-	if err != nil {
-		return err
-	}
-	if n, err := res.RowsAffected(); err == nil && n == 0 {
-		// The single writer makes this insert race-free; the heard
-		// columns it cannot know are zeroed, honestly absent.
-		if _, ierr := s.db.ExecContext(ctx,
-			`INSERT INTO frames (txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms,
-			        ptype, route, scope, path_len, verdict, duplicate_of, node, pubkey, detail)
-			 VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			txn, relay, time.Now().UnixMilli(), f.Type, f.Route, f.Scope, f.PathLen,
-			f.Verdict, f.DuplicateOf, f.Node, f.PubKey, f.Detail); ierr != nil {
-			return ierr
-		}
-		return errJudgementOrphan
-	}
-	return nil
+		f.Node, f.PubKey, f.Detail)
+	return err
 }
 
 // recordCorrupt counts a corrupt reception. One aggregate row per
@@ -390,7 +380,7 @@ const (
 // rollupMetrics ages the tiers: raw older than a day consolidates into
 // hourly buckets, hourly older than the journal's retention into daily
 // ones, and daily rows fall off after two years.
-func (s *store) rollupMetrics(ctx context.Context, now time.Time, retention time.Duration) error {
+func (s *store) rollupMetrics(ctx context.Context, now time.Time, retention, metricsRetention time.Duration) error {
 	// One transaction per pass: a consolidation folds rows into a
 	// bucket and then deletes them, so a crash between the two would
 	// double that bucket's count for good — the tiers are supposed to
@@ -417,8 +407,11 @@ func (s *store) rollupMetrics(ctx context.Context, now time.Time, retention time
 		`DELETE FROM metrics_hourly WHERE at_ms < ?`, hourlyCut); err != nil {
 		return err
 	}
+	if metricsRetention <= 0 {
+		metricsRetention = metricDailyKeep
+	}
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM metrics_daily WHERE at_ms < ?`, now.Add(-metricDailyKeep).UnixMilli()); err != nil {
+		`DELETE FROM metrics_daily WHERE at_ms < ?`, now.Add(-metricsRetention).UnixMilli()); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -516,7 +509,9 @@ func (s *store) insertObserverState(ctx context.Context, at time.Time, observer,
 // bounded in time always and in size when asked. The metrics tiers age
 // in the same pass. Freed pages go back to the filesystem where
 // auto_vacuum applies.
-func (s *store) prune(ctx context.Context, now time.Time, retention time.Duration, maxFrames int) error {
+func (s *store) prune(ctx context.Context, now time.Time,
+	retention, metricsRetention time.Duration, maxFrames int,
+) error {
 	cutoff := now.Add(-retention).UnixMilli()
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM frames WHERE at_ms < ?`, cutoff); err != nil {
 		return err
@@ -530,6 +525,9 @@ func (s *store) prune(ctx context.Context, now time.Time, retention time.Duratio
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM tx WHERE at_ms < ?`, cutoff); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM tx_drop_events WHERE at_ms < ?`, cutoff); err != nil {
+		return err
+	}
 	if maxFrames > 0 {
 		if _, err := s.db.ExecContext(ctx,
 			`DELETE FROM frames WHERE txn IN (
@@ -538,7 +536,7 @@ func (s *store) prune(ctx context.Context, now time.Time, retention time.Duratio
 			return err
 		}
 	}
-	if err := s.rollupMetrics(ctx, now, retention); err != nil {
+	if err := s.rollupMetrics(ctx, now, retention, metricsRetention); err != nil {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `PRAGMA incremental_vacuum;`)
@@ -953,13 +951,62 @@ func (s *store) TxSince(ctx context.Context, since time.Time) ([]Sent, error) {
 
 // recordTxDrop tallies one refused emission by reason — bounded rows,
 // like the corrupt tally.
-func (s *store) recordTxDrop(ctx context.Context, at time.Time, relay, reason string) error {
-	_, err := s.db.ExecContext(ctx,
+// recordTxDrop journals one refused emission — the event with its
+// transaction, and the by-reason tally — in one transaction, so the
+// aggregate can never disagree with the events it summarises. The
+// events answer "what happened to txn X"; the tally answers "what
+// does this site lose to".
+func (s *store) recordTxDrop(ctx context.Context, at time.Time, relay, txn, reason, kind string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO tx_drop_events (at_ms, relay, txn, reason, kind) VALUES (?, ?, ?, ?, ?)`,
+		at.UnixMilli(), relay, txn, reason, kind); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO tx_drops (relay, reason, count, last_at_ms) VALUES (?, ?, 1, ?)
 		 ON CONFLICT(relay, reason) DO UPDATE SET
 		   count = count + 1, last_at_ms = excluded.last_at_ms`,
-		relay, reason, at.UnixMilli())
-	return err
+		relay, reason, at.UnixMilli()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// TxDropEvent is one refused emission, as the journal remembers it.
+type TxDropEvent struct {
+	At     time.Time
+	Relay  string
+	Txn    string
+	Reason string
+	Kind   string
+}
+
+// DropsFor lists the refusals recorded under one transaction prefix,
+// oldest first — the missing half of the heard → judged → sent chain.
+func (s *store) DropsFor(ctx context.Context, txnPrefix string) ([]TxDropEvent, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT at_ms, relay, txn, reason, kind FROM tx_drop_events
+		  WHERE txn LIKE ? || '%' ORDER BY at_ms`, txnPrefix)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []TxDropEvent
+	for rows.Next() {
+		var e TxDropEvent
+		var at int64
+		if err := rows.Scan(&at, &e.Relay, &e.Txn, &e.Reason, &e.Kind); err != nil {
+			return nil, err
+		}
+		e.At = time.UnixMilli(at)
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // TxDrop is one relay's refusal tally for one reason.

@@ -391,6 +391,7 @@ func (e *engine) queueLen() int {
 func (e *engine) dropRateLimited(origin txn.ID) {
 	e.bus.Publish(bus.TxDropped{
 		Relay: e.relay, Txn: origin, At: time.Now(), Reason: reasonRateLimited,
+		Kind: "answer",
 	})
 }
 

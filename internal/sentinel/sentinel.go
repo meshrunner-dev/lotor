@@ -6,7 +6,8 @@ package sentinel
 
 import (
 	"context"
-	"errors"
+	"fmt"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -18,14 +19,24 @@ const pruneEvery = time.Hour
 
 // Sentinel journals bus traffic into its store.
 type Sentinel struct {
-	store       *store
-	bus         *bus.Bus
-	sub         *bus.Subscription
-	log         *zap.Logger
-	retention   time.Duration
-	maxFrames   int
-	journalPath string
-	reported    uint64
+	store            *store
+	bus              *bus.Bus
+	sub              *bus.Subscription
+	log              *zap.Logger
+	retention        time.Duration
+	metricsRetention time.Duration
+	maxFrames        int
+	journalPath      string
+	reported         uint64
+	// The journal's health, kept where any goroutine may read it: the
+	// consumer writes, status and heartbeats read. warnedAt paces the
+	// failure logs on the consumer goroutine alone.
+	writes   atomic.Uint64
+	failures atomic.Uint64
+	degraded atomic.Bool
+	lastErr  atomic.Value // string
+	lastFail atomic.Int64 // unix ms
+	warnedAt time.Time
 	// txWindows tracks each relay's sliding-hour airtime, feeding the
 	// tx_airtime series. Consumer-goroutine state, like the store.
 	txWindows map[string][]txStamp
@@ -61,7 +72,7 @@ func (s *Sentinel) txWindow(relay string, at time.Time, air time.Duration) time.
 
 // Open prepares the journal. The path may be MemoryJournal for hosts
 // whose storage dislikes continuous writes.
-func Open(ctx context.Context, journalPath string, retention time.Duration,
+func Open(ctx context.Context, journalPath string, retention, metricsRetention time.Duration,
 	maxFrames int, b *bus.Bus, log *zap.Logger,
 ) (*Sentinel, error) {
 	st, err := openStore(ctx, journalPath)
@@ -73,8 +84,8 @@ func Open(ctx context.Context, journalPath string, retention time.Duration,
 	// breath, the daemon's opening relay states included.
 	sen := &Sentinel{
 		store: st, bus: b, sub: b.Subscribe(256),
-		log: log, retention: retention, maxFrames: maxFrames,
-		journalPath: journalPath,
+		log: log, retention: retention, metricsRetention: metricsRetention,
+		maxFrames: maxFrames, journalPath: journalPath,
 	}
 	sen.seedTxWindows(ctx)
 	return sen, nil
@@ -196,10 +207,22 @@ func (s *Sentinel) TxDrops(ctx context.Context) ([]TxDrop, error) {
 	return s.store.TxDrops(ctx)
 }
 
-// Journal reports where the archive lives and how long it reaches.
+// DropsFor lists the refusals recorded under one transaction prefix —
+// the missing half of the heard → judged → sent chain.
+func (s *Sentinel) DropsFor(ctx context.Context, txnPrefix string) ([]TxDropEvent, error) {
+	return s.store.DropsFor(ctx, txnPrefix)
+}
+
+// Journal reports where the archive lives and how long it reaches —
+// the detailed depth. The consolidated metric tiers reach further, by
+// design; MetricsRetention names that depth honestly.
 func (s *Sentinel) Journal() (path string, retention time.Duration) {
 	return s.journalPath, s.retention
 }
+
+// MetricsRetention is how long the consolidated hourly/daily metric
+// tiers reach — the long game the detailed retention does not bound.
+func (s *Sentinel) MetricsRetention() time.Duration { return s.metricsRetention }
 
 // Run consumes the bus until the context ends, then drains what the
 // subscription still buffers before closing the store — the last
@@ -217,8 +240,12 @@ func (s *Sentinel) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			// The daemon's context is done; the drain writes must not
-			// be — hence the detached context.
-			s.drain(context.WithoutCancel(ctx))
+			// be — detached, but BOUNDED: a filesystem that hangs must
+			// not hold the whole shutdown hostage to save at most a
+			// buffer's worth of events.
+			dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), drainBudget)
+			s.drain(dctx)
+			cancel()
 			return
 		case ev, ok := <-s.sub.C:
 			if !ok {
@@ -233,10 +260,17 @@ func (s *Sentinel) Run(ctx context.Context) {
 	}
 }
 
+// drainBudget bounds the shutdown drain.
+const drainBudget = 5 * time.Second
+
 // drain journals everything still buffered. The caller sequences the
 // shutdown so publishers are already stopped.
 func (s *Sentinel) drain(ctx context.Context) {
 	for {
+		if ctx.Err() != nil {
+			s.reportDrops()
+			return
+		}
 		select {
 		case ev := <-s.sub.C:
 			s.Process(ctx, ev)
@@ -262,16 +296,17 @@ func (s *Sentinel) reportDrops() {
 func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 	var err error
 	switch e := ev.(type) {
-	case bus.FrameHeard:
-		err = s.store.insertHeard(ctx, Frame{
+	case bus.FrameJudged:
+		// The one archive event: it carries the reception AND the
+		// verdict, so a backpressure drop loses a whole frame or
+		// nothing — never a row stranded halfway. FrameHeard stays on
+		// the bus for the live consumers and is not journalled.
+		err = s.store.insertObserved(ctx, Frame{
 			Txn: e.Txn.String(), Relay: e.Relay, At: e.At,
 			Bytes: e.Bytes, RSSI: e.RSSI, SNR: e.SNR,
 			SignalRSSI: e.SignalRSSI, FreqErrHz: e.FreqErrHz,
 			Airtime: e.Airtime,
-		})
-	case bus.FrameJudged:
-		err = s.store.applyJudgement(ctx, e.Txn.String(), e.Relay, Frame{
-			Type: e.Type, Route: e.Route, Scope: e.Scope, PathLen: e.PathLen,
+			Type:    e.Type, Route: e.Route, Scope: e.Scope, PathLen: e.PathLen,
 			Verdict: e.Verdict, DuplicateOf: e.DuplicateOf,
 			Node: e.Node, PubKey: e.PubKey, Detail: e.Detail,
 		})
@@ -297,7 +332,7 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 				s.txWindow(e.Relay, e.At, e.Airtime).Seconds())
 		}
 	case bus.TxDropped:
-		err = s.store.recordTxDrop(ctx, e.At, e.Relay, e.Reason)
+		err = s.store.recordTxDrop(ctx, e.At, e.Relay, e.Txn.String(), e.Reason, e.Kind)
 	case bus.RelayState:
 		err = s.store.insertRelayState(ctx, e.At, e.Relay, e.State, e.Err)
 	case bus.ObserverState:
@@ -305,16 +340,73 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 	default:
 		return
 	}
-	switch {
-	case errors.Is(err, errJudgementOrphan):
-		s.log.Warn("journal recovered an orphan judgement — its heard event was dropped")
-	case err != nil:
-		s.log.Warn("journal write failed", zap.Error(err))
-	}
+	s.recordOutcome(ev, err)
 }
 
 func (s *Sentinel) pruneNow(ctx context.Context) {
-	if err := s.store.prune(ctx, time.Now(), s.retention, s.maxFrames); err != nil {
+	if err := s.store.prune(ctx, time.Now(), s.retention, s.metricsRetention, s.maxFrames); err != nil {
 		s.log.Warn("journal prune failed", zap.Error(err))
 	}
+}
+
+// healthLogEvery paces the degraded journal's own noise: a disk that
+// refuses every write under RF traffic must not earn a WARN per
+// frame — that log volume is itself disk pressure, feeding the very
+// saturation it reports.
+const healthLogEvery = 30 * time.Second
+
+// recordOutcome tallies one write and keeps the failure story honest:
+// the FIRST failure logs at once, the rest fold into paced deltas,
+// and the recovery is announced — a journal that fell sick and got
+// better must say both, or a log rotation erases the whole episode.
+func (s *Sentinel) recordOutcome(ev bus.Event, err error) {
+	if err == nil {
+		s.writes.Add(1)
+		if s.degraded.CompareAndSwap(true, false) {
+			s.log.Info("journal recovered",
+				zap.Uint64("writes_failed", s.failures.Load()))
+		}
+		return
+	}
+	s.failures.Add(1)
+	s.lastErr.Store(err.Error())
+	s.lastFail.Store(time.Now().UnixMilli())
+	first := s.degraded.CompareAndSwap(false, true)
+	if first || time.Since(s.warnedAt) >= healthLogEvery {
+		s.warnedAt = time.Now()
+		s.log.Warn("journal write failed",
+			zap.String("event", fmt.Sprintf("%T", ev)),
+			zap.Uint64("failures", s.failures.Load()),
+			zap.Bool("first", first),
+			zap.Error(err))
+	}
+}
+
+// Health is the journal's condition as outside readers see it.
+type Health struct {
+	Healthy  bool
+	Writes   uint64
+	Failures uint64
+	// BusDropped counts the events the journal never even received —
+	// backpressure at the subscription.
+	BusDropped uint64
+	LastErr    string
+	LastFailAt time.Time
+}
+
+// Health reports the journal's condition — any goroutine.
+func (s *Sentinel) Health() Health {
+	h := Health{
+		Healthy:    !s.degraded.Load(),
+		Writes:     s.writes.Load(),
+		Failures:   s.failures.Load(),
+		BusDropped: s.sub.Dropped(),
+	}
+	if e, ok := s.lastErr.Load().(string); ok {
+		h.LastErr = e
+	}
+	if ms := s.lastFail.Load(); ms != 0 {
+		h.LastFailAt = time.UnixMilli(ms)
+	}
+	return h
 }

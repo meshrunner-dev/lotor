@@ -247,7 +247,7 @@ func (e *engine) enqueueAfter(pkt *meshcore.Packet, kind string, origin txn.ID,
 		e.log.Warn("tx queue full, dropping", zap.String("kind", kind),
 			zap.String("txn", origin.Short()))
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Txn: origin, At: time.Now(), Reason: "queue-full",
+			Relay: e.relay, Txn: origin, At: time.Now(), Reason: "queue-full", Kind: kind,
 		})
 		return false
 	}
@@ -679,7 +679,7 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 		return nil
 	}
 	log := e.log.With(zap.String("txn", entry.origin.Short()), zap.String("kind", entry.kind))
-	outcome, err := e.clearChannel(ctx, dev, log, entry.origin)
+	outcome, err := e.clearChannel(ctx, dev, log, entry.origin, entry.kind)
 	switch {
 	case err != nil:
 		e.dropOnFault(ctx, entry.origin, err)
@@ -694,7 +694,7 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	if err != nil {
 		log.Warn("tx marshal failed", zap.Error(err))
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: "malformed",
+			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: "malformed", Kind: entry.kind,
 		})
 		return nil
 	}
@@ -805,7 +805,7 @@ func (e *engine) requeue(entry txEntry) {
 		e.log.Warn("radio busy receiving past the LBT bound, dropping",
 			zap.String("txn", entry.origin.Short()), zap.String("kind", entry.kind))
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Txn: entry.origin, At: now, Reason: "lbt",
+			Relay: e.relay, Txn: entry.origin, At: now, Reason: "lbt", Kind: entry.kind,
 		})
 		return
 	}
@@ -817,7 +817,7 @@ func (e *engine) requeue(entry txEntry) {
 		lbtRetryNominal/2 + rand.N(lbtRetryNominal)) //nolint:gosec // backoff jitter, not security
 	if !e.queue.push(entry) {
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Txn: entry.origin, At: now, Reason: "queue-full",
+			Relay: e.relay, Txn: entry.origin, At: now, Reason: "queue-full", Kind: entry.kind,
 		})
 	}
 }
@@ -827,7 +827,7 @@ func (e *engine) requeue(entry txEntry) {
 // mesh's convention) or a counted drop. A refusal because the radio
 // is receiving ends the wait early: the frame in hand comes first.
 func (e *engine) clearChannel(ctx context.Context, dev radio.Device, log *zap.Logger,
-	origin txn.ID,
+	origin txn.ID, kind string,
 ) (lbtOutcome, error) {
 	if !e.policy.CAD {
 		// The reference's own default posture: key and let the mesh's
@@ -852,7 +852,7 @@ func (e *engine) clearChannel(ctx context.Context, dev radio.Device, log *zap.Lo
 			if e.policy.LBTExhausted == "drop" {
 				log.Warn("channel busy past the LBT bound, dropping")
 				e.bus.Publish(bus.TxDropped{
-					Relay: e.relay, Txn: origin, At: time.Now(), Reason: "lbt",
+					Relay: e.relay, Txn: origin, At: time.Now(), Reason: "lbt", Kind: kind,
 				})
 				return lbtDrop, nil
 			}
@@ -877,7 +877,7 @@ func (e *engine) clearChannel(ctx context.Context, dev radio.Device, log *zap.Lo
 func (e *engine) dropQueued(reason string) {
 	for _, entry := range e.queue.entries {
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: reason,
+			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: reason, Kind: entry.kind,
 		})
 	}
 	if n := len(e.queue.entries); n > 0 {
@@ -993,14 +993,14 @@ func (e *engine) admitDuty(dev radio.Device, entry txEntry) bool {
 		e.log.Warn("duty budget refuses the emission, dropping",
 			zap.String("kind", entry.kind), zap.String("txn", entry.origin.Short()))
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: "duty",
+			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: "duty", Kind: entry.kind,
 		})
 		return false
 	}
 	entry.notBefore = freeAt
 	if !e.queue.push(entry) {
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: "duty",
+			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: "duty", Kind: entry.kind,
 		})
 	}
 	return false

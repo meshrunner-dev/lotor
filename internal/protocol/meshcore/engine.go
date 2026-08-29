@@ -869,13 +869,27 @@ func (e *engine) heard(frame radio.Frame) (txn.ID, *zap.Logger) {
 	return id, log
 }
 
+// judgedEvent seeds a verdict event with the reception it is about:
+// the journal archives on this one event, so it must carry everything
+// FrameHeard measured.
+func (e *engine) judgedEvent(id txn.ID, frame radio.Frame) bus.FrameJudged {
+	return bus.FrameJudged{
+		Relay: e.relay, Txn: id, At: frame.At,
+		Bytes: len(frame.Payload), RSSI: frame.RSSI, SNR: frame.SNR,
+		SignalRSSI: frame.SignalRSSI, FreqErrHz: frame.FreqErrHz,
+		Airtime: frame.Airtime,
+	}
+}
+
 func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 	e.stats.countFrame()
 	id, log := e.heard(frame)
 	pkt, err := meshcore.ParsePacket(frame.Payload)
 	if err != nil {
 		log.Info("frame judged", zap.String("verdict", verdictMalformed), zap.Error(err))
-		e.bus.Publish(bus.FrameJudged{Relay: e.relay, Txn: id, Verdict: verdictMalformed})
+		j := e.judgedEvent(id, frame)
+		j.Verdict = verdictMalformed
+		e.bus.Publish(j)
 		return
 	}
 	// The version gate stands here, where the reference's dispatcher
@@ -885,11 +899,11 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 	// wearing a version we reject was still naming neighbours.
 	if unsupportedVersion(pkt) {
 		log.Info("frame judged", zap.String("verdict", verdictBadVersion))
-		e.bus.Publish(bus.FrameJudged{
-			Relay: e.relay, Txn: id, Verdict: verdictBadVersion,
-			Type: pkt.PayloadType().String(), Route: pkt.Route().String(),
-			PathLen: pkt.PathHashCount(),
-		})
+		j := e.judgedEvent(id, frame)
+		j.Verdict = verdictBadVersion
+		j.Type, j.Route = pkt.PayloadType().String(), pkt.Route().String()
+		j.PathLen = pkt.PathHashCount()
+		e.bus.Publish(j)
 		return
 	}
 	// The score hold, the reference dispatcher's gesture: a flood we
@@ -921,12 +935,10 @@ func (e *engine) process(dev radio.Device, pkt *meshcore.Packet, frame radio.Fra
 		zap.Int("hops", hops),
 	)
 
-	judged := bus.FrameJudged{
-		Relay: e.relay, Txn: id,
-		Type:    pkt.PayloadType().String(),
-		Route:   pkt.Route().String(),
-		PathLen: hops,
-	}
+	judged := e.judgedEvent(id, frame)
+	judged.Type = pkt.PayloadType().String()
+	judged.Route = pkt.Route().String()
+	judged.PathLen = hops
 	rx := &reception{pkt: pkt, frame: frame, id: id}
 	judged.Scope = e.regionName(rx)
 	log = log.With(describe(rx, &judged, e.id)...)

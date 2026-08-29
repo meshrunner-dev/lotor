@@ -1087,7 +1087,7 @@ func TestABusySpellStartsOnceAndEndsOnAClearChannel(t *testing.T) {
 	}
 	// A clear channel ends it, so sparse refusals never accumulate
 	// into a drop the way a continuous spell does.
-	if _, err := e.clearChannel(context.Background(), dev, zap.NewNop(), txn.New()); err != nil {
+	if _, err := e.clearChannel(context.Background(), dev, zap.NewNop(), txn.New(), "test"); err != nil {
 		t.Fatalf("clearChannel: %v", err)
 	}
 	if !e.busySince.IsZero() {
@@ -1371,7 +1371,7 @@ func TestTheCADKnobIsADeclaredDivergence(t *testing.T) {
 	log := zap.NewNop()
 
 	// On — this node's default — the busy channel is waited out.
-	outcome, err := e.clearChannel(context.Background(), dev, log, txn.New())
+	outcome, err := e.clearChannel(context.Background(), dev, log, txn.New(), "test")
 	if err != nil || outcome != lbtGo {
 		t.Fatalf("outcome %v err %v", outcome, err)
 	}
@@ -1383,7 +1383,7 @@ func TestTheCADKnobIsADeclaredDivergence(t *testing.T) {
 	// radio at all, and the frame is keyed straight away.
 	e.policy.CAD = false
 	dev.busy = 3
-	outcome, err = e.clearChannel(context.Background(), dev, log, txn.New())
+	outcome, err = e.clearChannel(context.Background(), dev, log, txn.New(), "test")
 	if err != nil || outcome != lbtGo {
 		t.Fatalf("with CAD off: outcome %v err %v", outcome, err)
 	}

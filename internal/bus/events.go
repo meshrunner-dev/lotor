@@ -27,11 +27,24 @@ type FrameHeard struct {
 	Airtime time.Duration
 }
 
-// FrameJudged is the protocol engine's verdict on a heard frame.
+// FrameJudged is the protocol engine's verdict on a heard frame —
+// and the journal's whole record of it: it carries the reception's
+// own measurements, so the archive lands in ONE event. FrameHeard
+// remains the live feed; a backpressure drop of either event can no
+// longer leave a row forever without its verdict, or a verdict
+// without its reception.
 type FrameJudged struct {
 	Relay   string
 	Txn     txn.ID
 	Verdict string
+	// The reception the verdict is about, as FrameHeard carried it.
+	At         time.Time
+	Bytes      int
+	RSSI       float64
+	SNR        float64
+	SignalRSSI float64
+	FreqErrHz  float64
+	Airtime    time.Duration
 	// DuplicateOf links a suppressed frame to the transaction that
 	// carried the first copy, so log chains can be followed.
 	DuplicateOf string
@@ -87,6 +100,10 @@ type TxDropped struct {
 	Txn    txn.ID
 	At     time.Time
 	Reason string
+	// Kind names what was refused — the queue entry's kind, or the
+	// would-be answer's for refusals that never composed a packet.
+	// Empty when the pipeline gave up before it knew.
+	Kind string
 }
 
 // NoiseFloor is a relay channel's measured ambient level — what the

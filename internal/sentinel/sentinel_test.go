@@ -3,6 +3,7 @@ package sentinel
 import (
 	"context"
 	"database/sql"
+	"os"
 	"testing"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 
 func testSentinel(t *testing.T) *Sentinel {
 	t.Helper()
-	s, err := Open(context.Background(), MemoryJournal, time.Hour, 0, bus.New(), zap.NewNop())
+	s, err := Open(context.Background(), MemoryJournal, time.Hour, 0, 0, bus.New(), zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,17 +24,19 @@ func testSentinel(t *testing.T) *Sentinel {
 }
 
 func TestHeardThenJudgedBecomesOneRow(t *testing.T) {
+	// The judged event carries the reception whole — one event, one
+	// row, atomically: a bus drop can no longer strand a row without
+	// its verdict or a verdict without its reception. FrameHeard is
+	// the live feed and is not journalled at all.
 	s := testSentinel(t)
 	id := txn.New()
 	at := time.Now()
 
-	s.Process(context.Background(), bus.FrameHeard{
+	s.Process(context.Background(), bus.FrameHeard{Relay: "meshcore-868", Txn: id, At: at})
+	s.Process(context.Background(), bus.FrameJudged{
 		Relay: "meshcore-868", Txn: id, At: at,
 		Bytes: 132, RSSI: -69, SNR: 8.5, SignalRSSI: -74, FreqErrHz: 112,
 		Airtime: 1295 * time.Millisecond,
-	})
-	s.Process(context.Background(), bus.FrameJudged{
-		Relay: "meshcore-868", Txn: id,
 		Verdict: "would-relay-flood", Type: "ADVERT", Route: "FLOOD", PathLen: 6,
 		Node: "Wanadoo", PubKey: "de1234567890", Detail: "repeater",
 	})
@@ -57,8 +60,8 @@ func TestHeardThenJudgedBecomesOneRow(t *testing.T) {
 func TestShortPrefixFindsItsTransaction(t *testing.T) {
 	s := testSentinel(t)
 	id := txn.New()
-	s.Process(context.Background(), bus.FrameHeard{Relay: "r", Txn: id, At: time.Now()})
-	s.Process(context.Background(), bus.FrameHeard{Relay: "r", Txn: txn.New(), At: time.Now()})
+	s.Process(context.Background(), bus.FrameJudged{Relay: "r", Txn: id, At: time.Now()})
+	s.Process(context.Background(), bus.FrameJudged{Relay: "r", Txn: txn.New(), At: time.Now()})
 
 	frames, err := s.RecentFrames(context.Background(), FrameQuery{TxnPrefix: id.Short(), Limit: 10})
 	if err != nil {
@@ -73,10 +76,10 @@ func TestRetentionPrunes(t *testing.T) {
 	s := testSentinel(t)
 	old := txn.New()
 	fresh := txn.New()
-	s.Process(context.Background(), bus.FrameHeard{Relay: "r", Txn: old, At: time.Now().Add(-2 * time.Hour)})
-	s.Process(context.Background(), bus.FrameHeard{Relay: "r", Txn: fresh, At: time.Now()})
+	s.Process(context.Background(), bus.FrameJudged{Relay: "r", Txn: old, At: time.Now().Add(-2 * time.Hour)})
+	s.Process(context.Background(), bus.FrameJudged{Relay: "r", Txn: fresh, At: time.Now()})
 
-	if err := s.store.prune(context.Background(), time.Now(), time.Hour, 0); err != nil {
+	if err := s.store.prune(context.Background(), time.Now(), time.Hour, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	frames, err := s.RecentFrames(context.Background(), FrameQuery{Limit: 10})
@@ -160,7 +163,7 @@ func TestMetricsRollUpThroughTheTiers(t *testing.T) {
 		s.Process(ctx, bus.NoiseFloor{Relay: "meshcore-868", At: p.at, DBm: p.dbm})
 	}
 	// Retention of 24h: the 48h-old hourly bucket ages into daily.
-	if err := s.store.prune(ctx, now, 24*time.Hour, 0); err != nil {
+	if err := s.store.prune(ctx, now, 24*time.Hour, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -395,11 +398,104 @@ func TestMigrateGraftsEveryColumnAddedSince(t *testing.T) {
 	}
 	// And the grafted journal takes today's writes.
 	s := &Sentinel{store: st}
-	s.Process(ctx, bus.FrameHeard{
+	s.Process(ctx, bus.FrameJudged{
 		Relay: "r", Txn: txn.New(), At: time.Now(), SignalRSSI: -70, FreqErrHz: 12})
 	s.Process(ctx, bus.NoiseFloor{Relay: "r", At: time.Now(), DBm: -100, SpreadDB: 3})
 	frames, err := st.RecentFrames(ctx, FrameQuery{Limit: 5})
 	if err != nil || len(frames) != 1 || frames[0].SignalRSSI != -70 {
 		t.Fatalf("frames = %+v, %v", frames, err)
+	}
+}
+
+func TestDropsKeepTheirTransaction(t *testing.T) {
+	// The chain's missing half: a refusal is findable by its txn, and
+	// the by-reason tally moves in the same transaction.
+	s := testSentinel(t)
+	ctx := context.Background()
+	id := txn.New()
+	at := time.Now()
+	s.Process(ctx, bus.TxDropped{Relay: "r", Txn: id, At: at, Reason: "duty", Kind: "relay-flood"})
+	s.Process(ctx, bus.TxDropped{Relay: "r", Txn: txn.New(), At: at, Reason: "duty", Kind: "advert-flood"})
+
+	events, err := s.DropsFor(ctx, id.Short())
+	if err != nil || len(events) != 1 {
+		t.Fatalf("DropsFor = %+v, %v", events, err)
+	}
+	e := events[0]
+	if e.Txn != id.String() || e.Reason != "duty" || e.Kind != "relay-flood" ||
+		e.At.UnixMilli() != at.UnixMilli() {
+		t.Errorf("event = %+v", e)
+	}
+	drops, err := s.TxDrops(ctx)
+	if err != nil || len(drops) != 1 || drops[0].Count != 2 {
+		t.Errorf("aggregate = %+v, %v", drops, err)
+	}
+	// Retention prunes the events like every detailed row.
+	if err := s.store.prune(ctx, at.Add(2*time.Hour), time.Hour, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if events, _ := s.DropsFor(ctx, id.Short()); len(events) != 0 {
+		t.Error("the drop events escaped retention")
+	}
+}
+
+func TestJournalHealthTellsTheStoryOnce(t *testing.T) {
+	// A hundred failing writes are one WARN and a paced delta, not a
+	// log storm feeding the disk saturation that caused them — and
+	// the recovery is announced, so a rotated log cannot erase the
+	// whole episode.
+	s := testSentinel(t)
+	ctx := context.Background()
+	_ = s.store.Close() // every write now fails
+
+	for range 100 {
+		s.Process(ctx, bus.FrameJudged{Relay: "r", Txn: txn.New(), At: time.Now()})
+	}
+	h := s.Health()
+	if h.Healthy || h.Failures != 100 || h.LastErr == "" || h.LastFailAt.IsZero() {
+		t.Errorf("health = %+v", h)
+	}
+	// warnedAt was set by the first failure and the rest fold: the
+	// throttle state proves at most 1 log in the burst window.
+	if time.Since(s.warnedAt) > time.Second {
+		t.Error("the throttle never armed")
+	}
+}
+
+func TestMetricsRetentionBoundsTheDailyTier(t *testing.T) {
+	s := testSentinel(t)
+	ctx := context.Background()
+	old := time.Now().Add(-72 * time.Hour)
+	if err := s.store.insertMetric(ctx, "noise_floor", "r", old, -100); err != nil {
+		t.Fatal(err)
+	}
+	// A short metrics retention sweeps what the fixed two-year keep
+	// used to hold forever.
+	if err := s.store.prune(ctx, time.Now(), time.Hour, 24*time.Hour, 0); err != nil {
+		t.Fatal(err)
+	}
+	buckets, err := s.NoiseHistory(ctx, "r", time.Now().Add(-30*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 0 {
+		t.Errorf("buckets = %+v — the metric outlived metrics_retention", buckets)
+	}
+}
+
+func TestJournalIsBornPrivate(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir() + "/journal.db"
+	st, err := openStore(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("journal mode = %o, want 600 — telemetry is not for every local account", info.Mode().Perm())
 	}
 }

@@ -109,6 +109,7 @@ func (e *engine) respondDiscover(dev radio.Device, pkt *meshcore.Packet, origin 
 		e.log.Debug("discovery response rate-limited", zap.String("txn", origin.Short()))
 		e.bus.Publish(bus.TxDropped{
 			Relay: e.relay, Txn: origin, At: time.Now(), Reason: reasonRateLimited,
+			Kind: "discover-response",
 		})
 		return
 	}
