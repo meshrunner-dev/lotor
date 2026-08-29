@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS acl(
   out_path_len   INTEGER,
   learned        TEXT,
   last_active    TEXT NOT NULL,
+  granted        INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(relay, pubkey)
 );
 INSERT INTO meta(key, value) VALUES('schema_version', '1')

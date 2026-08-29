@@ -8,7 +8,10 @@ package meshcore
 
 import (
 	"errors"
+	"fmt"
 	"time"
+
+	"go.uber.org/zap"
 
 	"meshrunner.dev/pkg/meshcore"
 )
@@ -32,6 +35,122 @@ type ClientSession struct {
 // sessionsOrder asks the pipeline for a snapshot of the client table.
 type sessionsOrder struct {
 	reply chan []ClientSession
+}
+
+// aclOrder carries a grant or revoke into the pipeline's goroutine,
+// which owns the table. A grant with role guest, or perms zero, is a
+// revoke — the reference's setperm, where a guest role is not
+// persisted and so means removal.
+type aclOrder struct {
+	pubKey [meshcore.PubKeySize]byte
+	perms  byte
+	revoke bool
+	reply  chan error
+}
+
+// Grant records or lifts a permission for a public key — an admin
+// naming another admin, or taking the grant back. The full key is
+// required: a permission set to a prefix could name the wrong node.
+func (e *engine) Grant(pubKey []byte, perms byte, revoke bool) error {
+	if e.id == nil {
+		return errors.New("this relay has no identity — it grants nothing")
+	}
+	if len(pubKey) != meshcore.PubKeySize {
+		return fmt.Errorf("a permission needs the whole %d-byte key", meshcore.PubKeySize)
+	}
+	o := &aclOrder{perms: perms, revoke: revoke, reply: make(chan error, 1)}
+	copy(o.pubKey[:], pubKey)
+	select {
+	case e.aclAsk <- o:
+	default:
+		return errors.New("a permission change is already pending")
+	}
+	e.wakeReceiver()
+	select {
+	case err := <-o.reply:
+		return err
+	case <-time.After(askWait):
+		return errors.New("the relay never picked the permission change up")
+	}
+}
+
+// ACLEntry is one grant or session, as the console shows the access
+// list: who, what role, whether it was granted or merely logged in,
+// and how fresh.
+type ACLEntry struct {
+	PubKey     [meshcore.PubKeySize]byte
+	Admin      bool
+	Granted    bool
+	LastActive time.Time
+}
+
+// AccessList reports the grants and live sessions — any goroutine.
+func (e *engine) AccessList() ([]ACLEntry, error) {
+	o := &aclListOrder{reply: make(chan []ACLEntry, 1)}
+	select {
+	case e.aclListAsk <- o:
+	default:
+		return nil, errors.New("an access-list snapshot is already pending")
+	}
+	e.wakeReceiver()
+	select {
+	case rows := <-o.reply:
+		return rows, nil
+	case <-time.After(askWait):
+		return nil, errors.New("the relay never picked the access-list snapshot up")
+	}
+}
+
+// aclListOrder asks the pipeline for the access list.
+type aclListOrder struct {
+	reply chan []ACLEntry
+}
+
+// drainACLAsk serves a pending grant or revoke, on the pipeline's
+// turn. The secret is computed here so a granted admin can be reached
+// before it has ever logged in — the reference calcs it at setperm.
+func (e *engine) drainACLAsk() {
+	select {
+	case o := <-e.aclAsk:
+		o.reply <- e.applyGrant(o)
+	default:
+	}
+	select {
+	case o := <-e.aclListAsk:
+		o.reply <- e.acl.entries()
+	default:
+	}
+}
+
+// applyGrant carries out one grant or revoke on the table the
+// pipeline owns.
+func (e *engine) applyGrant(o *aclOrder) error {
+	if o.revoke || o.perms&permRoleMask == permGuest {
+		// A guest role is not a grant; setting it, like the reference,
+		// removes the entry entirely.
+		e.acl.remove(o.pubKey)
+		e.log.Info("permission revoked", zap.String("pubkey", shortKey(o.pubKey[:])))
+		return nil
+	}
+	secret, err := e.id.SharedSecret(o.pubKey[:])
+	if err != nil {
+		return err
+	}
+	c := e.acl.get(o.pubKey[:])
+	if c == nil {
+		c = &client{asks: rateLimiter{max: e.p.SessionLimit, window: sessionLimitWindow}}
+		c.pubKey = o.pubKey
+	}
+	c.secret = secret
+	c.perms = (c.perms &^ permRoleMask) | (o.perms & permRoleMask)
+	c.granted = true
+	if c.lastActive.IsZero() {
+		c.lastActive = time.Now()
+	}
+	e.acl.put(c)
+	e.log.Info("permission granted",
+		zap.String("pubkey", shortKey(o.pubKey[:])), zap.Bool("admin", c.isAdmin()))
+	return nil
 }
 
 // ClientSessions reports the logged-in companions — any goroutine.

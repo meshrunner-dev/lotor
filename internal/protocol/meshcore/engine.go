@@ -204,6 +204,10 @@ type engine struct {
 	// sweepUntil mirrors the open window's end for readers outside
 	// the loop — zero when no scan listens.
 	sweepUntil atomic.Int64
+	// aclAsk carries a grant or revoke, aclListAsk a request for the
+	// whole access list, both served on the pipeline's own turn.
+	aclAsk     chan *aclOrder
+	aclListAsk chan *aclListOrder
 	// sessionsAsk carries the console's request for a snapshot of the
 	// client table. It asks for no emission, so unlike the others it
 	// is served whatever the gate's mode.
@@ -394,6 +398,8 @@ func newEngine(relayName string, p params, id *meshcore.LocalIdentity,
 		neighbours:  newNeighbourTable(),
 		acl:         newACL(nil),
 		sessionsAsk: make(chan *sessionsOrder, 1),
+		aclAsk:      make(chan *aclOrder, 1),
+		aclListAsk:  make(chan *aclListOrder, 1),
 		limits:      newLimits(),
 		scopes:      newScopeTable(p),
 	}
@@ -486,6 +492,7 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 	}
 	for {
 		e.drainSessionsAsk(time.Now())
+		e.drainACLAsk()
 		// Reception blocks until the pipeline next needs the radio —
 		// the queue's earliest schedule or an advert clock. Nothing
 		// pending means no deadline at all.
@@ -539,7 +546,7 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 	var rctx context.Context
 	var cancel context.CancelFunc
 	switch wait, ok := e.txWait(time.Now()); {
-	case len(e.sessionsAsk) > 0:
+	case len(e.sessionsAsk) > 0 || len(e.aclAsk) > 0 || len(e.aclListAsk) > 0:
 		rctx, cancel = context.WithDeadline(ctx, time.Now())
 	case !e.txEnabled():
 		rctx, cancel = context.WithCancel(ctx)

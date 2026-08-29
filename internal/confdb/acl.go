@@ -27,6 +27,8 @@ type ACLRow struct {
 	OutPathLen uint8
 	Learned    time.Time
 	LastActive time.Time
+	// Granted marks a permission set explicitly, which outlives idle.
+	Granted bool
 }
 
 // LoadACL reads one relay's sessions, freshest bound applied by the
@@ -34,7 +36,7 @@ type ACLRow struct {
 // stale is the engine's policy, not the disk's.
 func (s *Store) LoadACL(ctx context.Context, relay string) ([]ACLRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT pubkey, perms, last_timestamp, out_path, out_path_len, learned, last_active
+		`SELECT pubkey, perms, last_timestamp, out_path, out_path_len, learned, last_active, granted
 		   FROM acl WHERE relay = ?`, relay)
 	if err != nil {
 		return nil, err
@@ -47,10 +49,12 @@ func (s *Store) LoadACL(ctx context.Context, relay string) ([]ACLRow, error) {
 		var outPath []byte
 		var outLen sql.NullInt64
 		var learned, lastActive sql.NullString
+		var granted int64
 		if err := rows.Scan(&r.PubKey, &perms, &lastTS, &outPath, &outLen,
-			&learned, &lastActive); err != nil {
+			&learned, &lastActive, &granted); err != nil {
 			return nil, err
 		}
+		r.Granted = granted != 0
 		r.Perms = byte(perms)
 		r.LastTimestamp = uint32(lastTS)
 		r.OutPath = outPath
@@ -83,15 +87,20 @@ func (s *Store) SaveACL(ctx context.Context, relay string, r ACLRow) error {
 	if r.HasOut {
 		outLen = int64(r.OutPathLen)
 	}
+	granted := int64(0)
+	if r.Granted {
+		granted = 1
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO acl(relay, pubkey, perms, last_timestamp, out_path, out_path_len, learned, last_active)
-		   VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO acl(relay, pubkey, perms, last_timestamp, out_path, out_path_len, learned, last_active, granted)
+		   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(relay, pubkey) DO UPDATE SET
 		   perms = excluded.perms, last_timestamp = excluded.last_timestamp,
 		   out_path = excluded.out_path, out_path_len = excluded.out_path_len,
-		   learned = excluded.learned, last_active = excluded.last_active`,
+		   learned = excluded.learned, last_active = excluded.last_active,
+		   granted = excluded.granted`,
 		relay, r.PubKey, int64(r.Perms), int64(r.LastTimestamp),
-		r.OutPath, outLen, learned, r.LastActive.UTC().Format(time.RFC3339Nano))
+		r.OutPath, outLen, learned, r.LastActive.UTC().Format(time.RFC3339Nano), granted)
 	return err
 }
 

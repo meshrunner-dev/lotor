@@ -15,6 +15,7 @@ import (
 type PersistedSession struct {
 	PubKey        [meshcore.PubKeySize]byte
 	Perms         byte
+	Granted       bool
 	LastTimestamp uint32
 	// HasOut says the client taught a route, told apart from the path
 	// bytes: a zero-hop route is adjacent — empty path, still present
@@ -64,6 +65,11 @@ type client struct {
 	lastActive    time.Time
 	// asks bounds what this session may make us emit.
 	asks rateLimiter
+	// granted marks a permission set explicitly, by an admin — the
+	// reference's persisted contact, distinct from a login that a
+	// password opened. It survives idle: a granted admin is meant to
+	// stay one whether or not it happens to be talking right now.
+	granted bool
 }
 
 // isAdmin reports the role; always false here, kept because the wire
@@ -91,7 +97,7 @@ func newACL(store SessionStore) *acl {
 // persisted is one client in the shape the store keeps.
 func (c *client) persisted() PersistedSession {
 	p := PersistedSession{
-		PubKey: c.pubKey, Perms: c.perms,
+		PubKey: c.pubKey, Perms: c.perms, Granted: c.granted,
 		LastTimestamp: c.lastTimestamp, LastActive: c.lastActive,
 	}
 	if c.out != nil {
@@ -135,7 +141,7 @@ func (a *acl) load(secret func(pubKey []byte) ([]byte, error), asks func() rateL
 		return
 	}
 	for _, p := range rows {
-		if time.Since(p.LastActive) > sessionIdle {
+		if !p.Granted && time.Since(p.LastActive) > sessionIdle {
 			a.forget(p.PubKey)
 			continue
 		}
@@ -144,7 +150,7 @@ func (a *acl) load(secret func(pubKey []byte) ([]byte, error), asks func() rateL
 			continue
 		}
 		c := &client{
-			pubKey: p.PubKey, secret: sec, perms: p.Perms,
+			pubKey: p.PubKey, secret: sec, perms: p.Perms, granted: p.Granted,
 			lastTimestamp: p.LastTimestamp, lastActive: p.LastActive,
 			asks: asks(),
 		}
@@ -184,6 +190,24 @@ func (a *acl) evict() {
 	a.forget(oldest)
 }
 
+// remove drops one entry from the table and the store.
+func (a *acl) remove(k [meshcore.PubKeySize]byte) {
+	delete(a.by, k)
+	a.forget(k)
+}
+
+// entries is the access list as the console reads it: grants first
+// by their nature, then whoever is merely logged in.
+func (a *acl) entries() []ACLEntry {
+	out := make([]ACLEntry, 0, len(a.by))
+	for k, c := range a.by {
+		out = append(out, ACLEntry{
+			PubKey: k, Admin: c.isAdmin(), Granted: c.granted, LastActive: c.lastActive,
+		})
+	}
+	return out
+}
+
 // get returns a live session by full public key; one nobody has used
 // within sessionIdle is retired rather than returned.
 func (a *acl) get(pubKey []byte) *client {
@@ -199,7 +223,7 @@ func (a *acl) live(k [meshcore.PubKeySize]byte) *client {
 	if !ok {
 		return nil
 	}
-	if time.Since(c.lastActive) > sessionIdle {
+	if !c.granted && time.Since(c.lastActive) > sessionIdle {
 		delete(a.by, k)
 		a.forget(k)
 		return nil

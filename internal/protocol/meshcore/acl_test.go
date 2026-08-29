@@ -148,3 +148,52 @@ func TestASessionAnswersAcrossARestart(t *testing.T) {
 	case <-time.After(700 * time.Millisecond):
 	}
 }
+
+func TestAGrantOutlivesIdleAndIsReachable(t *testing.T) {
+	// setperm's contract: a granted admin stays one whether or not it
+	// is talking, and can be reached before it ever logs in — the
+	// secret is computed at the grant.
+	e, dev, _, peer := txRig(t, "on-air")
+	store := newMemStore()
+	e.AttachSessions(store)
+	runEngine(t, e, dev)
+
+	if err := e.Grant(peer.PubKey[:], permAdmin, false); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	c := e.acl.get(peer.PubKey[:])
+	if c == nil || !c.isAdmin() || !c.granted {
+		t.Fatalf("grant did not land: %+v", c)
+	}
+	if len(c.secret) == 0 {
+		t.Error("a granted admin has no secret — it cannot be reached before login")
+	}
+	// Age it past idle: a login would be dropped, a grant is not.
+	c.lastActive = time.Now().Add(-2 * sessionIdle)
+	if e.acl.get(peer.PubKey[:]) == nil {
+		t.Error("the grant expired on idle")
+	}
+	// It persisted as a grant.
+	if p, ok := store.rows[peer.PubKey]; !ok || !p.Granted || p.Perms&permRoleMask != permAdmin {
+		t.Errorf("grant not persisted: %+v", p)
+	}
+	// The access list shows it.
+	list, err := e.AccessList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || !list[0].Admin || !list[0].Granted {
+		t.Fatalf("access list = %+v", list)
+	}
+
+	// Revoke removes it, from table and store.
+	if err := e.Grant(peer.PubKey[:], permGuest, true); err != nil {
+		t.Fatal(err)
+	}
+	if e.acl.get(peer.PubKey[:]) != nil {
+		t.Error("the grant survived its revoke")
+	}
+	if _, held := store.rows[peer.PubKey]; held {
+		t.Error("the revoke left the grant in the store")
+	}
+}

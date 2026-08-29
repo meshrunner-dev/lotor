@@ -33,7 +33,36 @@ func storeMigrations() []confdb.Migration {
 		Doc: "revisions recorded secrets in the clear before the mask asked " +
 			"the schema — the history aligns with the policy",
 		Run: scrubRevisionSecrets,
+	}, {
+		To:  5,
+		Doc: "the session table gains granted, for permissions that outlive idle",
+		Run: addACLGranted,
 	}}
+}
+
+// addACLGranted adds the granted column to a store whose acl table
+// predates it. A base that never had the table gets it whole from the
+// schema, with the column; this heals the ones created in between.
+func addACLGranted(ctx context.Context, tx *sql.Tx) error {
+	var count int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM pragma_table_info('acl') WHERE name = 'granted'").Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil // already present — a base born with the column
+	}
+	// A table absent entirely also reads zero; guard on the table too.
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='acl'").Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx,
+		"ALTER TABLE acl ADD COLUMN granted INTEGER NOT NULL DEFAULT 0")
+	return err
 }
 
 // secretKeys is every attribute name a revision may have recorded in

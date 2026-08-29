@@ -325,7 +325,7 @@ func (a *aclStore) LoadSessions() ([]enginemc.PersistedSession, error) {
 	out := make([]enginemc.PersistedSession, 0, len(rows))
 	for _, r := range rows {
 		p := enginemc.PersistedSession{
-			Perms: r.Perms, LastTimestamp: r.LastTimestamp,
+			Perms: r.Perms, Granted: r.Granted, LastTimestamp: r.LastTimestamp,
 			HasOut: r.HasOut, OutPath: r.OutPath, OutPathLen: r.OutPathLen,
 			Learned: r.Learned, LastActive: r.LastActive,
 		}
@@ -337,7 +337,7 @@ func (a *aclStore) LoadSessions() ([]enginemc.PersistedSession, error) {
 
 func (a *aclStore) SaveSession(p enginemc.PersistedSession) error {
 	return a.store.SaveACL(context.Background(), a.relay, confdb.ACLRow{
-		PubKey: p.PubKey[:], Perms: p.Perms, LastTimestamp: p.LastTimestamp,
+		PubKey: p.PubKey[:], Perms: p.Perms, Granted: p.Granted, LastTimestamp: p.LastTimestamp,
 		HasOut: p.HasOut, OutPath: p.OutPath, OutPathLen: p.OutPathLen,
 		Learned: p.Learned, LastActive: p.LastActive,
 	})
