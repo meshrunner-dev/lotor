@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -426,7 +428,7 @@ func TestRevisionSecretsScrubWhereverTheyNest(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &c); err != nil {
 		t.Fatal(err)
 	}
-	if !scrubSecrets(c) {
+	if !scrubSecretsIn(c, secretKeys) {
 		t.Fatal("nothing scrubbed")
 	}
 	out, err := json.Marshal(c)
@@ -444,7 +446,7 @@ func TestRevisionSecretsScrubWhereverTheyNest(t *testing.T) {
 		}
 	}
 	// Idempotent: a masked journal stays put.
-	if scrubSecrets(c) {
+	if scrubSecretsIn(c, secretKeys) {
 		t.Error("a masked journal was rewritten")
 	}
 }
@@ -925,4 +927,63 @@ func TestOTASetRefusesWhatTheBoardCannotDo(t *testing.T) {
 	if o := <-m.air; o.set["tx_power_dbm"] != "6" {
 		t.Errorf("order = %+v", o)
 	}
+}
+
+func TestProfileMovesBeforeItsOverrides(t *testing.T) {
+	// "set profile=x k=v" on one line: the profile decides which scope
+	// the override lands in, so it must apply first whatever order the
+	// map yields — this used to be a coin flip per invocation.
+	for range 20 {
+		next := &config.File{Relays: map[string]config.Relay{"mc": {
+			Protocol: "meshcore", Radio: "r",
+			Layered: config.Layered{Profile: "eu-868-narrow"},
+		}}}
+		change, err := applyRelayChanges(next, "mc", map[string]any{
+			"profile":   "custom",
+			"node_name": "new name",
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rc := next.Relays["mc"]
+		if rc.Layered.Profile != "custom" {
+			t.Fatalf("profile = %q", rc.Layered.Profile)
+		}
+		if v := rc.Layered.Overrides["custom"]["node_name"]; v != "new name" {
+			t.Fatalf("override landed in %v, want the NEW profile's scope", rc.Layered.Overrides)
+		}
+		if len(change) != 2 {
+			t.Fatalf("change = %v", change)
+		}
+	}
+}
+
+func TestSocketPathRefusesWhatIsNotASocket(t *testing.T) {
+	// The instance lock says no daemon owns this config; it says
+	// nothing about what sits at the socket path. Deleting it blind
+	// destroyed whatever it was — the config database included, when
+	// the two paths were set equal.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "console.sock")
+	if err := os.WriteFile(path, []byte("somebody's data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := listenConsole(context.Background(), path); err == nil ||
+		!strings.Contains(err.Error(), "not a socket") {
+		t.Fatalf("a regular file at the socket path: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the file was destroyed anyway: %v", err)
+	}
+	// A stale socket IS a previous life's leftover: replaced quietly.
+	ln, err := listenConsole(context.Background(), path+"2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = ln.Close() // leaves the socket file behind, stale
+	ln, err = listenConsole(context.Background(), path+"2")
+	if err != nil {
+		t.Fatalf("a stale socket was refused: %v", err)
+	}
+	_ = ln.Close()
 }

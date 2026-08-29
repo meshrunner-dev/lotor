@@ -1315,6 +1315,25 @@ func (m *manager) createMQTT(next *config.File, name string,
 	return nil
 }
 
+// orderedAttrs walks one mutation's keys deterministically, the
+// structural profile FIRST: it decides which scope every override on
+// the same line lands in, and a Go map's iteration order must not —
+// "set profile=custom node_name=x" wrote node_name into the OLD
+// profile's scope whenever the map happened to yield it first.
+func orderedAttrs(typed map[string]any) []string {
+	keys := make([]string, 0, len(typed))
+	for k := range typed {
+		if k != attrProfile {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	if _, held := typed[attrProfile]; held {
+		keys = append([]string{attrProfile}, keys...)
+	}
+	return keys
+}
+
 // applyMQTTChanges edits one observer's layers: the profile knob on
 // its field, everything else into the live profile's override scope,
 // the same discipline a relay's waveform follows.
@@ -1326,8 +1345,8 @@ func applyMQTTChanges(next *config.File, name string,
 		return nil, fmt.Errorf("no observer %q", name)
 	}
 	change := map[string]confdb.Change{}
-	for attr, v := range typed {
-		old, stored, err := setMQTTAttr(&mq, attr, v)
+	for _, attr := range orderedAttrs(typed) {
+		old, stored, err := setMQTTAttr(&mq, attr, typed[attr])
 		if err != nil {
 			return nil, err
 		}
@@ -1842,12 +1861,12 @@ func applyRelayChanges(next *config.File, name string,
 ) (map[string]confdb.Change, error) {
 	change := map[string]confdb.Change{}
 	rc := next.Relays[name]
-	for attr, v := range typed {
-		old, err := setRelayAttr(&rc, attr, v)
+	for _, attr := range orderedAttrs(typed) {
+		old, err := setRelayAttr(&rc, attr, typed[attr])
 		if err != nil {
 			return nil, err
 		}
-		change[attr] = confdb.Change{Old: old, New: v}
+		change[attr] = confdb.Change{Old: old, New: typed[attr]}
 	}
 	for _, attr := range unset {
 		old, err := unsetRelayAttr(&rc, attr)
@@ -1865,12 +1884,12 @@ func applySensorChanges(next *config.File, name string,
 ) (map[string]confdb.Change, error) {
 	change := map[string]confdb.Change{}
 	sn := next.Sensors[name]
-	for attr, v := range typed {
-		old, err := setSensorAttr(&sn, attr, v)
+	for _, attr := range orderedAttrs(typed) {
+		old, err := setSensorAttr(&sn, attr, typed[attr])
 		if err != nil {
 			return nil, err
 		}
-		change[attr] = confdb.Change{Old: old, New: v}
+		change[attr] = confdb.Change{Old: old, New: typed[attr]}
 	}
 	for _, attr := range unset {
 		old, err := unsetOverride(&sn.Layered, attr)
@@ -1888,12 +1907,12 @@ func applyRadioChanges(next *config.File, name string,
 ) (map[string]confdb.Change, error) {
 	change := map[string]confdb.Change{}
 	rd := next.Radios[name]
-	for attr, v := range typed {
-		old, err := setRadioAttr(&rd, attr, v)
+	for _, attr := range orderedAttrs(typed) {
+		old, err := setRadioAttr(&rd, attr, typed[attr])
 		if err != nil {
 			return nil, err
 		}
-		change[attr] = confdb.Change{Old: old, New: v}
+		change[attr] = confdb.Change{Old: old, New: typed[attr]}
 	}
 	for _, attr := range unset {
 		old, err := unsetOverride(&rd.Layered, attr)
@@ -2419,4 +2438,48 @@ func asInt(attr string, v any) (int, error) {
 		return int(n), nil
 	}
 	return 0, fmt.Errorf("%s: %v is not a whole number", attr, v)
+}
+
+// Layers reads one instance's persisted layering whole — the selected
+// profile and every override scope, inactive ones included — for the
+// export that must not lose what a switch would come back to.
+func (m *manager) Layers(kind, name string) (string, map[string]map[string]any, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var l config.Layered
+	switch kind {
+	case confdb.KindRelay:
+		rc, ok := m.file.Relays[name]
+		if !ok {
+			return "", nil, false
+		}
+		l = rc.Layered
+	case confdb.KindRadio:
+		rd, ok := m.file.Radios[name]
+		if !ok {
+			return "", nil, false
+		}
+		l = rd.Layered
+	case confdb.KindSensor:
+		sn, ok := m.file.Sensors[name]
+		if !ok {
+			return "", nil, false
+		}
+		l = sn.Layered
+	case confdb.KindMQTT:
+		mq, ok := m.file.MQTT[name]
+		if !ok {
+			return "", nil, false
+		}
+		l = mq.Layered
+	default:
+		return "", nil, false
+	}
+	out := make(map[string]map[string]any, len(l.Overrides))
+	for scope, kv := range l.Overrides {
+		copied := make(map[string]any, len(kv))
+		maps.Copy(copied, kv)
+		out[scope] = copied
+	}
+	return l.Profile, out, true
 }

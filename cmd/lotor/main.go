@@ -229,6 +229,15 @@ func (c *configImportCmd) Run() error {
 	if err != nil {
 		return err
 	}
+	// The structural validation above is not the whole judgement: the
+	// registries know which protocols, drivers, profiles and
+	// waveforms exist, and a file that would not have booted must not
+	// replace — under --force — a configuration that boots. The same
+	// preflight the manager runs on every mutation runs here, before
+	// anything destructive, and without touching hardware.
+	if err := validateWholeFile(f); err != nil {
+		return fmt.Errorf("%s would not boot: %w — nothing was imported", c.Path, err)
+	}
 	// The daemon reads the store at boot and holds the instance lock
 	// while it runs; importing behind its back would change nothing
 	// until the next restart and surprise everyone then.
@@ -244,6 +253,7 @@ func (c *configImportCmd) Run() error {
 		return err
 	}
 	defer func() { _ = store.Close() }()
+	store.SetRevisionMasker(revisionMasker(buildKinds()))
 	if empty, err := store.Empty(ctx); err != nil {
 		return err
 	} else if !empty && !c.Force {
@@ -541,6 +551,10 @@ func openConfig(dbPath string, log *zap.Logger) (*confdb.Store, *config.File, er
 	if err != nil {
 		return nil, nil, err
 	}
+	// The journal's secrets mask goes in before anything writes a
+	// revision: derived from every schema, so import and remove keep
+	// masked copies like every ordinary mutation does.
+	store.SetRevisionMasker(revisionMasker(buildKinds()))
 	// The shape heals before the first load: a store written by a
 	// past binary carries keys this one no longer speaks.
 	if err := store.Migrate(ctx, storeMigrations()); err != nil {
@@ -600,6 +614,7 @@ func consoleDeps(mgr *manager, b *bus.Bus, sen *sentinel.Sentinel) cli.Deps {
 		History:     mgr.History,
 		Log:         mgr.log.Named("cli"),
 		LiveTraces:  mgr.Traces,
+		Layers:      mgr.Layers,
 		Mutate:      mgr.Mutate,
 		Undo:        mgr.Undo,
 		Create:      mgr.Create,
@@ -684,8 +699,19 @@ func listenConsole(ctx context.Context, path string) (net.Listener, error) {
 		return nil, err
 	}
 	// The instance lock guarantees no live daemon shares this config:
-	// whatever socket sits at the path is a previous life's leftover.
-	_ = os.Remove(path)
+	// a SOCKET at the path is a previous life's leftover, and only a
+	// socket is. Anything else — a file, a directory, a symlink — is
+	// somebody's data at a path the operator mistyped, and deleting it
+	// blind destroyed whatever it was, the configuration database
+	// included when the two paths were set equal.
+	if st, err := os.Lstat(path); err == nil {
+		if st.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf(
+				"console socket path %s holds a %s, not a socket — refusing to delete it; pick another path",
+				path, modeWord(st.Mode()))
+		}
+		_ = os.Remove(path)
+	}
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "unix", path)
 	if err != nil {
@@ -802,8 +828,8 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 	if err != nil {
 		return nil, err
 	}
-	logTraces(rlog, "radio config", p.res.radioTraces)
-	logTraces(rlog, "relay config", p.res.relayTraces)
+	logTraces(rlog, "radio config", p.res.radioTraces, secretAttrs(p.res.drv.Schema))
+	logTraces(rlog, "relay config", p.res.relayTraces, secretAttrs(p.res.builder.Schema))
 	announceOverrides(rlog, p.res.radioTraces, p.res.relayTraces)
 	// The session table persists where the protocol keeps one and a
 	// store was offered: a companion outlives the bounce, its replay
@@ -1399,11 +1425,34 @@ func checkScopes(l config.Layered, presets map[string]map[string]any,
 	return nil
 }
 
-func logTraces(log *zap.Logger, msg string, traces []config.Trace) {
+// logTraces journals each effective key with its provenance. Values
+// the schema marks Secret travel masked: the config store is guarded
+// like the identity it holds, but the system journal has its own
+// owner, retention and backups — a wider and more durable domain that
+// a DEBUG session must not copy credentials into. Key and provenance
+// are what a diagnosis needs; the value of a secret never is.
+func logTraces(log *zap.Logger, msg string, traces []config.Trace, secret map[string]bool) {
 	for _, t := range traces {
+		v := t.Value
+		if secret[t.Key] {
+			v = maskedChange
+		}
 		log.Debug(msg, zap.String("key", t.Key),
-			zap.Any("value", t.Value), zap.String("source", t.Source))
+			zap.Any("value", v), zap.String("source", t.Source))
 	}
+}
+
+// secretAttrs collects the attribute names a schema marks Secret —
+// derived, never listed by hand, so a secret a future protocol or
+// driver declares is masked the day it exists.
+func secretAttrs(attrs []schema.Attr) map[string]bool {
+	out := map[string]bool{}
+	for _, a := range attrs {
+		if a.Secret {
+			out[a.Name] = true
+		}
+	}
+	return out
 }
 
 // announceOverrides names non-stock values at INFO on every start:
@@ -1442,4 +1491,53 @@ func newLogger(level string) (*zap.Logger, zap.AtomicLevel, error) {
 	cfg.EncoderConfig.EncodeLevel = logging.EncodeLevel
 	log, err := cfg.Build()
 	return log, atomic, err
+}
+
+// validateWholeFile judges a complete configuration the way the
+// manager judges every mutation: against the registries, the layers,
+// the schemas and the radio preflight — everything deterministic,
+// nothing hardware. It is the import door's whole judgement.
+func validateWholeFile(f *config.File) error {
+	for name, rc := range f.Relays {
+		if err := preflight(name, rc, f.Radios[rc.Radio]); err != nil {
+			return fmt.Errorf("relay %q: %w", name, err)
+		}
+	}
+	claimed := map[string]bool{}
+	for _, rc := range f.Relays {
+		claimed[rc.Radio] = true
+	}
+	for name, spec := range f.Radios {
+		if claimed[name] {
+			continue // judged through its relay's preflight
+		}
+		if err := checkRadioAlone(spec); err != nil {
+			return fmt.Errorf("radio %q: %w", name, err)
+		}
+	}
+	for name, sn := range f.Sensors {
+		if err := checkSensorAlone(sn); err != nil {
+			return fmt.Errorf("sensor %q: %w", name, err)
+		}
+	}
+	for name, mq := range f.MQTT {
+		if _, err := resolveMQTTParams(mq); err != nil {
+			return fmt.Errorf("observer %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// modeWord names a file's kind for a refusal an operator will read.
+func modeWord(m os.FileMode) string {
+	switch {
+	case m.IsDir():
+		return "directory"
+	case m&os.ModeSymlink != 0:
+		return "symlink"
+	case m.IsRegular():
+		return "regular file"
+	default:
+		return m.Type().String()
+	}
 }
