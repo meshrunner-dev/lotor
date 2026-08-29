@@ -364,7 +364,7 @@ func (e *engine) answerRequest(c *client, args []byte, budget int) (body []byte,
 		// carries its own newlines, and is last so they cannot be
 		// mistaken for a fourth field.
 		return withinBudget(
-			version.Version+"\n"+e.p.NodeName+"\n"+e.p.OwnerInfo, budget), true
+			version.Current().Version+"\n"+e.p.NodeName+"\n"+e.p.OwnerInfo, budget), true
 	case meshcore.ReqKeepAlive:
 		// The reference answers nothing here either, and the session's
 		// clock has already moved on the request that carried it.

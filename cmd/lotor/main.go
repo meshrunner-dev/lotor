@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -52,9 +53,14 @@ import (
 	lotorversion "meshrunner.dev/lotor/internal/version"
 )
 
-// version identifies this build in the CLI banner and status; the
-// firmware string a companion reads over the air is the same one.
-var version = lotorversion.Version
+// buildInfo is this build's whole identity, read once; version is
+// its functional half — the string the banner, the status, the OTA
+// ver reply and the firmware field all repeat. One source, every
+// surface.
+var (
+	buildInfo = lotorversion.Current()
+	version   = buildInfo.Version
+)
 
 // commandLine is the Kong grammar. Bare `lotor` prints this help and
 // does nothing else — running the daemon is an explicit choice.
@@ -65,7 +71,27 @@ type commandLine struct {
 	Config   configCmd        `cmd:""                              help:"Configuration database tools."`
 	Identity identityCmd      `cmd:""                              help:"Node identity tools."`
 	Update   updateCmd        `cmd:""                              help:"The update machinery's own gears — the units turn these, not operators."`
+	Ver      versionCmd       `cmd:""                              help:"Show this build's full identity."                                          name:"version"`
 	Version  kong.VersionFlag `help:"Print the version and leave."`
+}
+
+// versionCmd is the diagnostic surface: everything a support exchange
+// needs about one binary, human or JSON.
+type versionCmd struct {
+	JSON bool `help:"Emit the same identity as JSON."`
+}
+
+func (c *versionCmd) Run() error {
+	if c.JSON {
+		out, err := json.MarshalIndent(buildInfo, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(out))
+		return nil
+	}
+	fmt.Printf("%s %s\n%s\n", product.Name, buildInfo.Version, buildInfo)
+	return nil
 }
 
 // updateCmd is the privileged half of self-update, plus the health
@@ -288,7 +314,7 @@ func main() {
 		kong.Name("lotor"),
 		kong.Description(product.Description+"."),
 		kong.Vars{
-			"version":     version,
+			"version":     product.Slug + " " + version,
 			"default_cli": config.DefaultCLIListen,
 			"default_db":  confdb.DefaultPath,
 		},
@@ -414,7 +440,13 @@ func run(dbPath, logLevel string) error {
 	if err := startListeners(ctx, f, &deps, &producers, log); err != nil {
 		return err
 	}
-	log.Info("daemon up", zap.Int("relays", len(f.Relays)))
+	log.Info("daemon up", zap.Int("relays", len(f.Relays)),
+		zap.String("version", buildInfo.Version),
+		zap.String("revision", buildInfo.ShortRevision()),
+		zap.String("tree", string(buildInfo.Tree)),
+		zap.Time("source_time", buildInfo.SourceTime),
+		zap.String("toolchain", buildInfo.GoVersion),
+		zap.String("target", buildInfo.GOOS+"/"+buildInfo.GOARCH))
 	<-ctx.Done()
 	log.Info("shutting down")
 	producers.Wait()
