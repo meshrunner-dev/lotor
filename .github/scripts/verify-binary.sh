@@ -22,10 +22,11 @@ expect GOOS "$(setting GOOS)" "$goos"
 expect GOARCH "$(setting GOARCH)" "$goarch"
 [ -n "$goarm" ] && expect GOARM "$(setting GOARM)" "$goarm"
 expect toolchain "$(get .GoVersion)" "$(go env GOVERSION)"
-stamped="$(echo "$meta" | jq -r '.Settings[] | select(.Key=="-ldflags") | .Value')"
-case "$stamped" in
-  *"version.release=${version}"*) ;;
-  *) echo "verify: the version ldflag does not stamp ${version}" >&2; fail=1 ;;
-esac
+# -trimpath keeps -ldflags out of the embedded settings (flags may
+# carry local paths), so the stamp is checked where it actually lives:
+# the -X value is a literal in the binary's data.
+if ! grep -qaF "$version" "$file"; then
+  echo "verify: the bytes do not carry the version ${version}" >&2; fail=1
+fi
 [ "$fail" -eq 0 ] && echo "verify: ${file} ok"
 exit "$fail"
