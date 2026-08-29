@@ -37,7 +37,7 @@ func run(t *testing.T, deps Deps, commands ...string) string {
 func testDeps(t *testing.T) Deps {
 	t.Helper()
 	b := bus.New()
-	sen, err := sentinel.Open(context.Background(), sentinel.MemoryJournal, time.Hour, 0, b, zap.NewNop())
+	sen, err := sentinel.Open(context.Background(), sentinel.MemoryJournal, time.Hour, 0, 0, b, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,19 +122,19 @@ func seed(t *testing.T, deps Deps) (orig, dup txn.ID) {
 	t.Helper()
 	ctx := context.Background()
 	orig, dup = txn.New(), txn.New()
-	heard := func(id txn.ID, rssi float64) bus.FrameHeard {
-		return bus.FrameHeard{Relay: "meshcore-868", Txn: id, At: time.Now(),
+	// The judged event carries the reception whole — the journal's
+	// one archive event since the atomic contract.
+	judgedAt := func(id txn.ID, rssi float64) bus.FrameJudged {
+		return bus.FrameJudged{Relay: "meshcore-868", Txn: id, At: time.Now(),
 			Bytes: 132, RSSI: rssi, SNR: 8.5, Airtime: 1295 * time.Millisecond}
 	}
-	judged := bus.FrameJudged{Relay: "meshcore-868", Txn: orig,
-		Verdict: "would-relay-flood", Type: "ADVERT", Route: "FLOOD", PathLen: 5,
-		Node: "Radio-Club", PubKey: "17c74bb65391", Detail: "repeater"}
-	for _, ev := range []bus.Event{
-		heard(orig, -69), judged,
-		heard(dup, -29),
-		bus.FrameJudged{Relay: "meshcore-868", Txn: dup, Verdict: "duplicate",
-			DuplicateOf: orig.Short(), Type: "ADVERT", Route: "FLOOD", PathLen: 5},
-	} {
+	judged := judgedAt(orig, -69)
+	judged.Verdict, judged.Type, judged.Route, judged.PathLen = "would-relay-flood", "ADVERT", "FLOOD", 5
+	judged.Node, judged.PubKey, judged.Detail = "Radio-Club", "17c74bb65391", "repeater"
+	dupJudged := judgedAt(dup, -29)
+	dupJudged.Verdict, dupJudged.DuplicateOf = "duplicate", orig.Short()
+	dupJudged.Type, dupJudged.Route, dupJudged.PathLen = "ADVERT", "FLOOD", 5
+	for _, ev := range []bus.Event{judged, dupJudged} {
 		deps.Sentinel.Process(ctx, ev)
 	}
 	return orig, dup
@@ -334,11 +334,9 @@ func TestArchivedRelayStaysAddressable(t *testing.T) {
 	deps := testDeps(t)
 	ctx := context.Background()
 	id := txn.New()
-	deps.Sentinel.Process(ctx, bus.FrameHeard{
-		Relay: "meshcore-433", Txn: id, At: time.Now(), Bytes: 20, RSSI: -90, SNR: 5})
 	deps.Sentinel.Process(ctx, bus.FrameJudged{
-		Relay: "meshcore-433", Txn: id, Verdict: "would-relay-flood",
-		Type: "ADVERT", Route: "FLOOD"})
+		Relay: "meshcore-433", Txn: id, At: time.Now(), Bytes: 20, RSSI: -90, SNR: 5,
+		Verdict: "would-relay-flood", Type: "ADVERT", Route: "FLOOD"})
 	deps.Sentinel.Process(ctx, bus.NoiseFloor{
 		Relay: "meshcore-433", At: time.Now(), DBm: -101})
 
@@ -453,8 +451,9 @@ func TestNodesAdmitsAnUnmeasuredRSSI(t *testing.T) {
 	// too good.
 	deps := testDeps(t)
 	deps.Sentinel.Process(context.Background(), bus.FrameJudged{
-		Relay: "meshcore-868", Txn: txn.New(), Verdict: "would-relay-flood",
-		Type: "ADVERT", Route: "FLOOD", Node: "Ghost", PubKey: "aabbccddeeff",
+		Relay: "meshcore-868", Txn: txn.New(), At: time.Now(),
+		Verdict: "would-relay-flood",
+		Type:    "ADVERT", Route: "FLOOD", Node: "Ghost", PubKey: "aabbccddeeff",
 	})
 	out := run(t, deps, "nodes")
 	if !strings.Contains(out, "Ghost") {

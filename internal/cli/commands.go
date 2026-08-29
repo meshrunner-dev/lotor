@@ -32,19 +32,41 @@ func (s *session) status(ctx context.Context, _ input) error {
 				float64(r.Waveform.BandwidthHz)/1e3),
 			"floor "+floorText(r), "tx "+txModeText(r)+dutyText(r))
 	}
+	s.sentinelRow(ctx, tb)
+	return tb.flush(s.out)
+}
+
+// sentinelRow is the journal's status line: size and reach when it is
+// well, the failure story when it is not — degradation and recovery
+// both, because a log rotation must not erase the episode.
+func (s *session) sentinelRow(ctx context.Context, tb *table) {
 	if s.deps.Sentinel == nil {
 		tb.row("sentinel", "none")
-	} else {
-		path, retention := s.deps.Sentinel.Journal()
-		if n, err := s.deps.Sentinel.FrameCount(ctx); err != nil {
-			// A sick journal is one degraded row, never a blank view.
-			tb.row("sentinel", "error", err.Error())
-		} else {
-			tb.row("sentinel", "journalling", path,
-				fmt.Sprintf("%d frames", n), fmt.Sprintf("%s retention", retention))
-		}
+		return
 	}
-	return tb.flush(s.out)
+	path, retention := s.deps.Sentinel.Journal()
+	n, err := s.deps.Sentinel.FrameCount(ctx)
+	if err != nil {
+		// A sick journal is one degraded row, never a blank view.
+		tb.row("sentinel", "error", err.Error())
+		return
+	}
+	h := s.deps.Sentinel.Health()
+	if !h.Healthy {
+		tb.row("sentinel", "degraded", path,
+			fmt.Sprintf("%d writes failed — last: %s", h.Failures, h.LastErr))
+		return
+	}
+	extra := ""
+	if h.Failures > 0 {
+		extra = fmt.Sprintf(" — recovered after %d failed writes", h.Failures)
+	}
+	if h.BusDropped > 0 {
+		extra += fmt.Sprintf(" — %d events lost to backpressure", h.BusDropped)
+	}
+	tb.row("sentinel", "journalling", path,
+		fmt.Sprintf("%d frames", n),
+		fmt.Sprintf("%s retention", retention)+extra)
 }
 
 // relayList renders the relays as a table — the tree's print at the
@@ -1205,35 +1227,59 @@ func (s *session) noise(ctx context.Context, in input) error {
 		}
 	}
 	fmt.Fprintf(s.out, "current  %s\r\n", current)
-	if len(buckets) == 0 {
+	if len(buckets) == 0 && len(spreads) == 0 && len(starveds) == 0 {
 		fmt.Fprint(s.out, "no history yet\r\n")
 		return nil
 	}
 	return s.noiseTable(buckets, spreads, starveds).flush(s.out)
 }
 
-// noiseTable renders the floor buckets with their companion series.
+// noiseTable renders the union of the three series: a bucket exists
+// wherever ANY of them measured something. An hour of pure starvation
+// is precisely the hour worth reading — the channel too busy for a
+// single floor batch — and a table walking only the floor's
+// timestamps erased it.
 // Every point is a batch median: min/max bound the p50s the bucket
 // saw, avg(p50) is their consolidation — the telemetry idiom naming
 // the estimator and the fold separately. starved counts the batches
 // the channel was too busy to let converge.
 func (s *session) noiseTable(buckets, spreads, starveds []sentinel.MetricBucket) *table {
+	floorAt := make(map[int64]sentinel.MetricBucket, len(buckets))
+	axis := make(map[int64]bool, len(buckets))
+	for _, b := range buckets {
+		floorAt[b.At.UnixMilli()] = b
+		axis[b.At.UnixMilli()] = true
+	}
 	spreadAt := make(map[int64]float64, len(spreads))
 	for _, b := range spreads {
 		spreadAt[b.At.UnixMilli()] = b.Avg
+		axis[b.At.UnixMilli()] = true
 	}
 	starvedAt := make(map[int64]float64, len(starveds))
 	for _, b := range starveds {
 		starvedAt[b.At.UnixMilli()] = b.Avg * float64(b.N)
+		axis[b.At.UnixMilli()] = true
 	}
+	moments := make([]int64, 0, len(axis))
+	for at := range axis {
+		moments = append(moments, at)
+	}
+	slices.Sort(moments)
 	tb := s.table()
-	for _, b := range buckets {
-		tb.row(b.At.Format("02/01 15:04"),
-			fmt.Sprintf("min %.1f", b.Min), fmt.Sprintf("avg(p50) %.1f", b.Avg),
-			fmt.Sprintf("max %.1f", b.Max),
-			fmt.Sprintf("p90-p50 %.1f", spreadAt[b.At.UnixMilli()]),
-			fmt.Sprintf("starved %.0f", starvedAt[b.At.UnixMilli()]),
-			fmt.Sprintf("%d×", b.N))
+	for _, at := range moments {
+		when := time.UnixMilli(at).Format("02/01 15:04")
+		starved := fmt.Sprintf("starved %.0f", starvedAt[at])
+		if b, measured := floorAt[at]; measured {
+			tb.row(when,
+				fmt.Sprintf("min %.1f", b.Min), fmt.Sprintf("avg(p50) %.1f", b.Avg),
+				fmt.Sprintf("max %.1f", b.Max),
+				fmt.Sprintf("p90-p50 %.1f", spreadAt[at]),
+				starved, fmt.Sprintf("%d×", b.N))
+			continue
+		}
+		// No floor converged this hour: the measurements are unknown,
+		// not zero, and the starvation is the row's whole story.
+		tb.row(when, "min —", "avg(p50) —", "max —", "p90-p50 —", starved, "0×")
 	}
 	return tb
 }

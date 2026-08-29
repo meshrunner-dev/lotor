@@ -25,9 +25,13 @@ type ID [16]byte
 func New() ID {
 	var id ID
 	// crypto/rand.Read never fails on the platforms this daemon
-	// targets; a theoretical failure would leave a zero id, which is
-	// still harmless (identification is best-effort by design).
-	_, _ = rand.Read(id[:])
+	// targets. If it somehow did, several zero ids would collide on
+	// the journal's primary key and fuse unrelated transactions into
+	// one false story — an explicit death is the honest outcome, and
+	// matches what crypto/rand itself promises since Go 1.24.
+	if _, err := rand.Read(id[:]); err != nil {
+		panic("txn: the entropy source failed: " + err.Error())
+	}
 	return id
 }
 

@@ -185,13 +185,18 @@ func (m *manager) observerConfig(name string, p mqtt.Params, log *zap.Logger) (m
 // rides as-is ({pubkey} resolved to the watched relay's key), and
 // silence connects anonymously.
 func observerDial(p mqtt.Params, name string, info cli.RelayInfo,
-	connects chan<- struct{}, log *zap.Logger,
+	connects chan<- struct{}, publish func(bus.Event), log *zap.Logger,
 ) mqtt.Options {
 	opts := mqtt.Options{
 		URL:       p.URL,
 		Instance:  name,
 		Keepalive: p.Keepalive.Std(),
 		CAFile:    p.CA,
+		OnTransition: func(state, cause string) {
+			publish(bus.ObserverState{
+				Observer: name, At: time.Now(), State: state, Cause: cause,
+			})
+		},
 		OnConnect: func() {
 			select {
 			case connects <- struct{}{}:
@@ -363,6 +368,12 @@ func (m *manager) observerHealth(relayName string) func() mqtt.Health {
 		info, ok := m.infos[relayName]
 		m.viewMu.RUnlock()
 		h := mqtt.Health{}
+		if m.sen != nil {
+			if jh := m.sen.Health(); !jh.Healthy {
+				degraded := true
+				h.JournalDegraded = &degraded
+			}
+		}
 		if !ok {
 			return h
 		}
@@ -419,7 +430,7 @@ func (m *manager) startObserver(ctx context.Context, name string) {
 	m.viewMu.RLock()
 	dialInfo := m.infos[cfg.Relay]
 	m.viewMu.RUnlock()
-	broker, err := mqtt.Dial(observerDial(p, name, dialInfo, connects, log), log)
+	broker, err := mqtt.Dial(observerDial(p, name, dialInfo, connects, m.bus.Publish, log), log)
 	if err != nil {
 		m.observerDown(name, err, log)
 		return
@@ -438,8 +449,12 @@ func (m *manager) startObserver(ctx context.Context, name string) {
 		obs.Run(octx, sub)
 	})
 	delete(m.obsCause, name)
-	m.bus.Publish(bus.ObserverState{Observer: name, At: time.Now(), State: "up"})
-	log.Info("observer up", zap.String("broker", p.URL), zap.String("relay", cfg.Relay))
+	// "started" is the honest word: the goroutine runs and Paho is
+	// dialing, but no broker session exists yet — connected, lost and
+	// reconnected arrive from the connection's own callbacks, so the
+	// archive can date a real outage.
+	m.bus.Publish(bus.ObserverState{Observer: name, At: time.Now(), State: "started"})
+	log.Info("observer started", zap.String("broker", p.URL), zap.String("relay", cfg.Relay))
 }
 
 // observerDown records why an observer is not running: the cause the

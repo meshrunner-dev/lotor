@@ -54,14 +54,25 @@ type Options struct {
 	// OnConnect is told about every established session, first and
 	// re-established alike — the observer\'s cue to speak.
 	OnConnect func()
+	// OnTransition is told the connection's real life — connected,
+	// reconnected, lost — with its cause, so the archive can date an
+	// outage instead of trusting "the goroutine started" for "up".
+	OnTransition func(state, cause string)
 }
 
 // connectionLadder tells the connection's life as it happens:
 // attempts and their failures in debug — the socket's abnormal life —
 // and the state changes an operator acts on in info: connected,
 // lost, reconnected.
-func connectionLadder(brokerURL string, log *zap.Logger) paho.ConnectionNotificationHandler {
+func connectionLadder(brokerURL string, notify func(state, cause string),
+	log *zap.Logger,
+) paho.ConnectionNotificationHandler {
 	var sessions atomic.Uint32
+	tell := func(state, cause string) {
+		if notify != nil {
+			notify(state, cause)
+		}
+	}
 	return func(_ paho.Client, n paho.ConnectionNotification) {
 		url := zap.String("url", brokerURL)
 		switch e := n.(type) {
@@ -73,13 +84,19 @@ func connectionLadder(brokerURL string, log *zap.Logger) paho.ConnectionNotifica
 		case paho.ConnectionNotificationFailed:
 			log.Debug("observer broker round failed — backing off", url, zap.Error(e.Reason))
 		case paho.ConnectionNotificationConnected:
-			word := "observer broker connected"
+			word, state := "observer broker connected", "connected"
 			if sessions.Add(1) > 1 {
-				word = "observer broker reconnected"
+				word, state = "observer broker reconnected", "reconnected"
 			}
 			log.Info(word, url)
+			tell(state, "")
 		case paho.ConnectionNotificationLost:
 			log.Info("observer broker lost", url, zap.Error(e.Reason))
+			cause := ""
+			if e.Reason != nil {
+				cause = e.Reason.Error()
+			}
+			tell("lost", cause)
 		}
 	}
 }
@@ -134,7 +151,7 @@ func Dial(o Options, log *zap.Logger) (*Broker, error) {
 			o.OnConnect()
 		}
 	}
-	opts.OnConnectionNotification = connectionLadder(o.URL, log)
+	opts.OnConnectionNotification = connectionLadder(o.URL, o.OnTransition, log)
 	b := &Broker{client: paho.NewClient(opts), log: log}
 	// Connect in the background: a broker that is down at start must
 	// not hold the daemon\'s assembly, and Paho\'s retry keeps dialing.

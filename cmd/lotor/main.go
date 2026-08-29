@@ -633,7 +633,7 @@ func startSentinel(ctx, journalCtx context.Context, f *config.File,
 		return nil, nil //nolint:nilnil // absence is the configured mode, not a fault
 	}
 	sent, err := sentinel.Open(ctx, f.Sentinel.Journal, f.Sentinel.Retention,
-		f.Sentinel.MaxFrames, b, log.Named("sentinel"))
+		f.Sentinel.MetricsRetention, f.Sentinel.MaxFrames, b, log.Named("sentinel"))
 	if err != nil {
 		return nil, fmt.Errorf("sentinel: %w", err)
 	}

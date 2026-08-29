@@ -68,7 +68,9 @@ func SentinelAttrs() []schema.Attr {
 		{Name: "retention", Type: schema.Duration,
 			Doc: "how far back the journal reaches (0 takes 720h)"},
 		{Name: "max_frames", Type: schema.Int,
-			Doc: "row bound on top of retention, for hosts a busy mesh would outgrow"},
+			Doc: "row bound on top of retention, frames table alone"},
+		{Name: "metrics_retention", Type: schema.Duration,
+			Doc: "how long the consolidated hourly/daily metric tiers reach (0 takes two years)"},
 	}
 }
 

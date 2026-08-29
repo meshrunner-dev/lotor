@@ -153,12 +153,24 @@ type Sentinel struct {
 	Retention time.Duration `yaml:"retention"`
 	// MaxFrames, when set, also bounds the journal in rows — for
 	// hosts where time alone would let a busy mesh outgrow the disk.
+	// It bounds the frames table alone; states, emissions and drops
+	// follow retention.
 	MaxFrames int `yaml:"max_frames"`
+	// MetricsRetention bounds the CONSOLIDATED metric history — the
+	// hourly and daily tiers that outlive retention by design, so a
+	// year of noise-floor trend survives a month of frame detail.
+	// Zero takes two years; retention itself is only the raw→hourly
+	// frontier for metrics.
+	MetricsRetention time.Duration `yaml:"metrics_retention"`
 }
 
 // DefaultRetention keeps the journal for a long default, as an
 // observation archive should.
 const DefaultRetention = 30 * 24 * time.Hour
+
+// DefaultMetricsRetention keeps the consolidated metric tiers for two
+// years — trends are the archive's long game.
+const DefaultMetricsRetention = 2 * 365 * 24 * time.Hour
 
 // CLI configures the line-based operator interface. The block's
 // absence disables the network listener — the optionality rule — but
