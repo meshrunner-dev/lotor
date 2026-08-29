@@ -64,11 +64,19 @@ type Reading struct {
 // call Read from two places at once.
 //
 // Read may block for as long as the bus makes it block — that is the
-// whole reason a Sampler exists to own it.
+// whole reason a Sampler exists to own it — but it must honour its
+// context and return, as radio.Device's waits do. A driver on a bus
+// that can hang is what bounds the hang: no context reaches a
+// syscall already blocked in the kernel, so the adapter's own timeout
+// is the only thing between a stuck slave and a daemon that cannot
+// stop.
 type Device interface {
-	// Read takes one sample of everything this device measures. A
-	// device that measures nothing right now returns no readings and
-	// no error; that is a device warming up, not a fault.
+	// Read takes one sample of everything this device measures. It
+	// returns what the readings say, or the reason it could not ask.
+	// A device that measures nothing right now returns no readings
+	// and no error; that is a device warming up, not a fault. The
+	// slice is copied before anyone else sees it, so a driver may
+	// keep its own and refill it.
 	Read(ctx context.Context) ([]Reading, error)
 	Close() error
 }
