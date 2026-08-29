@@ -59,10 +59,16 @@ func (p Pin) String() string {
 	return p.Chip + ":" + strconv.Itoa(p.Offset)
 }
 
-// Resolve fills in the board's default chip for a pin that named none.
+// Resolve fills in the board's default chip for a pin that named
+// none, and canonicalises the chip's spelling: the GPIO library reads
+// "gpiochip0" and "/dev/gpiochip0" as the same chip, so this seam
+// must too — two spellings of one line used to pass the uniqueness
+// check and fail deterministically at acquisition, where the kernel
+// hands a line to a single requester.
 func (p Pin) Resolve(defaultChip string) Pin {
 	if p.Chip == "" {
 		p.Chip = defaultChip
 	}
+	p.Chip = strings.TrimPrefix(p.Chip, "/dev/")
 	return p
 }
