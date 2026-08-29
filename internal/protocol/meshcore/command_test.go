@@ -1,6 +1,7 @@
 package meshcore
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -443,6 +444,84 @@ func TestOnlyCommandSubtypesReachTheMutationDoor(t *testing.T) {
 		e.runCommand(rx, rx.id)
 		if ran != 0 {
 			t.Errorf("%s: reached the mutation door", c.name)
+		}
+	}
+}
+
+func TestLegacyPlainCommandsAreAcknowledged(t *testing.T) {
+	// A PLAIN sender waits on the ack, not on the reply: without one
+	// a command whose answer is empty reads as a timeout and is sent
+	// again forever.
+	e, _, _, peer := txRig(t, "on-air")
+	e.queue.depth = 8
+	e.AttachCommands(func(string, []byte) string { return "OK" })
+	c := adminSession(t, e, peer, nowTS(0))
+	c.out = &outPath{pathLen: 1, path: []byte{0x21}, learned: time.Now()}
+
+	pkt, plain := typedCommandPacket(t, e.id, peer,
+		time.Unix(int64(nowTS(20)), 0), meshcore.TxtTypePlain, "set repeat off")
+	rx := rxOf(e, pkt)
+	e.runCommand(rx, rx.id)
+
+	kinds := map[string]int{}
+	var ack *meshcore.Packet
+	for _, entry := range e.queue.entries {
+		kinds[entry.kind]++
+		if entry.kind == "cmd-ack" {
+			ack = entry.pkt
+		}
+	}
+	if kinds["cmd-ack"] != 1 || kinds["cmd-resp"] != 1 {
+		t.Fatalf("queued %v, want one ack and one reply", kinds)
+	}
+	// The ack proves the words arrived: the truncated hash over the
+	// timestamp, flags and text, keyed on the sender's own key — the
+	// padding the cipher added is not part of it.
+	text, err := meshcore.ParseTextPlaintext(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := meshcore.BuildTextAck(plain[:5+len(text.Text)], peer.PubKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(ack.Payload, want.Payload) {
+		t.Errorf("ack carries %x, want %x", ack.Payload, want.Payload)
+	}
+
+	// A retry is acknowledged again and the line is not re-run: the
+	// ack is exactly what the sender is missing.
+	e.queue.entries = e.queue.entries[:0]
+	ran := 0
+	e.AttachCommands(func(string, []byte) string { ran++; return "" })
+	e.runCommand(rxOf(e, pkt), rx.id)
+	if ran != 0 {
+		t.Errorf("the retry re-ran the command %d times", ran)
+	}
+	kinds = map[string]int{}
+	for _, entry := range e.queue.entries {
+		kinds[entry.kind]++
+	}
+	if kinds["cmd-ack"] != 1 || kinds["cmd-resp"] != 0 {
+		t.Errorf("retry queued %v, want the ack alone", kinds)
+	}
+}
+
+func TestCLIDataCommandsCarryNoAck(t *testing.T) {
+	// Its answer is the reply; an ack besides would be airtime for
+	// nothing, and the reference sends none.
+	e, _, _, peer := txRig(t, "on-air")
+	e.queue.depth = 8
+	e.AttachCommands(func(string, []byte) string { return "OK" })
+	adminSession(t, e, peer, nowTS(0))
+	pkt, _ := typedCommandPacket(t, e.id, peer,
+		time.Unix(int64(nowTS(30)), 0), meshcore.TxtTypeCLIData, "get name")
+	rx := rxOf(e, pkt)
+	e.runCommand(rx, rx.id)
+
+	for _, entry := range e.queue.entries {
+		if entry.kind == "cmd-ack" {
+			t.Fatal("a CLI_DATA command was acknowledged")
 		}
 	}
 }

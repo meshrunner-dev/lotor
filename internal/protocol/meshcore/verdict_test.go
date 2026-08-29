@@ -241,3 +241,40 @@ func TestARejectedVersionTouchesNothing(t *testing.T) {
 		t.Fatalf("the rejected frame reserved a slot: %+v", judged)
 	}
 }
+
+func TestATraceVerdictPromisesOnlyWhatTheWalkAllows(t *testing.T) {
+	// A trace path carries one raw SNR byte per hop, never node
+	// hashes. A descriptor claiming a wider hop used to earn
+	// would-relay-trace from the verdict and then a deterministic
+	// refusal from AppendTraceHop, so dry promised what on-air could
+	// not do. The codec refuses the shape now, and both agree.
+	e, sub := identifiedEngine(t)
+	payload := make([]byte, 9, 11)
+	binary.LittleEndian.PutUint32(payload[0:], 1)
+	binary.LittleEndian.PutUint32(payload[4:], 2)
+	payload = append(payload, e.id.PubKey[0], 0xA2)
+
+	wide := append([]byte{0x02 | 0x09<<2, 0x40}, payload...) // two-byte hops
+	e.judge(newFakeDevice(), frame(wide))
+	narrow := append([]byte{0x02 | 0x09<<2, 0x00}, payload...)
+	e.judge(newFakeDevice(), frame(narrow))
+
+	judged := drainJudged(t, sub)
+	if len(judged) != 2 {
+		t.Fatalf("judged %d frames", len(judged))
+	}
+	if judged[0].Verdict != "ignored" {
+		t.Errorf("a trace the walk would refuse was judged %q", judged[0].Verdict)
+	}
+	if judged[1].Verdict != "would-relay-trace" {
+		t.Errorf("a walkable trace was judged %q", judged[1].Verdict)
+	}
+	// And what the verdict promised, the transform delivers.
+	pkt, err := meshcore.ParsePacket(narrow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pkt.AppendTraceHop(6); err != nil {
+		t.Errorf("the promised relay could not be made: %v", err)
+	}
+}
