@@ -567,6 +567,26 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	if out := m.runOTA("mc", "air:test", "setperm abcd 0"); out != "OK" {
 		t.Errorf("prefix removal got %q", out)
 	}
+	// The host keeps its own clock: sync is already true and answers
+	// in the OK-with-detail shape; setting it wears the ERR shape.
+	if out := m.runOTA("mc", "air:test", "clock sync"); out != "OK - clock already synced (system time)" {
+		t.Errorf("clock sync got %q", out)
+	}
+	if out := m.runOTA("mc", "air:test", "time 1756400000"); out != "ERR: clock not settable (system time)" {
+		t.Errorf("time got %q", out)
+	}
+	// The reference gates set freq to the serial port; ours is the
+	// console, and the air is refused.
+	if out := m.runOTA("mc", "air:test", "set freq 869618000"); out != "ERR: console only" {
+		t.Errorf("set freq got %q", out)
+	}
+	// Reading it stays open, like the reference's get.
+	// The deliberate absences answer like any unknown word.
+	for _, cmd := range []string{"reboot", "clkreboot", "tempradio 869525000 62500 8 8 10", "poweroff"} {
+		if out := m.runOTA("mc", "air:test", cmd); out != otaUnknown {
+			t.Errorf("%q got %q", cmd, out)
+		}
+	}
 	if g := <-m.air; g.perms != enginemc.PermGuest || len(g.pubKey) != 2 {
 		t.Errorf("prefix removal order = %+v", g)
 	}

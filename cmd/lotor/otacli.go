@@ -21,7 +21,11 @@ import (
 
 // otaSetting maps one CommonCLI variable onto the attribute it means
 // here. A word absent from this table is not administrable over the
-// air, and says so.
+// air, and says so. Deliberately absent whole commands, acted with
+// the operator: tempradio, reboot, clkreboot, poweroff — a daemon
+// under systemd is not a firmware to power-cycle, and temporary
+// radio params await a design of their own; they answer Unknown
+// command like anything else this node does not speak.
 var otaSetting = map[string]string{
 	"name":                  "node_name",
 	"lat":                   "node_lat",
@@ -48,6 +52,10 @@ var otaSetting = map[string]string{
 var otaReadOnly = map[string]bool{
 	"admin_password": true,
 	"identity":       true,
+	// The reference gates set freq to the serial port alone — a
+	// frequency changed over the air strands the admin who changed
+	// it — and our serial port is the console.
+	"frequency_hz": true,
 }
 
 // otaUnknown is the reference's exact answer for a word it does not
@@ -83,8 +91,19 @@ func (m *manager) runOTA(relay, principal, line string) string {
 	case "ver":
 		return "lotor " + version
 	case "clock":
+		if rest == "sync" {
+			// The host keeps its own clock, so what sync asks for is
+			// already true — an OK, in the reference's OK-with-detail
+			// shape, because answering an app's sync with a failure
+			// would report broken what is merely unnecessary.
+			return "OK - clock already synced (system time)"
+		}
 		// The reference's own clock shape: minutes and a datestamp.
 		return time.Now().UTC().Format("15:04 - 2/1/2006") + " UTC"
+	case "time":
+		// The host's clock is not the mesh's to set; the refusal
+		// wears the reference's ERR shape.
+		return "ERR: clock not settable (system time)"
 	case "":
 		return ""
 	default:
