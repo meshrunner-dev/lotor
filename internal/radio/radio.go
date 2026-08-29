@@ -39,6 +39,20 @@ type Envelope struct {
 	FreqRangeHiHz  uint32
 }
 
+// Permits judges a whole demand — the waveform and the power choice
+// — against the board. Allows covers the waveform alone, for callers
+// that have nothing to say about power.
+func (e Envelope) Permits(w Waveform, dbm int8, explicit bool) error {
+	if err := e.Allows(w); err != nil {
+		return err
+	}
+	if explicit && e.MaxTxPowerDBm != 0 && dbm > e.MaxTxPowerDBm {
+		return fmt.Errorf("tx_power_dbm %d exceeds the radio's %d dBm cap — refusing, not clamping",
+			dbm, e.MaxTxPowerDBm)
+	}
+	return nil
+}
+
 // Allows verifies a waveform fits the envelope.
 func (e Envelope) Allows(w Waveform) error {
 	if e.FreqRangeLowHz != 0 && w.FrequencyHz < e.FreqRangeLowHz ||

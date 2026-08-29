@@ -285,6 +285,19 @@ func (m *manager) relayCfgCopy(relay string) map[string]any {
 	return out
 }
 
+// relayEnvelope reads the envelope of the radio a relay owns, from
+// the live view — safe from any goroutine, the engine's included.
+func (m *manager) relayEnvelope(relay string) (radio.Envelope, bool) {
+	m.viewMu.RLock()
+	defer m.viewMu.RUnlock()
+	info, ok := m.infos[relay]
+	if !ok {
+		return radio.Envelope{}, false
+	}
+	rd, ok := m.radios[info.Radio]
+	return rd.Envelope, ok
+}
+
 // relayValue reads one effective attribute from the live view — safe
 // from any goroutine, the engine's included. A value nobody set reads
 // as the empty one it is: absence and emptiness are the same answer

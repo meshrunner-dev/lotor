@@ -73,8 +73,13 @@ type Armer interface {
 // it over every override scope, so a typo under a profile that is not
 // selected today still fails today.
 type Builder struct {
-	Build   func(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (Engine, error)
-	Check   func(cfg map[string]any) error
+	Build func(relayName string, cfg map[string]any, b *bus.Bus, log *zap.Logger) (Engine, error)
+	Check func(cfg map[string]any) error
+	// Asks is what a configuration would demand of the radio — the
+	// waveform and the power choice — without building an engine.
+	// An engine answers the same, but only once built: too late to
+	// refuse a mutation before it reaches the store.
+	Asks    func(cfg map[string]any) (w radio.Waveform, dbm int8, explicit bool, err error)
 	Presets map[string]map[string]any
 	// Schema declares every attribute the protocol accepts — the
 	// administration channels' single source for help, completion and

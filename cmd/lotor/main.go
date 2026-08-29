@@ -716,8 +716,27 @@ func resolveConfigs(rc config.Relay, radioSpec config.Radio) (*resolvedConfigs, 
 		func(cfg map[string]any) error { _, e := drv.Inspect(cfg); return e }); err != nil {
 		return nil, fmt.Errorf("radio %q: %w", rc.Radio, err)
 	}
-	if err := checkScopes(rc.Layered, builder.Presets, builder.Check); err != nil {
+	// Every relay scope is judged against the board too, not just the
+	// selected one: a power tomorrow's profile cannot key is a relay
+	// that dies the day someone switches to it.
+	fits, err := envelopeCheck(drv, radioCfg, builder)
+	if err != nil {
+		return nil, fmt.Errorf("radio %q: %w", rc.Radio, err)
+	}
+	if err := checkScopes(rc.Layered, builder.Presets, func(cfg map[string]any) error {
+		if builder.Check != nil {
+			if err := builder.Check(cfg); err != nil {
+				return err
+			}
+		}
+		return fits(cfg)
+	}); err != nil {
 		return nil, err
+	}
+	// The selected scope may hold no overrides at all, and then the
+	// loop above never saw it.
+	if err := fits(relayCfg); err != nil {
+		return nil, fmt.Errorf("radio %q: %w", rc.Radio, err)
 	}
 	return &resolvedConfigs{
 		drv: drv, builder: builder,
@@ -1170,14 +1189,36 @@ func bindEnvelope(drv radio.Driver, radioCfg map[string]any,
 	if err != nil {
 		return env, err
 	}
-	if err := env.Allows(eng.Waveform()); err != nil {
+	dbm, explicit := eng.TxPower()
+	if err := env.Permits(eng.Waveform(), dbm, explicit); err != nil {
 		return env, err
 	}
-	if dbm, explicit := eng.TxPower(); explicit && env.MaxTxPowerDBm != 0 && dbm > env.MaxTxPowerDBm {
-		return env, fmt.Errorf("tx_power_dbm %d exceeds the radio's %d dBm cap — refusing, not clamping",
-			dbm, env.MaxTxPowerDBm)
-	}
 	return env, nil
+}
+
+// envelopeCheck reads the board once and returns the judgement that a
+// relay configuration asks nothing the board cannot serve. assemble
+// asks the same of the engine it built, but a refusal there is a
+// relay that does not come up; asked here it is a mutation refused,
+// the running relay untouched. What cannot answer passes.
+func envelopeCheck(drv radio.Driver, radioCfg map[string]any,
+	builder protocol.Builder,
+) (func(map[string]any) error, error) {
+	pass := func(map[string]any) error { return nil }
+	if drv.Inspect == nil || builder.Asks == nil {
+		return pass, nil
+	}
+	env, err := drv.Inspect(radioCfg)
+	if err != nil {
+		return nil, err
+	}
+	return func(cfg map[string]any) error {
+		w, dbm, explicit, err := builder.Asks(cfg)
+		if err != nil {
+			return err
+		}
+		return env.Permits(w, dbm, explicit)
+	}, nil
 }
 
 // checkScopes dry-runs every override scope through a validator.

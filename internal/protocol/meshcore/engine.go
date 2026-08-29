@@ -29,7 +29,7 @@ import (
 
 func init() {
 	protocol.Register("meshcore", protocol.Builder{
-		Build: build, Check: check, Presets: presets, Schema: Schema(),
+		Build: build, Check: check, Asks: asks, Presets: presets, Schema: Schema(),
 	})
 }
 
@@ -322,6 +322,17 @@ func normalizeGuest(p *params) error {
 func check(cfg map[string]any) error {
 	_, _, err := resolve(cfg)
 	return err
+}
+
+// asks reports what a configuration would demand of the radio. It
+// reads the same resolution check and build do, so the three cannot
+// disagree about what a configuration means.
+func asks(cfg map[string]any) (radio.Waveform, int8, bool, error) {
+	p, _, err := resolve(cfg)
+	if err != nil {
+		return radio.Waveform{}, 0, false, err
+	}
+	return p.Waveform, p.TxPowerDBm.dbm, p.TxPowerDBm.explicit, nil
 }
 
 // resolve reads the configuration into the parameters and the identity

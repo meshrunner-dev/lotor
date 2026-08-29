@@ -11,6 +11,7 @@ import (
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/protocol"
 	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
+	"meshrunner.dev/lotor/internal/radio"
 	"time"
 )
 
@@ -672,5 +673,87 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 		if out := m.runOTA("mc", "air:test", cmd); out != otaUnknown {
 			t.Errorf("%q got %q", cmd, out)
 		}
+	}
+}
+
+func TestAMutationCannotOutrunTheBoard(t *testing.T) {
+	// A dBm figure the schema likes and the board cannot serve: the
+	// mutation is refused, and nothing reaches the store.
+	f := sampleFile()
+	f.Relays["meshcore-868"].Layered.Overrides["eu-868-narrow"]["tx_power_dbm"] = "30"
+	err := deepCheck(f, confdb.KindRelay, "meshcore-868", "meshcore-868")
+	if err == nil {
+		t.Fatal("30 dBm passed a 22 dBm board")
+	}
+	if !strings.Contains(err.Error(), "22 dBm cap") {
+		t.Errorf("error = %v", err)
+	}
+	// A frequency the board does not serve is the same judgement.
+	f = sampleFile()
+	f.Relays["meshcore-868"].Layered.Overrides["eu-868-narrow"]["frequency_hz"] = 433000000
+	if err := deepCheck(f, confdb.KindRelay, "meshcore-868", "meshcore-868"); err == nil {
+		t.Fatal("433 MHz passed an 868 MHz board")
+	}
+	// A scope nobody has selected is judged too: the day an operator
+	// switches profile is not the day to find out the board cannot
+	// key what the profile asks.
+	builder, err := protocol.Lookup("meshcore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f = sampleFile()
+	spare := map[string]any{"tx_power_dbm": "30"}
+	maps.Copy(spare, builder.Presets["eu-868-narrow"])
+	f.Relays["meshcore-868"].Layered.Overrides["custom"] = spare
+	err = deepCheck(f, confdb.KindRelay, "meshcore-868", "meshcore-868")
+	if err == nil {
+		t.Fatal("an unselected scope smuggled 30 dBm past the board")
+	}
+	if !strings.Contains(err.Error(), "22 dBm cap") {
+		t.Errorf("unselected scope refused for the wrong reason: %v", err)
+	}
+	// What the board can serve still resolves.
+	f = sampleFile()
+	f.Relays["meshcore-868"].Layered.Overrides["eu-868-narrow"]["tx_power_dbm"] = "-9"
+	if err := deepCheck(f, confdb.KindRelay, "meshcore-868", "meshcore-868"); err != nil {
+		t.Fatalf("-9 dBm refused: %v", err)
+	}
+}
+
+func TestOTASetRefusesWhatTheBoardCannotDo(t *testing.T) {
+	builder, err := protocol.Lookup("meshcore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]any{"node_name": "Raccoon City"}
+	maps.Copy(cfg, builder.Presets["eu-868-narrow"])
+	m := &manager{kinds: buildKinds(), file: &config.File{},
+		infos: map[string]cli.RelayInfo{"mc": {Name: "mc", Radio: "sx"}},
+		radios: map[string]cli.RadioInfo{"sx": {Name: "sx", Envelope: radio.Envelope{
+			MaxTxPowerDBm: 22, FreqRangeLowHz: 850_000_000, FreqRangeHiHz: 930_000_000,
+		}}},
+		traces: map[string][]config.Trace{
+			"relay mc": {{Key: "protocol", Value: "meshcore", Source: "config"}},
+		},
+		cfgs: map[string]map[string]any{"mc": cfg},
+		air:  make(chan airOrder, 4),
+	}
+	// The admin hears the board's own refusal, on the air, at once,
+	// and the order never leaves for the manager's goroutine.
+	out := m.runOTA("mc", "air:test", "set tx 30")
+	if !strings.HasPrefix(out, "ERR: ") || !strings.Contains(out, "22 dBm cap") {
+		t.Errorf("over the cap got %q", out)
+	}
+	if len(m.air) != 0 {
+		t.Fatal("a value the board refuses reached the air channel")
+	}
+	// freq is console-only, so the air cannot reach the frequency
+	// check; TestAMutationCannotOutrunTheBoard judges that path.
+	// What the board can serve still travels.
+	if out := m.runOTA("mc", "air:test", "set tx 6"); out != "OK" {
+		t.Errorf("sound value got %q", out)
+	}
+	if o := <-m.air; o.set["tx_power_dbm"] != "6" {
+		t.Errorf("order = %+v", o)
 	}
 }

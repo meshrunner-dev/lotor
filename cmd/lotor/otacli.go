@@ -251,6 +251,20 @@ func (m *manager) otaDeepCheck(choice, relay, attr string, value any) string {
 	if err := builder.Check(cfg); err != nil {
 		return otaErr(err)
 	}
+	// What the change would ask of the radio, against what the board
+	// allows. The mutation refuses this too, but two seconds later
+	// and only to the journal — here it is the admin's answer.
+	env, known := m.relayEnvelope(relay)
+	if !known || builder.Asks == nil {
+		return ""
+	}
+	w, dbm, explicit, err := builder.Asks(cfg)
+	if err != nil {
+		return otaErr(err)
+	}
+	if err := env.Permits(w, dbm, explicit); err != nil {
+		return otaErr(err)
+	}
 	return ""
 }
 
