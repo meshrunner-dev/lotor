@@ -23,7 +23,7 @@ RestartSec=5
 
 User=lotor
 Group=lotor
-SupplementaryGroups=spi gpio
+SupplementaryGroups=spi gpio i2c
 StateDirectory=lotor
 RuntimeDirectory=lotor
 RuntimeDirectoryMode=0750
@@ -39,6 +39,7 @@ ProtectHome=yes
 PrivateTmp=yes
 DeviceAllow=char-spi rw
 DeviceAllow=char-gpiochip rw
+DeviceAllow=char-i2c rw
 
 [Install]
 WantedBy=multi-user.target

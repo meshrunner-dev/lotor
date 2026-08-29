@@ -28,6 +28,7 @@ import (
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/radio"
+	"meshrunner.dev/lotor/internal/sensor"
 	"meshrunner.dev/lotor/internal/sentinel"
 	"meshrunner.dev/lotor/internal/update"
 )
@@ -281,6 +282,11 @@ type SensorInfo struct {
 	Name           string
 	Driver         string
 	SampleInterval time.Duration
+	// Running is false for a part that would not open — a bus that is
+	// not there, a permission the unit does not grant.
+	Running bool
+	// Readings is the sampler's last answer, empty until it has one.
+	Readings []sensor.Reading
 }
 
 // Deps is everything the commands may consult. Sentinel may be nil —

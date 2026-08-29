@@ -18,6 +18,7 @@ import (
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/relay"
+	"meshrunner.dev/lotor/internal/sensor"
 	"meshrunner.dev/lotor/internal/sentinel"
 	"meshrunner.dev/lotor/internal/update"
 )
@@ -193,19 +194,29 @@ func (s *session) sensorList() error {
 		return nil
 	}
 	tb := s.table()
-	tb.header("NAME", "DRIVER", "SAMPLED")
+	tb.header("NAME", "DRIVER", "SAMPLED", "LAST")
 	for _, sn := range s.sensors() {
 		every := "default"
 		if sn.SampleInterval > 0 {
 			every = "every " + sn.SampleInterval.String()
 		}
-		tb.row(sn.Name, sn.Driver, every)
+		tb.row(sn.Name, sn.Driver, every, sensorLast(sn))
 	}
 	return tb.flush(s.out)
 }
 
-// sensorStatus is one part as it is read. Nothing samples it yet, so
-// what it can honestly say is what it was told to be.
+// sensorUnits is what a quantity is measured in, for a reader. The
+// protocol side maps the same quantities to its own encoding; neither
+// table belongs in internal/sensor, which measures rather than
+// presents.
+var sensorUnits = map[sensor.Quantity]string{
+	sensor.Voltage: "V",
+	sensor.Current: "A",
+	sensor.Power:   "W",
+}
+
+// sensorStatus is one part as it is read: what it was told to be, and
+// what it last answered.
 func (s *session) sensorStatus(name string) error {
 	for _, sn := range s.sensors() {
 		if sn.Name != name {
@@ -218,9 +229,37 @@ func (s *session) sensorStatus(name string) error {
 			every = sn.SampleInterval.String()
 		}
 		tb.row("sampled", "every "+every)
+		switch {
+		case !sn.Running:
+			// The part did not open. The journal says why; the
+			// console says that it did not, so nobody reads an empty
+			// list as a quiet part.
+			tb.row("state", "not running — the journal says why")
+		case len(sn.Readings) == 0:
+			tb.row("state", "running, nothing read yet")
+		default:
+			tb.row("state", "running")
+			for _, r := range sn.Readings {
+				tb.row(string(r.Quantity),
+					fmt.Sprintf("%.3f %s — %s", r.Value, sensorUnits[r.Quantity], ago(r.At)))
+			}
+		}
 		return tb.flush(s.out)
 	}
 	return fmt.Errorf("no sensor %q", name)
+}
+
+// sensorLast summarises a part in one cell: the listing says whether
+// it answers at all, and status says what it answered.
+func sensorLast(sn SensorInfo) string {
+	switch {
+	case !sn.Running:
+		return "not running"
+	case len(sn.Readings) == 0:
+		return "nothing yet"
+	default:
+		return ago(sn.Readings[0].At)
+	}
 }
 
 // radioStatus is one radio as it is attached.

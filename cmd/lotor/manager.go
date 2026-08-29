@@ -107,6 +107,7 @@ type manager struct {
 	// the truth the status line owes the operator, kept beside the
 	// observer table under the same lock.
 	obsCause map[string]string
+	samplers map[string]*managedSampler
 	infos    map[string]cli.RelayInfo
 	radios   map[string]cli.RadioInfo
 	traces   map[string][]config.Trace
@@ -129,6 +130,7 @@ func newManager(store *confdb.Store, f *config.File, b *bus.Bus,
 		running:   map[string]*managedRelay{},
 		observers: map[string]*managedObserver{},
 		obsCause:  map[string]string{},
+		samplers:  map[string]*managedSampler{},
 		infos:     map[string]cli.RelayInfo{},
 		radios:    map[string]cli.RadioInfo{},
 		traces:    map[string][]config.Trace{},
@@ -148,6 +150,9 @@ func (m *manager) Start(ctx context.Context) {
 	}
 	for name := range m.file.MQTT {
 		m.startObserver(ctx, name)
+	}
+	for name := range m.file.Sensors {
+		m.startSampler(ctx, name)
 	}
 }
 
@@ -564,17 +569,22 @@ func (m *manager) RadioInfos() []cli.RadioInfo {
 	return out
 }
 
-// SensorInfos lists the configured parts. Nothing runs them yet, so
-// the view is what the store says — the readings join it with the
-// sampler.
+// SensorInfos lists the configured parts and what each last measured.
+// Latest is a copy behind the sampler's own lock, so this never waits
+// on a bus.
 func (m *manager) SensorInfos() []cli.SensorInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]cli.SensorInfo, 0, len(m.file.Sensors))
 	for name, sn := range m.file.Sensors {
-		out = append(out, cli.SensorInfo{
+		info := cli.SensorInfo{
 			Name: name, Driver: sn.Driver, SampleInterval: sn.SampleInterval,
-		})
+			Running: false, Readings: nil,
+		}
+		if h, live := m.samplers[name]; live {
+			info.Running, info.Readings = true, h.smp.Latest()
+		}
+		out = append(out, info)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
@@ -1030,6 +1040,8 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 			// check and install read the store live; nothing bounces.
 			return "applied — the next check reads it", nil
 		case confdb.KindSensor:
+			// The part is reopened; no relay is disturbed by it.
+			m.bounceSampler(name)
 			return "applied — sensor " + name, nil
 		case confdb.KindMQTT:
 			m.bounceObserver(name)
@@ -1178,6 +1190,9 @@ func (m *manager) commitCreate(ctx context.Context, next *config.File,
 	case confdb.KindMQTT:
 		m.startObserver(m.ctx, name) //nolint:contextcheck // deliberate: daemon lifetime
 		return fmt.Sprintf("added — observer %s connecting", name), nil
+	case confdb.KindSensor:
+		m.startSampler(m.ctx, name) //nolint:contextcheck // deliberate: daemon lifetime
+		return "added — sensor " + name, nil
 	}
 	return fmt.Sprintf("added — %s %s", kind, name), nil
 }
@@ -1523,6 +1538,9 @@ func (m *manager) Remove(ctx context.Context, kind, name, principal string) (str
 		return "", err
 	}
 	m.file = next
+	if kind == confdb.KindSensor {
+		m.stopSampler(name)
+	}
 	if kind == confdb.KindRelay {
 		m.stopRelay(name)
 		m.viewMu.Lock()
