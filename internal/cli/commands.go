@@ -727,7 +727,10 @@ func (s *session) regions(_ context.Context, in input) error {
 }
 
 // regionLine forwards one line of the region grammar to the relay and
-// prints the wire's own reply.
+// prints the wire's own reply. The modal load is refused at this door:
+// the REPL strips leading spaces and swallows blank lines, so a load
+// armed from here is a transaction nothing can feed or commit — the
+// air has the modal, the console has def and the dump.
 func (s *session) regionLine(_ context.Context, in input) error {
 	r, err := s.oneRelay(in.opts[scopeRelay])
 	if err != nil {
@@ -743,7 +746,10 @@ func (s *session) regionLine(_ context.Context, in input) error {
 	if len(in.pos) > 0 && in.pos[0] != "" {
 		line += " " + in.pos[0]
 	}
-	reply, handled, err := r.RegionLine("console", line)
+	if verb := strings.Fields(strings.TrimPrefix(line, cmdRegion)); len(verb) > 0 && verb[0] == "load" {
+		return errors.New(`the modal load speaks over the air — here, build the tree with region "def …"`)
+	}
+	reply, handled, err := r.RegionLine(s.regionOwner(), line)
 	if err != nil {
 		return err
 	}
@@ -788,7 +794,7 @@ func (s *session) regionItemVerb(_ context.Context, in input, verb string) error
 	if name == "" {
 		return fmt.Errorf("which one? %s=<name>", optRegion)
 	}
-	reply, _, err := r.RegionLine("console", cmdRegion+" "+verb+" "+name)
+	reply, _, err := r.RegionLine(s.regionOwner(), cmdRegion+" "+verb+" "+name)
 	if err != nil {
 		return err
 	}
@@ -1637,4 +1643,15 @@ func observerState(mq MQTTInfo) string {
 		return "connecting"
 	}
 	return "down"
+}
+
+// regionOwner names this console session at the region door: a
+// staging is an exclusive transaction keyed by owner, and every
+// session must be its own — two consoles sharing a constant would
+// speak into each other's.
+func (s *session) regionOwner() string {
+	if s.id != "" {
+		return "console:" + s.id
+	}
+	return "console"
 }
