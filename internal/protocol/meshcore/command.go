@@ -10,6 +10,8 @@ package meshcore
 // console.
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -135,14 +137,15 @@ func (e *engine) runCommand(rx *reception, origin txn.ID) {
 		// The reference answers a retry with an empty reply rather
 		// than running the line again: the command already took.
 		e.log.Info("command retried — not run again",
-			zap.String("txn", origin.Short()), zap.String("command", line))
+			zap.String("txn", origin.Short()), zap.String("command", safeCommandLine(line)))
 	} else {
 		out = e.commands(line, c.pubKey[:])
 		e.log.Info("command from the air",
 			zap.String("txn", origin.Short()),
 			zap.String("pubkey", shortKey(c.pubKey[:])),
-			zap.String("command", line))
-		logging.Trace(e.log, "command answered", zap.String("reply", out))
+			zap.String("command", safeCommandLine(line)))
+		logging.Trace(e.log, "command answered",
+			zap.String("txn", origin.Short()), zap.String("reply", safeCommandReply(line, out)))
 	}
 	if out == "" {
 		return
@@ -221,4 +224,51 @@ func (e *engine) replyText(inbound *meshcore.Packet, c *client, plain []byte, or
 	pkt.SetPathHashSizeAndCount(inbound.PathHashSize(), 0)
 	scope.Scope(pkt)
 	e.enqueueAfter(pkt, "cmd-resp", origin, prioFloodReply, serverResponseDelay)
+}
+
+// commandTailSafe are the verbs whose whole line may enter the
+// journal: their tails carry names and figures, never credentials.
+// Everything else logs its verb and subject alone — a set's value is
+// a password whenever the setting is one, and an unknown command's
+// tail is whatever the sender typed, canaries included. The store's
+// revision journal keeps the (masked) values; the log does not need
+// them twice.
+// verbGet is the read verb, named once for the reply mask.
+const verbGetSetting = "get"
+
+var commandTailSafe = map[string]bool{
+	"region": true, verbGetSetting: true, "advert": true, "advert.zerohop": true,
+	"setperm": true, "discover.neighbors": true, "neighbor.remove": true,
+	"ver": true, "clock": true, "time": true,
+}
+
+// safeCommandLine renders one command line for the journal. A set
+// keeps its setting's name — that is the diagnosis — and loses its
+// value; an unknown verb loses everything past itself, because its
+// "subject" is just the first word of a tail nobody vetted.
+func safeCommandLine(line string) string {
+	fields := strings.Fields(line)
+	switch {
+	case len(fields) == 0:
+		return ""
+	case commandTailSafe[fields[0]]:
+		return strings.Join(fields, " ")
+	case fields[0] == "set" && len(fields) >= 2:
+		return "set " + fields[1] + " …"
+	case len(fields) == 1:
+		return fields[0]
+	default:
+		return fields[0] + " …"
+	}
+}
+
+// safeCommandReply renders one answer for the trace. A get's answer
+// IS the setting's value — secret whenever the setting is — and an
+// unknown line's echo is its tail again; both trace as their size.
+func safeCommandReply(line, reply string) string {
+	fields := strings.Fields(line)
+	if len(fields) > 0 && fields[0] != verbGetSetting && commandTailSafe[fields[0]] {
+		return reply
+	}
+	return fmt.Sprintf("(%d bytes)", len(reply))
 }

@@ -525,3 +525,42 @@ func TestCLIDataCommandsCarryNoAck(t *testing.T) {
 		}
 	}
 }
+
+func TestCommandLogsCarryNoSecrets(t *testing.T) {
+	// The log-confidentiality matrix: a set's value is a password
+	// whenever the setting is one, an unknown command's tail is
+	// whatever was typed, and a get's ANSWER is the value again. None
+	// may enter the journal at any level; the safe verbs keep their
+	// whole line, which is what makes the journal worth reading.
+	canary := "guest-password-must-not-enter-logs"
+	for _, c := range []struct{ line, want string }{
+		{"set guest.password " + canary, "set guest.password …"},
+		{"set name Raccoon", "set name …"},
+		{"get guest.password", "get guest.password"},
+		{"region put lab-eu", "region put lab-eu"},
+		{"ver", "ver"},
+	} {
+		if got := safeCommandLine(c.line); got != c.want {
+			t.Errorf("safeCommandLine(%q) = %q, want %q", c.line, got, c.want)
+		}
+		if strings.Contains(safeCommandLine(c.line), canary) && !strings.Contains(c.want, canary) {
+			t.Errorf("%q leaked the canary", c.line)
+		}
+	}
+	// An unknown command's tail — canary included — never survives
+	// past its subject.
+	if got := safeCommandLine("frobnicate " + canary + " " + canary); strings.Contains(got, canary) {
+		t.Errorf("unknown command leaked its tail: %q", got)
+	}
+	// Replies: a get's answer is the value; an unknown's echo is the
+	// tail again. Both trace as size alone.
+	if got := safeCommandReply("get guest.password", "> "+canary); strings.Contains(got, canary) {
+		t.Errorf("get reply leaked: %q", got)
+	}
+	if got := safeCommandReply("region put lab-eu", "OK - (flood allowed)"); got != "OK - (flood allowed)" {
+		t.Errorf("safe verb reply masked: %q", got)
+	}
+	if got := safeCommandReply("blah "+canary, canary); strings.Contains(got, canary) {
+		t.Errorf("unknown reply leaked: %q", got)
+	}
+}
