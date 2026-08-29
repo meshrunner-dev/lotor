@@ -636,14 +636,23 @@ func TestAdminLoginGrantsTheRole(t *testing.T) {
 		t.Fatalf("login reply = % x — want OK, admin bit, admin perms", body)
 	}
 
-	// A later guest-word login does not demote the admin.
+	// A password login sets the role the password earns, demotion
+	// included — the reference rewrites the bits on every one; only
+	// the blank in-ACL recheck keeps a granted role.
 	frame, secret = login(t, e.id, peer, nowTS(301), "raccoon", false)
 	dev.frames <- frame
 	if sent := awaitSent(t, sub); sent.Kind != "login-resp" {
 		t.Fatalf("sent = %+v", sent)
 	}
+	if _, body := openReply(t, <-dev.sent, secret); body[2] != 0 {
+		t.Fatalf("the guest word kept the admin role: % x", body)
+	}
+	// And the admin word takes it back.
+	frame, secret = login(t, e.id, peer, nowTS(302), "mask", false)
+	dev.frames <- frame
+	awaitSent(t, sub)
 	if _, body := openReply(t, <-dev.sent, secret); body[2] != 1 {
-		t.Fatalf("guest word demoted the admin: % x", body)
+		t.Fatalf("the admin word did not restore the role: % x", body)
 	}
 }
 

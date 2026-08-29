@@ -168,3 +168,71 @@ func TestAMutatingCommandDoesNotBlockTheLoop(t *testing.T) {
 		t.Fatalf("the loop stopped serving after a set: %+v", sent)
 	}
 }
+
+func TestTheAccessListAnswersItsAdminAlone(t *testing.T) {
+	e, dev, sub, peer := txRig(t, "on-air")
+	e.p.AdminPassword = "mask"
+	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
+	e.AttachSessions(newMemStore())
+	runEngine(t, e, dev)
+
+	// A grant to a third key, so the list has something to say. A
+	// real identity: the grant derives a secret, and a byte pattern
+	// is not a curve point.
+	seed := make([]byte, meshcore.SeedSize)
+	seed[0] = 7
+	thirdID, err := meshcore.LocalIdentityFromSeed(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third := thirdID.PubKey
+	if err := e.Grant(third[:], PermReadWrite); err != nil {
+		t.Fatal(err)
+	}
+
+	frame, secret := login(t, e.id, peer, nowTS(900), "mask", false)
+	dev.frames <- frame
+	awaitSent(t, sub)
+	<-dev.sent
+
+	dev.frames <- request(t, e.id, peer, nowTS(901), []byte{meshcore.ReqGetAccessList, 0, 0, 0, 0})
+	if sent := awaitSent(t, sub); sent.Kind != "req-resp" {
+		t.Fatalf("no access list: %+v", sent)
+	}
+	tag, body := openReply(t, <-dev.sent, secret)
+	if tag != nowTS(901) {
+		t.Fatalf("tag = %d", tag)
+	}
+	// Seven bytes per entry: the six-byte prefix and the byte. The
+	// admin session and the grant are here; the padding past the
+	// entries is the cipher's, all zero, and a zero role is skipped
+	// on the wire so the tail reads unambiguously.
+	if len(body) < 14 {
+		t.Fatalf("body = % x", body)
+	}
+	found := map[byte]byte{}
+	for i := 0; i+7 <= len(body); i += 7 {
+		if body[i+6]&permRoleMask == permGuest {
+			continue // padding, or nothing
+		}
+		found[body[i]] = body[i+6]
+	}
+	if found[third[0]]&permRoleMask != PermReadWrite {
+		t.Errorf("the grant is missing or wrong: %v", found)
+	}
+	if found[peer.PubKey[0]]&permRoleMask != PermAdmin {
+		t.Errorf("the asking admin is missing: %v", found)
+	}
+
+	// A guest asking earns silence, the reference's own gate.
+	gfr, _ := login(t, e.id, peer, nowTS(910), "raccoon", false)
+	dev.frames <- gfr
+	awaitSent(t, sub)
+	<-dev.sent
+	dev.frames <- request(t, e.id, peer, nowTS(911), []byte{meshcore.ReqGetAccessList, 0, 0, 0, 0})
+	select {
+	case raw := <-dev.sent:
+		t.Fatalf("a guest read the access list: % x", raw[:8])
+	case <-time.After(700 * time.Millisecond):
+	}
+}

@@ -7,8 +7,10 @@ package meshcore
 // asks for no emission, so a dry gate serves it too.
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"go.uber.org/zap"
@@ -106,6 +108,36 @@ func (e *engine) AccessList() ([]ACLEntry, error) {
 // aclListOrder asks the pipeline for the access list.
 type aclListOrder struct {
 	reply chan []ACLEntry
+}
+
+// accessListBody frames the access list the way the reference's
+// REQ_TYPE_GET_ACCESS_LIST answers it: seven bytes per entry — a
+// six-byte key prefix and the permission byte — guests skipped like
+// the reference skips them, the list cut where the reply would
+// outgrow the packet. Sorted by key so two asks read alike.
+func (e *engine) accessListBody() []byte {
+	const (
+		entrySize = 6 + 1
+		// The reference bounds at MAX_PACKET_PAYLOAD minus the tag it
+		// writes first; the same arithmetic, the same wire.
+		bodyMax = 184 - 4
+	)
+	rows := e.acl.entries()
+	sort.Slice(rows, func(i, j int) bool {
+		return bytes.Compare(rows[i].PubKey[:], rows[j].PubKey[:]) < 0
+	})
+	body := make([]byte, 0, min(len(rows), bodyMax/entrySize)*entrySize)
+	for _, r := range rows {
+		if r.Perms&permRoleMask == permGuest {
+			continue // the reference's "skip deleted (or guest) entries"
+		}
+		if len(body)+entrySize > bodyMax {
+			break
+		}
+		body = append(body, r.PubKey[:6]...)
+		body = append(body, r.Perms)
+	}
+	return body
 }
 
 // RoleName names the role a permission byte carries — the reference's

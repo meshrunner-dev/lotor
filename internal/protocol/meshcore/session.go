@@ -174,12 +174,12 @@ func (e *engine) admitLogin(senderPub, secret []byte, password string,
 			c = &client{perms: permGuest}
 			copy(c.pubKey[:], senderPub)
 		}
-		// A guest word never demotes an admin session: the admin who
-		// idly logs in with the lesser password keeps the greater
-		// role, exactly as the reference's ACL keeps its permissions.
-		if !c.isAdmin() {
-			c.perms = (c.perms &^ permRoleMask) | permGuest
-		}
+		// A password login sets the role the password earns — the
+		// reference rewrites the bits on every one, demotion
+		// included; only the blank login, the in-ACL recheck, keeps
+		// what a grant recorded. A demoted entry is no grant either.
+		c.perms = (c.perms &^ permRoleMask) | permGuest
+		c.granted = false
 		c.secret = secret
 	default:
 		e.log.Debug("login refused", zap.String("txn", origin.Short()))
@@ -271,7 +271,7 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 		e.dropRateLimited(origin)
 		return
 	}
-	body, answered := e.answerRequest(args)
+	body, answered := e.answerRequest(c, args)
 	if len(args) > 0 {
 		logging.Trace(e.log, "session request answered",
 			zap.String("txn", origin.Short()), zap.String("request", reqName(args[0])),
@@ -301,10 +301,18 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 // is false for a question this node does not serve — which is not the
 // same as an answer that happens to be empty: a node with no sensor
 // still owes the asker a reply saying so.
-func (e *engine) answerRequest(args []byte) (body []byte, answered bool) {
+func (e *engine) answerRequest(c *client, args []byte) (body []byte, answered bool) {
 	switch args[0] {
 	case meshcore.ReqGetStatus:
 		return e.statusBody(), true
+	case meshcore.ReqGetAccessList:
+		// Admin only, both reserved bytes zero — the reference's
+		// exact gate; anyone else earns the silence a question this
+		// node does not serve earns.
+		if !c.isAdmin() || len(args) < 3 || args[1] != 0 || args[2] != 0 {
+			return nil, false
+		}
+		return e.accessListBody(), true
 	case meshcore.ReqGetTelemetry:
 		return e.telemetryBody(), true
 	case meshcore.ReqGetNeighbours:
