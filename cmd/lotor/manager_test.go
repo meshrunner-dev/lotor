@@ -483,7 +483,7 @@ func TestViewsAnswerWhileTheLifecycleLockIsHeld(t *testing.T) {
 			t.Fatalf("a view blocked behind the lifecycle lock — got only %v", seen)
 		}
 	}
-	if !seen["health on"] || !seen["get Raccoon City"] || !seen["name: Raccoon City"] {
+	if !seen["health on"] || !seen["get Raccoon City"] || !seen["> Raccoon City"] {
 		t.Errorf("views answered wrong: %v", seen)
 	}
 }
@@ -492,7 +492,10 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	m := &manager{kinds: buildKinds(), file: &config.File{},
 		infos: map[string]cli.RelayInfo{}, radios: map[string]cli.RadioInfo{},
 		traces: map[string][]config.Trace{
-			"relay mc": {{Key: "protocol", Value: "meshcore", Source: "config"}},
+			"relay mc": {
+				{Key: "protocol", Value: "meshcore", Source: "config"},
+				{Key: "node_name", Value: "Raccoon City", Source: "override:eu"},
+			},
 		},
 		air: make(chan airOrder, 4),
 	}
@@ -505,24 +508,30 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	cfg := map[string]any{"node_name": "Raccoon City"}
 	maps.Copy(cfg, builder.Presets["eu-868-narrow"])
 	m.cfgs = map[string]map[string]any{"mc": cfg}
-	// A value the schema refuses earns its refusal now, not a false
-	// ok and a journal line the admin cannot see.
-	if out := m.runOTA("mc", "air:test", "set tx banana"); !strings.Contains(out, "refused") {
+	// A value the schema refuses earns its refusal now — short, the
+	// reference's ERR shape — not a false ok and a journal line the
+	// admin cannot see.
+	out := m.runOTA("mc", "air:test", "set tx banana")
+	if !strings.HasPrefix(out, "ERR: ") || len(out) > 70 {
 		t.Errorf("garbage got %q", out)
 	}
 	if len(m.air) != 0 {
 		t.Fatal("garbage reached the air channel")
 	}
-	// A sound value is queued and answered optimistically.
-	if out := m.runOTA("mc", "air:test", "set tx 6"); !strings.Contains(out, "applied") {
+	// A sound value is queued and answered with the reference's own
+	// two bytes: a reply is airtime.
+	if out := m.runOTA("mc", "air:test", "set tx 6"); out != "OK" {
 		t.Errorf("sound value got %q", out)
 	}
 	o := <-m.air
 	if o.set["tx_power_dbm"] != "6" || o.principal != "air:test" {
 		t.Errorf("order = %+v", o)
 	}
-	// The unknown-word answer names the word, not a stack.
-	if out := m.runOTA("mc", "air:test", "set warp 9"); !strings.Contains(out, "unknown setting") {
+	// Unknown words earn the reference's exact answer, no echo.
+	if out := m.runOTA("mc", "air:test", "set warp 9"); out != "Unknown command" {
 		t.Errorf("unknown setting got %q", out)
+	}
+	if out := m.runOTA("mc", "air:test", "get name"); out != "> Raccoon City" {
+		t.Errorf("get shape: %q", out)
 	}
 }

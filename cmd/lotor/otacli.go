@@ -48,6 +48,11 @@ var otaReadOnly = map[string]bool{
 	"identity":       true,
 }
 
+// otaUnknown is the reference's exact answer for a word it does not
+// speak — and no echo: a reply is airtime, and the sender knows what
+// it typed.
+const otaUnknown = "Unknown command"
+
 // otaCommands runs one administration line from the air and returns
 // what to answer. It is the engine's commands hook.
 func (m *manager) otaCommands(relay string) func(line string, admin []byte) string {
@@ -74,41 +79,43 @@ func (m *manager) runOTA(relay, principal, line string) string {
 	case "ver":
 		return "lotor " + version
 	case "clock":
-		return time.Now().UTC().Format("2006-01-02 15:04:05") + " UTC"
+		// The reference's own clock shape: minutes and a datestamp.
+		return time.Now().UTC().Format("15:04 - 2/1/2006") + " UTC"
 	case "":
 		return ""
 	default:
-		return "unknown command: " + verb
+		return otaUnknown
 	}
 }
 
 // otaGet reads one setting back, or the node's own summary.
 func (m *manager) otaGet(relay, name string) string {
 	if name == "" {
-		return "get what? try: get name"
+		return "ERR: get what?"
 	}
 	attr, known := otaSetting[name]
 	if !known {
-		return "unknown setting: " + name
+		return otaUnknown
 	}
+	// "> value", the reference's get shape.
 	if v, ok := m.relayValue(relay, attr); ok {
-		return name + ": " + v
+		return "> " + v
 	}
-	return name + ": unset"
+	return "> (unset)"
 }
 
 // otaSet applies one setting through the mutation door.
 func (m *manager) otaSet(relay, principal, rest string) string {
 	name, value, ok := strings.Cut(rest, " ")
 	if !ok || strings.TrimSpace(value) == "" {
-		return "set what to what? try: set name Raccoon City"
+		return "ERR: set what?"
 	}
 	attr, known := otaSetting[name]
 	if !known {
-		return "unknown setting: " + name
+		return otaUnknown
 	}
 	if otaReadOnly[attr] {
-		return name + " is set from the console only"
+		return "ERR: console only"
 	}
 	value = strings.TrimSpace(value)
 	if attr == "tx.mode" {
@@ -119,7 +126,7 @@ func (m *manager) otaSet(relay, principal, rest string) string {
 		case "off":
 			value = "on-air-zero-hop"
 		default:
-			return "repeat wants on or off"
+			return "ERR: on or off"
 		}
 	}
 	// Validated here, synchronously and lock-free — the schema is
@@ -130,7 +137,7 @@ func (m *manager) otaSet(relay, principal, rest string) string {
 	typed, err := m.parseAgainst(confdb.KindRelay, choice,
 		map[string]string{attr: value}, nil)
 	if err != nil {
-		return "refused: " + err.Error()
+		return otaErr(err)
 	}
 	if msg := m.otaDeepCheck(choice, relay, attr, typed[attr]); msg != "" {
 		return msg
@@ -141,7 +148,7 @@ func (m *manager) otaSet(relay, principal, rest string) string {
 	// point — the deep cross-field checks run there, journalled.
 	return m.orderAir(airOrder{
 		relay: relay, principal: principal, set: map[string]string{attr: value},
-	}, "applied — "+name+" will change, relay restarting")
+	}, "OK")
 }
 
 // otaDeepCheck runs the engine's own validation on a copy of the
@@ -165,9 +172,29 @@ func (m *manager) otaDeepCheck(choice, relay, attr string, value any) string {
 	}
 	cfg[attr] = value
 	if err := builder.Check(cfg); err != nil {
-		return "refused: " + err.Error()
+		return otaErr(err)
 	}
 	return ""
+}
+
+// otaErr shortens a refusal for the air: the reference's ERR shape,
+// the wrapper prefixes dropped, the tail cut — a reply is airtime,
+// and the journal keeps the whole story for whoever needs it.
+func otaErr(err error) string {
+	msg := err.Error()
+	// Wrapped chains read inward: the deepest segment names the
+	// actual complaint, the wrappers name where it passed through.
+	if i := strings.LastIndex(msg, ": "); i >= 0 && i+2 < len(msg) {
+		if tail := msg[i+2:]; len(tail) > 12 {
+			msg = tail
+		}
+	}
+	msg = strings.TrimPrefix(msg, "meshcore params: ")
+	const keep = 60
+	if len(msg) > keep {
+		msg = msg[:keep-1] + "…"
+	}
+	return "ERR: " + msg
 }
 
 // otaAdvert announces this node, flooded or to the neighbourhood.
@@ -175,10 +202,9 @@ func (m *manager) otaAdvert(relay string, flood bool) string {
 	// Advert waits on the engine's own loop, so it cannot run in the
 	// engine goroutine either: queued like a mutation, triggered off
 	// it. The reply leaves first.
-	where := "the neighbourhood"
+	ok := "OK - zerohop advert sent"
 	if flood {
-		where = "the mesh"
+		ok = "OK - Advert sent"
 	}
-	return m.orderAir(airOrder{relay: relay, advert: true, flood: flood},
-		"advert queued for "+where)
+	return m.orderAir(airOrder{relay: relay, advert: true, flood: flood}, ok)
 }

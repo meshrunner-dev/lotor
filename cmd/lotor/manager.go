@@ -217,7 +217,7 @@ func (m *manager) orderAir(o airOrder, ok string) string {
 	case m.air <- o:
 		return ok
 	default:
-		return "busy — try again"
+		return "ERR: busy"
 	}
 }
 
