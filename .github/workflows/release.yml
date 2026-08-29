@@ -44,6 +44,8 @@ jobs:
     environment: stable
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       PRODUCT: ${{ needs.build.outputs.slug }}
@@ -59,6 +61,20 @@ jobs:
       - name: Refuse to publish unsigned channels
         run: grep -q "untrusted comment" internal/update/trust.go ||
           { echo "no embedded official key — mint one and embed it first"; exit 1; }
+      - name: Prove the release reproduces
+        # A second clean build of every target, compared byte-for-byte
+        # with the artifacts about to ship: "officially reproducible"
+        # is proved on the stable path itself, with the real version,
+        # not on a laptop with a task nobody is obliged to run.
+        run: |
+          for t in arm64 amd64 arm; do
+            goarm=""; [ "$t" = "arm" ] && goarm="7"
+            ./scripts/build -o "repro_${t}" -version "$VERSION" \
+              -goos linux -goarch "$t" -goarm "$goarm"
+            cmp -s "repro_${t}" "${PRODUCT}_linux_${t}" \
+              || { echo "linux/${t} does not reproduce byte-for-byte"; exit 1; }
+            rm "repro_${t}"
+          done
       - name: Create the release page
         # Notes for humans, an anchor for the TRIGGERING tag — gh
         # would silently mint a missing tag from the default branch,
@@ -70,15 +86,9 @@ jobs:
           flags=(--generate-notes --verify-tag --title "$VERSION")
           [ "${{ needs.meta.outputs.prerelease }}" = "true" ] && flags+=(--prerelease)
           gh release create "${GITHUB_REF_NAME}" "${flags[@]}"
-      - name: Compress, sign, upload, publish
+      - name: Compress and sign
         env:
           RELSIGN_KEY: ${{ secrets.RELSIGN_KEY }}
-          DEPLOY_KEY: ${{ secrets.UPDATES_DEPLOY_KEY }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_KEY }}
-          AWS_REGION: ${{ vars.S3_REGION || 'us-east-1' }}
-          S3_ENDPOINT: ${{ vars.S3_ENDPOINT }}
-          S3_BUCKET: ${{ vars.S3_BUCKET }}
           DL_BASE: ${{ vars.DL_BASE }}
         run: |
           # The bucket wiring is the environment's to provide — absent
@@ -100,6 +110,39 @@ jobs:
               "linux/arm=${base}/${PRODUCT}_${VERSION}_linux_arm.gz=${PRODUCT}_${VERSION}_linux_arm"
             go run ./cmd/relsign sign relsign.key "manifest-${channel}.json"
           done
+          # The .gz is what relays download: prove the compression is
+          # as deterministic as the build — the same relsign path over
+          # the same binaries must mint the same distributed bytes.
+          mkdir gzcheck
+          for t in arm64 amd64 arm; do
+            cp "${PRODUCT}_${VERSION}_linux_${t}" gzcheck/
+          done
+          ( cd gzcheck && go run ../cmd/relsign manifest -gzip probe "$VERSION" scratch.json \
+              "linux/arm64=${base}/a.gz=${PRODUCT}_${VERSION}_linux_arm64" \
+              "linux/amd64=${base}/b.gz=${PRODUCT}_${VERSION}_linux_amd64" \
+              "linux/arm=${base}/c.gz=${PRODUCT}_${VERSION}_linux_arm" )
+          for t in arm64 amd64 arm; do
+            cmp -s "${PRODUCT}_${VERSION}_linux_${t}.gz" "gzcheck/${PRODUCT}_${VERSION}_linux_${t}.gz" \
+              || { echo "linux/${t}.gz does not reproduce"; exit 1; }
+          done
+          rm -r gzcheck
+      - name: Attest the distributed bytes
+        # The attestation binds the .gz relays actually download to
+        # repository, commit and workflow — after compression, before
+        # anything is published. It complements Minisign; the updater's
+        # root of trust stays the embedded key.
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "*.gz"
+      - name: Upload and publish
+        env:
+          DEPLOY_KEY: ${{ secrets.UPDATES_DEPLOY_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_KEY }}
+          AWS_REGION: ${{ vars.S3_REGION || 'us-east-1' }}
+          S3_ENDPOINT: ${{ vars.S3_ENDPOINT }}
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
+        run: |
           # Artifacts land before any manifest points at them: a
           # published channel never names bytes not yet there.
           for f in "${PRODUCT}_${VERSION}"_linux_*.gz; do

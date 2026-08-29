@@ -223,9 +223,11 @@ Three contracts, three homes, never confused:
   by `task identity:check`, and never derived from the slug: a
   rebrand must not relocate a running fleet.
 
-Official builds are reproducible: `scripts/build` is the one recipe
-(Task and CI both), it injects no wall clock, and `task build:repro`
-proves two clean builds byte-identical. The three times that matter
+Official builds are reproducible, and the stable path proves it on
+every release: the publish job rebuilds each target and compares the
+result byte-for-byte with the artifacts about to ship, then proves
+the `.gz` relays download reproduces through the same `relsign`
+path. (`task build:repro` runs the same proof on a laptop.) The three times that matter
 stay distinct — `source time` is the commit's (in the binary),
 `published` is the manifest's (signed), and the job's own clock lives
 only in the CI provenance. Versions are functions of the source: dev
@@ -235,7 +237,9 @@ replay while refusing a different object under a known name. Git tags
 keep their `v` prefix; product versions drop it, and the update
 comparator tolerates both so old manifests stay valid.
 
-For stable releases, a GitHub artifact attestation can bind the
-distributed bytes to repository, commit and workflow. It complements
+Every stable release attests the distributed bytes: a GitHub
+artifact attestation binds each published `.gz` to repository,
+commit and workflow, generated after compression and before
+publication. It complements
 Minisign, never replaces it: the signed manifest and the embedded
 keys remain the auto-update's root of trust.
