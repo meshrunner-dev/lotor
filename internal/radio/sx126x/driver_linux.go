@@ -21,7 +21,8 @@ import (
 func init() {
 	radio.Register("sx126x-spi", radio.Driver{
 		Open: open, Inspect: Inspect, CheckTransmit: checkTransmit,
-		Presets: Presets(), Schema: Schema(),
+		CheckWaveform: CheckWaveform,
+		Presets:       Presets(), Schema: Schema(),
 	})
 }
 
@@ -400,78 +401,4 @@ func (d *device) Close() error {
 		_ = h.Close()
 	}
 	return err
-}
-
-func tcxoFrom(s string) (sx126x.TCXOVoltage, error) {
-	switch s {
-	case "":
-		return sx126x.TCXONone, nil
-	case "1.6":
-		return sx126x.TCXO1V6, nil
-	case "1.8":
-		return sx126x.TCXO1V8, nil
-	case "3.3":
-		return sx126x.TCXO3V3, nil
-	}
-	return sx126x.TCXONone, fmt.Errorf("unsupported tcxo voltage %q", s)
-}
-
-func chipFrom(s string) (sx126x.ChipVariant, error) {
-	switch s {
-	case "":
-		return sx126x.ChipUnset, nil
-	case chipSX1261:
-		return sx126x.SX1261, nil
-	case chipSX1262:
-		return sx126x.SX1262, nil
-	case chipSX1268:
-		return sx126x.SX1268, nil
-	}
-	return sx126x.ChipUnset, fmt.Errorf("unknown chip %q", s)
-}
-
-func paramsFrom(w radio.Waveform) (lora.Params, error) {
-	p := lora.Params{
-		Frequency: w.FrequencyHz,
-		Preamble:  uint16(w.Preamble),
-		SyncWord:  w.SyncWord,
-		CRC:       w.CRC,
-	}
-	switch w.SpreadingFactor {
-	case 5, 6, 7, 8, 9, 10, 11, 12:
-		p.SF = lora.SpreadingFactor(w.SpreadingFactor)
-	default:
-		return p, fmt.Errorf("spreading factor %d out of range", w.SpreadingFactor)
-	}
-	switch w.BandwidthHz {
-	case 7810:
-		p.BW = lora.BW7810
-	case 15630:
-		p.BW = lora.BW15630
-	case 31250:
-		p.BW = lora.BW31250
-	case 62500:
-		p.BW = lora.BW62500
-	case 125000:
-		p.BW = lora.BW125000
-	case 250000:
-		p.BW = lora.BW250000
-	case 500000:
-		p.BW = lora.BW500000
-	default:
-		return p, fmt.Errorf("unsupported bandwidth %d Hz", w.BandwidthHz)
-	}
-	switch w.CodingRate {
-	case 5:
-		p.CR = lora.CR5
-	case 6:
-		p.CR = lora.CR6
-	case 7:
-		p.CR = lora.CR7
-	case 8:
-		p.CR = lora.CR8
-	default:
-		return p, fmt.Errorf("coding rate 4/%d out of range", w.CodingRate)
-	}
-	return p, nil
 }

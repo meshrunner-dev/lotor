@@ -56,7 +56,7 @@ func TestSettingsResolveTheBoardChip(t *testing.T) {
 		"reset_pin":   "gpiochip1:25",
 		"busy_pin":    12,
 		"dio1_pin":    5,
-		"enable_pins": []any{12, "gpio2:3"},
+		"enable_pins": []any{13, "gpio2:3"},
 	})
 	if err != nil {
 		t.Fatalf("settings: %v", err)
@@ -70,7 +70,7 @@ func TestSettingsResolveTheBoardChip(t *testing.T) {
 	if got := *s.DIO1Pin; got != (Pin{Chip: "gpiochip0", Offset: 5}) {
 		t.Errorf("dio1 pin = %+v", got)
 	}
-	want := []Pin{{Chip: "gpiochip0", Offset: 12}, {Chip: "gpio2", Offset: 3}}
+	want := []Pin{{Chip: "gpiochip0", Offset: 13}, {Chip: "gpio2", Offset: 3}}
 	if len(s.EnablePins) != len(want) {
 		t.Fatalf("enable pins = %+v", s.EnablePins)
 	}

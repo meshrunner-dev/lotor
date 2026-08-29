@@ -179,6 +179,14 @@ type Driver struct {
 	// transmitter that could never key is a stillborn relay instead of
 	// one that reopens its radio every few seconds forever.
 	CheckTransmit func(cfg map[string]any) error
+	// CheckWaveform judges one channel choice without hardware, using
+	// the very conversion Configure performs. The envelope answers
+	// "may this board key there"; this answers the prior question,
+	// "can the chip be programmed with this at all" — a spreading
+	// factor, bandwidth, coding rate or preamble outside what the part
+	// accepts. Nil means the driver takes any waveform the envelope
+	// allows.
+	CheckWaveform func(w Waveform) error
 	Presets       map[string]map[string]any
 	// Schema declares every attribute the driver accepts — the
 	// administration channels' single source for help, completion and

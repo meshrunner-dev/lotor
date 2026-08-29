@@ -1234,6 +1234,16 @@ func bindEnvelope(drv radio.Driver, radioCfg map[string]any,
 	if err != nil {
 		return env, err
 	}
+	// What the chip can be programmed with, asked of the driver with
+	// the very conversion Configure runs: an envelope only knows
+	// about frequency and power, so a spreading factor or bandwidth
+	// the part does not accept used to pass here and fail at every
+	// Configure, forever.
+	if drv.CheckWaveform != nil {
+		if err := drv.CheckWaveform(eng.Waveform()); err != nil {
+			return env, err
+		}
+	}
 	dbm, explicit := eng.TxPower()
 	if err := env.Permits(eng.Waveform(), dbm, explicit); err != nil {
 		return env, err
@@ -1261,6 +1271,14 @@ func envelopeCheck(drv radio.Driver, radioCfg map[string]any,
 		w, dbm, explicit, err := builder.Asks(cfg)
 		if err != nil {
 			return err
+		}
+		// Two questions, and the driver's comes first: whether the
+		// chip can be programmed with this waveform at all, before
+		// whether the board may key there.
+		if drv.CheckWaveform != nil {
+			if err := drv.CheckWaveform(w); err != nil {
+				return err
+			}
 		}
 		return env.Permits(w, dbm, explicit)
 	}, nil

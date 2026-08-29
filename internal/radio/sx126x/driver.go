@@ -11,6 +11,8 @@ import (
 
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/radio"
+	"meshrunner.dev/pkg/lora"
+	"meshrunner.dev/pkg/lora/sx126x"
 )
 
 // Settings is the driver's hardware configuration: the attachment
@@ -96,6 +98,17 @@ func checkTransmit(cfg map[string]any) error {
 	return nil
 }
 
+// maxSPIHz is the SX126x bus ceiling from the datasheet. Past it the
+// chip does not answer reliably, which reads as a dead radio rather
+// than as the configuration error it is.
+const maxSPIHz = 16_000_000
+
+// settingsFrom is the canonical judgement of a board configuration:
+// everything about it that can be decided without touching hardware.
+// Inspect, CheckTransmit and Open all come through here, so what the
+// preflight accepts is what Open can carry out — leaving Open with
+// only the failures hardware really owns: an absent device, a line
+// another process holds, a bus fault, the chip's own verdict.
 func settingsFrom(cfg map[string]any) (Settings, error) {
 	s, err := config.Decode[Settings](cfg)
 	if err != nil {
@@ -104,11 +117,30 @@ func settingsFrom(cfg map[string]any) (Settings, error) {
 	if s.SPI == "" {
 		return s, errors.New("sx126x-spi settings: spi device path is required")
 	}
-	if len(s.FrequencyRangeHz) != 0 && len(s.FrequencyRangeHz) != 2 {
-		return s, errors.New("sx126x-spi settings: frequency_range wants [low, high]")
-	}
 	if s.SPIHz == 0 {
 		s.SPIHz = 2_000_000
+	}
+	if s.SPIHz > maxSPIHz {
+		return s, fmt.Errorf("sx126x-spi settings: spi_hz %d — the part is specified to %d",
+			s.SPIHz, maxSPIHz)
+	}
+	if s.DIO1Watchdog < 0 {
+		return s, fmt.Errorf(
+			"sx126x-spi settings: dio1_watchdog %s — a cadence is positive, or zero to leave it off",
+			s.DIO1Watchdog)
+	}
+	// The enums the hardware path resolves, decided here instead: an
+	// unknown part or an unsupported TCXO rail is a configuration
+	// error whatever the platform, and finding it only at Open makes
+	// it a relay that can never start rather than a mutation refused.
+	if _, err := chipFrom(s.Chip); err != nil {
+		return s, fmt.Errorf("sx126x-spi settings: %w", err)
+	}
+	if _, err := tcxoFrom(s.TCXO); err != nil {
+		return s, fmt.Errorf("sx126x-spi settings: %w", err)
+	}
+	if err := s.checkFrequencyRange(); err != nil {
+		return s, err
 	}
 	if s.GPIOChip == "" {
 		s.GPIOChip = "gpiochip0"
@@ -127,7 +159,53 @@ func settingsFrom(cfg map[string]any) (Settings, error) {
 	for i := range s.EnablePins {
 		s.EnablePins[i] = s.EnablePins[i].Resolve(s.GPIOChip)
 	}
-	return s, nil
+	return s, s.checkPinsDistinct()
+}
+
+// checkFrequencyRange refuses an envelope no frequency can satisfy.
+func (s Settings) checkFrequencyRange() error {
+	switch {
+	case len(s.FrequencyRangeHz) == 0:
+		return nil
+	case len(s.FrequencyRangeHz) != 2:
+		return errors.New("sx126x-spi settings: frequency_range wants [low, high]")
+	case s.FrequencyRangeHz[0] > s.FrequencyRangeHz[1]:
+		return fmt.Errorf(
+			"sx126x-spi settings: frequency_range %d..%d is inverted — no frequency is inside it",
+			s.FrequencyRangeHz[0], s.FrequencyRangeHz[1])
+	}
+	return nil
+}
+
+// checkPinsDistinct refuses two roles wired to one line. Acquiring the
+// second one fails deterministically at Open — the kernel hands a line
+// to a single requester — so the configuration is wrong long before
+// the hardware says so.
+func (s Settings) checkPinsDistinct() error {
+	roles := map[Pin]string{}
+	claim := func(role string, p Pin) error {
+		if other, taken := roles[p]; taken {
+			return fmt.Errorf("sx126x-spi settings: %s and %s both name line %s — "+
+				"one line serves one role", other, role, p)
+		}
+		roles[p] = role
+		return nil
+	}
+	if err := claim("reset_pin", *s.ResetPin); err != nil {
+		return err
+	}
+	if err := claim("busy_pin", *s.BusyPin); err != nil {
+		return err
+	}
+	if err := claim("dio1_pin", *s.DIO1Pin); err != nil {
+		return err
+	}
+	for i, p := range s.EnablePins {
+		if err := claim(fmt.Sprintf("enable_pins[%d]", i), p); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // requirePin insists the line was named — the chip does not run
@@ -138,6 +216,23 @@ func requirePin(name string, p *Pin, chip string) (*Pin, error) {
 	}
 	resolved := p.Resolve(chip)
 	return &resolved, nil
+}
+
+// CheckWaveform is the driver's dry run over one channel choice: the
+// very conversion Configure performs, and the library's own judgement
+// of the result. Running it at preflight is what stops a waveform the
+// chip cannot be programmed with from being persisted and handed to a
+// relay that opens its radio, fails at every Configure, closes, and
+// starts over after backoff for as long as the configuration stands.
+func CheckWaveform(w radio.Waveform) error {
+	p, err := paramsFrom(w)
+	if err != nil {
+		return fmt.Errorf("sx126x-spi waveform: %w", err)
+	}
+	if err := p.Validate(); err != nil {
+		return fmt.Errorf("sx126x-spi waveform: %w", err)
+	}
+	return nil
 }
 
 // Inspect is the driver's config dry run: strict decode plus the
@@ -156,4 +251,91 @@ func (s Settings) envelope() radio.Envelope {
 		e.FreqRangeLowHz, e.FreqRangeHiHz = s.FrequencyRangeHz[0], s.FrequencyRangeHz[1]
 	}
 	return e
+}
+
+// The pure conversions: what a configured value means to the library.
+// They live here rather than beside the hardware because the preflight
+// runs them too — the same function, so what a dry run accepts is
+// exactly what Configure and Open can carry out.
+
+func tcxoFrom(s string) (sx126x.TCXOVoltage, error) {
+	switch s {
+	case "":
+		return sx126x.TCXONone, nil
+	case "1.6":
+		return sx126x.TCXO1V6, nil
+	case "1.8":
+		return sx126x.TCXO1V8, nil
+	case "3.3":
+		return sx126x.TCXO3V3, nil
+	}
+	return sx126x.TCXONone, fmt.Errorf("unsupported tcxo voltage %q", s)
+}
+
+func chipFrom(s string) (sx126x.ChipVariant, error) {
+	switch s {
+	case "":
+		return sx126x.ChipUnset, nil
+	case chipSX1261:
+		return sx126x.SX1261, nil
+	case chipSX1262:
+		return sx126x.SX1262, nil
+	case chipSX1268:
+		return sx126x.SX1268, nil
+	}
+	return sx126x.ChipUnset, fmt.Errorf("unknown chip %q", s)
+}
+
+func paramsFrom(w radio.Waveform) (lora.Params, error) {
+	// The preamble is checked before the narrowing, not after: -1 cast
+	// to uint16 is 65535, a length the library accepts and the chip
+	// happily runs — a different network from the one the operator
+	// wrote down, configured without complaint.
+	if w.Preamble <= 0 || w.Preamble > 65535 {
+		return lora.Params{}, fmt.Errorf(
+			"preamble %d symbols out of range — the chip's field holds 1..65535", w.Preamble)
+	}
+	p := lora.Params{
+		Frequency: w.FrequencyHz,
+		Preamble:  uint16(w.Preamble),
+		SyncWord:  w.SyncWord,
+		CRC:       w.CRC,
+	}
+	switch w.SpreadingFactor {
+	case 5, 6, 7, 8, 9, 10, 11, 12:
+		p.SF = lora.SpreadingFactor(w.SpreadingFactor)
+	default:
+		return p, fmt.Errorf("spreading factor %d out of range", w.SpreadingFactor)
+	}
+	switch w.BandwidthHz {
+	case 7810:
+		p.BW = lora.BW7810
+	case 15630:
+		p.BW = lora.BW15630
+	case 31250:
+		p.BW = lora.BW31250
+	case 62500:
+		p.BW = lora.BW62500
+	case 125000:
+		p.BW = lora.BW125000
+	case 250000:
+		p.BW = lora.BW250000
+	case 500000:
+		p.BW = lora.BW500000
+	default:
+		return p, fmt.Errorf("unsupported bandwidth %d Hz", w.BandwidthHz)
+	}
+	switch w.CodingRate {
+	case 5:
+		p.CR = lora.CR5
+	case 6:
+		p.CR = lora.CR6
+	case 7:
+		p.CR = lora.CR7
+	case 8:
+		p.CR = lora.CR8
+	default:
+		return p, fmt.Errorf("coding rate 4/%d out of range", w.CodingRate)
+	}
+	return p, nil
 }
