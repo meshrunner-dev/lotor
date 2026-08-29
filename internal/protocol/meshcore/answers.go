@@ -76,7 +76,7 @@ func (e *engine) telemetryBody(permMask byte, budget int) []byte {
 		}
 	}
 	if err := enc.Add(meshcore.LPPReading{
-		Channel: telemChannelSelf, Type: meshcore.LPPVoltage, Value: volts,
+		Channel: TelemChannelSelf, Type: meshcore.LPPVoltage, Value: volts,
 	}); err != nil {
 		// A rejected reading leaves its header in the buffer, so the
 		// payload would decode as truncated rather than short.
@@ -100,7 +100,7 @@ func (e *engine) telemetryBody(permMask byte, budget int) []byte {
 	// thing a tight budget drops, which is the right one to lose.
 	if c, ok := hostTemperature(); ok {
 		if err := enc.Add(meshcore.LPPReading{
-			Channel: telemChannelSelf, Type: meshcore.LPPTemperature, Value: c,
+			Channel: TelemChannelSelf, Type: meshcore.LPPTemperature, Value: c,
 		}); err != nil && !errors.Is(err, meshcore.ErrLPPFull) {
 			e.log.Warn("telemetry temperature refused by the encoder", zap.Error(err))
 			return nil

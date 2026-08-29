@@ -48,8 +48,10 @@ const (
 	// 2 is the level whose shapes this engine answers with.
 	firmwareVerLevel = 2
 
-	// telemChannelSelf is the LPP channel a node's own readings ride.
-	telemChannelSelf = 1
+	// TelemChannelSelf is the LPP channel a node's own readings ride.
+	// Exported because the daemon numbers its parts' channels after
+	// it, and two constants for one number drift apart in silence.
+	TelemChannelSelf = 1
 
 	// maxClients bounds the session table; the least recently active
 	// session makes room for a new one.

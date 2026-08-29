@@ -558,6 +558,19 @@ func (e *engine) TrafficStats() StatsSnapshot { return e.stats.Snapshot() }
 // what a long list loses.
 type TelemetrySensors func(permMask byte, enc *meshcore.LPPEncoder) error
 
+// The telemetry permission bits, as the reference defines them in
+// SensorManager.h. They ride the request's first reserved byte,
+// inverted; the engine resolves that into the mask a hook receives.
+const (
+	// TelemPermBase covers the readings every asker gets, the supply
+	// among them.
+	TelemPermBase byte = 0x01
+	// TelemPermLocation covers where the node is.
+	TelemPermLocation byte = 0x02
+	// TelemPermEnvironment covers what its attached parts measure.
+	TelemPermEnvironment byte = 0x04
+)
+
 // SupplyVoltage reports what this node is running on, in volts. It is
 // the daemon's answer to the reference's board.getBattMilliVolts():
 // the engine cannot know what measures a supply, only that the base

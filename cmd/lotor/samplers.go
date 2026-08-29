@@ -88,10 +88,12 @@ const stopWait = 3 * time.Second
 // gives up rather than hold mu on a bus that is not answering. The
 // goroutine closes its own device whenever it comes back. The caller
 // holds mu.
-func (m *manager) stopSampler(name string) {
+// It reports whether the goroutine actually finished, so a caller
+// that means to reopen the part knows whether it may.
+func (m *manager) stopSampler(name string) bool {
 	h, ok := m.samplers[name]
 	if !ok {
-		return
+		return true
 	}
 	h.cancel()
 	delete(m.samplers, name)
@@ -102,14 +104,27 @@ func (m *manager) stopSampler(name string) {
 	select {
 	case <-h.done:
 		log.Info("sensor stopped")
+		return true
 	case <-time.After(stopWait):
 		log.Warn("sensor still stopping — it will close its device when the bus lets go")
+		return false
 	}
 }
 
 // bounceSampler reopens one part under the daemon's own context: a
 // mutation's order outlives the session that gave it.
+//
+// It reopens even when the old goroutine has not let go, which can put
+// two samplers on one chip for as long as the bus holds the first.
+// That is deliberate: their register writes may interleave and cost a
+// wrong reading or two, where refusing to reopen would lose the part
+// until somebody changed its configuration again. A transient wrong
+// value is the smaller harm, and it heals itself when the old one
+// exits.
 func (m *manager) bounceSampler(name string) {
-	m.stopSampler(name)
+	if !m.stopSampler(name) {
+		m.log.Named("sensor").Warn("sensor reopened while the old one still holds the bus",
+			zap.String("sensor", name))
+	}
 	m.startSampler(m.ctx, name)
 }

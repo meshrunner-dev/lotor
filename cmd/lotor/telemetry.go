@@ -10,6 +10,7 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
+	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 	"meshrunner.dev/lotor/internal/sensor"
 )
 
@@ -21,27 +22,29 @@ var telemLPP = map[sensor.Quantity]byte{
 	sensor.Power:   meshcore.LPPPower,
 }
 
-// sensorNames lists the running parts in a stable order, which is what
-// fixes each one's channel from one answer to the next.
-func (m *manager) sensorNames() []string {
+// sensorSnapshot reads every running part once, in name order, so the
+// supply and the sensor channels of one reply describe the same
+// instant. The view is held only long enough to copy the samplers out
+// — Latest takes a lock of its own, and viewMu is a leaf that spans
+// map access and nothing else.
+func (m *manager) sensorSnapshot() [][]sensor.Reading {
 	m.viewMu.RLock()
-	defer m.viewMu.RUnlock()
 	names := make([]string, 0, len(m.sensorViews))
 	for n := range m.sensorViews {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	return names
-}
-
-func (m *manager) sensorLatest(name string) []sensor.Reading {
-	m.viewMu.RLock()
-	smp, ok := m.sensorViews[name]
-	m.viewMu.RUnlock()
-	if !ok {
-		return nil
+	smps := make([]*sensor.Sampler, 0, len(names))
+	for _, n := range names {
+		smps = append(smps, m.sensorViews[n])
 	}
-	return smp.Latest()
+	m.viewMu.RUnlock()
+
+	out := make([][]sensor.Reading, 0, len(smps))
+	for _, smp := range smps {
+		out = append(out, smp.Latest())
+	}
+	return out
 }
 
 // supplyVoltage answers what this node runs on: the first part that
@@ -49,8 +52,8 @@ func (m *manager) sensorLatest(name string) []sensor.Reading {
 // one part reports it; the day two do, the configuration will have to
 // say which — a guess made here would be silent about being one.
 func (m *manager) supplyVoltage() (float64, bool) {
-	for _, name := range m.sensorNames() {
-		for _, r := range m.sensorLatest(name) {
+	for _, readings := range m.sensorSnapshot() {
+		for _, r := range readings {
 			if r.Quantity == sensor.Voltage {
 				return r.Value, true
 			}
@@ -59,14 +62,22 @@ func (m *manager) supplyVoltage() (float64, bool) {
 	return 0, false
 }
 
-// sensorTelemetry adds every part's readings to an answer, each on its
-// own channel from TELEM_CHANNEL_SELF + 1 upward — the reference's
-// EnvironmentSensorManager rule, so a client reading two nodes finds
-// the same shape.
-func (m *manager) sensorTelemetry(_ byte, enc *meshcore.LPPEncoder) error {
-	channel := telemChannelSelf + 1
-	for _, name := range m.sensorNames() {
-		for _, r := range m.sensorLatest(name) {
+// sensorTelemetry adds every part's readings to an answer, each on the
+// next channel after the node's own — the reference's
+// EnvironmentSensorManager rule, numbering active parts in order. A
+// part added or removed therefore renumbers the ones after it, as it
+// does there: the channel names a position, not a part.
+//
+// An asker without the environment bit gets none of this. The engine
+// forces a guest's mask to zero, and honouring that here is what makes
+// the gate mean anything.
+func (m *manager) sensorTelemetry(permMask byte, enc *meshcore.LPPEncoder) error {
+	if permMask&enginemc.TelemPermEnvironment == 0 {
+		return nil
+	}
+	channel := enginemc.TelemChannelSelf + 1
+	for _, readings := range m.sensorSnapshot() {
+		for _, r := range readings {
 			lpp, carried := telemLPP[r.Quantity]
 			if !carried {
 				continue
@@ -81,7 +92,3 @@ func (m *manager) sensorTelemetry(_ byte, enc *meshcore.LPPEncoder) error {
 	}
 	return nil
 }
-
-// telemChannelSelf mirrors the engine's own constant: channel 1 is the
-// node's, and a part's readings start after it.
-const telemChannelSelf = 1

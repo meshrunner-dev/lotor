@@ -46,8 +46,8 @@ func TestTelemetryAlwaysLeadsWithAVoltage(t *testing.T) {
 	if len(body) < 4 {
 		t.Fatalf("telemetry body is %d bytes, want at least one reading", len(body))
 	}
-	if body[0] != telemChannelSelf {
-		t.Errorf("first reading rides channel %d, want %d", body[0], telemChannelSelf)
+	if body[0] != TelemChannelSelf {
+		t.Errorf("first reading rides channel %d, want %d", body[0], TelemChannelSelf)
 	}
 	if body[1] != meshcore.LPPVoltage {
 		t.Errorf("first reading is type %d, want LPPVoltage (%d)", body[1], meshcore.LPPVoltage)
