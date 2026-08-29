@@ -219,7 +219,7 @@ func TestReplyScopeFollowsTheReference(t *testing.T) {
 		t.Error("a plain flood was answered inside a scope")
 	}
 	// A direct question carries no scope to match, so it gets ours —
-	// the reference's default, not openHop's plain reply.
+	// the reference's default: the answer is scoped, never plain.
 	if got := e.replyScope(ask(meshcore.RouteDirect, false)); got != speak {
 		t.Error("a direct question was not answered in the default scope")
 	}
