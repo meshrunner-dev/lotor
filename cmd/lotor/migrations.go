@@ -10,9 +10,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"sort"
 	"strings"
 
 	"meshrunner.dev/lotor/internal/confdb"
+	"meshrunner.dev/pkg/meshcore"
 )
 
 // storeShape is the shape this binary writes. Shape 1 is where
@@ -37,7 +39,184 @@ func storeMigrations() []confdb.Migration {
 		To:  5,
 		Doc: "the session table gains granted, for permissions that outlive idle",
 		Run: addACLGranted,
+	}, {
+		To: 6,
+		Doc: "the transport agreement moves into the region table: accept_scopes " +
+			"become region rows, default_scope the default designation, " +
+			"accept_unscoped the wildcard's flood flag",
+		Run: migrateScopesToRegions,
 	}}
+}
+
+// migrateScopesToRegions lifts the three scope attributes out of every
+// relay's stored overrides and into the region tables the engine now
+// mutates over the air. Accepted scopes become flood-allowed regions,
+// flat under the wildcard; the default scope becomes the default
+// designation, created if the old list somehow missed it — the
+// reference auto-creates on designation, and the migration follows;
+// accept_unscoped false becomes the wildcard's deny-flood flag. A
+// relay that never spoke of scopes gets no meta row at all: absent
+// means "never configured", which the engine seeds as the defaults,
+// while an empty table with a meta row is a map someone emptied.
+func migrateScopesToRegions(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx,
+		"SELECT name, attrs FROM objects WHERE kind = 'relay'")
+	if err != nil {
+		return err
+	}
+	type lift struct {
+		relay, attrs string
+		entries      []confdb.RegionRow
+		meta         confdb.RegionsMeta
+	}
+	var lifts []lift
+	func() {
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var relay, attrs string
+			if err = rows.Scan(&relay, &attrs); err != nil {
+				return
+			}
+			var healed string
+			var entries []confdb.RegionRow
+			var meta *confdb.RegionsMeta
+			if healed, entries, meta, err = liftScopeAttrs(attrs); err != nil || meta == nil {
+				if err != nil {
+					return
+				}
+				continue
+			}
+			lifts = append(lifts, lift{relay, healed, entries, *meta})
+		}
+		err = rows.Err()
+	}()
+	if err != nil {
+		return err
+	}
+	for _, l := range lifts {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE objects SET attrs = ? WHERE kind = 'relay' AND name = ?",
+			l.attrs, l.relay); err != nil {
+			return err
+		}
+		for i, r := range l.entries {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO regions(relay, id, parent, name, flags, seq)
+				   VALUES(?, ?, ?, ?, ?, ?)`,
+				l.relay, int64(r.ID), int64(r.Parent), r.Name, int64(r.Flags), int64(i)); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO regions_meta(relay, next_id, home_id, default_id, wildcard_flags)
+			   VALUES(?, ?, ?, ?, ?)`,
+			l.relay, int64(l.meta.NextID), int64(l.meta.HomeID),
+			int64(l.meta.DefaultID), int64(l.meta.WildcardFlags)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// liftScopeAttrs strips the three scope keys from one relay's override
+// scopes and translates them; meta is nil when the relay never carried
+// any of them.
+func liftScopeAttrs(attrs string) (string, []confdb.RegionRow, *confdb.RegionsMeta, error) {
+	var o map[string]any
+	if err := json.Unmarshal([]byte(attrs), &o); err != nil {
+		return "", nil, nil, err
+	}
+	accept, defaultScope, unscoped, found := takeScopeAttrs(o)
+	if !found {
+		return attrs, nil, nil, nil
+	}
+
+	seen := map[string]uint16{}
+	var entries []confdb.RegionRow
+	nextID := uint16(1)
+	add := func(name string) uint16 {
+		bare := strings.TrimPrefix(name, "#")
+		if bare == "" {
+			return 0
+		}
+		if id, held := seen[bare]; held {
+			return id
+		}
+		id := nextID
+		nextID++
+		seen[bare] = id
+		entries = append(entries, confdb.RegionRow{ID: id, Name: bare})
+		return id
+	}
+	for _, n := range accept {
+		add(n)
+	}
+	meta := &confdb.RegionsMeta{}
+	if defaultScope != "" {
+		meta.DefaultID = add(defaultScope)
+	}
+	meta.NextID = nextID
+	if unscoped != nil && !*unscoped {
+		meta.WildcardFlags = uint8(meshcore.RegionDenyFlood)
+	}
+	healed, err := json.Marshal(o)
+	return string(healed), entries, meta, err
+}
+
+// takeScopeAttrs pulls the three scope keys out of every override
+// scope, in sorted scope order so a store that somehow spread them
+// lifts deterministically; found says whether any key existed at all.
+func takeScopeAttrs(o map[string]any) (accept []string, defaultScope string, unscoped *bool, found bool) {
+	overrides, _ := o["overrides"].(map[string]any)
+	scopes := make([]string, 0, len(overrides))
+	for name := range overrides {
+		scopes = append(scopes, name)
+	}
+	sort.Strings(scopes)
+	for _, sc := range scopes {
+		kv, ok := overrides[sc].(map[string]any)
+		if !ok {
+			continue
+		}
+		if v, held := kv["accept_scopes"]; held {
+			accept = append(accept, scopeValueNames(v)...)
+			delete(kv, "accept_scopes")
+			found = true
+		}
+		if v, held := kv["default_scope"]; held {
+			if s, ok := v.(string); ok && s != "" {
+				defaultScope = s
+			}
+			delete(kv, "default_scope")
+			found = true
+		}
+		if v, held := kv["accept_unscoped"]; held {
+			if b, ok := v.(bool); ok {
+				unscoped = &b
+			}
+			delete(kv, "accept_unscoped")
+			found = true
+		}
+	}
+	return accept, defaultScope, unscoped, found
+}
+
+// scopeValueNames reads an accept_scopes value in either stored shape:
+// the list the config wrote, or the comma line an operator set.
+func scopeValueNames(v any) []string {
+	switch v := v.(type) {
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, e := range v {
+			if s, ok := e.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case string:
+		return meshcore.ScopeNames(v)
+	}
+	return nil
 }
 
 // addACLGranted adds the granted column to a store whose acl table

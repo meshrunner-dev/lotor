@@ -77,6 +77,22 @@ CREATE TABLE IF NOT EXISTS acl(
   granted        INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(relay, pubkey)
 );
+CREATE TABLE IF NOT EXISTS regions(
+  relay  TEXT NOT NULL,
+  id     INTEGER NOT NULL,
+  parent INTEGER NOT NULL,
+  name   TEXT NOT NULL,
+  flags  INTEGER NOT NULL,
+  seq    INTEGER NOT NULL,
+  PRIMARY KEY(relay, id)
+);
+CREATE TABLE IF NOT EXISTS regions_meta(
+  relay          TEXT PRIMARY KEY,
+  next_id        INTEGER NOT NULL,
+  home_id        INTEGER NOT NULL,
+  default_id     INTEGER NOT NULL,
+  wildcard_flags INTEGER NOT NULL
+);
 INSERT INTO meta(key, value) VALUES('schema_version', '1')
   ON CONFLICT(key) DO NOTHING;
 `
