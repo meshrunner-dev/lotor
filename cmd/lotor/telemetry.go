@@ -17,9 +17,12 @@ import (
 // telemLPP is what a quantity becomes on the wire. A quantity absent
 // here is not sent — the map is the whole of what a client will see.
 var telemLPP = map[sensor.Quantity]byte{
-	sensor.Voltage: meshcore.LPPVoltage,
-	sensor.Current: meshcore.LPPCurrent,
-	sensor.Power:   meshcore.LPPPower,
+	sensor.Voltage:     meshcore.LPPVoltage,
+	sensor.Current:     meshcore.LPPCurrent,
+	sensor.Power:       meshcore.LPPPower,
+	sensor.Temperature: meshcore.LPPTemperature,
+	sensor.Humidity:    meshcore.LPPRelativeHumidity,
+	sensor.Pressure:    meshcore.LPPBarometricPressure,
 }
 
 // sensorSnapshot reads every running part once, in name order, so the

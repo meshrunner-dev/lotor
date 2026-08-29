@@ -38,9 +38,12 @@ type Quantity string
 // A consumer maps these to whatever its protocol encodes; one it does
 // not know, it does not report.
 const (
-	Voltage Quantity = "voltage"
-	Current Quantity = "current"
-	Power   Quantity = "power"
+	Voltage     Quantity = "voltage"
+	Current     Quantity = "current"
+	Power       Quantity = "power"
+	Temperature Quantity = "temperature"
+	Humidity    Quantity = "humidity"
+	Pressure    Quantity = "pressure"
 )
 
 // Unit is what a quantity is measured in. It lives beside the
@@ -57,6 +60,12 @@ func (q Quantity) Unit() string {
 		return "A"
 	case Power:
 		return "W"
+	case Temperature:
+		return "°C"
+	case Humidity:
+		return "%"
+	case Pressure:
+		return "hPa"
 	}
 	return ""
 }

@@ -46,6 +46,7 @@ import (
 	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 	_ "meshrunner.dev/lotor/internal/radio/sx126x"
 	"meshrunner.dev/lotor/internal/schema"
+	_ "meshrunner.dev/lotor/internal/sensor/bme280"
 	_ "meshrunner.dev/lotor/internal/sensor/ina219"
 	lotorversion "meshrunner.dev/lotor/internal/version"
 )
