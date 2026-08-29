@@ -765,7 +765,6 @@ func (s *session) regionView(_ context.Context, instance string, _ frameSelector
 	}
 	v.keys = append(v.keys, "*")
 	v.rows["*"] = []field{
-		{name: fieldName, value: "*"},
 		{name: "parent", value: "-"},
 		{name: fieldFlood, value: flood(info.Unscoped)},
 		{name: "marks", value: wildMarks},
@@ -780,7 +779,6 @@ func (s *session) regionView(_ context.Context, instance string, _ frameSelector
 		}
 		v.keys = append(v.keys, e.Name)
 		v.rows[e.Name] = []field{
-			{name: fieldName, value: e.Name},
 			{name: "parent", value: e.Parent},
 			{name: fieldFlood, value: flood(e.Flood)},
 			{name: "marks", value: strings.Join(marks, ",")},
