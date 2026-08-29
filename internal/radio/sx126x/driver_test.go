@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"meshrunner.dev/lotor/internal/radio"
+	"meshrunner.dev/pkg/lora/sx126x"
 )
 
 // board is a configuration the preset would produce, for a test to
@@ -58,6 +59,12 @@ func TestWaveformCheckMatchesConfigure(t *testing.T) {
 		{"preamble at the field's edge", func(w *radio.Waveform) { w.Preamble = 65535 }, true},
 		{"no sync word", func(w *radio.Waveform) { w.SyncWord = 0 }, false},
 		{"no frequency", func(w *radio.Waveform) { w.FrequencyHz = 0 }, false},
+		// The synthesiser's own range, the remediation review's residual:
+		// a bound only Configure knew let 100 MHz pass the dry run.
+		{"below the synthesiser", func(w *radio.Waveform) { w.FrequencyHz = 149_999_999 }, false},
+		{"at the synthesiser floor", func(w *radio.Waveform) { w.FrequencyHz = 150_000_000 }, true},
+		{"at the synthesiser ceiling", func(w *radio.Waveform) { w.FrequencyHz = 960_000_000 }, true},
+		{"above the synthesiser", func(w *radio.Waveform) { w.FrequencyHz = 960_000_001 }, false},
 	}
 	for _, c := range cases {
 		w := meshcoreWaveform()
@@ -66,10 +73,11 @@ func TestWaveformCheckMatchesConfigure(t *testing.T) {
 		if (err == nil) != c.ok {
 			t.Errorf("%s: CheckWaveform = %v, want ok=%v", c.name, err, c.ok)
 		}
-		// The equivalence itself: the conversion Configure runs agrees
-		// with the preflight, waveform for waveform.
+		// The equivalence itself: the judgement Configure runs agrees
+		// with the preflight, waveform for waveform — the library's
+		// whole judgement, not the modulation half alone.
 		p, perr := paramsFrom(w)
-		converts := perr == nil && p.Validate() == nil
+		converts := perr == nil && sx126x.ValidateParams(p) == nil
 		if converts != c.ok {
 			t.Errorf("%s: the hardware conversion says %v, the preflight says %v",
 				c.name, converts, c.ok)
@@ -258,5 +266,51 @@ func TestAutoResolvesAgainstThePart(t *testing.T) {
 	unknown := radio.Envelope{MaxTxPowerDBm: 127, MaxTxPowerSet: true}
 	if err := unknown.Permits(w, 0, false); err != nil {
 		t.Errorf("an undeclared part was judged anyway: %v", err)
+	}
+}
+
+func TestLibraryTxCapSpeaksTheDriverDialect(t *testing.T) {
+	// The one translation to the library's vocabulary, where zero
+	// means "transmit disabled" and a named sentinel carries the
+	// 0 dBm ceiling. It lives at the seam so the configuration can
+	// mean the plain thing — and it deserves its own proof.
+	cap22, capZero := int8(22), int8(0)
+	cases := []struct {
+		name string
+		s    Settings
+		want int8
+	}{
+		{"undeclared disables transmit", Settings{}, 0},
+		{"a plain ceiling passes through", Settings{MaxTxPowerDBm: &cap22}, 22},
+		{"a zero ceiling becomes the sentinel", Settings{MaxTxPowerDBm: &capZero}, sx126x.MaxTxPowerZero},
+	}
+	for _, c := range cases {
+		if got := c.s.libraryTxCap(); got != c.want {
+			t.Errorf("%s: %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+func TestGpiochipSpellingsCollapse(t *testing.T) {
+	// The GPIO library reads "gpiochip0" and "/dev/gpiochip0" as the
+	// same chip; two spellings of one line used to pass the
+	// uniqueness check and fail at acquisition.
+	cfg := board()
+	cfg["reset_pin"] = "gpiochip0:16"
+	cfg["busy_pin"] = "/dev/gpiochip0:16"
+	if _, err := Inspect(cfg); err == nil {
+		t.Fatal("two spellings of the same GPIO line were accepted")
+	} else if !strings.Contains(err.Error(), "one line serves one role") {
+		t.Errorf("refused for the wrong reason: %v", err)
+	}
+	// And the canonical form is what settings carry from then on.
+	ok := board()
+	ok["reset_pin"] = "/dev/gpiochip1:16"
+	s, err := settingsFrom(ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.ResetPin.Chip != "gpiochip1" {
+		t.Errorf("chip spelled %q after resolve", s.ResetPin.Chip)
 	}
 }

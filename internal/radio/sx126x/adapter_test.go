@@ -15,6 +15,7 @@ package sx126x
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,8 +26,11 @@ import (
 	"meshrunner.dev/pkg/lora/sx126x"
 )
 
-// fakeChip is a scripted stand-in for the driver library.
+// fakeChip is a scripted stand-in for the driver library. The mutex
+// covers the fields a test rewrites while Receive runs in its own
+// goroutine, and the counters say which bus operations a phase took.
 type fakeChip struct {
+	mu          sync.Mutex
 	configured  lora.Params
 	configErr   error
 	startErr    error
@@ -35,7 +39,9 @@ type fakeChip struct {
 	events      chan struct{}
 	rssi        float64
 	rssiErr     error
+	rssiCalls   int
 	inProgress  [2]bool
+	ripErr      error
 	cadBusy     bool
 	cadErr      error
 	txResult    *sx126x.TxResult
@@ -43,6 +49,7 @@ type fakeChip struct {
 	txPower     int8
 	stats       sx126x.Stats
 	statsErr    error
+	statsCalls  int
 	closeErr    error
 	closedCount int
 }
@@ -51,13 +58,39 @@ func (c *fakeChip) Configure(p lora.Params) error {
 	c.configured = p
 	return c.configErr
 }
-func (c *fakeChip) StartReceive() error            { return c.startErr }
-func (c *fakeChip) Poll() (*sx126x.RxFrame, error) { return c.pollFrame, c.pollErr }
-func (c *fakeChip) Events() <-chan struct{}        { return c.events }
-func (c *fakeChip) RSSI() (float64, error)         { return c.rssi, c.rssiErr }
-func (c *fakeChip) Stats() (sx126x.Stats, error)   { return c.stats, c.statsErr }
+func (c *fakeChip) StartReceive() error     { return c.startErr }
+func (c *fakeChip) Events() <-chan struct{} { return c.events }
+
+func (c *fakeChip) Poll() (*sx126x.RxFrame, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pollFrame, c.pollErr
+}
+
+func (c *fakeChip) RSSI() (float64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.rssiCalls++
+	return c.rssi, c.rssiErr
+}
+
+func (c *fakeChip) Stats() (sx126x.Stats, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.statsCalls++
+	return c.stats, c.statsErr
+}
+
 func (c *fakeChip) ReceiveInProgress() (bool, bool, error) {
-	return c.inProgress[0], c.inProgress[1], nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.inProgress[0], c.inProgress[1], c.ripErr
+}
+
+func (c *fakeChip) rssiReads() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rssiCalls
 }
 
 func (c *fakeChip) AssessChannel(context.Context, sx126x.CAD) (bool, error) {
