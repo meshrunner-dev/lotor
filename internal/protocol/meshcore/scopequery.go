@@ -43,7 +43,7 @@ type scopeQuery struct {
 	// silence of a neighbour that never answered: the caller waited
 	// out the whole window and was told nobody replied, for a
 	// question that never left.
-	started ack
+	started *ack
 }
 
 // Neighbour resolves a key prefix against the neighbourhood: the
@@ -130,6 +130,9 @@ func (e *engine) drainScopeAsk(dev radio.Device, now time.Time) {
 	}
 	select {
 	case q := <-e.scopeAsk:
+		if !q.started.claim() {
+			return // the operator gave up; nothing goes out now
+		}
 		if e.pendingScope != nil {
 			// The channel emptied when the first question was taken,
 			// so a second one enqueues freely; it is refused here, and
@@ -145,21 +148,23 @@ func (e *engine) drainScopeAsk(dev radio.Device, now time.Time) {
 			q.started.refused(fmt.Errorf("the question could not be composed: %w", err))
 			return
 		}
+		// The slot is taken only once the question is really queued:
+		// holding it for a dropped question blocks the next one for a
+		// window nothing ever opened.
+		id := txn.New()
+		if !e.enqueue(dev, pkt, "scope-req", id, prioDirect, 0) {
+			q.started.refused(errors.New(
+				"the outbound queue is full — the question never left"))
+			return
+		}
 		e.pendingScope = q
 		// Same quiet-channel clause as the sweep: the slot must free
 		// on time even if nothing is heard, or the next question hits
 		// "already in flight" until luck turns the loop.
 		time.AfterFunc(scopeQueryWait+time.Second, e.wakeReceiver)
-		id := txn.New()
+		q.started.taken()
 		e.log.Info("asking a neighbour for its scopes",
 			zap.String("txn", id.Short()), zap.String("peer", shortKey(q.peer[:])))
-		if !e.enqueue(dev, pkt, "scope-req", id, prioDirect, 0) {
-			e.pendingScope = nil
-			q.started.refused(errors.New(
-				"the outbound queue is full — the question never left"))
-			return
-		}
-		q.started.taken()
 	default:
 	}
 }

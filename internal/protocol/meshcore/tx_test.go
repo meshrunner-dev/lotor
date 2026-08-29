@@ -2,9 +2,11 @@ package meshcore
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -981,10 +983,14 @@ func TestOrderedAdvertsAreSpaced(t *testing.T) {
 	// ends at this one clock, on one goroutine, with no lock.
 	e := armedEngine(t, "on-air")
 	now := time.Now()
-	if err := e.chargeAdvertAsk(now); err != nil {
+	if err := e.advertAskDue(now); err != nil {
 		t.Fatalf("the first order was refused: %v", err)
 	}
-	err := e.chargeAdvertAsk(now.Add(3 * time.Second))
+	// The gap is spent when an announcement is actually queued, never
+	// on an order the queue then refuses — which is why the check and
+	// the spending are two moves.
+	e.lastAskedAdvert = now
+	err := e.advertAskDue(now.Add(3 * time.Second))
 	if err == nil {
 		t.Fatal("a second order three seconds later went through")
 	}
@@ -992,7 +998,7 @@ func TestOrderedAdvertsAreSpaced(t *testing.T) {
 	if !strings.Contains(err.Error(), "7s to wait") {
 		t.Fatalf("refusal said %q", err)
 	}
-	if err := e.chargeAdvertAsk(now.Add(advertAskGap)); err != nil {
+	if err := e.advertAskDue(now.Add(advertAskGap)); err != nil {
 		t.Fatalf("an order a full gap later was refused: %v", err)
 	}
 }
@@ -1000,7 +1006,7 @@ func TestOrderedAdvertsAreSpaced(t *testing.T) {
 func TestTheFirstOrderedAdvertIsNotHeldBack(t *testing.T) {
 	// A zero clock means nothing was ever ordered, not that something
 	// was ordered at the epoch.
-	if err := armedEngine(t, "on-air").chargeAdvertAsk(time.Now()); err != nil {
+	if err := armedEngine(t, "on-air").advertAskDue(time.Now()); err != nil {
 		t.Fatalf("the first order of a fresh relay was refused: %v", err)
 	}
 }
@@ -1073,5 +1079,173 @@ func TestABusySpellStartsOnceAndEndsOnAClearChannel(t *testing.T) {
 	}
 	if !e.busySince.IsZero() {
 		t.Errorf("a clear channel left the spell running: %v", e.busySince)
+	}
+}
+
+func TestADutyCeilingNeverRoundsAwayToNoCeiling(t *testing.T) {
+	// The ledger reads a zero budget as "unbudgeted", so a percentage
+	// that rounds to no nanoseconds would turn the most restrictive
+	// ceiling an operator can write into no ceiling at all.
+	arm := func(pct float64) (*engine, error) {
+		seed := make([]byte, meshcore.SeedSize)
+		seed[0] = 3
+		self, err := meshcore.LocalIdentityFromSeed(seed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := newEngine("duty", params{NodeName: "n", DutyCyclePct: pct},
+			self, bus.New(), zap.NewNop())
+		return e, e.Arm(protocol.TXPolicy{Mode: "on-air", QueueDepth: 2})
+	}
+	// Positive but unrepresentable: refused, and named as such.
+	for _, tiny := range []float64{math.SmallestNonzeroFloat64, 1e-20, smallestDutyCyclePct / 2} {
+		if _, err := arm(tiny); err == nil {
+			t.Errorf("duty_cycle_pct %g armed a relay with no ceiling", tiny)
+		} else if !strings.Contains(err.Error(), "rounds to no airtime") {
+			t.Errorf("duty_cycle_pct %g refused for the wrong reason: %v", tiny, err)
+		}
+	}
+	// The first representable ceiling holds, and holds honestly: one
+	// nanosecond of budget fits no frame, so every emission is
+	// refused rather than waved through.
+	e, err := arm(smallestDutyCyclePct)
+	if err != nil {
+		t.Fatalf("the smallest holdable ceiling was refused: %v", err)
+	}
+	if e.duty.budget <= 0 {
+		t.Fatalf("budget = %v", e.duty.budget)
+	}
+	ok, _, never := e.duty.admit(time.Now(), time.Millisecond)
+	if ok || !never {
+		t.Errorf("a frame under a one-nanosecond budget: ok=%v never=%v", ok, never)
+	}
+	// The band defaults and the unbounded end still arm.
+	for _, pct := range []float64{0.1, 1, 10, 100} {
+		if _, err := arm(pct); err != nil {
+			t.Errorf("duty_cycle_pct %g refused: %v", pct, err)
+		}
+	}
+	// Zero is not a ceiling at all, and Arm has always said so.
+	if _, err := arm(0); err == nil {
+		t.Error("duty_cycle_pct 0 armed a transmitting relay")
+	}
+}
+
+func TestAFullQueueRefusesTheOrdersItDrops(t *testing.T) {
+	// An order answered "sent" whose packet was dropped is the worst
+	// of both: the operator believes the mesh heard from us, and the
+	// clocks were wound as if it had.
+	e, dev, _, _ := txRig(t, "on-air")
+	e.queue.depth = 1
+	// One entry already holds the only place.
+	e.enqueueAfter(&meshcore.Packet{
+		Header:  meshcore.MakeHeader(meshcore.RouteDirect, meshcore.PayloadTypeAck, meshcore.PayloadVer1),
+		Payload: []byte{1, 2, 3, 4},
+	}, "filler", txn.New(), prioDirect, time.Hour)
+
+	floodClock, localClock := e.nextFloodAdvert, e.nextLocalAdvert
+	o := &advertOrder{kind: "advert-local", started: newAck()}
+	e.advertAsk <- o
+	e.drainAdvertAsk(dev, time.Now())
+	err := o.started.wait("advert")
+	if err == nil {
+		t.Fatal("a dropped advert was answered as sent")
+	}
+	if !strings.Contains(err.Error(), "queue is full") {
+		t.Errorf("refusal = %v", err)
+	}
+	// Nothing was spent on it: not the gap, not the clocks.
+	if !e.lastAskedAdvert.IsZero() {
+		t.Error("the ten-second gap was consumed by an advert that never left")
+	}
+	if e.nextFloodAdvert != floodClock || e.nextLocalAdvert != localClock {
+		t.Error("the advert clocks wound for an announcement nobody heard")
+	}
+
+	// The same for a scan: no window opens for a question that was
+	// dropped, and the next scan is not blocked behind it.
+	s := &sweep{tag: 7, found: make(chan Neighbour, 1), started: newAck(),
+		seen: map[[meshcore.PubKeySize]byte]bool{}}
+	e.sweepAsk <- s
+	e.drainSweepAsk(dev, time.Now())
+	if err := s.started.wait("scan"); err == nil {
+		t.Fatal("a dropped scan reported a window")
+	}
+	if e.pendingSweep != nil {
+		t.Error("a dropped scan holds the scan slot")
+	}
+	if e.sweepUntil.Load() != 0 {
+		t.Error("a dropped scan published a listening window")
+	}
+}
+
+func TestAnOrderTheCallerGaveUpOnNeverHappens(t *testing.T) {
+	// The radio's retry backoff outlasts the order deadline, so an
+	// advert refused to the operator's face used to sit in its channel
+	// and go out when the session came back.
+	e, dev, _, _ := txRig(t, "on-air")
+	e.queue.depth = 4
+	o := &advertOrder{kind: "advert-local", started: newAck()}
+	e.advertAsk <- o
+
+	// The caller waits out its deadline while nothing turns.
+	if err := o.started.wait("advert"); err == nil {
+		t.Fatal("an order nobody served reported success")
+	}
+	// The pipeline comes back to life and finds the abandoned order.
+	e.drainAdvertAsk(dev, time.Now())
+	if n := len(e.queue.entries); n != 0 {
+		t.Fatalf("an abandoned order queued %d emissions", n)
+	}
+	if !e.lastAskedAdvert.IsZero() {
+		t.Error("an abandoned order spent the gap")
+	}
+}
+
+func TestAGrantTheCallerGaveUpOnIsNotApplied(t *testing.T) {
+	// A permission change landing after its author was told it had
+	// not is the same defect with teeth.
+	e, _ := identifiedEngine(t)
+	if err := e.AttachSessions(newFakeStore()); err != nil {
+		t.Fatal(err)
+	}
+	peer, err := meshcore.NewLocalIdentity(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := &aclOrder{perms: permAdmin, prefixLen: meshcore.PubKeySize, done: newAck()}
+	copy(o.pubKey[:], peer.PubKey[:])
+	e.aclAsk <- o
+	if err := o.done.wait("permission change"); err == nil {
+		t.Fatal("a change nobody served reported success")
+	}
+	e.drainACLAsk()
+	if len(e.acl.by) != 0 {
+		t.Fatal("an abandoned grant reached the table")
+	}
+}
+
+func TestAClaimedOrderStillAnswersAcrossTheDeadline(t *testing.T) {
+	// The other side of the arbitration: when the pipeline wins the
+	// claim, the caller must hear the real answer rather than a
+	// timeout the order is about to contradict.
+	a := newAck()
+	if !a.claim() {
+		t.Fatal("a fresh order could not be claimed")
+	}
+	go func() {
+		time.Sleep(askWait + 50*time.Millisecond)
+		a.taken()
+	}()
+	if err := a.wait("advert"); err != nil {
+		t.Errorf("a claimed order reported %v", err)
+	}
+	// And an abandoned one can never be claimed afterwards.
+	b := newAck()
+	if err := b.wait("advert"); err == nil {
+		t.Fatal("an unserved order reported success")
+	}
+	if b.claim() {
+		t.Error("an abandoned order was claimed after the fact")
 	}
 }

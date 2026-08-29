@@ -49,7 +49,9 @@ type aclOrder struct {
 	// name its entry by prefix.
 	prefixLen int
 	perms     byte
-	reply     chan error
+	// done arbitrates the deadline: a permission change whose author
+	// was told it never happened must not happen afterwards.
+	done *ack
 }
 
 // ErrNoSuchEntry says a removal named nobody the table holds.
@@ -72,7 +74,7 @@ func (e *engine) Grant(pubKey []byte, perms byte) error {
 	if removing && (len(pubKey) == 0 || len(pubKey) > meshcore.PubKeySize) {
 		return fmt.Errorf("a removal needs 1..%d key bytes", meshcore.PubKeySize)
 	}
-	o := &aclOrder{perms: perms, prefixLen: len(pubKey), reply: make(chan error, 1)}
+	o := &aclOrder{perms: perms, prefixLen: len(pubKey), done: newAck()}
 	copy(o.pubKey[:], pubKey)
 	select {
 	case e.aclAsk <- o:
@@ -80,12 +82,7 @@ func (e *engine) Grant(pubKey []byte, perms byte) error {
 		return errors.New("a permission change is already pending")
 	}
 	e.wakeReceiver()
-	select {
-	case err := <-o.reply:
-		return err
-	case <-time.After(askWait):
-		return errors.New("the relay never picked the permission change up")
-	}
+	return o.done.wait("permission change")
 }
 
 // ACLEntry is one grant or session, as the console shows the access
@@ -200,7 +197,17 @@ func RoleName(perms byte) string {
 func (e *engine) drainACLAsk() {
 	select {
 	case o := <-e.aclAsk:
-		o.reply <- e.applyGrant(o)
+		// Claimed before it is applied: a change whose author already
+		// gave up must leave the table alone, not land behind their
+		// back on the strength of a deadline they saw expire.
+		if !o.done.claim() {
+			break
+		}
+		if err := e.applyGrant(o); err != nil {
+			o.done.refused(err)
+		} else {
+			o.done.taken()
+		}
 	default:
 	}
 	select {

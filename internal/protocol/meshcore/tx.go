@@ -48,6 +48,12 @@ const (
 	clockRetry = time.Minute
 )
 
+// smallestDutyCyclePct is the least percentage the sliding-hour
+// ledger can still hold as one nanosecond of airtime. Below it a
+// positive ceiling would round away entirely, and the ledger reads a
+// zero budget as no ceiling at all.
+const smallestDutyCyclePct = 100.0 / float64(time.Hour)
+
 // clockEpoch bounds plausibility: an advert stamps the wall clock into
 // a signed payload, and neighbours keep only the newest timestamp per
 // node — so announcing from a host that has not found the network yet
@@ -151,12 +157,25 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 			"tx: mode %s needs duty_cycle_pct in (0, 100] on this relay's band — "+
 				"set the lawful ceiling, or 100 to state the band has none", p.Mode)
 	}
+	// The ledger reads a budget of zero as "unbudgeted", so a
+	// percentage that rounds to zero nanoseconds would turn the most
+	// restrictive ceiling an operator can write into no ceiling at
+	// all. A budget smaller than any frame is honest — every emission
+	// is then refused as one no budget ever fits — but a budget that
+	// disappears is not.
+	budget := time.Duration(float64(time.Hour) * e.p.DutyCyclePct / 100)
+	if budget <= 0 {
+		return fmt.Errorf(
+			"tx: duty_cycle_pct %g is positive but rounds to no airtime at all — "+
+				"the smallest budget this ledger can hold is %g%%",
+			e.p.DutyCyclePct, smallestDutyCyclePct)
+	}
 	e.policy = p
 	e.queue = &txQueue{depth: p.QueueDepth}
 	// The sliding hour did not restart with the process: what the
 	// journal remembers being spent is spent, or a crash-loop could
 	// launder the budget.
-	dl := &dutyLedger{budget: time.Duration(float64(time.Hour) * e.p.DutyCyclePct / 100)}
+	dl := &dutyLedger{budget: budget}
 	// The window prunes as a time-ordered prefix: feed it in order,
 	// whatever order the journal rows arrived in.
 	spent := slices.Clone(p.Spent)
@@ -418,8 +437,14 @@ func (e *engine) dueAdverts(dev radio.Device, now time.Time) {
 		}
 		return
 	}
+	// The clocks wind only once the announcement is queued. Winding
+	// first cost a refused emission its whole interval — up to
+	// forty-seven hours of silence for one full queue.
 	switch {
-	case !e.nextFloodAdvert.IsZero() && !now.Before(e.nextFloodAdvert):
+	case e.floodAdvertDue(now):
+		if !e.advert(dev, now, "advert-flood", false) {
+			return // the clock still stands: the next turn tries again
+		}
 		e.nextFloodAdvert = now.Add(e.p.AdvertFloodInterval)
 		// Both adverts in one pass would carry the same second in
 		// their timestamp, hence the same packet hash: a neighbour
@@ -429,10 +454,11 @@ func (e *engine) dueAdverts(dev radio.Device, now time.Time) {
 		if !e.nextLocalAdvert.IsZero() {
 			e.windLocalAdvert(now)
 		}
-		e.advert(dev, now, "advert-flood", false)
 	case !e.nextLocalAdvert.IsZero() && !now.Before(e.nextLocalAdvert):
+		if !e.advert(dev, now, "advert-local", true) {
+			return
+		}
 		e.windLocalAdvert(now)
-		e.advert(dev, now, "advert-local", true)
 	}
 }
 
@@ -469,7 +495,7 @@ func (e *engine) RequestAdvert(flood bool) error {
 // answer waiting to hear whether it went out.
 type advertOrder struct {
 	kind    string
-	started ack
+	started *ack
 }
 
 // advertAskGap is the least time between two ordered announcements.
@@ -480,48 +506,73 @@ type advertOrder struct {
 // has to dedup its way out of.
 const advertAskGap = 10 * time.Second
 
-// chargeAdvertAsk admits one order and refuses the ones that crowd it,
-// saying how long is left rather than only that the answer is no. It
-// runs on the pipeline's goroutine, beside the scheduled adverts'
-// clocks, so the spacing needs no lock to be right.
+// advertAskDue refuses an order that crowds the last one, saying how
+// long is left rather than only that the answer is no. It runs on the
+// pipeline's goroutine, beside the scheduled adverts' clocks, so the
+// spacing needs no lock to be right — and it only reads: the gap is
+// spent when the announcement is actually queued, never on an order
+// the queue then refuses.
 //
 // Those scheduled announcements do not come through here. They keep
 // their configured cadence, and an operator's order is not evidence
 // about when the next one is due.
-func (e *engine) chargeAdvertAsk(now time.Time) error {
+func (e *engine) advertAskDue(now time.Time) error {
 	if wait := advertAskGap - now.Sub(e.lastAskedAdvert); wait > 0 && !e.lastAskedAdvert.IsZero() {
 		return fmt.Errorf("an advert was ordered %s ago — %s to wait",
 			now.Sub(e.lastAskedAdvert).Round(time.Second), wait.Round(time.Second))
 	}
-	e.lastAskedAdvert = now
 	return nil
 }
 
-// drainAdvertAsk serves an operator-triggered announcement. The
-// clocks wind as if the scheduler itself had fired: the mesh just
-// heard from us, and a scheduled advert moments later would be a
+// drainAdvertAsk serves an operator-triggered announcement. Nothing is
+// spent — not the gap, not the clocks, not a place in the duplicate
+// table — until the announcement is actually in the queue: an order
+// answered "sent" whose packet was dropped for a full queue would
+// have wound the flood clock hours forward for an emission nobody
+// ever heard.
+//
+// The clocks then wind as if the scheduler itself had fired: the mesh
+// just heard from us, and a scheduled advert moments later would be a
 // byte-identical duplicate a neighbour would dedup away.
 func (e *engine) drainAdvertAsk(dev radio.Device, now time.Time) {
 	select {
 	case o := <-e.advertAsk:
-		if err := e.chargeAdvertAsk(now); err != nil {
+		if !o.started.claim() {
+			return // the operator gave up; this must not go out now
+		}
+		if err := e.advertAskDue(now); err != nil {
 			o.started.refused(err)
 			return
 		}
-		o.started.taken()
-		kind := o.kind
-		if kind == "advert-flood" {
-			if e.p.AdvertFloodInterval > 0 {
-				e.nextFloodAdvert = now.Add(e.p.AdvertFloodInterval)
-			}
-			e.windLocalAdvert(now)
-			e.advert(dev, now, kind, false)
+		// A due flood outranks an ordered local one: both would carry
+		// this second in the same signed payload, hash alike, and the
+		// neighbour hearing the zero-hop copy first would judge the
+		// routable one a duplicate and never re-flood it. The flood is
+		// the one the mesh cannot get again for hours.
+		if o.kind == "advert-local" && e.floodAdvertDue(now) {
+			o.started.refused(errors.New(
+				"a flooded advert is due this second — it carries the same announcement further"))
 			return
 		}
+		local := o.kind != "advert-flood"
+		if !e.advert(dev, now, o.kind, local) {
+			o.started.refused(errors.New("the outbound queue is full — the advert never left"))
+			return
+		}
+		e.lastAskedAdvert = now
+		if !local && e.p.AdvertFloodInterval > 0 {
+			e.nextFloodAdvert = now.Add(e.p.AdvertFloodInterval)
+		}
 		e.windLocalAdvert(now)
-		e.advert(dev, now, kind, true)
+		o.started.taken()
 	default:
 	}
+}
+
+// floodAdvertDue reports that the routable announcement's own clock
+// has struck.
+func (e *engine) floodAdvertDue(now time.Time) bool {
+	return !e.nextFloodAdvert.IsZero() && !now.Before(e.nextFloodAdvert)
 }
 
 // windLocalAdvert schedules the next local advert, or stops the clock
@@ -540,10 +591,13 @@ func (e *engine) advertDue(now time.Time) bool {
 		(!e.nextLocalAdvert.IsZero() && !now.Before(e.nextLocalAdvert))
 }
 
-// advert builds this node's signed announcement. Local adverts are
-// zero-hop: direct route, empty path — the form the band rules allow
-// first. Our own hash is witnessed so the echo judges as a duplicate.
-func (e *engine) advert(dev radio.Device, now time.Time, kind string, local bool) {
+// advert builds this node's signed announcement and reports whether
+// it reached the queue. Local adverts are zero-hop: direct route,
+// empty path — the form the band rules allow first. Our own hash is
+// witnessed so the echo judges as a duplicate, and only once the
+// announcement is really scheduled: a witness for a frame that was
+// dropped would silence the next honest copy of it.
+func (e *engine) advert(dev radio.Device, now time.Time, kind string, local bool) bool {
 	data := &meshcore.AdvertData{
 		Type: meshcore.AdvTypeRepeater,
 		Name: e.p.NodeName,
@@ -556,7 +610,7 @@ func (e *engine) advert(dev radio.Device, now time.Time, kind string, local bool
 	pkt, err := meshcore.BuildAdvert(e.id, now, data)
 	if err != nil {
 		e.log.Warn("advert build failed", zap.Error(err))
-		return
+		return false
 	}
 	if local {
 		pkt.Header = meshcore.MakeHeader(meshcore.RouteDirect,
@@ -574,12 +628,15 @@ func (e *engine) advert(dev radio.Device, now time.Time, kind string, local bool
 		e.scopes.speak.Scope(pkt)
 	}
 	id := txn.New()
-	e.seen.witness(pkt.Hash(), id, now)
 	prio := prioFloodAdvert
 	if local {
 		prio = prioDirect // zero-hop sends go out at the front
 	}
-	e.enqueue(dev, pkt, kind, id, prio, 0)
+	if !e.enqueue(dev, pkt, kind, id, prio, 0) {
+		return false
+	}
+	e.seen.witness(pkt.Hash(), id, now)
+	return true
 }
 
 // lbtOutcome is what the channel assessment decided about one entry.

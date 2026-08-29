@@ -44,7 +44,7 @@ type sweep struct {
 	// the relay refused would look exactly like a scan nobody answered
 	// — an empty room and a silent failure read the same from the
 	// console, and only one of them is true.
-	started ack
+	started *ack
 }
 
 // Discover asks the neighbourhood who is there. The channel carries
@@ -106,6 +106,10 @@ func (e *engine) drainSweepAsk(dev radio.Device, now time.Time) {
 	}
 	select {
 	case s := <-e.sweepAsk:
+		if !s.started.claim() {
+			close(s.found)
+			return // the operator gave up; nothing goes out now
+		}
 		if e.pendingSweep != nil {
 			// One window at a time: two scans at once make every
 			// responder answer both, into the same jitter, and the
@@ -129,6 +133,14 @@ func (e *engine) drainSweepAsk(dev radio.Device, now time.Time) {
 			e.log.Warn("scan build failed", zap.Error(err))
 			return
 		}
+		// Nothing is opened until the question is really queued: a
+		// window published for a scan that was dropped is a minute of
+		// empty listening, and it blocks every other scan meanwhile.
+		id := txn.New()
+		if !e.enqueue(dev, pkt, "discover-req", id, prioDirect, 0) {
+			s.refuse(errors.New("the outbound queue is full — the scan never left"))
+			return
+		}
 		// The window starts when the question does, not when it was
 		// typed: the wait above is short but it is not nothing.
 		s.until = now.Add(sweepWindow)
@@ -139,10 +151,8 @@ func (e *engine) drainSweepAsk(dev radio.Device, now time.Time) {
 		time.AfterFunc(time.Until(s.until)+time.Second, e.wakeReceiver)
 		e.pendingSweep = s
 		s.started.taken()
-		id := txn.New()
 		e.log.Info("scanning the neighbourhood",
 			zap.String("txn", id.Short()), zap.Duration("window", sweepWindow))
-		e.enqueue(dev, pkt, "discover-req", id, prioDirect, 0)
 	default:
 	}
 }
