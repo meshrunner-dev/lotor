@@ -519,7 +519,7 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	// A value the schema refuses earns its refusal now — short, the
 	// reference's ERR shape — not a false ok and a journal line the
 	// admin cannot see.
-	out := m.runOTA("mc", "air:test", "set tx banana")
+	out := m.runOTA("mc", "air:test", "air:test", "set tx banana")
 	if !strings.HasPrefix(out, "ERR: ") || len(out) > 70 {
 		t.Errorf("garbage got %q", out)
 	}
@@ -528,7 +528,7 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	}
 	// A sound value is queued and answered with the reference's own
 	// two bytes: a reply is airtime.
-	if out := m.runOTA("mc", "air:test", "set tx 6"); out != "OK" {
+	if out := m.runOTA("mc", "air:test", "air:test", "set tx 6"); out != "OK" {
 		t.Errorf("sound value got %q", out)
 	}
 	o := <-m.air
@@ -536,20 +536,20 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 		t.Errorf("order = %+v", o)
 	}
 	// Unknown words earn the reference's exact answer, no echo.
-	if out := m.runOTA("mc", "air:test", "set warp 9"); out != "Unknown command" {
+	if out := m.runOTA("mc", "air:test", "air:test", "set warp 9"); out != "Unknown command" {
 		t.Errorf("unknown setting got %q", out)
 	}
-	if out := m.runOTA("mc", "air:test", "get name"); out != "> Raccoon City" {
+	if out := m.runOTA("mc", "air:test", "air:test", "get name"); out != "> Raccoon City" {
 		t.Errorf("get shape: %q", out)
 	}
 
 	// A grant needs the whole key — the reference's exact words —
 	// where a removal below may use a prefix.
-	if out := m.runOTA("mc", "air:test", "setperm abcd 3"); out != "Err - invalid params" {
+	if out := m.runOTA("mc", "air:test", "air:test", "setperm abcd 3"); out != "Err - invalid params" {
 		t.Errorf("short setperm key got %q", out)
 	}
 	full := strings.Repeat("ab", 32)
-	if out := m.runOTA("mc", "air:test", "setperm "+full+" 3"); out != "OK" {
+	if out := m.runOTA("mc", "air:test", "air:test", "setperm "+full+" 3"); out != "OK" {
 		t.Errorf("setperm got %q", out)
 	}
 	g := <-m.air
@@ -557,7 +557,7 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 		t.Errorf("grant order = %+v", g)
 	}
 	// The byte travels whole: read-only stays read-only, not admin.
-	if out := m.runOTA("mc", "air:test", "setperm "+full+" 1"); out != "OK" {
+	if out := m.runOTA("mc", "air:test", "air:test", "setperm "+full+" 1"); out != "OK" {
 		t.Errorf("setperm read-only got %q", out)
 	}
 	if g := <-m.air; g.perms != enginemc.PermReadOnly {
@@ -565,13 +565,13 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	}
 	// A guest role is the reference's word for removal — and removal
 	// alone may name its entry by prefix.
-	if out := m.runOTA("mc", "air:test", "setperm "+full+" 0"); out != "OK" {
+	if out := m.runOTA("mc", "air:test", "air:test", "setperm "+full+" 0"); out != "OK" {
 		t.Errorf("setperm revoke got %q", out)
 	}
 	if g := <-m.air; !g.grant || g.perms != enginemc.PermGuest {
 		t.Errorf("revoke order = %+v", g)
 	}
-	if out := m.runOTA("mc", "air:test", "setperm abcd 0"); out != "OK" {
+	if out := m.runOTA("mc", "air:test", "air:test", "setperm abcd 0"); out != "OK" {
 		t.Errorf("prefix removal got %q", out)
 	}
 	if g := <-m.air; g.perms != enginemc.PermGuest || len(g.pubKey) != 2 {
@@ -579,15 +579,15 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	}
 	// The host keeps its own clock: sync is already true and answers
 	// in the OK-with-detail shape; setting it wears the ERR shape.
-	if out := m.runOTA("mc", "air:test", "clock sync"); out != "OK - clock already synced (system time)" {
+	if out := m.runOTA("mc", "air:test", "air:test", "clock sync"); out != "OK - clock already synced (system time)" {
 		t.Errorf("clock sync got %q", out)
 	}
-	if out := m.runOTA("mc", "air:test", "time 1756400000"); out != "ERR: clock not settable (system time)" {
+	if out := m.runOTA("mc", "air:test", "air:test", "time 1756400000"); out != "ERR: clock not settable (system time)" {
 		t.Errorf("time got %q", out)
 	}
 	// The reference gates set freq to the serial port; ours is the
 	// console, and the air is refused.
-	if out := m.runOTA("mc", "air:test", "set freq 869618000"); out != "ERR: console only" {
+	if out := m.runOTA("mc", "air:test", "air:test", "set freq 869618000"); out != "ERR: console only" {
 		t.Errorf("set freq got %q", out)
 	}
 	// Reading freq stays open, like the reference's get — and speaks
@@ -595,10 +595,10 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	m.traces["relay mc"] = append(m.traces["relay mc"],
 		config.Trace{Key: "tx.mode", Value: "on-air", Source: "config"},
 		config.Trace{Key: "frequency_hz", Value: 869618000, Source: "profile:eu"})
-	if out := m.runOTA("mc", "air:test", "get repeat"); out != "> on" {
+	if out := m.runOTA("mc", "air:test", "air:test", "get repeat"); out != "> on" {
 		t.Errorf("get repeat got %q", out)
 	}
-	if out := m.runOTA("mc", "air:test", "get freq"); out != "> 869.618" {
+	if out := m.runOTA("mc", "air:test", "air:test", "get freq"); out != "> 869.618" {
 		t.Errorf("get freq got %q", out)
 	}
 	// A lesser gate is not repeating: the ladder collapses to off.
@@ -607,7 +607,7 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 			m.traces["relay mc"][i].Value = "on-air-zero-hop"
 		}
 	}
-	if out := m.runOTA("mc", "air:test", "get repeat"); out != "> off" {
+	if out := m.runOTA("mc", "air:test", "air:test", "get repeat"); out != "> off" {
 		t.Errorf("get repeat (zero-hop) got %q", out)
 	}
 	// The neighbourhood verbs: refresh queues a scan off the engine's
@@ -618,25 +618,25 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	m.infos["mc"] = cli.RelayInfo{Discover: func() (<-chan cli.Neighbour, time.Time, error) {
 		return nil, time.Time{}, nil
 	}}
-	if out := m.runOTA("mc", "air:test", "discover.neighbors"); out != "Err - transmit gate is dry" {
+	if out := m.runOTA("mc", "air:test", "air:test", "discover.neighbors"); out != "Err - transmit gate is dry" {
 		t.Errorf("dry gate got %q", out)
 	}
 	info := m.infos["mc"]
 	info.TXMode = config.TXOnAir
 	info.ScanWindow = func() (time.Time, bool) { return time.Now().Add(42 * time.Second), true }
 	m.infos["mc"] = info
-	if out := m.runOTA("mc", "air:test", "discover.neighbors"); out != "Err - scanning, 42s left" {
+	if out := m.runOTA("mc", "air:test", "air:test", "discover.neighbors"); out != "Err - scanning, 42s left" {
 		t.Errorf("busy scan got %q", out)
 	}
 	info.ScanWindow = func() (time.Time, bool) { return time.Time{}, false }
 	m.infos["mc"] = info
-	if out := m.runOTA("mc", "air:test", "discover.neighbors"); out != "OK - Discover sent" {
+	if out := m.runOTA("mc", "air:test", "air:test", "discover.neighbors"); out != "OK - Discover sent" {
 		t.Errorf("discover got %q", out)
 	}
 	if o := <-m.air; !o.discover {
 		t.Errorf("discover order = %+v", o)
 	}
-	if out := m.runOTA("mc", "air:test", "discover.neighbors now"); out != "Err - discover.neighbors has no options" {
+	if out := m.runOTA("mc", "air:test", "air:test", "discover.neighbors now"); out != "Err - discover.neighbors has no options" {
 		t.Errorf("discover with options got %q", out)
 	}
 	var removed [][]byte
@@ -645,13 +645,13 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 		return len(removed)
 	}
 	m.infos["mc"] = info
-	if out := m.runOTA("mc", "air:test", "neighbor.remove"); out != "OK" {
+	if out := m.runOTA("mc", "air:test", "air:test", "neighbor.remove"); out != "OK" {
 		t.Errorf("purge got %q", out)
 	}
-	if out := m.runOTA("mc", "air:test", "neighbor.remove de247e"); out != "OK" {
+	if out := m.runOTA("mc", "air:test", "air:test", "neighbor.remove de247e"); out != "OK" {
 		t.Errorf("prefix remove got %q", out)
 	}
-	if out := m.runOTA("mc", "air:test", "neighbor.remove zz"); out != "ERR: bad pubkey" {
+	if out := m.runOTA("mc", "air:test", "air:test", "neighbor.remove zz"); out != "ERR: bad pubkey" {
 		t.Errorf("bad hex got %q", out)
 	}
 	if len(removed) != 2 || len(removed[0]) != 0 || len(removed[1]) != 3 {
@@ -660,10 +660,10 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	// Owner info: the wire carries newlines as bars, both ways, and a
 	// value nobody set reads as empty — never as a word this daemon
 	// invented, which the app would show as if it were the setting.
-	if out := m.runOTA("mc", "air:test", "get owner.info"); out != "> " {
+	if out := m.runOTA("mc", "air:test", "air:test", "get owner.info"); out != "> " {
 		t.Errorf("unset owner.info got %q", out)
 	}
-	if out := m.runOTA("mc", "air:test", "set owner.info Raton|laveur"); out != "OK" {
+	if out := m.runOTA("mc", "air:test", "air:test", "set owner.info Raton|laveur"); out != "OK" {
 		t.Errorf("set owner.info got %q", out)
 	}
 	if o := <-m.air; o.set["owner_info"] != "Raton\nlaveur" {
@@ -671,66 +671,66 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	}
 	m.traces["relay mc"] = append(m.traces["relay mc"],
 		config.Trace{Key: "owner_info", Value: "Raton\nlaveur", Source: "config"})
-	if out := m.runOTA("mc", "air:test", "get owner.info"); out != "> Raton|laveur" {
+	if out := m.runOTA("mc", "air:test", "air:test", "get owner.info"); out != "> Raton|laveur" {
 		t.Errorf("newlines did not become bars: %q", out)
 	}
 	// The delay knobs read back the default actually in force when
 	// nobody set them: an empty answer here would show on the asker's
 	// screen as "no jitter", which is not what the relay runs on.
-	if out := m.runOTA("mc", "air:test", "get txdelay"); out != "> 0.5" {
+	if out := m.runOTA("mc", "air:test", "air:test", "get txdelay"); out != "> 0.5" {
 		t.Errorf("unset txdelay got %q", out)
 	}
-	if out := m.runOTA("mc", "air:test", "get direct.txdelay"); out != "> 0.3" {
+	if out := m.runOTA("mc", "air:test", "air:test", "get direct.txdelay"); out != "> 0.3" {
 		t.Errorf("unset direct.txdelay got %q", out)
 	}
-	if out := m.runOTA("mc", "air:test", "get rxdelay"); out != "> 0" {
+	if out := m.runOTA("mc", "air:test", "air:test", "get rxdelay"); out != "> 0" {
 		t.Errorf("unset rxdelay got %q", out)
 	}
-	if out := m.runOTA("mc", "air:test", "set txdelay 0.7"); out != "OK" {
+	if out := m.runOTA("mc", "air:test", "air:test", "set txdelay 0.7"); out != "OK" {
 		t.Errorf("set txdelay got %q", out)
 	}
 	if o := <-m.air; o.set["tx_delay_factor"] != "0.7" {
 		t.Errorf("txdelay order = %+v", o.set)
 	}
 	// Out of the reference's range: refused now, the bound named.
-	if out := m.runOTA("mc", "air:test", "set txdelay 2.5"); !strings.HasPrefix(out, "ERR: ") ||
+	if out := m.runOTA("mc", "air:test", "air:test", "set txdelay 2.5"); !strings.HasPrefix(out, "ERR: ") ||
 		!strings.Contains(out, "0..2") {
 		t.Errorf("txdelay 2.5 got %q", out)
 	}
-	if out := m.runOTA("mc", "air:test", "set rxdelay 21"); !strings.HasPrefix(out, "ERR: ") ||
+	if out := m.runOTA("mc", "air:test", "air:test", "set rxdelay 21"); !strings.HasPrefix(out, "ERR: ") ||
 		!strings.Contains(out, "0..20") {
 		t.Errorf("rxdelay 21 got %q", out)
 	}
 	m.traces["relay mc"] = append(m.traces["relay mc"],
 		config.Trace{Key: "rx_delay_base", Value: "12", Source: "config"})
-	if out := m.runOTA("mc", "air:test", "get rxdelay"); out != "> 12" {
+	if out := m.runOTA("mc", "air:test", "air:test", "get rxdelay"); out != "> 12" {
 		t.Errorf("set rxdelay read back %q", out)
 	}
 	// The width and orbit knobs read back this node's own defaults —
 	// mode 1 and minimal, the two deliberate steps past the reference.
-	if out := m.runOTA("mc", "air:test", "get path.hash.mode"); out != "> 1" {
+	if out := m.runOTA("mc", "air:test", "air:test", "get path.hash.mode"); out != "> 1" {
 		t.Errorf("unset path.hash.mode got %q", out)
 	}
-	if out := m.runOTA("mc", "air:test", "get loop.detect"); out != "> minimal" {
+	if out := m.runOTA("mc", "air:test", "air:test", "get loop.detect"); out != "> minimal" {
 		t.Errorf("unset loop.detect got %q", out)
 	}
-	if out := m.runOTA("mc", "air:test", "set loop.detect strict"); out != "OK" {
+	if out := m.runOTA("mc", "air:test", "air:test", "set loop.detect strict"); out != "OK" {
 		t.Errorf("set loop.detect got %q", out)
 	}
 	if o := <-m.air; o.set["loop_detect"] != "strict" {
 		t.Errorf("loop.detect order = %+v", o.set)
 	}
-	if out := m.runOTA("mc", "air:test", "set path.hash.mode 3"); !strings.HasPrefix(out, "ERR: ") ||
+	if out := m.runOTA("mc", "air:test", "air:test", "set path.hash.mode 3"); !strings.HasPrefix(out, "ERR: ") ||
 		!strings.Contains(out, "0, 1 or 2") {
 		t.Errorf("path.hash.mode 3 got %q", out)
 	}
-	if out := m.runOTA("mc", "air:test", "set loop.detect banana"); !strings.HasPrefix(out, "ERR: ") ||
+	if out := m.runOTA("mc", "air:test", "air:test", "set loop.detect banana"); !strings.HasPrefix(out, "ERR: ") ||
 		!strings.Contains(out, "strict") {
 		t.Errorf("loop.detect banana got %q", out)
 	}
 	// The deliberate absences answer like any unknown word.
 	for _, cmd := range []string{"reboot", "clkreboot", "tempradio 869525000 62500 8 8 10", "poweroff"} {
-		if out := m.runOTA("mc", "air:test", cmd); out != otaUnknown {
+		if out := m.runOTA("mc", "air:test", "air:test", cmd); out != otaUnknown {
 			t.Errorf("%q got %q", cmd, out)
 		}
 	}
@@ -909,7 +909,7 @@ func TestOTASetRefusesWhatTheBoardCannotDo(t *testing.T) {
 	}
 	// The admin hears the board's own refusal, on the air, at once,
 	// and the order never leaves for the manager's goroutine.
-	out := m.runOTA("mc", "air:test", "set tx 30")
+	out := m.runOTA("mc", "air:test", "air:test", "set tx 30")
 	if !strings.HasPrefix(out, "ERR: ") || !strings.Contains(out, "22 dBm cap") {
 		t.Errorf("over the cap got %q", out)
 	}
@@ -919,7 +919,7 @@ func TestOTASetRefusesWhatTheBoardCannotDo(t *testing.T) {
 	// freq is console-only, so the air cannot reach the frequency
 	// check; TestAMutationCannotOutrunTheBoard judges that path.
 	// What the board can serve still travels.
-	if out := m.runOTA("mc", "air:test", "set tx 6"); out != "OK" {
+	if out := m.runOTA("mc", "air:test", "air:test", "set tx 6"); out != "OK" {
 		t.Errorf("sound value got %q", out)
 	}
 	if o := <-m.air; o.set["tx_power_dbm"] != "6" {

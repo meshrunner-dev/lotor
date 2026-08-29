@@ -125,23 +125,32 @@ const (
 const otaUnknown = "Unknown command"
 
 // otaCommands runs one administration line from the air and returns
-// what to answer. It is the engine's commands hook.
+// what to answer. It is the engine's commands hook. The region door
+// gets the WHOLE admin key as its owner — a staging is an exclusive
+// transaction, and a truncated owner could let two admins sharing a
+// prefix speak into each other's — while the journal principal keeps
+// its short form.
 func (m *manager) otaCommands(relay string) func(line string, admin []byte) string {
 	return func(line string, admin []byte) string {
 		principal := "air:" + hex.EncodeToString(admin[:6])
-		return m.runOTA(relay, principal, line)
+		owner := "air:" + hex.EncodeToString(admin)
+		return m.runOTA(relay, principal, owner, line)
 	}
 }
 
 // runOTA dispatches one line. Every answer is a single short string:
 // the reference's clients show it as a message.
-func (m *manager) runOTA(relay, principal, line string) string {
-	// The region door goes first, exactly as the reference's modal
-	// load check does: while a load staging is armed for this admin,
-	// EVERY line — the blank commit included — belongs to it.
-	if reply, handled := m.otaRegion(relay, principal, line); handled {
+func (m *manager) runOTA(relay, principal, owner, line string) string {
+	// The region door goes first, on the RAW line, exactly as the
+	// reference's modal load check does: while a load staging is
+	// armed for this admin, EVERY line — the blank commit included —
+	// belongs to it, and a load line's leading spaces are its whole
+	// meaning. Only past that refusal is the line trimmed for the
+	// ordinary dispatch.
+	if reply, handled := m.otaRegion(relay, owner, line); handled {
 		return reply
 	}
+	line = strings.TrimSpace(line)
 	verb, rest, _ := strings.Cut(line, " ")
 	rest = strings.TrimSpace(rest)
 	switch verb {
@@ -422,19 +431,19 @@ func (m *manager) otaAdvert(relay string, flood bool) string {
 // region business: the `region` grammar, or any line at all while a
 // modal load staging is armed for this principal. The replies are the
 // engine's — the same words the console gets.
-func (m *manager) otaRegion(relay, principal, line string) (string, bool) {
+func (m *manager) otaRegion(relay, owner, line string) (string, bool) {
 	m.viewMu.RLock()
 	info, ok := m.infos[relay]
 	m.viewMu.RUnlock()
 	if !ok || info.RegionLine == nil {
 		return "", false
 	}
-	armed := info.RegionLoadArmed != nil && info.RegionLoadArmed(principal)
+	armed := info.RegionLoadArmed != nil && info.RegionLoadArmed(owner)
 	verb, _, _ := strings.Cut(strings.TrimLeft(line, " "), " ")
 	if !armed && verb != "region" {
 		return "", false
 	}
-	reply, handled, err := info.RegionLine(principal, line)
+	reply, handled, err := info.RegionLine(owner, line)
 	if err != nil {
 		return "Err - " + err.Error(), true
 	}

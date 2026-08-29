@@ -10,7 +10,6 @@ package meshcore
 // console.
 
 import (
-	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -99,7 +98,13 @@ func (e *engine) runCommand(rx *reception, origin txn.ID) {
 		return
 	}
 
-	line := strings.TrimSpace(text.Text)
+	// The line crosses whole, leading spaces included: a modal region
+	// load encodes each entry's parent purely in its indentation, and
+	// a trim here silently reduced every dump to orphan lines that a
+	// blank commit then persisted as an empty table. Whoever runs the
+	// line trims for its own dispatch AFTER the region door has had
+	// the raw bytes.
+	line := text.Text
 	// The companion's optional pairing prefix — two characters and a
 	// bar — is stripped before the words and reflected at the head of
 	// the answer: it is how the app matches replies to the commands

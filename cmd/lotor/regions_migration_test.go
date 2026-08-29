@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
+	"meshrunner.dev/lotor/internal/cli"
 	"meshrunner.dev/lotor/internal/confdb"
 )
 
@@ -121,5 +124,130 @@ func seedRelay(ctx context.Context, t *testing.T, s *confdb.Store, name, attrs s
 	}
 	if err := s.Replace(ctx, confdb.KindRelay, name, o, "test", "add", nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestScopeLiftReadsTheSelectedProfileAlone(t *testing.T) {
+	// The layering's contract survives the migration: only the
+	// selected profile's overrides were ever in force, so only they
+	// translate — an inactive profile's antagonistic policy must not
+	// leak in, however its name sorts.
+	attrs := `{"profile":"b","overrides":{` +
+		`"a":{"accept_scopes":["evil","worse"],"default_scope":"evil","accept_unscoped":false},` +
+		`"b":{"accept_scopes":["good"],"default_scope":"good","accept_unscoped":true}}}`
+	healed, entries, meta, err := liftScopeAttrs(attrs)
+	if err != nil || meta == nil {
+		t.Fatalf("lift: %v meta=%v", err, meta)
+	}
+	if len(entries) != 1 || entries[0].Name != "good" ||
+		meta.DefaultID != entries[0].ID || meta.WildcardFlags != 0 {
+		t.Errorf("entries=%+v meta=%+v — the inactive profile leaked", entries, meta)
+	}
+	// The obsolete keys are stripped from EVERY scope.
+	var o map[string]any
+	if err := json.Unmarshal([]byte(healed), &o); err != nil {
+		t.Fatal(err)
+	}
+	for _, sc := range []string{"a", "b"} {
+		kv, ok := o["overrides"].(map[string]any)[sc].(map[string]any)
+		if !ok {
+			t.Fatalf("scope %s gone", sc)
+		}
+		for _, gone := range []string{"accept_scopes", "default_scope", "accept_unscoped"} {
+			if _, held := kv[gone]; held {
+				t.Errorf("%s.%s survived", sc, gone)
+			}
+		}
+	}
+}
+
+func TestScopeLiftStripsInactiveProfilesEvenWithoutAnActivePolicy(t *testing.T) {
+	// The active profile never spoke of scopes: no region table — the
+	// running policy was the defaults — but the obsolete keys must
+	// still leave the store, or the strict config door refuses the
+	// relay at its next load.
+	attrs := `{"profile":"b","overrides":{` +
+		`"a":{"accept_scopes":["old"],"node_name":"x"},"b":{"node_name":"y"}}}`
+	healed, entries, meta, err := liftScopeAttrs(attrs)
+	if err != nil || meta != nil || entries != nil {
+		t.Fatalf("lift: %v meta=%+v entries=%+v", err, meta, entries)
+	}
+	if strings.Contains(healed, "accept_scopes") {
+		t.Error("the obsolete key survived in an inactive profile")
+	}
+	if !strings.Contains(healed, `"node_name":"x"`) {
+		t.Error("a neighbour key was lost in the strip")
+	}
+}
+
+func TestScopeLiftBoundsAndPolicies(t *testing.T) {
+	// 33 accepted scopes cannot become a table the engine refuses to
+	// attach: the migration fails before writing, backup in hand.
+	names := make([]string, 33)
+	for i := range names {
+		names[i] = fmt.Sprintf("s%02d", i)
+	}
+	raw, err := json.Marshal(map[string]any{
+		"overrides": map[string]any{"custom": map[string]any{"accept_scopes": names}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := liftScopeAttrs(string(raw)); err == nil ||
+		!strings.Contains(err.Error(), "region table holds 32") {
+		t.Errorf("33 scopes = %v", err)
+	}
+	// A stray private scope migrates to nothing rather than to a
+	// table the policy gate then refuses whole.
+	_, entries, meta, err := liftScopeAttrs(
+		`{"overrides":{"custom":{"accept_scopes":["eu","$secret"]}}}`)
+	if err != nil || len(entries) != 1 || entries[0].Name != "eu" || meta == nil {
+		t.Errorf("$ skip: entries=%+v meta=%+v err=%v", entries, meta, err)
+	}
+}
+
+// recordingRegionDoor captures what reaches a relay's region door.
+type recordingRegionDoor struct {
+	lines []string
+	armed bool
+}
+
+func TestOTARegionDoorGetsTheRawLine(t *testing.T) {
+	door := &recordingRegionDoor{}
+	m := &manager{infos: map[string]cli.RelayInfo{"mc": {
+		Name: "mc",
+		RegionLine: func(owner, line string) (string, bool, error) {
+			door.lines = append(door.lines, line)
+			return "ok", true, nil
+		},
+		RegionLoadArmed: func(owner string) bool { return door.armed },
+	}}}
+
+	// Not armed: a region line routes raw, anything else falls through
+	// to the ordinary dispatch — which trims and answers as itself.
+	if out := m.runOTA("mc", "p", "o", "  region put x"); out != "ok" {
+		t.Fatalf("region line = %q", out)
+	}
+	if out := m.runOTA("mc", "p", "o", " eu F"); out != otaUnknown {
+		t.Fatalf("stray load line = %q, want the ordinary dispatch", out)
+	}
+
+	// Armed: EVERY line belongs to the staging, its leading spaces
+	// intact — they are the load format's whole meaning — and the
+	// blank commit included.
+	door.armed = true
+	for _, line := range []string{"*^ F", " eu F", "  fr F", ""} {
+		if out := m.runOTA("mc", "p", "o", line); out != "ok" {
+			t.Fatalf("armed line %q = %q", line, out)
+		}
+	}
+	want := []string{"  region put x", "*^ F", " eu F", "  fr F", ""}
+	if len(door.lines) != len(want) {
+		t.Fatalf("door saw %q", door.lines)
+	}
+	for i, l := range door.lines {
+		if l != want[i] {
+			t.Errorf("line %d = %q, want %q — normalisation crept in", i, l, want[i])
+		}
 	}
 }

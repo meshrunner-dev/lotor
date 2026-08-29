@@ -55,6 +55,9 @@ func (e *engine) AttachRegions(store RegionStore) error {
 	if err != nil {
 		return fmt.Errorf("regions: %w", err)
 	}
+	if err := checkRegionPolicy(m); err != nil {
+		return fmt.Errorf("regions: stored table: %w", err)
+	}
 	e.regions = newRegionTable(m)
 	if n := m.Count(); n > 0 {
 		e.log.Info("regions restored", zap.Int("count", n))
@@ -151,20 +154,32 @@ func (e *engine) drainRegionAsk() {
 
 // serveRegionLine is the dispatcher the reference runs first on every
 // command: the modal staging when one is armed for this owner, the
-// region grammar when the line speaks it, nothing otherwise.
+// region grammar when the line speaks it, nothing otherwise. While a
+// staging is armed, another owner's region commands are refused whole:
+// a staging is an exclusive transaction on the table, and a mutation
+// slipped under it would be silently undone by the commit of a
+// snapshot that never saw it.
 func (e *engine) serveRegionLine(owner, line string) (reply string, handled bool) {
 	if e.regionStaging != nil {
-		if time.Now().After(e.regionStaging.until) {
+		switch {
+		case time.Now().After(e.regionStaging.until):
 			e.dropRegionStaging("expired")
-		} else if e.regionStaging.owner == owner {
+		case e.regionStaging.owner == owner:
 			return e.serveRegionLoadLine(line), true
+		case isRegionLine(line):
+			return "Err - busy - another admin is loading regions", true
 		}
 	}
-	trimmed := strings.TrimLeft(line, " ")
-	if trimmed == "region" || strings.HasPrefix(trimmed, "region ") {
-		return e.serveRegionCommand(owner, trimmed), true
+	if isRegionLine(line) {
+		return e.serveRegionCommand(owner, strings.TrimLeft(line, " ")), true
 	}
 	return "", false
+}
+
+// isRegionLine says whether a line speaks the region grammar.
+func isRegionLine(line string) bool {
+	t := strings.TrimLeft(line, " ")
+	return t == "region" || strings.HasPrefix(t, "region ")
 }
 
 // dropRegionStaging discards an armed staging and says why.
@@ -195,10 +210,30 @@ func (e *engine) serveRegionLoadLine(line string) string {
 	return fmt.Sprintf("OK - loaded %d regions", fresh.Count())
 }
 
+// checkRegionPolicy is this daemon's own gate over a whole candidate
+// table, run before anything persists or installs — one place, so no
+// door (put, def, load, default, a restored store) can slip past it.
+// Today it holds one rule: no '$' regions, because the private
+// keystore they promise is not implemented, and a table carrying one
+// would announce a region this relay can never match — or worse,
+// designate it as default and speak unscoped while claiming a scope.
+func checkRegionPolicy(m *meshcore.RegionMap) error {
+	for _, r := range m.Entries() {
+		if strings.HasPrefix(r.Name, "$") {
+			return fmt.Errorf("region %q: private '$' regions are not supported", r.Name)
+		}
+	}
+	return nil
+}
+
 // installRegions persists a composed map and only then makes it live,
 // re-deriving the speaking key — the compose-then-install discipline
-// every mutation here follows.
+// every mutation here follows. The policy gate runs first: a candidate
+// it refuses touches neither the store nor the live table.
 func (e *engine) installRegions(m *meshcore.RegionMap) error {
+	if err := checkRegionPolicy(m); err != nil {
+		return err
+	}
 	if e.regionStore != nil {
 		if err := e.regionStore.SaveRegions(PersistedRegions{
 			Entries:       m.Entries(),

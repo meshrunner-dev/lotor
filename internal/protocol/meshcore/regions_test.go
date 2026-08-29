@@ -541,3 +541,210 @@ func TestRegionMutationWithoutBounce(t *testing.T) {
 		}
 	}
 }
+
+func TestARawCommandLineCrossesTheAirWhole(t *testing.T) {
+	// The counter-test of the load defect: a TXT_MSG's leading spaces
+	// are a load line's whole meaning, and the command path must hand
+	// them to whoever runs the line, untouched.
+	e, dev, sub, peer := txRig(t, "on-air")
+	e.p.AdminPassword = "mask"
+	var got []string
+	e.AttachCommands(func(line string, admin []byte) string {
+		got = append(got, line)
+		return "ok"
+	})
+	runEngine(t, e, dev)
+
+	frame, _ := login(t, e.id, peer, nowTS(400), "mask", false)
+	dev.frames <- frame
+	awaitSent(t, sub)
+	<-dev.sent
+
+	lines := []string{"region load", "*^ F", " eu F", "  fr F"}
+	for i, l := range lines {
+		at := time.Unix(int64(nowTS(410+uint32(i))), 0)
+		dev.frames <- commandFrame(t, e.id, peer, at, l)
+		awaitSent(t, sub)
+		<-dev.sent
+	}
+	if len(got) != len(lines) {
+		t.Fatalf("commands ran: %q", got)
+	}
+	for i, l := range got {
+		if l != lines[i] {
+			t.Errorf("line %d = %q, want %q — the air's bytes were normalised", i, l, lines[i])
+		}
+	}
+}
+
+func TestRegionLoadEndToEndThroughTheOrderDoor(t *testing.T) {
+	// The dump sequence over the running engine's own order channel,
+	// store attached: staged, committed, persisted — and a second
+	// engine attaching the same store reads the identical table.
+	e, dev, _, _ := txRig(t, "shadow")
+	store := &memRegionStore{}
+	if err := e.AttachRegions(store); err != nil {
+		t.Fatal(err)
+	}
+	runEngine(t, e, dev)
+
+	seq := []struct{ line, want string }{
+		{"region put keeper", "OK - (flood allowed)"},
+		{"region home keeper", " home is now keeper"},
+		{"region default keeper", " default scope is now keeper"},
+		{"region load", ""},
+		{"*^ F", ""},
+		{" keeper F", ""},
+		{"  child", ""},
+		{"", "OK - loaded 2 regions"},
+	}
+	for _, s := range seq {
+		reply, handled, err := e.RegionCommand("air:admin", s.line)
+		if err != nil || !handled || reply != s.want {
+			t.Fatalf("%q = %q/%v/%v, want %q", s.line, reply, handled, err, s.want)
+		}
+	}
+	if len(store.saved) == 0 {
+		t.Fatal("the commit never persisted")
+	}
+
+	// A fresh engine restores the very table the commit wrote.
+	last := store.saved[len(store.saved)-1]
+	fresh := regionRig(t)
+	if err := fresh.AttachRegions(&memRegionStore{loaded: &last}); err != nil {
+		t.Fatal(err)
+	}
+	want := "* F\n keeper^ F\n  child\n"
+	if got := fresh.regions.m.ExportTree(); got != want {
+		t.Errorf("restored tree =\n%q\nwant\n%q", got, want)
+	}
+	if d := fresh.regions.m.Default(); d == nil || d.Name != "keeper" {
+		t.Errorf("restored default = %+v", d)
+	}
+	if fresh.regions.speak != meshcore.TransportKeyForName("keeper") {
+		t.Error("the restored engine does not speak the committed default")
+	}
+}
+
+func TestAStagingIsAnExclusiveTransaction(t *testing.T) {
+	e := regionRig(t)
+	e.serveRegionLine("A", "region load")
+	// Another owner's region commands are refused whole while the
+	// staging stands — a mutation slipped under it would be undone by
+	// the commit of a snapshot that never saw it — and a second load
+	// must not replace the first.
+	busy := "Err - busy - another admin is loading regions"
+	if reply, handled := e.serveRegionLine("B", "region denyf *"); !handled || reply != busy {
+		t.Errorf("mutation under staging = %q/%v", reply, handled)
+	}
+	if reply, _ := e.serveRegionLine("B", "region load"); reply != busy {
+		t.Errorf("second load = %q", reply)
+	}
+	if e.regionStaging == nil || e.regionStaging.owner != "A" {
+		t.Fatal("the staging changed hands")
+	}
+	// B's non-region lines still pass through to their own dispatch.
+	if _, handled := e.serveRegionLine("B", "get name"); handled {
+		t.Error("a non-region line was captured by someone else's staging")
+	}
+	// A commits; B is welcome again.
+	e.serveRegionLine("A", " fresh F")
+	if reply, _ := e.serveRegionLine("A", ""); reply != "OK - loaded 1 regions" {
+		t.Fatalf("commit = %q", reply)
+	}
+	if reply, _ := e.serveRegionLine("B", "region denyf *"); reply != "OK" {
+		t.Errorf("after commit = %q", reply)
+	}
+}
+
+func TestPrivateRegionsAreRefusedAtEveryDoor(t *testing.T) {
+	// def: composed on the clone, refused at install, live untouched.
+	e := regionRig(t)
+	reply, _ := e.serveRegionLine("A", "region def $secret")
+	if !strings.Contains(reply, "not supported") {
+		t.Errorf("def $ = %q", reply)
+	}
+	if e.regions.m.Count() != 0 {
+		t.Error("a refused def left the private region live")
+	}
+	// load: staged, refused at commit, live untouched.
+	e.serveRegionLine("A", "region load")
+	e.serveRegionLine("A", " $secret F")
+	if reply, _ := e.serveRegionLine("A", ""); !strings.Contains(reply, "not supported") {
+		t.Errorf("load commit with $ = %q", reply)
+	}
+	if e.regions.m.Count() != 0 {
+		t.Error("a refused load left the private region live")
+	}
+	// default: the auto-create path names the policy.
+	if reply, _ := e.serveRegionLine("A", "region default $secret"); !strings.Contains(reply, "not supported") {
+		t.Errorf("default $ = %q", reply)
+	}
+	// restore: a store that somehow holds one refuses the relay.
+	bad := &PersistedRegions{
+		Entries: []meshcore.Region{{ID: 1, Name: "$secret"}}, NextID: 2,
+	}
+	if err := regionRig(t).AttachRegions(&memRegionStore{loaded: bad}); err == nil ||
+		!strings.Contains(err.Error(), "not supported") {
+		t.Errorf("restore $ = %v", err)
+	}
+}
+
+func TestAnonRegionsAnswerSkipsAndContinues(t *testing.T) {
+	// The reference's export rule: a name that will not fit is left
+	// out and the walk continues — a short name after the long ones
+	// still answers, where a break would have silently ended the list.
+	e, _, _, peer := txRig(t, "on-air")
+	e.queue.depth = 4
+	names := make([]string, 0, 9)
+	for i := range 8 {
+		names = append(names, strings.Repeat(string(rune('a'+i)), 30))
+	}
+	names = append(names, "z")
+	e.regions = testRegions(t, "", names, true)
+
+	secret, err := e.id.SharedSecret(peer.PubKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := meshcore.FrameAnonRequest(42, meshcore.AnonReqScopes, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt, err := meshcore.BuildAnonDatagram(e.id.PubKey[:meshcore.PathHashSize],
+		peer.PubKey[:], secret, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt.Header = meshcore.MakeHeader(meshcore.RouteDirect,
+		meshcore.PayloadTypeAnonReq, meshcore.PayloadVer1)
+	rx := rxOf(e, pkt)
+	e.respondAnon(rx, rx.id)
+
+	if len(e.queue.entries) != 1 {
+		t.Fatalf("the answer was not composed: %d queued", len(e.queue.entries))
+	}
+	d, err := meshcore.ParseDatagram(e.queue.entries[0].pkt.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := d.Open(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rest, err := meshcore.UnframeAdmin(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := meshcore.ParseAnonReply(rest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := reply.Text
+	if !strings.HasSuffix(text, ",z") {
+		t.Errorf("answer = %q — the short name after the long ones was dropped", text)
+	}
+	if strings.Contains(text, strings.Repeat("h", 30)) {
+		t.Errorf("answer = %q — every long name fit, the test bites nothing", text)
+	}
+}
