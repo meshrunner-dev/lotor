@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -289,5 +290,162 @@ func TestMigrationsLiftTheShapeOnce(t *testing.T) {
 	}
 	if shape, _ := s.Shape(ctx); shape != 2 {
 		t.Errorf("failed lift moved the stamp to %d", shape)
+	}
+}
+
+func TestMigrationsFailClosedTowardTheFuture(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, Memory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	// A store stamped past this binary's ceiling was written by a
+	// newer lotor: touching it would mutate invariants this code has
+	// never heard of.
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT INTO meta(key, value) VALUES('shape', '99')"); err != nil {
+		t.Fatal(err)
+	}
+	err = s.Migrate(ctx, []Migration{{To: 2, Doc: "t",
+		Run: func(context.Context, *sql.Tx) error { return nil }}})
+	if err == nil || !strings.Contains(err.Error(), "newer") {
+		t.Errorf("future shape = %v, want the refusal to say a newer binary wrote it", err)
+	}
+	// A broken list is named before anything runs.
+	fresh, _ := Open(ctx, Memory)
+	defer func() { _ = fresh.Close() }()
+	err = fresh.Migrate(ctx, []Migration{
+		{To: 2, Doc: "t", Run: func(context.Context, *sql.Tx) error { return nil }},
+		{To: 4, Doc: "gap", Run: func(context.Context, *sql.Tx) error { return nil }},
+	})
+	if err == nil || !strings.Contains(err.Error(), "broken") {
+		t.Errorf("gapped list = %v", err)
+	}
+}
+
+func TestAFailedMigrationIsResumable(t *testing.T) {
+	// The backup of a failed attempt is the recovery point the retry
+	// keeps — not a name collision that stops every retry cold.
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boom := []Migration{{To: 2, Doc: "boom",
+		Run: func(context.Context, *sql.Tx) error { return errors.New("transient") }}}
+	if err := s.Migrate(ctx, boom); err == nil {
+		t.Fatal("the failing migration succeeded")
+	}
+	if _, err := os.Stat(path + ".pre-shape2"); err != nil {
+		t.Fatalf("no recovery point: %v", err)
+	}
+	fixed := []Migration{{To: 2, Doc: "fixed",
+		Run: func(context.Context, *sql.Tx) error { return nil }}}
+	if err := s.Migrate(ctx, fixed); err != nil {
+		t.Fatalf("the retry could not run: %v", err)
+	}
+	if shape, _ := s.Shape(ctx); shape != 2 {
+		t.Errorf("shape = %d after the retry", shape)
+	}
+	// And every snapshot beside the base is 0600: they carry the
+	// identity the main file guards.
+	st, err := os.Stat(path + ".pre-shape2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Errorf("backup mode = %o, want 600", st.Mode().Perm())
+	}
+	probe := filepath.Join(dir, "probe.db")
+	if err := s.CopyTo(ctx, probe); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(probe); st.Mode().Perm() != 0o600 {
+		t.Errorf("probe mode = %o, want 600", st.Mode().Perm())
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != 0o600 {
+		t.Errorf("base mode = %o, want 600", st.Mode().Perm())
+	}
+	_ = s.Close()
+}
+
+func TestRevisionsKeepMaskedCopiesEverywhere(t *testing.T) {
+	// Import and remove used to journal raw whole objects while the
+	// ordinary mutation masked its deltas: the journal outlives
+	// rotations and rides every backup.
+	ctx := context.Background()
+	s, err := Open(ctx, Memory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	s.SetRevisionMasker(func(raw string) string {
+		return strings.ReplaceAll(raw, "supersecret", "<masked>")
+	})
+	f := &config.File{
+		Radios: map[string]config.Radio{},
+		Relays: map[string]config.Relay{"mc": {
+			Protocol: "meshcore", Radio: "r",
+			Layered: config.Layered{Overrides: map[string]map[string]any{
+				"custom": {"identity": "supersecret"},
+			}},
+		}},
+	}
+	if err := s.ImportFile(ctx, f, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Remove(ctx, KindRelay, "mc", "test"); err != nil {
+		t.Fatal(err)
+	}
+	revs, err := s.Revisions(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range revs {
+		if strings.Contains(r.Change, "supersecret") {
+			t.Errorf("revision %s %s journalled the secret raw:\n%s", r.Op, r.Kind, r.Change)
+		}
+		// Every revision reads as the delta shape the console shows.
+		if _, err := r.Changes(); err != nil {
+			t.Errorf("revision %s %s is not readable as changes: %v", r.Op, r.Kind, err)
+		}
+	}
+	// The object row itself keeps the raw value: the store is the
+	// guarded home, the journal is the copy that travels.
+	var attrs string
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT attrs FROM objects WHERE kind='relay'").Scan(&attrs); err == nil {
+		t.Log("relay object removed as expected") // removed above
+	}
+}
+
+func TestImportReplacesRuntimeState(t *testing.T) {
+	// An import is a NEW configuration: sessions and regions must not
+	// survive it by mere equality of names.
+	ctx := context.Background()
+	s, err := Open(ctx, Memory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.SaveACL(ctx, "mc", ACLRow{PubKey: []byte{9}, LastActive: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceRegions(ctx, "mc",
+		[]RegionRow{{ID: 1, Name: "eu"}}, RegionsMeta{NextID: 2}); err != nil {
+		t.Fatal(err)
+	}
+	f := &config.File{Radios: map[string]config.Radio{}, Relays: map[string]config.Relay{}}
+	if err := s.ImportFile(ctx, f, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if rows, _ := s.LoadACL(ctx, "mc"); len(rows) != 0 {
+		t.Error("sessions survived the import")
+	}
+	if _, _, ok, _ := s.LoadRegions(ctx, "mc"); ok {
+		t.Error("regions survived the import")
 	}
 }

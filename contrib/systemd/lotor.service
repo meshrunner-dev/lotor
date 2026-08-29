@@ -27,6 +27,10 @@ SupplementaryGroups=spi gpio i2c
 StateDirectory=lotor
 RuntimeDirectory=lotor
 RuntimeDirectoryMode=0750
+# The state directory holds the node identity; nothing it creates may
+# be born readable to other accounts, and nobody else may traverse it.
+StateDirectoryMode=0700
+UMask=0077
 
 # No privileges to escalate, no devices beyond the radio, no view of
 # anything the daemon does not own. The device allowlist names kernel
