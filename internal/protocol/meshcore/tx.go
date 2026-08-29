@@ -690,22 +690,44 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 		PowerDBm: e.policy.PowerDBm, Shadow: e.paperOnly(entry.pkt),
 		Raw: append([]byte(nil), raw...),
 	}
+	var faulted error
 	if sent.Shadow {
 		sent.At, sent.Airtime = time.Now(), dev.Airtime(len(raw))
-	} else if requeued, err := e.keyAndFill(ctx, dev, raw, entry, &sent, log); requeued || err != nil {
-		if err != nil && sent.Airtime == 0 {
-			// Nothing was radiated and nothing will be: the entry was
-			// already popped, so the session restart's queue purge
-			// cannot count it — this is its only witness.
-			e.dropOnFault(ctx, entry.origin, err)
+	} else {
+		requeued, radiated, err := e.keyAndFill(ctx, dev, raw, entry, &sent)
+		switch {
+		case requeued:
+			return nil
+		case !radiated:
+			if err != nil {
+				// Nothing was radiated and nothing will be: the entry
+				// was already popped, so the session restart's queue
+				// purge cannot count it — this is its only witness.
+				e.dropOnFault(ctx, entry.origin, err)
+			}
+			return err
 		}
-		return err
+		faulted = err
 	}
+	// One place for every consequence of a frame that occupied the
+	// channel, whether the radio came back healthy afterwards or not.
+	e.recordEmission(entry, sent, log, faulted)
+	return faulted
+}
+
+// recordEmission is everything a frame that reached the air owes the
+// rest of the daemon: the duplicate table, so our own words are not
+// heard back as a stranger's and flooded again; the duty ledger the
+// regulator counts; the traffic tally the status answers with; the
+// log and the journal.
+//
+// It exists as one function because the accounting used to be split
+// across two: a frame the chip radiated and then faulted on handback
+// reached the ledger and the journal but not the duplicate table or
+// the counters, so GET_STATUS and the heartbeat denied an emission
+// the budget had already paid for.
+func (e *engine) recordEmission(entry txEntry, sent bus.FrameSent, log *zap.Logger, faulted error) {
 	if !sent.Shadow {
-		// The reference marks every emission seen as it sends it: a
-		// flood we originate comes back from our neighbours, and
-		// without this we would judge our own words a stranger's and
-		// flood them again.
 		e.seen.witness(entry.pkt.Hash(), entry.origin, time.Now())
 	}
 	e.duty.record(sent.At, sent.Airtime)
@@ -713,39 +735,35 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 		// The radio's own tally: paper never counts here.
 		e.stats.countSent(entry.pkt.IsRouteFlood(), sent.Airtime)
 	}
-	log.Info("frame sent", zap.Bool("shadow", sent.Shadow),
-		zap.Duration("airtime", sent.Airtime), zap.Int8("power_dbm", sent.PowerDBm))
+	if faulted != nil {
+		log.Warn("frame sent, then the radio faulted",
+			zap.Duration("airtime", sent.Airtime), zap.Error(faulted))
+	} else {
+		log.Info("frame sent", zap.Bool("shadow", sent.Shadow),
+			zap.Duration("airtime", sent.Airtime), zap.Int8("power_dbm", sent.PowerDBm))
+	}
 	e.bus.Publish(sent)
-	return nil
 }
 
 // keyAndFill keys the radio and fills the emission's own account of
-// itself. requeued reports that the entry went back in the queue —
-// the caller is done either way.
+// itself. requeued reports that the entry went back in the queue;
+// radiated that the frame reached the air, which the caller must
+// account for whatever the error beside it.
 //
-// An error alongside a real airtime means the frame reached the air
-// and the trouble came after: charge and journal it before the
-// session goes down, or the ledger loses airtime the regulator would
-// still count.
+// An error alongside a real airtime means the frame was radiated and
+// the trouble came after — a chip that signalled TxDone and then
+// failed to go back to listening. As far as the channel and the
+// regulator are concerned that emission happened.
 func (e *engine) keyAndFill(ctx context.Context, dev radio.Device, raw []byte,
-	entry txEntry, sent *bus.FrameSent, log *zap.Logger,
-) (requeued bool, err error) {
+	entry txEntry, sent *bus.FrameSent,
+) (requeued, radiated bool, err error) {
 	report, err := e.key(ctx, dev, raw)
 	if errors.Is(err, radio.ErrBusyReceiving) {
 		e.requeue(entry) // a frame landed between assessment and keying
-		return true, nil
+		return true, false, nil
 	}
 	sent.At, sent.Airtime, sent.PowerDBm = report.At, report.Airtime, report.PowerDBm
-	if err == nil {
-		return false, nil
-	}
-	if report.Airtime > 0 {
-		e.duty.record(report.At, report.Airtime)
-		e.bus.Publish(*sent)
-		log.Warn("frame sent, then the radio faulted",
-			zap.Duration("airtime", report.Airtime), zap.Error(err))
-	}
-	return false, err
+	return false, err == nil || report.Airtime > 0, err
 }
 
 // key transmits under a deadline of its own. Once the radio is

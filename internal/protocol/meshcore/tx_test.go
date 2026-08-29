@@ -36,6 +36,11 @@ type fakeDevice struct {
 	// what its context said after the caller had a chance to cancel.
 	txEntered chan struct{}
 	txCtxErr  chan error
+	// txFault is returned beside the report: with txAirtime non-zero
+	// it is the chip that signalled TxDone and then failed to go back
+	// to listening, which is an emission whatever happened after.
+	txFault   error
+	txAirtime time.Duration
 }
 
 func newFakeDevice() *fakeDevice {
@@ -85,9 +90,13 @@ func (d *fakeDevice) Transmit(ctx context.Context, payload []byte, powerDBm int8
 		d.txCtxErr <- ctx.Err()
 	}
 	d.sent <- payload
+	air := time.Millisecond
+	if d.txAirtime != 0 {
+		air = d.txAirtime
+	}
 	return radio.TxReport{
-		At: time.Now(), Airtime: time.Millisecond, PowerDBm: powerDBm,
-	}, nil
+		At: time.Now(), Airtime: air, PowerDBm: powerDBm,
+	}, d.txFault
 }
 
 // txRig builds an armed engine on a bus with a subscription, and a
@@ -1247,5 +1256,103 @@ func TestAClaimedOrderStillAnswersAcrossTheDeadline(t *testing.T) {
 	}
 	if b.claim() {
 		t.Error("an abandoned order was claimed after the fact")
+	}
+}
+
+func TestAFrameRadiatedThenFaultedIsCountedOnce(t *testing.T) {
+	// The chip signalled TxDone and then failed to go back to
+	// listening. That frame occupied the channel: the ledger and the
+	// journal knew it, while the duplicate table and the counters did
+	// not — so the status answer and the heartbeat denied an emission
+	// the budget had already paid for.
+	e, dev, sub, peer := txRig(t, "on-air")
+	dev.txFault = errors.New("handback failed")
+	pkt, err := meshcore.BuildAdvert(peer, time.Now(), &meshcore.AdvertData{
+		Type: meshcore.AdvTypeRepeater, Name: "p",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := txn.New()
+	e.enqueueAfter(pkt, "advert-flood", id, prioDirect, 0)
+
+	err = e.txPhase(context.Background(), dev)
+	if err == nil {
+		t.Fatal("the radio fault did not reach the supervisor")
+	}
+	<-dev.sent
+
+	stats := e.TrafficStats()
+	if stats.SentDirect+stats.SentFlood != 1 {
+		t.Errorf("counted %d emissions, want 1", stats.SentDirect+stats.SentFlood)
+	}
+	if stats.TxAirtime == 0 {
+		t.Error("the traffic tally lost the airtime the ledger charged")
+	}
+	if used, _, ok := e.Duty(); !ok || used == 0 {
+		t.Error("the duty ledger lost the airtime")
+	}
+	// Witnessed too: our own words must not come back as a stranger's.
+	if _, dup := e.seen.witness(pkt.Hash(), txn.New(), time.Now()); !dup {
+		t.Error("the emission was never witnessed — its echo would be re-flooded")
+	}
+	// And exactly one journal line for it.
+	sentEvents := 0
+	for {
+		select {
+		case ev := <-sub.C:
+			if _, ok := ev.(bus.FrameSent); ok {
+				sentEvents++
+			}
+			continue
+		default:
+		}
+		break
+	}
+	if sentEvents != 1 {
+		t.Errorf("published %d FrameSent events, want 1", sentEvents)
+	}
+}
+
+func TestADueFloodAdvertOutranksAnOrderedLocalOne(t *testing.T) {
+	// Both carry this second in the same signed payload and hash
+	// alike, so a neighbour hearing the zero-hop copy first judges the
+	// routable one a duplicate and never re-floods it — and the flood
+	// is the one the mesh cannot get again for hours.
+	e, dev, _, _ := txRig(t, "on-air")
+	e.queue.depth = 8
+	now := time.Now()
+	e.nextFloodAdvert = now.Add(-time.Second) // due
+	e.nextLocalAdvert = now.Add(time.Hour)
+
+	o := &advertOrder{kind: "advert-local", started: newAck()}
+	e.advertAsk <- o
+	e.drainAdvertAsk(dev, now)
+	err := o.started.wait("advert")
+	if err == nil {
+		t.Fatal("an ordered local advert went out on top of a due flood")
+	}
+	if !strings.Contains(err.Error(), "flooded advert is due") {
+		t.Errorf("refusal = %v", err)
+	}
+	if len(e.queue.entries) != 0 {
+		t.Fatalf("the refused order queued %d emissions", len(e.queue.entries))
+	}
+	// The flood then goes out on its own turn, alone.
+	e.dueAdverts(dev, now)
+	if len(e.queue.entries) != 1 || e.queue.entries[0].kind != "advert-flood" {
+		t.Fatalf("queue = %+v", e.queue.entries)
+	}
+	// An ordered local advert with no flood due is served normally.
+	e.queue.entries = e.queue.entries[:0]
+	e.lastAskedAdvert = time.Time{}
+	o2 := &advertOrder{kind: "advert-local", started: newAck()}
+	e.advertAsk <- o2
+	e.drainAdvertAsk(dev, now.Add(time.Minute))
+	if err := o2.started.wait("advert"); err != nil {
+		t.Fatalf("an ordered local advert with no flood due: %v", err)
+	}
+	if len(e.queue.entries) != 1 || e.queue.entries[0].kind != "advert-local" {
+		t.Fatalf("queue = %+v", e.queue.entries)
 	}
 }
