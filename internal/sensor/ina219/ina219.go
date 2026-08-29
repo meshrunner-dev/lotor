@@ -2,14 +2,15 @@
 // I2C: the part a machine reads to say honestly what its supply is
 // doing — one of the few that does measure the host itself.
 //
-// Open is absent for now — this package declares what the part is and
-// what a configuration for it must say, so an operator can wire one up
-// and have it validated before any bus transaction exists to run.
+// The bus code is Linux's alone, in open_linux.go; everywhere else the
+// part can still be declared and validated, which is what lets a
+// configuration be written on a laptop.
 package ina219
 
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"meshrunner.dev/lotor/internal/schema"
 	"meshrunner.dev/lotor/internal/sensor"
@@ -37,14 +38,6 @@ const (
 	attrAddress = "address"
 	attrShunt   = "shunt_ohms"
 )
-
-func init() {
-	sensor.Register("ina219", sensor.Driver{
-		Open:    nil, // the bus transaction lands in its own change
-		Inspect: inspect,
-		Schema:  Schema(),
-	})
-}
 
 // A band preset earns its keep because a relay switches between bands
 // and each keeps its own tuning; a part has one configuration, decided
@@ -145,4 +138,29 @@ func asFloat(v any) (float64, bool) {
 		return float64(n), true
 	}
 	return 0, false
+}
+
+// The two scales the datasheet fixes: a bus reading counts 4mV in its
+// top thirteen bits, a shunt reading counts 10µV and is signed.
+const (
+	busVoltsPerBit   = 0.004
+	shuntVoltsPerBit = 0.00001
+)
+
+// readings turns two raw registers into what the part measured. Kept
+// away from the bus so the datasheet's arithmetic can be checked on
+// any machine: the sign of a current and the three flag bits under a
+// bus voltage are where this goes wrong, and no board is needed to
+// see it.
+func readings(rawBus, rawShunt uint16, shuntOhms float64, at time.Time) []sensor.Reading {
+	// The bus reading keeps CNVR and OVF in the bottom three bits.
+	volts := float64(rawBus>>3) * busVoltsPerBit
+	// The shunt reading is two's complement: current flows both ways
+	// through a resistor, and a discharging battery reads negative.
+	amps := float64(int16(rawShunt)) * shuntVoltsPerBit / shuntOhms
+	return []sensor.Reading{
+		{Quantity: sensor.Voltage, Value: volts, At: at},
+		{Quantity: sensor.Current, Value: amps, At: at},
+		{Quantity: sensor.Power, Value: volts * amps, At: at},
+	}
 }
