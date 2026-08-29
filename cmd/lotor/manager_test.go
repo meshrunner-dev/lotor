@@ -580,7 +580,26 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	if out := m.runOTA("mc", "air:test", "set freq 869618000"); out != "ERR: console only" {
 		t.Errorf("set freq got %q", out)
 	}
-	// Reading it stays open, like the reference's get.
+	// Reading freq stays open, like the reference's get — and speaks
+	// megahertz, the wire's unit, where the store keeps hertz.
+	m.traces["relay mc"] = append(m.traces["relay mc"],
+		config.Trace{Key: "tx.mode", Value: "on-air", Source: "config"},
+		config.Trace{Key: "frequency_hz", Value: 869618000, Source: "profile:eu"})
+	if out := m.runOTA("mc", "air:test", "get repeat"); out != "> on" {
+		t.Errorf("get repeat got %q", out)
+	}
+	if out := m.runOTA("mc", "air:test", "get freq"); out != "> 869.618" {
+		t.Errorf("get freq got %q", out)
+	}
+	// A lesser gate is not repeating: the ladder collapses to off.
+	for i, tr := range m.traces["relay mc"] {
+		if tr.Key == "tx.mode" {
+			m.traces["relay mc"][i].Value = "on-air-zero-hop"
+		}
+	}
+	if out := m.runOTA("mc", "air:test", "get repeat"); out != "> off" {
+		t.Errorf("get repeat (zero-hop) got %q", out)
+	}
 	// The deliberate absences answer like any unknown word.
 	for _, cmd := range []string{"reboot", "clkreboot", "tempradio 869525000 62500 8 8 10", "poweroff"} {
 		if out := m.runOTA("mc", "air:test", cmd); out != otaUnknown {

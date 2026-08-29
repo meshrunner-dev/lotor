@@ -362,9 +362,9 @@ func (m *manager) observerHealth(relayName string) func() mqtt.Health {
 		}
 		up := int(time.Since(info.Started).Seconds())
 		h.UptimeSecs = &up
-		h.Repeat = "off"
+		h.Repeat = repeatOff
 		if info.TXMode == config.TXOnAir {
-			h.Repeat = "on"
+			h.Repeat = repeatOn
 		}
 		if info.NoiseFloor != nil {
 			if nf, ok := info.NoiseFloor(); ok {

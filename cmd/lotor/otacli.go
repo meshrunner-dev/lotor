@@ -44,6 +44,28 @@ var otaSetting = map[string]string{
 	"allow.read.only":       "guest_access",
 }
 
+// otaRender translates a stored value back into the wire's own
+// vocabulary for get — the inverse of what set accepts. A setting
+// absent here reads back as stored.
+var otaRender = map[string]func(string) string{
+	// The gate ladder collapses to the reference's two words: only
+	// on-air repeats routable traffic; every lesser gate is off.
+	"repeat": func(v string) string {
+		if v == "on-air" {
+			return repeatOn
+		}
+		return repeatOff
+	},
+	// The wire speaks megahertz where the store keeps hertz.
+	"freq": func(v string) string {
+		hz, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return v
+		}
+		return strconv.FormatFloat(hz/1e6, 'f', 3, 64)
+	},
+}
+
 // otaReadOnly are the words a companion may read but never write from
 // the air: the credentials that grant a role, and the identity that
 // is the node. Changing those is the console's alone — an admin who
@@ -57,6 +79,12 @@ var otaReadOnly = map[string]bool{
 	// it — and our serial port is the console.
 	"frequency_hz": true,
 }
+
+// The reference's two words for the repeat gate, spelled once.
+const (
+	repeatOn  = "on"
+	repeatOff = "off"
+)
 
 // otaUnknown is the reference's exact answer for a word it does not
 // speak — and no echo: a reply is airtime, and the sender knows what
@@ -120,8 +148,13 @@ func (m *manager) otaGet(relay, name string) string {
 	if !known {
 		return otaUnknown
 	}
-	// "> value", the reference's get shape.
+	// "> value", the reference's get shape — through the setting's
+	// own renderer when the wire speaks another vocabulary than the
+	// store.
 	if v, ok := m.relayValue(relay, attr); ok {
+		if render, translated := otaRender[name]; translated {
+			v = render(v)
+		}
 		return "> " + v
 	}
 	return "> (unset)"
@@ -144,9 +177,9 @@ func (m *manager) otaSet(relay, principal, rest string) string {
 	if attr == "tx.mode" {
 		// repeat on/off is the reference's word for the transmit gate.
 		switch value {
-		case "on":
+		case repeatOn:
 			value = "on-air"
-		case "off":
+		case repeatOff:
 			value = "on-air-zero-hop"
 		default:
 			return "ERR: on or off"
