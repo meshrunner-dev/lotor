@@ -151,7 +151,7 @@ func (m *manager) observerConfig(name string, p mqtt.Params, log *zap.Logger) (m
 		OriginID: info.Identity,
 		Model:    info.Driver,
 		Firmware: version,
-		Client:   product.Slug + " " + version,
+		Client:   product.Slug + "/" + version,
 		Radio: mqtt.RadioString(info.Waveform.FrequencyHz,
 			uint32(max(info.Waveform.BandwidthHz, 0)), // a LoRa bandwidth, never negative
 			info.Waveform.SpreadingFactor, info.Waveform.CodingRate),

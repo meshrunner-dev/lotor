@@ -209,7 +209,7 @@ func TestEverySurfaceSpeaksTheSameBuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Firmware != version || cfg.Client != product.Slug+" "+version {
+	if cfg.Firmware != version || cfg.Client != product.Slug+"/"+version {
 		t.Errorf("heartbeat fields = %q / %q, want the boot version %q",
 			cfg.Firmware, cfg.Client, version)
 	}

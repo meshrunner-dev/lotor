@@ -330,7 +330,7 @@ func TestObserverHeartbeat(t *testing.T) {
 	up := 5
 	rec, _, counters := observerRig(t, Config{
 		Instance: "t", Relay: "mc", Status: true, StatusInterval: 20 * time.Millisecond,
-		OriginID: "feed", Model: "sx126x-spi", Firmware: "1.0", Client: "lotor 1.0",
+		OriginID: "feed", Model: "sx126x-spi", Firmware: "1.0", Client: "lotor/1.0",
 		Radio:  RadioString(869_618_000, 62_500, 8, 8),
 		Health: func() Health { return Health{Repeat: "on", UptimeSecs: &up} },
 	})
