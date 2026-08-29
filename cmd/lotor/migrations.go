@@ -69,7 +69,71 @@ func storeMigrations() []confdb.Migration {
 		Doc: "the region tables tighten to the model: flags to the defined " +
 			"bits, sequences 32-bit and unique per relay",
 		Run: migrateRegionIdentity,
+	}, {
+		To: 11,
+		Doc: "import revisions from before the delta shape become readable: " +
+			"the raw-object form wraps into the change the history view speaks",
+		Run: migrateImportRevisions,
 	}}
+}
+
+// deltaNew is the Change form's "new" side, named for the wrap.
+const deltaNew = "new"
+
+// migrateImportRevisions wraps the raw whole-object change the early
+// imports recorded into the {"object": {"new": …}} delta every other
+// revision speaks — the console showed those rows as unreadable
+// instead of explaining the import. The wrapped object is scrubbed on
+// the way, like shape 8 scrubbed everything else.
+func migrateImportRevisions(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx,
+		"SELECT id, change FROM revisions WHERE op = 'import'")
+	if err != nil {
+		return err
+	}
+	type patch struct {
+		id     int64
+		change string
+	}
+	var patches []patch
+	collect := func() error {
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var id int64
+			var change string
+			if err := rows.Scan(&id, &change); err != nil {
+				return err
+			}
+			var probe map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(change), &probe); err != nil {
+				continue // not JSON at all: leave the evidence as it is
+			}
+			if _, delta := probe["object"]; delta {
+				continue // already the readable shape
+			}
+			var obj any
+			if err := json.Unmarshal([]byte(change), &obj); err != nil {
+				continue
+			}
+			scrubSecretsIn(obj, secretKeys)
+			wrapped, err := json.Marshal(map[string]any{"object": map[string]any{deltaNew: obj}})
+			if err != nil {
+				return err
+			}
+			patches = append(patches, patch{id, string(wrapped)})
+		}
+		return rows.Err()
+	}
+	if err := collect(); err != nil {
+		return err
+	}
+	for _, p := range patches {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE revisions SET change = ? WHERE id = ?", p.change, p.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // dropOrphanRuntime removes sessions and region tables that outlived
@@ -322,35 +386,32 @@ func regionRowsFrom(accept []string, defaultScope string, unscoped *bool,
 	nextID := uint16(1)
 	var badName error
 	add := func(name string) uint16 {
-		bare := strings.TrimPrefix(name, "#")
-		if bare == "" {
+		if name == "" {
 			return 0
 		}
-		stored := bare
-		if strings.HasPrefix(bare, "$") {
-			// The class of a name is decided BEFORE the hash strip:
-			// "#$secret" is an auto region whose bare name begins with
-			// '$' — MeshCore derives its key from "#$secret" like any
-			// other — while a name that starts with '$' outright is a
-			// private region whose keystore was never implemented.
-			// The auto one keeps its '#', which is what keeps its
-			// class; the truly private one fails the migration whole,
-			// backup in hand — erasing it silently would turn a stored
-			// policy into unscoped emission.
-			if name == bare {
-				badName = fmt.Errorf(
-					"scope %q is a private region — not supported; remove it before migrating", name)
-				return 0
-			}
-			stored = name
+		// The private class is judged on the ORIGINAL spelling — a
+		// name that starts with '$' outright promises a keystore that
+		// was never implemented, and fails the migration whole rather
+		// than silently becoming unscoped emission. Everything else is
+		// stored AS SPELLED: every '#' past the first is part of the
+		// identity ("##x" is not "#x", and "#" alone is a region the
+		// old validator accepted), so stripping anything here changed
+		// names' classes and hashes behind the operator's back. The
+		// one-hash equivalence — "fr" and "#fr" are one region — is
+		// the dedup key and nothing more.
+		if strings.HasPrefix(name, "$") {
+			badName = fmt.Errorf(
+				"scope %q is a private region — not supported; remove it before migrating", name)
+			return 0
 		}
-		if id, held := seen[bare]; held {
+		identity := strings.TrimPrefix(name, "#")
+		if id, held := seen[identity]; held {
 			return id
 		}
 		id := nextID
 		nextID++
-		seen[bare] = id
-		entries = append(entries, confdb.RegionRow{ID: id, Name: stored})
+		seen[identity] = id
+		entries = append(entries, confdb.RegionRow{ID: id, Name: name})
 		return id
 	}
 	for _, n := range accept {
@@ -750,4 +811,16 @@ func healObserverAttrs(attrs string) (string, bool, error) {
 	}
 	healed, err := json.Marshal(o)
 	return string(healed), changed, err
+}
+
+// shapeCeiling is the newest shape this binary understands — what
+// Open refuses to exceed before any DDL runs.
+func shapeCeiling() int {
+	top := 1
+	for _, m := range storeMigrations() {
+		if m.To > top {
+			top = m.To
+		}
+	}
+	return top
 }

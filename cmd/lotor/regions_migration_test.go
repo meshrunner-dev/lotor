@@ -3,12 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"meshrunner.dev/lotor/internal/cli"
 	"meshrunner.dev/lotor/internal/confdb"
+	"meshrunner.dev/pkg/meshcore"
 )
 
 // The exact override shape the lab stored: the three scope keys inside
@@ -79,16 +83,19 @@ func TestScopeLiftEdges(t *testing.T) {
 	}
 	// accept_unscoped false becomes the wildcard's deny-flood flag,
 	// and the comma spelling of the list reads as the list.
+	// The stored spelling is the ORIGINAL: "#fr" stays "#fr" — every
+	// '#' is identity, and the model itself treats "fr" and "#fr" as
+	// one region wherever it matters.
 	_, entries, meta, err = liftScopeAttrs(
 		`{"overrides":{"custom":{"accept_scopes":"eu, #fr","accept_unscoped":false}}}`)
-	if err != nil || len(entries) != 2 || entries[1].Name != "fr" || meta.WildcardFlags != 1 {
+	if err != nil || len(entries) != 2 || entries[1].Name != "#fr" || meta.WildcardFlags != 1 {
 		t.Errorf("comma+deny: entries=%+v meta=%+v err=%v", entries, meta, err)
 	}
 }
 
 func TestShapeSixMigratesAStore(t *testing.T) {
 	ctx := context.Background()
-	s, err := confdb.Open(ctx, confdb.Memory)
+	s, err := confdb.Open(ctx, confdb.Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,8 +224,8 @@ func TestScopeLiftBoundsAndPolicies(t *testing.T) {
 	if meta.DefaultID != entries[1].ID {
 		t.Errorf("meta=%+v — the default lost its region", meta)
 	}
-	if entries[0].Name != "fr" {
-		t.Errorf("entries=%+v — a plain auto name keeps its bare form", entries)
+	if entries[0].Name != "#fr" {
+		t.Errorf("entries=%+v — the original spelling survives", entries)
 	}
 }
 
@@ -272,7 +279,7 @@ func TestOrphanRuntimeIsDroppedOnUpgrade(t *testing.T) {
 	// A removal before the cascade existed left sessions and regions
 	// behind; shape 9 sweeps them so a recreated name starts anew.
 	ctx := context.Background()
-	s, err := confdb.Open(ctx, confdb.Memory)
+	s, err := confdb.Open(ctx, confdb.Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,5 +299,104 @@ func TestOrphanRuntimeIsDroppedOnUpgrade(t *testing.T) {
 	}
 	if _, _, ok, _ := s.LoadRegions(ctx, "kept"); !ok {
 		t.Error("the living relay's regions were swept too")
+	}
+}
+
+func TestScopeLiftKeepsEveryValidSpelling(t *testing.T) {
+	// The review's counter-examples: "#" was a valid scope the old
+	// validator accepted and must not become unscoped policy; "##x"
+	// and "#x" are DIFFERENT identities that must both survive and
+	// still restore; and the one-hash pairs collapse as ever.
+	_, entries, meta, err := liftScopeAttrs(`{"overrides":{"custom":{` +
+		`"accept_scopes":["#","##x","#x","fr","#fr"],"default_scope":"#"}}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name
+	}
+	want := []string{"#", "##x", "#x", "fr"}
+	if len(names) != len(want) {
+		t.Fatalf("names = %v, want %v", names, want)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Fatalf("names = %v, want %v", names, want)
+		}
+	}
+	if meta.DefaultID != entries[0].ID {
+		t.Errorf("meta = %+v — the '#' default lost its region", meta)
+	}
+	// And the produced table restores: distinct identities, no
+	// collision after the model's own one-hash equivalence.
+	rows := make([]meshcore.Region, len(entries))
+	for i, e := range entries {
+		rows[i] = meshcore.Region{ID: e.ID, Name: e.Name}
+	}
+	if _, err := meshcore.RestoreRegionMap(rows, 0, meta.NextID, 0, meta.DefaultID); err != nil {
+		t.Errorf("the migrated table does not restore: %v", err)
+	}
+}
+
+func TestOldImportRevisionsBecomeReadable(t *testing.T) {
+	// Early imports journalled the raw object; the console showed
+	// those rows as unreadable. Shape 11 wraps them into the delta
+	// form — scrubbed on the way, like everything else was.
+	ctx := context.Background()
+	s, err := confdb.Open(ctx, confdb.Memory, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Replace(ctx, confdb.KindRelay, "mc",
+		map[string]any{"radio": "r"}, "t", "add", nil); err != nil {
+		t.Fatal(err)
+	}
+	// Plant a pre-delta import row the way an old binary wrote it.
+	if err := confdb.PlantRevision(ctx, s, "import",
+		`{"overrides":{"custom":{"admin_password":"RACCOON-CANARY","node_name":"x"}}}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Migrate(ctx, storeMigrations()); err != nil {
+		t.Fatal(err)
+	}
+	revs, err := s.Revisions(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range revs {
+		if r.Op != "import" {
+			continue
+		}
+		if _, err := r.Changes(); err != nil {
+			t.Errorf("import revision still unreadable: %v", err)
+		}
+		if strings.Contains(r.Change, "RACCOON-CANARY") {
+			t.Error("the wrap left the secret in the clear")
+		}
+		if !strings.Contains(r.Change, `"object"`) {
+			t.Errorf("import revision not in delta form: %s", r.Change)
+		}
+	}
+}
+
+func TestImportRunLeavesARefusedBaseUntouched(t *testing.T) {
+	// The CFG-009 regression the review asked for: the whole command
+	// path with an invalid file, proving the target base never moves.
+	dir := t.TempDir()
+	yaml := filepath.Join(dir, "bad.yaml")
+	if err := os.WriteFile(yaml, []byte(
+		"radios:\n  r:\n    driver: sx126x-spi\n    profile: rak6421-13300x-slot1\n"+
+			"relays:\n  mc:\n    protocol: not-a-protocol\n    radio: r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db := filepath.Join(dir, "config.db")
+	cmd := &configImportCmd{Path: yaml, DB: db, Force: true}
+	if err := cmd.Run(); err == nil {
+		t.Fatal("an unknown protocol imported")
+	}
+	if _, err := os.Stat(db); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the refused import touched the base: %v", err)
 	}
 }
