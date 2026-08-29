@@ -53,6 +53,22 @@ jobs:
             -version "${{ inputs.version }}" \
             -goos "${{ matrix.goos }}" -goarch "${{ matrix.goarch }}" \
             -goarm "${{ matrix.goarm }}"
+      - name: Prove the verifier itself
+        # The verifier guards every train, so it is proved before it
+        # judges: a canary build must pass under its own version and
+        # FAIL under any other — a verifier that stopped seeing the
+        # stamp would otherwise wave everything through. Once per run
+        # is enough; the canary is the host's own architecture.
+        if: matrix.goarch == 'amd64'
+        run: |
+          ./scripts/build -o canary -version 9.9.9-canary
+          ./.github/scripts/verify-binary.sh canary "9.9.9-canary" \
+            "$(git rev-parse HEAD)" "linux" "amd64" ""
+          if ./.github/scripts/verify-binary.sh canary "8.8.8-wrong" \
+            "$(git rev-parse HEAD)" "linux" "amd64" "" 2>/dev/null; then
+            echo "the verifier accepted a version the canary does not carry"; exit 1
+          fi
+          rm canary
       - name: Verify the binary against its own metadata
         run: |
           slug="$(go run ./internal/product/cmd/meta -field slug)"

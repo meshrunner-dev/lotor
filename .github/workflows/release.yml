@@ -59,12 +59,16 @@ jobs:
         run: grep -q "untrusted comment" internal/update/trust.go ||
           { echo "no embedded official key — mint one and embed it first"; exit 1; }
       - name: Create the release page
-        # Notes for humans, an anchor for the tag — the binaries live
-        # in the stable train's bucket, and only the manifests say so.
+        # Notes for humans, an anchor for the TRIGGERING tag — gh
+        # would silently mint a missing tag from the default branch,
+        # which may not be the commit these binaries came from, so the
+        # release names the ref that fired the workflow and refuses to
+        # invent one. The v-less version stays the product's name; it
+        # is not the tag's Git identity.
         run: |
-          flags=(--generate-notes)
+          flags=(--generate-notes --verify-tag --title "$VERSION")
           [ "${{ needs.meta.outputs.prerelease }}" = "true" ] && flags+=(--prerelease)
-          gh release create "$VERSION" "${flags[@]}"
+          gh release create "${GITHUB_REF_NAME}" "${flags[@]}"
       - name: Compress, sign, upload, publish
         env:
           RELSIGN_KEY: ${{ secrets.RELSIGN_KEY }}
