@@ -249,7 +249,11 @@ func CheckWaveform(w radio.Waveform) error {
 	if err != nil {
 		return fmt.Errorf("sx126x-spi waveform: %w", err)
 	}
-	if err := p.Validate(); err != nil {
+	// The library's own whole judgement — modulation and synthesiser
+	// range both — not the modulation half alone: a frequency the
+	// synthesiser cannot reach used to pass here and fail at every
+	// Configure after the hardware was open.
+	if err := sx126x.ValidateParams(p); err != nil {
 		return fmt.Errorf("sx126x-spi waveform: %w", err)
 	}
 	return nil
