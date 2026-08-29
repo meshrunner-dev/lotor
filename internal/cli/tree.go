@@ -55,7 +55,7 @@ func (s *session) treeLine(line string) bool {
 // vocabularies without either shadowing the other.
 func isTreeVerb(word string) bool {
 	switch word {
-	case verbPrint, verbSet, verbSet64, verbUnset, verbAdd, verbRemove, verbExport:
+	case verbPrint, verbSet, verbSet64, verbUnset, verbAdd, verbAdd64, verbRemove, verbExport:
 		return true
 	}
 	return false
@@ -346,7 +346,7 @@ func (s *session) treeVerb(ctx context.Context, path []string,
 		return s.treeMutate(ctx, path, verb, args)
 	case verb == verbDisable || verb == verbEnable:
 		return s.treeToggle(ctx, path, verb, args)
-	case verb == verbAdd || verb == verbRemove:
+	case isAddVerb(verb) || verb == verbRemove:
 		return s.treeCreateRemove(ctx, path, verb, args)
 	case len(path) == 0:
 		// Anything else at the root is a flat command — "/status" from
@@ -397,6 +397,12 @@ const (
 	verbSet64  = "set64"
 	verbExport = "export"
 	verbAdd    = "add"
+	// verbAdd64 is add with every value base64-encoded — the
+	// creation's atomic carrier: when any value cannot ride the
+	// historic inline form, the WHOLE command travels encoded, so
+	// cross-attribute constraints and secrets reach the store in one
+	// transaction, exactly as the original command did.
+	verbAdd64  = "add64"
 	verbRemove = "remove"
 	// verbStatus is an instance as it is running, where print is the
 	// instance as it was configured. It lives in the tree rather than
@@ -465,7 +471,7 @@ func (s *session) treeCreateRemove(ctx context.Context, path []string, verb stri
 	}
 	kind := path[0]
 	if s.isSingleton(path) {
-		if verb == verbAdd {
+		if isAddVerb(verb) {
 			return fmt.Errorf("/%s is one block — set its attributes instead", kind)
 		}
 		msg, err := s.deps.Remove(ctx, kind, "", "console")
@@ -479,26 +485,37 @@ func (s *session) treeCreateRemove(ctx context.Context, path []string, verb stri
 		return fmt.Errorf("usage: %s <name> [attr=value …]", verb)
 	}
 	name, rest := args[0], args[1:]
-	if verb == verbAdd && strings.Contains(name, "=") {
+	if isAddVerb(verb) && strings.Contains(name, "=") {
 		return fmt.Errorf("%q reads like an attribute — the name comes first: %s <name> [attr=value …]",
-			name, verbAdd)
+			name, verb)
 	}
 	if verb == verbRemove {
-		if len(rest) > 0 {
-			return errors.New("remove takes one name and nothing else")
-		}
-		msg, err := s.deps.Remove(ctx, kind, name, "console")
-		if err != nil {
+		return s.treeRemove(ctx, kind, name, rest)
+	}
+	if verb == verbAdd64 {
+		var err error
+		if rest, err = decode64Pairs(verbAdd64, rest); err != nil {
 			return err
 		}
-		fmt.Fprintf(s.out, "%s\r\n", msg)
-		return nil
 	}
 	attrs, err := attrPairs(rest)
 	if err != nil {
 		return err
 	}
 	msg, err := s.deps.Create(ctx, kind, name, attrs, "console")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(s.out, "%s\r\n", msg)
+	return nil
+}
+
+// treeRemove takes one instance out of existence.
+func (s *session) treeRemove(ctx context.Context, kind, name string, rest []string) error {
+	if len(rest) > 0 {
+		return errors.New("remove takes one name and nothing else")
+	}
+	msg, err := s.deps.Remove(ctx, kind, name, "console")
 	if err != nil {
 		return err
 	}
@@ -527,6 +544,11 @@ func isMutationVerb(verb string) bool {
 	return verb == verbSet || verb == verbUnset || verb == verbSet64
 }
 
+// isAddVerb says whether a verb creates an instance.
+func isAddVerb(verb string) bool {
+	return verb == verbAdd || verb == verbAdd64
+}
+
 // treeMutate routes the three mutation spellings to their door.
 func (s *session) treeMutate(ctx context.Context, path []string, verb string, args []string) error {
 	if verb == verbSet64 {
@@ -538,19 +560,29 @@ func (s *session) treeMutate(ctx context.Context, path []string, verb string, ar
 // treeSet64 is set with base64 values: decoded here, then exactly the
 // ordinary mutation — same validation, same journal, same gates.
 func (s *session) treeSet64(ctx context.Context, path []string, args []string) error {
+	decoded, err := decode64Pairs(verbSet64, args)
+	if err != nil {
+		return err
+	}
+	return s.treeSet(ctx, path, verbSet, decoded)
+}
+
+// decode64Pairs turns attr=<base64> words back into attr=value, for
+// both encoded carriers.
+func decode64Pairs(verb string, args []string) ([]string, error) {
 	decoded := make([]string, 0, len(args))
 	for _, a := range args {
 		key, value, valued := strings.Cut(a, "=")
 		if !valued {
-			return fmt.Errorf("%s takes attr=<base64>, not %q", verbSet64, a)
+			return nil, fmt.Errorf("%s takes attr=<base64>, not %q", verb, a)
 		}
 		raw, err := base64.StdEncoding.DecodeString(value)
 		if err != nil {
-			return fmt.Errorf("%s %s: %w", verbSet64, key, err)
+			return nil, fmt.Errorf("%s %s: %w", verb, key, err)
 		}
 		decoded = append(decoded, key+"="+string(raw))
 	}
-	return s.treeSet(ctx, path, verbSet, decoded)
+	return decoded, nil
 }
 
 func (s *session) treeSet(ctx context.Context, path []string, verb string, args []string) error {
@@ -764,24 +796,43 @@ func scopePairs(kv map[string]any) [][2]string {
 	return out
 }
 
-// emitObject writes one object's recreating lines: the verb line with
-// every attribute the historic inline form carries whole, then one
-// set64 line for the rest — base64, under the grammar marker no old
-// export can have produced.
+// emitObject writes ONE line that recreates the object: the historic
+// inline form when every value can ride it, otherwise the verb's
+// base64 carrier with EVERY value encoded. One line because the
+// original command was one transaction — split in two, a creation
+// whose halves need each other (guest_access without its password)
+// is refused with the secret still in flight, and the object is
+// simply lost. The carrier keeps the verb, so what reaches Create or
+// Mutate is exactly what the original command carried, together.
 func (s *session) emitObject(kind, verb, name string, raw [][2]string) {
-	var inline, encoded [][2]string
+	inline := true
 	for _, p := range raw {
-		if inlineRenderable(p[1]) {
-			inline = append(inline, [2]string{p[0], quoteIfSpaced(p[1])})
-		} else {
-			encoded = append(encoded,
-				[2]string{p[0], base64.StdEncoding.EncodeToString([]byte(p[1]))})
+		if !inlineRenderable(p[1]) {
+			inline = false
+			break
 		}
 	}
-	s.exportLine(kind, verb, name, inline)
-	if len(encoded) > 0 {
-		s.exportLine(kind, verbSet64, name, encoded)
+	pairs := make([][2]string, 0, len(raw))
+	if inline {
+		for _, p := range raw {
+			pairs = append(pairs, [2]string{p[0], quoteIfSpaced(p[1])})
+		}
+		s.exportLine(kind, verb, name, pairs)
+		return
 	}
+	for _, p := range raw {
+		pairs = append(pairs,
+			[2]string{p[0], base64.StdEncoding.EncodeToString([]byte(p[1]))})
+	}
+	s.exportLine(kind, carrier64(verb), name, pairs)
+}
+
+// carrier64 names a verb's base64 spelling.
+func carrier64(verb string) string {
+	if verb == verbAdd {
+		return verbAdd64
+	}
+	return verbSet64
 }
 
 // attrKeyProfile is the layering knob's name, as set accepts it.
@@ -809,8 +860,14 @@ func (s *session) exportSingleton(kind string) {
 func (s *session) exportLine(kind, verb, name string, pairs [][2]string) {
 	var b strings.Builder
 	b.WriteString(s.color(cPath, "/"+kind))
+	// The grammar's own order: a creation names its object after the
+	// verb, a mutation stands inside it — the instance is path, so
+	// the name comes before set and set64 or the CLI refuses the line.
+	if name != "" && !isAddVerb(verb) {
+		b.WriteString(" " + s.color(cPath, name))
+	}
 	b.WriteString(" " + s.color(cVerb, verb))
-	if name != "" {
+	if name != "" && isAddVerb(verb) {
 		b.WriteString(" " + s.color(cPath, name))
 	}
 	for _, p := range pairs {
@@ -819,13 +876,17 @@ func (s *session) exportLine(kind, verb, name string, pairs [][2]string) {
 	fmt.Fprintf(s.out, "%s\r\n", b.String())
 }
 
-// exportValue renders one value the way set accepts it back. Every
-// list joins on commas whatever its element type, because commas are
-// the only form the parser reads: a list rendered any other way makes
-// a line that cannot be pasted back, which is the one thing an export
-// has to be.
-func exportValue(v any) string {
-	return quoteIfSpaced(rawValue(v))
+// displayValue renders one value for the screen. Inline values read
+// as the command line carries them; control-laden ones appear in
+// Go-quoted notation — a form for eyes, deliberately not one the
+// command grammar reads, so print stays legible without handing the
+// quoted form a second meaning.
+func displayValue(v any) string {
+	raw := rawValue(v)
+	if inlineRenderable(raw) {
+		return quoteIfSpaced(raw)
+	}
+	return strconv.Quote(raw)
 }
 
 // rawValue renders one value the way set accepts it back, before any
@@ -1215,7 +1276,7 @@ func (s *session) printDetail(kind string, secrets bool) error {
 		traces := s.traces()[kind+" "+name]
 		pairs := make([][2]string, 0, len(traces))
 		for _, t := range traces {
-			value := exportValue(t.Value)
+			value := displayValue(t.Value)
 			if masked[t.Key] {
 				value = maskedValue
 			}
@@ -1439,6 +1500,7 @@ var verbDoc = map[string]string{
 	verbSet64:   "change an attribute from a base64 value — the export's carrier for control-laden bytes",
 	verbUnset:   "clear an attribute, back to what the preset says",
 	verbAdd:     "bring a new one into existence",
+	verbAdd64:   "add from base64 values — the export's atomic carrier for control-laden bytes",
 	verbRemove:  "take one out of existence",
 	verbDisable: "park it: keep the configuration, stop running it",
 	verbEnable:  "unpark it and run it again",
@@ -1541,7 +1603,7 @@ func (s *session) verbNamesAt(path []string) []string {
 		}
 		return verbs
 	case len(path) == 1:
-		verbs := []string{verbPrint, verbAdd, verbRemove, verbExport}
+		verbs := []string{verbPrint, verbAdd, verbAdd64, verbRemove, verbExport}
 		if disableable(path[0]) {
 			verbs = append(verbs, verbDisable, verbEnable)
 		}
@@ -1676,9 +1738,9 @@ func (s *session) argTermsFor(path, rest []string) []term {
 		return s.printTerms(path)
 	case verbRemove, verbDisable, verbEnable:
 		return s.instanceNameTerms(path)
-	case verbSet, verbUnset, verbAdd:
+	case verbSet, verbSet64, verbUnset, verbAdd, verbAdd64:
 		attrs := s.attrsAt(path)
-		if verb == verbAdd && len(path) == 1 && !s.isSingleton(path) {
+		if isAddVerb(verb) && len(path) == 1 && !s.isSingleton(path) {
 			// The choice is on the line, not in the store yet.
 			attrs = s.attrsForAddLine(path[0], rest)
 		}
@@ -2209,7 +2271,7 @@ func (w *lineWalk) paintArg(token string) string {
 // rather than one this console names: the instance a creation or a
 // removal is about, or a command's own positional.
 func takesValue(verb string) bool {
-	if verb == verbAdd || verb == verbRemove {
+	if isAddVerb(verb) || verb == verbRemove {
 		return true
 	}
 	c := lookup(verb)

@@ -30,6 +30,7 @@ import (
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/mqtt"
+	"meshrunner.dev/lotor/internal/protocol"
 	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/relay"
@@ -604,21 +605,13 @@ func (m *manager) Traces() map[string][]config.Trace {
 	out := make(map[string][]config.Trace, len(m.traces)+2)
 	maps.Copy(out, m.traces)
 	m.viewMu.RUnlock()
-	// A radio nobody claims yet has no assembly to trace, but it is
-	// configuration all the same: resolve its layers without hardware
-	// so print and export see it like any other.
-	for name, rd := range m.file.Radios {
-		if _, live := out["radio "+name]; live {
-			continue
-		}
-		rows := radioStructural(rd)
-		if drv, err := radio.Lookup(rd.Driver); err == nil {
-			if _, traces, rerr := rd.Layered.Resolve(drv.Presets); rerr == nil {
-				rows = withStructural(traces, rows)
-			}
-		}
-		out["radio "+name] = rows
-	}
+	// A radio nobody claims yet, or a relay whose assembly failed,
+	// has no assembly to trace — but it is configuration all the
+	// same: resolve the layers without hardware, so the persisted
+	// form keeps showing in print and replaying in export even while
+	// the hardware is missing.
+	m.syntheticRadioTraces(out)
+	m.syntheticRelayTraces(out)
 	addSensorTraces(out, m.file.Sensors)
 	// The singletons have no layering, so their "provenance" is the
 	// store itself — synthesised here so print works the same way
@@ -658,6 +651,39 @@ func (m *manager) Traces() map[string][]config.Trace {
 		}
 	}
 	return out
+}
+
+// syntheticRadioTraces resolves the layers of every radio no live
+// assembly speaks for. The caller holds mu.
+func (m *manager) syntheticRadioTraces(out map[string][]config.Trace) {
+	for name, rd := range m.file.Radios {
+		if _, live := out["radio "+name]; live {
+			continue
+		}
+		rows := radioStructural(rd)
+		if drv, err := radio.Lookup(rd.Driver); err == nil {
+			if _, traces, rerr := rd.Layered.Resolve(drv.Presets); rerr == nil {
+				rows = withStructural(traces, rows)
+			}
+		}
+		out["radio "+name] = rows
+	}
+}
+
+// syntheticRelayTraces does the same for relays. The caller holds mu.
+func (m *manager) syntheticRelayTraces(out map[string][]config.Trace) {
+	for name, rc := range m.file.Relays {
+		if _, live := out["relay "+name]; live {
+			continue
+		}
+		rows := relayStructural(rc)
+		if b, err := protocol.Lookup(rc.Protocol); err == nil {
+			if _, traces, rerr := rc.Layered.Resolve(b.Presets); rerr == nil {
+				rows = withStructural(traces, rows)
+			}
+		}
+		out["relay "+name] = rows
+	}
 }
 
 // systemTraces shows the system block as it is felt: the name however
@@ -1040,7 +1066,7 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 			// Both attributes are read live.
 			m.applyLogLevel()
 			return fmt.Sprintf("applied — this system is now %s, logging at %s",
-				m.systemName(), logging.LevelName(m.logKnob.Level())), nil
+				m.systemName(), m.liveLevelName()), nil
 		case confdb.KindSentinel, confdb.KindCLI:
 			return "applied — takes effect when the daemon restarts", nil
 		case confdb.KindUpdate:
@@ -2210,9 +2236,21 @@ func (m *manager) adoptLevelKnob(knob zap.AtomicLevel) {
 	m.applyLogLevel()
 }
 
+// liveLevelName names the level the live knob points at, or the boot
+// default when none was adopted.
+func (m *manager) liveLevelName() string {
+	if m.logKnob == (zap.AtomicLevel{}) {
+		return logging.LevelName(m.bootLevel)
+	}
+	return logging.LevelName(m.logKnob.Level())
+}
+
 // applyLogLevel points the live knob where the configuration says —
 // the stored override when one is set, the boot flag otherwise.
 func (m *manager) applyLogLevel() {
+	if m.logKnob == (zap.AtomicLevel{}) {
+		return // no live knob adopted — nothing to point yet
+	}
 	lvl := m.bootLevel
 	if m.file.System != nil && m.file.System.LogLevel != "" {
 		parsed, err := logging.ParseLevel(m.file.System.LogLevel)

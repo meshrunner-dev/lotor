@@ -1194,12 +1194,12 @@ func TestExportRendersEveryListTheWaySetReadsItBack(t *testing.T) {
 	// in the shape the language prints slices in — which the parser
 	// does not read. An export nobody can paste back is not one.
 	for _, c := range []struct{ in any }{{[]int{12, 13}}, {[]any{12, 13}}, {[]string{"12", "13"}}} {
-		if got := exportValue(c.in); got != "12,13" {
-			t.Errorf("exportValue(%v) = %q", c.in, got)
+		if got := rawValue(c.in); got != "12,13" {
+			t.Errorf("rawValue(%v) = %q", c.in, got)
 		}
 	}
 	attr := schema.Attr{Name: "enable_pins", Type: schema.Ints}
-	if _, err := schema.Parse(attr, exportValue([]int{12, 13})); err != nil {
+	if _, err := schema.Parse(attr, rawValue([]int{12, 13})); err != nil {
 		t.Errorf("what export wrote does not parse back: %s", err)
 	}
 }
@@ -2170,5 +2170,90 @@ func TestSet64IsTheOrdinaryMutation(t *testing.T) {
 	out := run(t, deps, "/relay meshcore-868 set64 guest_password=%%%")
 	if !strings.Contains(out, "set64") {
 		t.Errorf("bad payload refusal:\n%s", out)
+	}
+}
+
+func TestEncodedExportStaysOneCommand(t *testing.T) {
+	// One logical command, one line: as soon as any value needs the
+	// encoded carrier, the WHOLE command travels under it — add64 for
+	// a creation, set64 for a mutation — with the instance where the
+	// grammar reads it: in the path for mutations, after the verb for
+	// creations. Split in two, a creation whose halves need each
+	// other (guest_access without its password) is refused with the
+	// secret still in flight; and a singleton whose only value is
+	// encoded must not leave an empty ordinary line behind.
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	deps.Traces["system"] = []config.Trace{
+		{Key: "name", Source: "config", Value: "two\nlines"},
+	}
+	deps.Layers = func(kind, name string) (string, map[string]map[string]any, bool) {
+		if kind != scopeRelay || name != "meshcore-868" {
+			return "", nil, false
+		}
+		return "eu-868-narrow", map[string]map[string]any{
+			"eu-868-narrow": {"guest_access": "password", "guest_password": `h"unter`},
+			"eu-433":        {"node_name": "line\nbreak", "tx_power_dbm": "3"},
+		}, true
+	}
+	out := run(t, deps, "export")
+
+	decode := func(line string) map[string]string {
+		t.Helper()
+		got := map[string]string{}
+		for _, w := range splitArgs(line) {
+			k, v, ok := strings.Cut(w, "=")
+			if !ok {
+				continue
+			}
+			raw, err := base64.StdEncoding.DecodeString(v)
+			if err != nil {
+				t.Fatalf("%q: %s is not base64: %v", line, k, err)
+			}
+			got[k] = string(raw)
+		}
+		return got
+	}
+	var add64, scope64, restore, system string
+	for l := range strings.SplitSeq(out, "\r\n") {
+		switch {
+		case strings.HasPrefix(l, "/relay add64 meshcore-868 "):
+			add64 = l
+		case strings.HasPrefix(l, "/relay meshcore-868 set64 "):
+			scope64 = l
+		case strings.HasPrefix(l, "/relay meshcore-868 set "):
+			restore = l
+		case strings.HasPrefix(l, "/system "):
+			if system != "" {
+				t.Errorf("the singleton left a second line: %q after %q", l, system)
+			}
+			system = l
+		case strings.HasPrefix(l, "/relay add ") ||
+			strings.HasPrefix(l, "/relay set") ||
+			strings.HasPrefix(l, "/relay set64"):
+			t.Errorf("a line the grammar refuses, or a split command: %q", l)
+		}
+	}
+	if add64 == "" || scope64 == "" || restore == "" || system == "" {
+		t.Fatalf("lines missing (add64=%q scope=%q restore=%q system=%q):\n%s",
+			add64, scope64, restore, system, out)
+	}
+	pairs := decode(add64)
+	if pairs["guest_access"] != "password" || pairs["guest_password"] != `h"unter` {
+		t.Errorf("the creation split its halves: %v", pairs)
+	}
+	pairs = decode(scope64)
+	if pairs["profile"] != "eu-433" || pairs["node_name"] != "line\nbreak" ||
+		pairs["tx_power_dbm"] != "3" {
+		t.Errorf("the scope switch travelled apart from its values: %v", pairs)
+	}
+	if !strings.HasPrefix(system, "/system set64 ") {
+		t.Errorf("singleton line = %q, want one set64", system)
+	}
+	if got := decode(system)["name"]; got != "two\nlines" {
+		t.Errorf("singleton value = %q", got)
+	}
+	if restore != "/relay meshcore-868 set profile=eu-868-narrow" {
+		t.Errorf("restore line = %q", restore)
 	}
 }
