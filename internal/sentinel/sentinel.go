@@ -300,6 +300,8 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 		err = s.store.recordTxDrop(ctx, e.At, e.Relay, e.Reason)
 	case bus.RelayState:
 		err = s.store.insertRelayState(ctx, e.At, e.Relay, e.State, e.Err)
+	case bus.ObserverState:
+		err = s.store.insertObserverState(ctx, e.At, e.Observer, e.State, e.Cause)
 	default:
 		return
 	}

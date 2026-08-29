@@ -122,3 +122,13 @@ type RelayState struct {
 	State string
 	Err   string
 }
+
+// ObserverState is published on every observer lifecycle transition —
+// up, down with its cause, stopped — so a refusal to start is history
+// the journal keeps, not a log line that scrolled away.
+type ObserverState struct {
+	Observer string
+	At       time.Time
+	State    string
+	Cause    string
+}

@@ -46,6 +46,12 @@ CREATE TABLE IF NOT EXISTS relay_states (
 	state TEXT NOT NULL,
 	err   TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS observer_states (
+	at_ms    INTEGER NOT NULL,
+	observer TEXT NOT NULL,
+	state    TEXT NOT NULL,
+	cause    TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS noise (
 	relay      TEXT PRIMARY KEY,
 	count      INTEGER NOT NULL DEFAULT 0,
@@ -111,6 +117,7 @@ CREATE INDEX IF NOT EXISTS frames_dup ON frames(duplicate_of);
 CREATE INDEX IF NOT EXISTS frames_ptype ON frames(ptype);
 CREATE INDEX IF NOT EXISTS frames_verdict ON frames(verdict);
 CREATE INDEX IF NOT EXISTS relay_states_at ON relay_states(at_ms);
+CREATE INDEX IF NOT EXISTS observer_states_at ON observer_states(at_ms);
 CREATE INDEX IF NOT EXISTS tx_txn ON tx(txn);
 CREATE INDEX IF NOT EXISTS tx_at ON tx(at_ms);
 CREATE INDEX IF NOT EXISTS metrics_raw_key ON metrics_raw(series, relay, at_ms);
@@ -496,6 +503,14 @@ func (s *store) insertRelayState(ctx context.Context, at time.Time, relay, state
 	return err
 }
 
+func (s *store) insertObserverState(ctx context.Context, at time.Time, observer, state, cause string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO observer_states (at_ms, observer, state, cause) VALUES (?, ?, ?, ?)`,
+		at.UnixMilli(), observer, state, cause,
+	)
+	return err
+}
+
 // prune drops everything older than the retention and, when maxFrames
 // is set, everything beyond the newest maxFrames rows — the journal is
 // bounded in time always and in size when asked. The metrics tiers age
@@ -507,6 +522,9 @@ func (s *store) prune(ctx context.Context, now time.Time, retention time.Duratio
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM relay_states WHERE at_ms < ?`, cutoff); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM observer_states WHERE at_ms < ?`, cutoff); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM tx WHERE at_ms < ?`, cutoff); err != nil {

@@ -1373,12 +1373,15 @@ func (s *session) mqttStatus(name string) error {
 			continue
 		}
 		tb := s.table()
-		state := "connecting"
-		if mq.Connected != nil && mq.Connected() {
-			state = "connected"
-		}
+		// The same ladder the list renders: a row without a broker
+		// session is down, not "connecting" — an observer that never
+		// started is not on its way anywhere.
+		state := observerState(mq)
 		tb.row("broker", mq.URL)
 		tb.row("state", state)
+		if mq.Down != "" {
+			tb.row("cause", mq.Down)
+		}
 		tb.row("relay", mq.Relay)
 		if mq.Counters != nil {
 			published, pubErrors, busDropped, filtered, last := mq.Counters()
@@ -1392,7 +1395,7 @@ func (s *session) mqttStatus(name string) error {
 		}
 		return tb.flush(s.out)
 	}
-	return fmt.Errorf("no observer %q running", name)
+	return fmt.Errorf("no observer %q", name)
 }
 
 // mqttList names the observer connections and how each is doing.
@@ -1411,20 +1414,30 @@ func (s *session) mqttList() error {
 	tb := s.table()
 	tb.header("", "NAME", "BROKER", "RELAY", "STATE", "PUBLISHED")
 	for _, mq := range mqs {
-		flag, state, published := "", "down", "-"
-		switch {
-		case mq.Disabled:
-			flag, state = "X", "-"
-		case mq.Connected != nil && mq.Connected():
-			state = "connected"
-		case mq.Connected != nil:
-			state = "connecting"
+		flag, published := "", "-"
+		if mq.Disabled {
+			flag = "X"
 		}
 		if mq.Counters != nil {
 			n, _, _, _, _ := mq.Counters()
 			published = strconv.FormatUint(n, 10)
 		}
-		tb.row(flag, mq.Name, mq.URL, mq.Relay, state, published)
+		tb.row(flag, mq.Name, mq.URL, mq.Relay, observerState(mq), published)
 	}
 	return tb.flush(s.out)
+}
+
+// observerState is the one ladder both the list and the detail read,
+// so they cannot disagree about the same observer: parked, connected,
+// connecting — or down, with MQTTInfo.Down saying why.
+func observerState(mq MQTTInfo) string {
+	switch {
+	case mq.Disabled:
+		return "disabled"
+	case mq.Connected != nil && mq.Connected():
+		return "connected"
+	case mq.Connected != nil:
+		return "connecting"
+	}
+	return "down"
 }

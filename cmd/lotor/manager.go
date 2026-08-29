@@ -100,9 +100,13 @@ type manager struct {
 	wg        sync.WaitGroup
 	running   map[string]*managedRelay
 	observers map[string]*managedObserver
-	infos     map[string]cli.RelayInfo
-	radios    map[string]cli.RadioInfo
-	traces    map[string][]config.Trace
+	// obsCause remembers why each configured observer is not running —
+	// the truth the status line owes the operator, kept beside the
+	// observer table under the same lock.
+	obsCause map[string]string
+	infos    map[string]cli.RelayInfo
+	radios   map[string]cli.RadioInfo
+	traces   map[string][]config.Trace
 	// cfgs holds each relay's resolved engine configuration, under
 	// viewMu with the rest of the view: the over-the-air deep check
 	// clones one and asks the protocol, exactly what assembly asks.
@@ -121,6 +125,7 @@ func newManager(store *confdb.Store, f *config.File, b *bus.Bus,
 		store: store, file: f, bus: b, sen: sen, kinds: kinds, log: log,
 		running:   map[string]*managedRelay{},
 		observers: map[string]*managedObserver{},
+		obsCause:  map[string]string{},
 		infos:     map[string]cli.RelayInfo{},
 		radios:    map[string]cli.RadioInfo{},
 		traces:    map[string][]config.Trace{},
@@ -1027,6 +1032,10 @@ func (m *manager) commitCreate(ctx context.Context, next *config.File,
 	switch kind {
 	case confdb.KindRelay:
 		m.startRelay(m.ctx, name) //nolint:contextcheck // deliberate: daemon lifetime
+		// The new relay changes what "the only relay" resolves to: the
+		// observers reading that phrase must follow, now and not at the
+		// next restart.
+		m.reconcileObservers()
 		return fmt.Sprintf("added — relay %s starting", name), nil
 	case confdb.KindMQTT:
 		m.startObserver(m.ctx, name) //nolint:contextcheck // deliberate: daemon lifetime
@@ -1308,6 +1317,19 @@ func (m *manager) Remove(ctx context.Context, kind, name, principal string) (str
 	if err != nil {
 		return "", err
 	}
+	// An observer explicitly pointing at this relay is a claim,
+	// refused exactly like a relay's claim on a radio: silently
+	// orphaning the reference would leave a connection publishing for
+	// a relay the tree no longer holds. Implicit observers claim
+	// nothing — "the only relay" is a phrase, not a reference — and
+	// the reconciliation below re-reads it.
+	if kind == confdb.KindRelay {
+		for obsName, mq := range m.file.MQTT {
+			if p, err := resolveMQTTParams(mq); err == nil && p.Relay == name {
+				return "", fmt.Errorf("observer %q claims this relay — remove it first", obsName)
+			}
+		}
+	}
 	msg, err := removeFromFile(next, kind, name)
 	if err != nil {
 		return "", err
@@ -1332,9 +1354,11 @@ func (m *manager) Remove(ctx context.Context, kind, name, principal string) (str
 			}
 		}
 		m.viewMu.Unlock()
+		m.reconcileObservers()
 	}
 	if kind == confdb.KindMQTT {
 		m.stopObserver(name)
+		delete(m.obsCause, name)
 	}
 	return msg, nil
 }

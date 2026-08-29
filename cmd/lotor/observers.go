@@ -94,18 +94,25 @@ func resolveMQTTParams(mq config.MQTT) (mqtt.Params, error) {
 // observerRelay resolves which relay an observer watches: the named
 // one, or the only one there is.
 func (m *manager) observerRelay(relay string) (string, error) {
+	return observerRelayIn(m.file, relay)
+}
+
+// observerRelayIn is the same resolution against any file: a pure
+// judgement, which is what lets the reconciliation compare where an
+// observer would land before and after a topology change.
+func observerRelayIn(f *config.File, relay string) (string, error) {
 	if relay != "" {
-		if _, ok := m.file.Relays[relay]; !ok {
+		if _, ok := f.Relays[relay]; !ok {
 			return "", fmt.Errorf("no relay %q to observe", relay)
 		}
 		return relay, nil
 	}
-	if len(m.file.Relays) == 1 {
-		for name := range m.file.Relays {
+	if len(f.Relays) == 1 {
+		for name := range f.Relays {
 			return name, nil
 		}
 	}
-	return "", fmt.Errorf("%d relays run here — relay= says which to observe", len(m.file.Relays))
+	return "", fmt.Errorf("%d relays run here — relay= says which to observe", len(f.Relays))
 }
 
 // observerConfig assembles one observer's whole decision set from its
@@ -394,17 +401,18 @@ func (m *manager) startObserver(ctx context.Context, name string) {
 	}
 	log := m.log.Named("mqtt").With(zap.String("observer", name))
 	if mq.Disabled {
+		delete(m.obsCause, name)
 		log.Info("observer disabled — not started")
 		return
 	}
 	p, err := resolveMQTTParams(mq)
 	if err != nil {
-		log.Error("observer not started", zap.Error(err))
+		m.observerDown(name, err, log)
 		return
 	}
 	cfg, err := m.observerConfig(name, p, log)
 	if err != nil {
-		log.Error("observer not started", zap.Error(err))
+		m.observerDown(name, err, log)
 		return
 	}
 	connects := make(chan struct{}, 1)
@@ -414,7 +422,7 @@ func (m *manager) startObserver(ctx context.Context, name string) {
 	m.viewMu.RUnlock()
 	broker, err := mqtt.Dial(observerDial(p, name, dialInfo, connects, log), log)
 	if err != nil {
-		log.Error("observer not started", zap.Error(err))
+		m.observerDown(name, err, log)
 		return
 	}
 	sub := m.bus.Subscribe(observerSubBuffer)
@@ -430,7 +438,20 @@ func (m *manager) startObserver(ctx context.Context, name string) {
 		defer sub.Close()
 		obs.Run(octx, sub)
 	})
+	delete(m.obsCause, name)
+	m.bus.Publish(bus.ObserverState{Observer: name, At: time.Now(), State: "up"})
 	log.Info("observer up", zap.String("broker", p.URL), zap.String("relay", cfg.Relay))
+}
+
+// observerDown records why an observer is not running: the cause the
+// status line shows, the transition the journal keeps — not only a
+// log line that scrolled away. The caller holds mu.
+func (m *manager) observerDown(name string, err error, log *zap.Logger) {
+	m.obsCause[name] = err.Error()
+	m.bus.Publish(bus.ObserverState{
+		Observer: name, At: time.Now(), State: "down", Cause: err.Error(),
+	})
+	log.Error("observer not started", zap.Error(err))
 }
 
 // stopObserver takes one down and waits it out. The caller holds mu.
@@ -442,7 +463,43 @@ func (m *manager) stopObserver(name string) {
 	h.cancel()
 	<-h.done
 	delete(m.observers, name)
+	m.bus.Publish(bus.ObserverState{Observer: name, At: time.Now(), State: "stopped"})
 	m.log.Named("mqtt").Info("observer stopped", zap.String("observer", name))
+}
+
+// reconcileObservers realigns every observer with the relay topology
+// after a relay was created or removed. An empty relay= means "the
+// only relay", and that phrase changes meaning with the map: each
+// observer whose resolution changed is stopped, bounced or started,
+// so the running state is exactly what a restart would produce —
+// never a connection kept alive to the captured face of a relay the
+// tree no longer holds. The caller holds mu.
+func (m *manager) reconcileObservers() {
+	for name, mq := range m.file.MQTT {
+		if mq.Disabled {
+			continue
+		}
+		log := m.log.Named("mqtt").With(zap.String("observer", name))
+		var target string
+		p, err := resolveMQTTParams(mq)
+		if err == nil {
+			target, err = m.observerRelay(p.Relay)
+		}
+		h, live := m.observers[name]
+		switch {
+		case live && err != nil:
+			m.stopObserver(name)
+			m.observerDown(name, err, log)
+		case live && h.relay != target:
+			m.bounceObserver(name)
+		case !live && err == nil:
+			m.startObserver(m.ctx, name)
+		case !live && m.obsCause[name] != err.Error():
+			// Still down, but the reason moved with the topology: the
+			// status must say why it is down now, not why it once was.
+			m.observerDown(name, err, log)
+		}
+	}
 }
 
 // bounceObserver restarts one connection under the daemon's own
@@ -486,7 +543,7 @@ func (m *manager) MQTTInfos() []cli.MQTTInfo {
 		if _, live := m.observers[name]; live {
 			continue
 		}
-		row := cli.MQTTInfo{Name: name, Disabled: mq.Disabled}
+		row := cli.MQTTInfo{Name: name, Disabled: mq.Disabled, Down: m.obsCause[name]}
 		if p, err := resolveMQTTParams(mq); err == nil {
 			row.URL = p.URL
 			if relayName, err := m.observerRelay(p.Relay); err == nil {

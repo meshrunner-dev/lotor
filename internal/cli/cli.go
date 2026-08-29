@@ -240,9 +240,13 @@ type MQTTInfo struct {
 	// Disabled marks a parked connection: configured, deliberately
 	// not running.
 	Disabled bool
-	URL      string
-	Relay    string
-	// Connected reports the broker session's state right now.
+	// Down carries why a configured observer is not running — empty
+	// when it runs, or when it was parked on purpose.
+	Down  string
+	URL   string
+	Relay string
+	// Connected reports the broker session's state right now; nil
+	// when the observer is not running at all.
 	Connected func() bool
 	// Published, PublishErrors, BusDropped, Filtered and LastPublished
 	// come back together from Counters.
