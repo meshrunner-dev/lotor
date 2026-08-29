@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/schema"
 	"meshrunner.dev/lotor/internal/update"
 )
@@ -1974,5 +1975,17 @@ func TestACLEntrySetCompletesAndPaints(t *testing.T) {
 	}
 	if !strings.Contains(painted, cAttr+"role") {
 		t.Errorf("role not painted as an attribute: %q", painted)
+	}
+}
+
+func TestEnvelopeTextReadsThePresenceBit(t *testing.T) {
+	// A ceiling of exactly 0 dBm is a declared board; "undeclared"
+	// told the operator the opposite of what the envelope knows.
+	zero := radio.Envelope{MaxTxPowerDBm: 0, MaxTxPowerSet: true}
+	if got := envelopeText(zero); !strings.Contains(got, "max 0 dBm") {
+		t.Errorf("declared zero ceiling shows %q", got)
+	}
+	if got := envelopeText(radio.Envelope{}); got != "envelope undeclared" {
+		t.Errorf("an empty envelope shows %q", got)
 	}
 }

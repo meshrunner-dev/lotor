@@ -239,7 +239,10 @@ func floorText(r RelayInfo) string {
 
 func envelopeText(e radio.Envelope) string {
 	parts := []string{}
-	if e.MaxTxPowerDBm != 0 {
+	// The presence bit, not the value: a ceiling of exactly 0 dBm is
+	// a declared board, and showing it "undeclared" told the operator
+	// the opposite of what the envelope now knows.
+	if e.MaxTxPowerSet {
 		parts = append(parts, fmt.Sprintf("max %d dBm", e.MaxTxPowerDBm))
 	}
 	if e.FreqRangeLowHz != 0 || e.FreqRangeHiHz != 0 {
