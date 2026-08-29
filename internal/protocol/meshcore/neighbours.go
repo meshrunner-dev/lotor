@@ -88,6 +88,33 @@ func evictOldest[K comparable, V any](m map[K]V, maximum int, at func(V) time.Ti
 	delete(m, oldest)
 }
 
+// removeMatching drops every neighbour whose key starts with prefix —
+// the empty prefix matching all, which is the wire's own purge — and
+// reports how many went. Any goroutine: the table carries its own
+// lock.
+func (nt *neighbourTable) removeMatching(prefix []byte) int {
+	nt.mu.Lock()
+	defer nt.mu.Unlock()
+	removed := 0
+	for k := range nt.by {
+		if len(prefix) > len(k) {
+			continue
+		}
+		hit := true
+		for i := range prefix {
+			if k[i] != prefix[i] {
+				hit = false
+				break
+			}
+		}
+		if hit {
+			delete(nt.by, k)
+			removed++
+		}
+	}
+	return removed
+}
+
 // get returns one neighbour as the table now holds it — any goroutine.
 func (nt *neighbourTable) get(pubKey [meshcore.PubKeySize]byte) Neighbour {
 	nt.mu.Lock()

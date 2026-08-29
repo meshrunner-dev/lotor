@@ -567,6 +567,9 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	if out := m.runOTA("mc", "air:test", "setperm abcd 0"); out != "OK" {
 		t.Errorf("prefix removal got %q", out)
 	}
+	if g := <-m.air; g.perms != enginemc.PermGuest || len(g.pubKey) != 2 {
+		t.Errorf("prefix removal order = %+v", g)
+	}
 	// The host keeps its own clock: sync is already true and answers
 	// in the OK-with-detail shape; setting it wears the ERR shape.
 	if out := m.runOTA("mc", "air:test", "clock sync"); out != "OK - clock already synced (system time)" {
@@ -600,13 +603,38 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	if out := m.runOTA("mc", "air:test", "get repeat"); out != "> off" {
 		t.Errorf("get repeat (zero-hop) got %q", out)
 	}
+	// The neighbourhood verbs: refresh queues a scan off the engine's
+	// goroutine, purge — the argument-less remove — sweeps the table.
+	if out := m.runOTA("mc", "air:test", "discover.neighbors"); out != "OK - Discover sent" {
+		t.Errorf("discover got %q", out)
+	}
+	if o := <-m.air; !o.discover {
+		t.Errorf("discover order = %+v", o)
+	}
+	if out := m.runOTA("mc", "air:test", "discover.neighbors now"); out != "Err - discover.neighbors has no options" {
+		t.Errorf("discover with options got %q", out)
+	}
+	var removed [][]byte
+	m.infos["mc"] = cli.RelayInfo{RemoveNeighbours: func(prefix []byte) int {
+		removed = append(removed, prefix)
+		return len(removed)
+	}}
+	if out := m.runOTA("mc", "air:test", "neighbor.remove"); out != "OK" {
+		t.Errorf("purge got %q", out)
+	}
+	if out := m.runOTA("mc", "air:test", "neighbor.remove de247e"); out != "OK" {
+		t.Errorf("prefix remove got %q", out)
+	}
+	if out := m.runOTA("mc", "air:test", "neighbor.remove zz"); out != "ERR: bad pubkey" {
+		t.Errorf("bad hex got %q", out)
+	}
+	if len(removed) != 2 || len(removed[0]) != 0 || len(removed[1]) != 3 {
+		t.Errorf("removals = %v", removed)
+	}
 	// The deliberate absences answer like any unknown word.
 	for _, cmd := range []string{"reboot", "clkreboot", "tempradio 869525000 62500 8 8 10", "poweroff"} {
 		if out := m.runOTA("mc", "air:test", cmd); out != otaUnknown {
 			t.Errorf("%q got %q", cmd, out)
 		}
-	}
-	if g := <-m.air; g.perms != enginemc.PermGuest || len(g.pubKey) != 2 {
-		t.Errorf("prefix removal order = %+v", g)
 	}
 }

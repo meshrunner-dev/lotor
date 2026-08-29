@@ -116,6 +116,13 @@ func (m *manager) runOTA(relay, principal, line string) string {
 		return m.otaAdvert(relay, false)
 	case "setperm":
 		return m.otaSetperm(relay, principal, rest)
+	case "discover.neighbors":
+		if rest != "" {
+			return "Err - discover.neighbors has no options"
+		}
+		return m.orderAir(airOrder{relay: relay, discover: true}, "OK - Discover sent")
+	case "neighbor.remove":
+		return m.otaRemoveNeighbour(relay, rest)
 	case "ver":
 		return "lotor " + version
 	case "clock":
@@ -280,6 +287,26 @@ func (m *manager) otaSetperm(relay, principal, rest string) string {
 	return m.orderAir(airOrder{
 		relay: relay, principal: principal, grant: true, pubKey: pub, perms: byte(perms),
 	}, "OK")
+}
+
+// otaRemoveNeighbour drops neighbours by key prefix — and with no
+// argument at all, drops them all: the wire's purge, which on the
+// reference falls out of a zero-length prefix matching every entry.
+// The table carries its own lock, so this needs no detour through
+// the air channel.
+func (m *manager) otaRemoveNeighbour(relay, rest string) string {
+	prefix, err := hex.DecodeString(strings.TrimSpace(rest))
+	if err != nil || len(prefix) > 32 {
+		return "ERR: bad pubkey"
+	}
+	m.viewMu.RLock()
+	info, ok := m.infos[relay]
+	m.viewMu.RUnlock()
+	if !ok || info.RemoveNeighbours == nil {
+		return "ERR: no neighbour table"
+	}
+	info.RemoveNeighbours(prefix)
+	return "OK"
 }
 
 // otaAdvert announces this node, flooded or to the neighbourhood.

@@ -809,34 +809,35 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 	r *relay.Relay, eng protocol.Engine,
 ) cli.RelayInfo {
 	return cli.RelayInfo{
-		Name:          name,
-		Protocol:      rc.Protocol,
-		Radio:         rc.Radio,
-		Driver:        radioSpec.Driver,
-		Waveform:      eng.Waveform(),
-		State:         r.State,
-		Err:           r.Err,
-		NoiseFloor:    r.NoiseFloor,
-		ChipStats:     r.ChipStats,
-		TXMode:        r.TXMode(),
-		Duty:          dutyOf(eng),
-		Scopes:        scopesOf(eng),
-		DefaultScope:  defaultScopeOf(eng),
-		Sign:          signOf(eng),
-		AskScopes:     askScopesOf(eng),
-		Discover:      discoverOf(eng),
-		ScanWindow:    scanWindowOf(eng),
-		TriggerAdvert: advertTrigger(eng),
-		Neighbours:    neighboursOf(eng),
-		AirSessions:   airSessionsOf(eng),
-		Access:        accessOf(eng),
-		Grant:         grantOf(eng),
-		GrantRole:     grantRoleOf(eng),
-		Revoke:        roleDoor(eng, enginemc.PermGuest),
-		Identity:      eng.Identity(),
-		Started:       time.Now(),
-		NodeName:      nodeNameOf(eng),
-		Traffic:       trafficOf(eng),
+		Name:             name,
+		Protocol:         rc.Protocol,
+		Radio:            rc.Radio,
+		Driver:           radioSpec.Driver,
+		Waveform:         eng.Waveform(),
+		State:            r.State,
+		Err:              r.Err,
+		NoiseFloor:       r.NoiseFloor,
+		ChipStats:        r.ChipStats,
+		TXMode:           r.TXMode(),
+		Duty:             dutyOf(eng),
+		Scopes:           scopesOf(eng),
+		DefaultScope:     defaultScopeOf(eng),
+		Sign:             signOf(eng),
+		AskScopes:        askScopesOf(eng),
+		Discover:         discoverOf(eng),
+		ScanWindow:       scanWindowOf(eng),
+		TriggerAdvert:    advertTrigger(eng),
+		Neighbours:       neighboursOf(eng),
+		RemoveNeighbours: removeNeighboursOf(eng),
+		AirSessions:      airSessionsOf(eng),
+		Access:           accessOf(eng),
+		Grant:            grantOf(eng),
+		GrantRole:        grantRoleOf(eng),
+		Revoke:           roleDoor(eng, enginemc.PermGuest),
+		Identity:         eng.Identity(),
+		Started:          time.Now(),
+		NodeName:         nodeNameOf(eng),
+		Traffic:          trafficOf(eng),
 	}
 }
 
@@ -890,6 +891,15 @@ func trafficOf(eng protocol.Engine) func() (uint32, uint32, uint32, time.Duratio
 		return s.SentFlood + s.SentDirect, s.RecvTotal, s.RecvErrors,
 			s.TxAirtime, s.RxAirtime
 	}
+}
+
+// removeNeighboursOf exposes an engine's neighbour removal.
+func removeNeighboursOf(eng protocol.Engine) func(prefix []byte) int {
+	r, ok := eng.(interface{ RemoveNeighbours(prefix []byte) int })
+	if !ok {
+		return nil
+	}
+	return r.RemoveNeighbours
 }
 
 // neighboursOf exposes an engine's direct neighbourhood when it keeps

@@ -468,6 +468,13 @@ func (e *engine) IdentitySign(message []byte) []byte {
 // DefaultScope is the transport scope this relay speaks under.
 func (e *engine) DefaultScope() string { return e.p.DefaultScope }
 
+// RemoveNeighbours drops the neighbours a key prefix names — all of
+// them for the empty prefix, the wire's own purge — and reports how
+// many went.
+func (e *engine) RemoveNeighbours(prefix []byte) int {
+	return e.neighbours.removeMatching(prefix)
+}
+
 // ScanWindow reports when the scan currently listening closes; ok is
 // false when none does.
 func (e *engine) ScanWindow() (time.Time, bool) {

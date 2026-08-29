@@ -160,6 +160,10 @@ type RelayInfo struct {
 	// Neighbours lists the direct neighbourhood — repeaters heard with
 	// no relay in between; nil when the engine keeps none.
 	Neighbours func() []Neighbour
+	// RemoveNeighbours drops the neighbours a key prefix names — all
+	// for the empty prefix — and reports how many went; nil when the
+	// engine keeps none.
+	RemoveNeighbours func(prefix []byte) int
 	// AirSessions lists the companions logged in over the air; nil
 	// when the protocol keeps no sessions.
 	AirSessions func() ([]AirSession, error)

@@ -154,6 +154,9 @@ type airOrder struct {
 	unset     []string
 	advert    bool
 	flood     bool
+	// discover keys a neighbourhood scan — it waits on the engine's
+	// own loop, so like the advert it may not run in it.
+	discover bool
 	// grant carries a permission change: the byte for pubKey, zero
 	// role meaning removal.
 	grant  bool
@@ -181,6 +184,29 @@ func (m *manager) serveAir(ctx context.Context) {
 // admin's reply radiates before the bounce clears the queue.
 const airReplyGrace = 2 * time.Second
 
+// serveAirDiscover keys a neighbourhood scan for an over-the-air
+// order. The answers join the shared table as they land; draining
+// the channel only keeps the engine from holding a reader nobody
+// reads.
+func (m *manager) serveAirDiscover(relay string) {
+	m.viewMu.RLock()
+	info, ok := m.infos[relay]
+	m.viewMu.RUnlock()
+	if !ok || info.Discover == nil {
+		return
+	}
+	answers, _, err := info.Discover()
+	if err != nil {
+		m.log.Warn("over-the-air discover refused",
+			zap.String("relay", relay), zap.Error(err))
+		return
+	}
+	go func() {
+		for range answers {
+		}
+	}()
+}
+
 // serveAirOrder carries out one order off the engine's goroutine.
 func (m *manager) serveAirOrder(ctx context.Context, o airOrder) {
 	if o.grant {
@@ -196,6 +222,10 @@ func (m *manager) serveAirOrder(ctx context.Context, o airOrder) {
 					zap.Error(err))
 			}
 		}
+		return
+	}
+	if o.discover {
+		m.serveAirDiscover(o.relay)
 		return
 	}
 	if o.advert {
