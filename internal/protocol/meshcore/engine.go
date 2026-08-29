@@ -119,22 +119,6 @@ type params struct {
 	// announces no position.
 	NodeLat float64 `yaml:"node_lat"`
 	NodeLon float64 `yaml:"node_lon"`
-	// DefaultScope is the transport scope this relay speaks in: what
-	// it stamps on the adverts it originates and on a reply whose
-	// question named no scope. Empty speaks unscoped, which is what a
-	// relay does on a mesh that has no scopes. See the Vocabulary —
-	// this is not a radio band.
-	DefaultScope string `yaml:"default_scope"`
-	// AcceptScopes lists the scopes whose floods this relay carries.
-	// A scoped flood matching none of them is somebody else's
-	// business, exactly as the reference treats one whose code it
-	// cannot match.
-	AcceptScopes scopeList `yaml:"accept_scopes"`
-	// AcceptUnscoped decides whether plain floods are relayed at all —
-	// the reference's wildcard and its deny-flood bit. Unset relays
-	// them, which is what every mesh without scopes needs.
-	AcceptUnscoped *bool `yaml:"accept_unscoped"`
-
 	// GuestAccess decides whether a stranger may open a read-only
 	// session at all — status, telemetry, the neighbourhood, nothing
 	// that changes anything. Blocked by default: a repeater owes the
@@ -209,7 +193,7 @@ type engine struct {
 	// paces those orders and nothing else.
 	lastAskedAdvert time.Time
 	limits          limits
-	scopes          *scopeTable
+	regions         *regionTable
 	discoverySince  time.Time
 	clockWarned     bool
 	acl             *acl
@@ -252,6 +236,16 @@ type engine struct {
 	// whole access list, both served on the pipeline's own turn.
 	aclAsk     chan *aclOrder
 	aclListAsk chan *aclListOrder
+	// regionAsk carries one region command line, regionSnapAsk the
+	// outside readers' snapshot; regionStaging is the armed modal
+	// load, engine-goroutine only, mirrored into regionLoadState for
+	// the dispatcher's cheap pre-check.
+	regionAsk       chan *regionOrder
+	regionSnapAsk   chan *regionSnapOrder
+	regionStaging   *regionLoad
+	regionLoadState atomic.Value
+	// regionStore persists the region map; nil keeps it in memory.
+	regionStore RegionStore
 	// sessionsAsk carries the console's request for a snapshot of the
 	// client table. It asks for no emission, so unlike the others it
 	// is served whatever the gate's mode.
@@ -267,6 +261,16 @@ type engine struct {
 // paramsFrom is the strict decode both build and the config checker
 // share.
 func paramsFrom(cfg map[string]any) (params, error) {
+	// The old scope attributes live in the region table now, mutated
+	// by the `region` command; a config still carrying them deserves
+	// the pointer, not a bare unknown-key refusal.
+	for _, gone := range []string{"default_scope", "accept_scopes", "accept_unscoped"} {
+		if _, held := cfg[gone]; held {
+			var p params
+			return p, fmt.Errorf(
+				"meshcore params: %s moved into the region table — administer it with the `region` command", gone)
+		}
+	}
 	p, err := config.Decode[params](cfg)
 	if err != nil {
 		return p, fmt.Errorf("meshcore params: %w", err)
@@ -281,9 +285,6 @@ func paramsFrom(cfg map[string]any) (params, error) {
 	// the setting — so does the config, or a site would run a cadence
 	// no reference node would.
 	if err := normalizeGuest(&p); err != nil {
-		return p, err
-	}
-	if err := normalizeScopes(&p); err != nil {
 		return p, err
 	}
 	// The reference's own field sizes (char[32] / char[120]); past
@@ -343,12 +344,6 @@ func inRange(v, lo, hi float64) bool {
 // value whenever it opens that gate.
 func validDutyCyclePct(v float64) bool {
 	return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 && v <= 100
-}
-
-// acceptUnscoped resolves the wildcard default: a relay carries plain
-// floods unless told otherwise.
-func (p params) acceptUnscoped() bool {
-	return p.AcceptUnscoped == nil || *p.AcceptUnscoped
 }
 
 // txDelayFactor and directTxDelayFactor resolve the retransmission
@@ -520,19 +515,21 @@ func newEngine(relayName string, p params, id *meshcore.LocalIdentity,
 ) *engine {
 	p = p.withDefaults()
 	return &engine{
-		relay:       relayName,
-		p:           p,
-		id:          id,
-		bus:         b,
-		log:         log,
-		seen:        newSeenTable(p.DedupTTL, p.DedupEntries),
-		neighbours:  newNeighbourTable(),
-		acl:         newACL(nil),
-		sessionsAsk: make(chan *sessionsOrder, 1),
-		aclAsk:      make(chan *aclOrder, 1),
-		aclListAsk:  make(chan *aclListOrder, 1),
-		limits:      newLimits(),
-		scopes:      newScopeTable(p),
+		relay:         relayName,
+		p:             p,
+		id:            id,
+		bus:           b,
+		log:           log,
+		seen:          newSeenTable(p.DedupTTL, p.DedupEntries),
+		neighbours:    newNeighbourTable(),
+		acl:           newACL(nil),
+		sessionsAsk:   make(chan *sessionsOrder, 1),
+		aclAsk:        make(chan *aclOrder, 1),
+		aclListAsk:    make(chan *aclListOrder, 1),
+		regionAsk:     make(chan *regionOrder, 1),
+		regionSnapAsk: make(chan *regionSnapOrder, 1),
+		limits:        newLimits(),
+		regions:       newRegionTable(meshcore.NewRegionMap()),
 	}
 }
 
@@ -605,8 +602,16 @@ func (e *engine) IdentitySign(message []byte) []byte {
 	return e.id.Sign(message)
 }
 
-// DefaultScope is the transport scope this relay speaks under.
-func (e *engine) DefaultScope() string { return e.p.DefaultScope }
+// DefaultScope is the region this relay speaks under — the bare name
+// of the default designation, empty when it speaks unscoped. Any
+// goroutine: it reads through the snapshot order.
+func (e *engine) DefaultScope() string {
+	snap, err := e.Regions()
+	if err != nil {
+		return ""
+	}
+	return snap.Default
+}
 
 // RemoveNeighbours drops the neighbours a key prefix names — all of
 // them for the empty prefix, the wire's own purge — and reports how
@@ -662,6 +667,8 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 	for {
 		e.drainSessionsAsk(time.Now())
 		e.drainACLAsk()
+		e.drainRegionAsk()
+		e.drainRegionSnapAsk()
 		e.drainHeld(dev, time.Now())
 		// Reception blocks until the pipeline next needs the radio —
 		// the queue's earliest schedule or an advert clock. Nothing
@@ -716,7 +723,8 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 	var rctx context.Context
 	var cancel context.CancelFunc
 	switch wait, ok := e.txWait(time.Now()); {
-	case len(e.sessionsAsk) > 0 || len(e.aclAsk) > 0 || len(e.aclListAsk) > 0:
+	case len(e.sessionsAsk) > 0 || len(e.aclAsk) > 0 || len(e.aclListAsk) > 0 ||
+		len(e.regionAsk) > 0 || len(e.regionSnapAsk) > 0:
 		rctx, cancel = context.WithDeadline(ctx, time.Now())
 	case !e.txEnabled():
 		// A dry gate schedules no emission, but a held flood is still
@@ -891,7 +899,7 @@ func (e *engine) process(dev radio.Device, pkt *meshcore.Packet, frame radio.Fra
 		PathLen: hops,
 	}
 	rx := &reception{pkt: pkt, frame: frame, id: id}
-	judged.Scope = e.scopeName(rx)
+	judged.Scope = e.regionName(rx)
 	log = log.With(describe(rx, &judged, e.id)...)
 	// A direct packet still carrying hops belongs to the nodes its
 	// path names. When none of them is us, it passes by without

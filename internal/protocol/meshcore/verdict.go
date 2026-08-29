@@ -196,7 +196,7 @@ func (e *engine) verdict(rx *reception) (string, string) {
 		return verdictSelfAdvert, ""
 	case pkt.IsRouteFlood():
 		v, why := e.floodVerdict(rx, rx.advertOK)
-		if scope, _ := e.scopeOf(rx); scope != "" && scope != wildcardScope {
+		if scope, _ := e.regionOf(rx); scope != "" && scope != wildcardRegion {
 			if why == "" {
 				why = "scope " + scope
 			} else {
@@ -231,7 +231,7 @@ func (e *engine) floodVerdict(rx *reception, advertOK bool) (string, string) {
 	// to the wildcard and moves unless the operator shut it; a scoped
 	// one moves only when one of our keys recomputes its code. The
 	// reference refuses the rest as an unknown transport code.
-	if _, carried := e.scopeOf(rx); !carried {
+	if _, carried := e.regionOf(rx); !carried {
 		return verdictDropScoped, "a scope this relay does not carry"
 	}
 	t := pkt.PayloadType()

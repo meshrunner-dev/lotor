@@ -177,40 +177,31 @@ func TestAQuestionTheQueueRefusesSaysSo(t *testing.T) {
 	}
 }
 
-func TestScopeNamesRefuseTheirOwnDelimiter(t *testing.T) {
-	// The scopes answer separates names with commas, so a name
+func TestRegionNamesRefuseTheirOwnDelimiter(t *testing.T) {
+	// The regions answer separates names with commas, so a name
 	// holding one is served as a pair and read back at the other end
 	// as two names nobody can derive a key for. The reference's own
-	// grammar refuses it, along with the rest of the punctuation.
+	// grammar refuses it, along with the rest of the punctuation —
+	// and the refusal now guards the command door, where names are
+	// written since the region table replaced the config attributes.
+	m := meshcore.NewRegionMap()
 	for _, bad := range []string{"eu,lab", "eu lab", "eu.lab", "eu:lab", "eu/lab", "eu\x00lab", "eu\nlab"} {
-		if err := checkScopeName(bad); err == nil {
-			t.Errorf("scope %q accepted", bad)
+		if _, err := m.Put(bad, 0); err == nil {
+			t.Errorf("region %q accepted", bad)
 		}
 	}
 	for _, good := range []string{"eu", "EU-868", "#lab", "lab2", "café"} {
-		if err := checkScopeName(good); err != nil {
-			t.Errorf("scope %q refused: %v", good, err)
+		if _, err := m.Put(good, 0); err != nil {
+			t.Errorf("region %q refused: %v", good, err)
 		}
 	}
-	// And the refusal reaches the configuration wherever a name is
-	// written as one: the sequence form's entries, and default_scope.
-	for _, cfg := range []map[string]any{
-		{"frequency_hz": 869_618_000, "default_scope": "eu,lab"},
-		{"frequency_hz": 869_618_000, "accept_scopes": []any{"eu,lab"}},
-	} {
-		if _, err := paramsFrom(cfg); err == nil {
-			t.Errorf("config %v accepted a comma in a scope name", cfg)
-		}
+	// Over the command door the same refusal answers in the CLI's own
+	// words, and the private-region syntax is refused with its reason.
+	e := regionRig(t)
+	if reply, _ := e.serveRegionLine("admin", "region put eu,lab"); reply != "Err - unable to put" {
+		t.Errorf("comma name = %q", reply)
 	}
-	// The scalar form is the exception that proves it: there a comma
-	// is the operator's own separator, and "eu,lab" is two scopes.
-	p, err := paramsFrom(map[string]any{
-		"frequency_hz": 869_618_000, "accept_scopes": "eu,lab",
-	})
-	if err != nil {
-		t.Fatalf("the scalar list form was refused: %v", err)
-	}
-	if len(p.AcceptScopes) != 2 {
-		t.Errorf("scalar accept_scopes read as %v", p.AcceptScopes)
+	if reply, _ := e.serveRegionLine("admin", "region put $secret"); !strings.Contains(reply, "not supported") {
+		t.Errorf("private region = %q", reply)
 	}
 }

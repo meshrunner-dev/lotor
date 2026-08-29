@@ -335,7 +335,7 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 	rc := m.file.Relays[name]
 	var r *relay.Relay
 	asm, err := assemble(ctx, name, rc, m.file.Radios[rc.Radio], m.bus, m.log, m.sen,
-		m.sessionStore(name), m.otaCommands(name))
+		m.sessionStore(name), m.regionStore(name), m.otaCommands(name))
 	if err != nil {
 		m.log.Error("relay configuration failed",
 			zap.String("relay", name), zap.Error(err))
@@ -390,6 +390,54 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 // very sessions its predecessor kept.
 func (m *manager) sessionStore(relay string) enginemc.SessionStore {
 	return &aclStore{store: m.store, relay: relay}
+}
+
+// regionStore hands a relay a persistence door onto the region
+// tables, keyed to its name, like sessionStore does for the acl.
+func (m *manager) regionStore(relay string) enginemc.RegionStore {
+	return &regionStoreAdapter{store: m.store, relay: relay}
+}
+
+// regionStoreAdapter ties the engine's region map to confdb. Like the
+// aclStore it touches the database alone, never the manager's mutex.
+type regionStoreAdapter struct {
+	store *confdb.Store
+	relay string
+}
+
+func (a *regionStoreAdapter) LoadRegions() (*enginemc.PersistedRegions, error) {
+	ctx, cancel := aclStoreCtx()
+	defer cancel()
+	rows, meta, ok, err := a.store.LoadRegions(ctx, a.relay)
+	if err != nil || !ok {
+		return nil, err
+	}
+	pr := &enginemc.PersistedRegions{
+		NextID: meta.NextID, HomeID: meta.HomeID,
+		DefaultID: meta.DefaultID, WildcardFlags: meta.WildcardFlags,
+	}
+	for _, r := range rows {
+		pr.Entries = append(pr.Entries, meshcore.Region{
+			ID: r.ID, Parent: r.Parent,
+			Flags: meshcore.RegionFlags(r.Flags), Name: r.Name,
+		})
+	}
+	return pr, nil
+}
+
+func (a *regionStoreAdapter) SaveRegions(pr enginemc.PersistedRegions) error {
+	ctx, cancel := aclStoreCtx()
+	defer cancel()
+	rows := make([]confdb.RegionRow, 0, len(pr.Entries))
+	for _, r := range pr.Entries {
+		rows = append(rows, confdb.RegionRow{
+			ID: r.ID, Parent: r.Parent, Flags: uint8(r.Flags), Name: r.Name,
+		})
+	}
+	return a.store.ReplaceRegions(ctx, a.relay, rows, confdb.RegionsMeta{
+		NextID: pr.NextID, HomeID: pr.HomeID,
+		DefaultID: pr.DefaultID, WildcardFlags: pr.WildcardFlags,
+	})
 }
 
 // aclStore ties the meshcore session table to confdb. It touches the

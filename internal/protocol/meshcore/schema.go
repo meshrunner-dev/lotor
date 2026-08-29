@@ -92,13 +92,6 @@ func policySchema() []schema.Attr {
 			Doc: `the node's private key, hex — or "new" to mint one; ` +
 				"whoever reads it IS the node"},
 
-		{Name: "default_scope", Type: schema.String,
-			Doc: "the transport scope stamped on what this relay originates"},
-		{Name: "accept_scopes", Type: schema.Words,
-			Doc: "whose scoped floods this relay carries"},
-		{Name: "accept_unscoped", Type: schema.Bool,
-			Doc: "whether plain floods move through at all (true unless said otherwise)"},
-
 		{Name: "guest_access", Type: schema.String,
 			Enum: []string{guestBlocked, guestPassword, guestOpen},
 			Doc:  "whether a stranger may open a read-only session over the air"},

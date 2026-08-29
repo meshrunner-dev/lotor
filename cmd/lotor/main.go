@@ -764,7 +764,7 @@ type otaRunner = func(line string, admin []byte) string
 
 func assemble(ctx context.Context, name string, rc config.Relay, radioSpec config.Radio,
 	b *bus.Bus, log *zap.Logger, sen *sentinel.Sentinel, sessions enginemc.SessionStore,
-	commands otaRunner,
+	regions enginemc.RegionStore, commands otaRunner,
 ) (*assembled, error) {
 	rlog := log.With(zap.String("relay", name))
 	p, err := prepare(name, rc, radioSpec, spentAirtime(ctx, name, rc, sen), b, rlog)
@@ -786,6 +786,19 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 			// holds every admin's replay guard, and coming up without
 			// it rewinds those clocks to zero.
 			if err := a.AttachSessions(sessions); err != nil {
+				return nil, err
+			}
+		}
+	}
+	// The region table persists the same way: the relaying policy an
+	// admin shaped over the air outlives the bounce, and a store that
+	// cannot be read refuses the relay rather than carrying floods
+	// the operator has denied.
+	if regions != nil {
+		if a, ok := p.eng.(interface {
+			AttachRegions(store enginemc.RegionStore) error
+		}); ok {
+			if err := a.AttachRegions(regions); err != nil {
 				return nil, err
 			}
 		}

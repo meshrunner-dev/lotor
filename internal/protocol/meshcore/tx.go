@@ -638,7 +638,7 @@ func (e *engine) advert(dev radio.Device, now time.Time, kind string, local bool
 		// to. The zero-hop one stays plain, as the reference's own
 		// zero-hop send does: whoever hears it directly hears it
 		// whatever they carry.
-		e.scopes.speak.Scope(pkt)
+		e.regions.speak.Scope(pkt)
 	}
 	id := txn.New()
 	prio := prioFloodAdvert

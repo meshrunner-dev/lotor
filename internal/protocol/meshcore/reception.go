@@ -30,13 +30,13 @@ type reception struct {
 	// opened is a request addressed to this node that we could read.
 	opened *opened
 
-	// scope is the transport scope this frame arrived in and whether
-	// we carry it, resolved once: matching costs an HMAC over the
-	// whole payload per scope carried.
-	scope        string
-	scopeKey     meshcore.TransportKey
-	scopeCarried bool
-	scopeKnown   bool
+	// region is the region this frame arrived in and whether we carry
+	// it, resolved once: matching costs an HMAC over the whole
+	// payload per flood-allowed region.
+	region        string
+	regionKey     meshcore.TransportKey
+	regionCarried bool
+	regionKnown   bool
 }
 
 // opened is a request this node decrypted: who asked, under what

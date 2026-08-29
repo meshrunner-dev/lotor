@@ -167,7 +167,7 @@ func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 		// bounds its own export: a list composed past the packet is a
 		// question left unanswered, and half a scope name at the far
 		// end is a scope nobody can derive a key for.
-		text = joinWithin(e.scopes.served(), e.answerBudget(pkt)-anonReplyClockLen)
+		text = joinWithin(e.regions.served(), e.answerBudget(pkt)-anonReplyClockLen)
 	default:
 		return // a question nobody defined stays unanswered
 	}

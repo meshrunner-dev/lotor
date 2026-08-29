@@ -125,7 +125,7 @@ func TestAScopesAnswerIsCutAtAWholeName(t *testing.T) {
 	for i := range 8 {
 		names = append(names, strings.Repeat(string(rune('a'+i)), 30))
 	}
-	e.scopes = newScopeTable(params{AcceptScopes: names})
+	e.regions = testRegions(t, "", names, true)
 
 	secret, err := e.id.SharedSecret(peer.PubKey[:])
 	if err != nil {
