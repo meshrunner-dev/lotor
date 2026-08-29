@@ -37,22 +37,36 @@ endorsed by the MeshCore project.
   all** — embedded hosts with tight RAM and CPU relay without
   observing, and nothing else may depend on a sentinel existing.
 
-- **scope** — a MeshCore *transport scope*: a named partition of the
-  mesh that a flood is confined to. A scope is a shared secret — a
-  16-byte key derived from its name — and a scoped flood carries a
+- **region** — a MeshCore region: a named partition of the mesh that
+  a flood is confined to, plus the administrative model around it. On
+  the wire a region is a *transport scope* — a shared secret, the
+  16-byte key derived from its name, and a scoped flood carries a
   two-byte code, recomputed per packet as `HMAC(key, type‖payload)`,
-  that only a node holding the key can match. It is a mesh agreement,
-  independent of the radio band, and the two words must not be
-  conflated: a *band* is what the radio is tuned to, a *scope* is which
-  slice of the traffic on that band a relay carries. A relay declares
-  one `default_scope` it originates under and a set of `accept_scopes`
-  it will relay; the reference calls the outgoing one the default
-  scope, and this follows that name.
+  that only a node holding the key can match. Around that wire fact
+  the reference keeps a table: up to 32 entries under a wildcard
+  root, each with a place in a display hierarchy (the matching stays
+  flat), a deny-flood flag, and two designations — the *default*
+  region a node's own traffic is scoped to, and its *home*. This
+  daemon keeps the same table, in the config store, mutated over the
+  air by the `region` command without a relay restart.
 
-  Code, configuration, journal and console say *scope*, always. A web
-  UI may present it as a *region* instead, because that is the word
-  MeshCore operators arrive with — a deliberate translation at the
-  edge, not an inconsistency to tidy away.
+  A region is a mesh agreement, independent of the radio band, and
+  the two words must not be conflated: a *band* is what the radio is
+  tuned to, a *region* is which slice of the traffic on that band a
+  relay carries. Code, journal, console and the wire say *region*,
+  always — the ecosystem's own word. *Scope* survives only where the
+  wire primitive is meant (a transport scope, `TransportKey`), and in
+  two deprecated console spellings (`scopes`, `ask-scopes`) that
+  leave next release. One legacy the rename does not touch: the
+  journal's `would-drop-flood-scoped` verdict keeps its name, because
+  renaming a recorded event would cut every archived query in two.
+
+  Divergence, assumed: the reference persists its table only on
+  `region save`; here every mutation persists before it installs, and
+  `region save` is an honest OK that only bumps the discovery
+  timestamp. A reload (`region load` … blank line) preserves the
+  home/default designations and the wildcard's flags by name, where
+  the reference silently drops all three.
 
 ## Architecture
 
@@ -112,9 +126,8 @@ twice:
   switch, PA caps);
 - **band profiles** on relays (frequency plans, LoRa parameters —
   e.g. a MeshCore EU narrow preset). Called *band* deliberately, not
-  *region*: on a MeshCore mesh "region" would collide with a transport
-  scope (see the Vocabulary entry), which is a mesh agreement, not a
-  radio fact.
+  *region*: on a MeshCore mesh a region is a mesh agreement (see the
+  Vocabulary entry), not a radio fact.
 
 Profiles themselves are code, shipped with the daemon; the store holds
 only what the operator chose. Properties this buys:
