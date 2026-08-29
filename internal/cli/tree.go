@@ -1148,8 +1148,17 @@ func (s *session) writeTerm(b *strings.Builder, t term) {
 }
 
 // attrsAt resolves the attribute set a context offers: an instance's
-// choice decides the contributed ones, a singleton has only its own.
+// choice decides the contributed ones, a singleton has only its own —
+// and a drawer item, the little its drawer declares settable. The
+// completion, the painter, the help and the value finisher all read
+// this one answer, so none of them can disagree about a word.
 func (s *session) attrsAt(path []string) []schema.Attr {
+	if site := s.drawerSiteAt(path); site != nil {
+		if site.item != "" && site.d.itemSet != nil {
+			return site.d.itemAttrs
+		}
+		return nil
+	}
 	if s.isSingleton(path) {
 		return s.kindByName(path[0]).AttrsFor("")
 	}

@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"meshrunner.dev/lotor/internal/schema"
 )
 
 // A drawer is a runtime collection an instance holds: what the mesh is
@@ -44,6 +46,10 @@ type drawer struct {
 	// attr=value while standing on it, the item itself naming the
 	// subject. Everything else about a drawer stays read-only.
 	itemSet func(s *session, ctx context.Context, site *drawerSite, set map[string]string) error
+	// itemAttrs declares what itemSet accepts — the vocabulary the
+	// completion, the painter and the help all read, so an argument
+	// nobody can discover cannot exist here either.
+	itemAttrs []schema.Attr
 	// windowed says the drawer answers the temporal selectors — the
 	// vocabulary frames speaks, applied to what this drawer holds.
 	windowed bool
@@ -153,6 +159,9 @@ var drawers = []drawer{{
 	keys:      (*session).accessKeys,
 	view:      (*session).accessView,
 	itemSet:   (*session).accessSet,
+	itemAttrs: []schema.Attr{{Name: optRole, Type: schema.String,
+		Enum: []string{roleAdmin, roleReadWrite, roleReadOnly},
+		Doc:  "the entry's role — the same ladder grant speaks"}},
 }, {
 	name:     drawerHistory,
 	doc:      "the configuration's revision journal — who changed what, when",

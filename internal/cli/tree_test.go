@@ -1942,3 +1942,37 @@ func TestACLEntryShowsItsKeyAndSetsItsRole(t *testing.T) {
 		t.Fatalf("a non-admin set reached the engine: %v", granted)
 	}
 }
+
+func TestACLEntrySetCompletesAndPaints(t *testing.T) {
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	live := []Access{{Role: "admin", Granted: true, LastActive: time.Now()}}
+	for i := range live[0].PubKey {
+		live[0].PubKey[i] = byte(i)
+	}
+	for i := range deps.Relays {
+		deps.Relays[i].Access = func() ([]Access, error) { return live, nil }
+	}
+	s := &session{deps: deps, colors: true}
+	s.setPath([]string{"relay", "meshcore-868", "acl", "000102030405"})
+
+	// After set, the entry's one settable attribute completes…
+	if add, _ := s.complete("set ro"); add != "le=" {
+		t.Errorf("complete(set ro) = %q, want le=", add)
+	}
+	// …and its value completes from the role ladder.
+	if _, hints := s.complete("set role="); len(hints) != 3 {
+		t.Errorf("role values offered: %v, want the three roles", hints)
+	}
+	if add, _ := s.complete("set role=read-w"); !strings.HasPrefix(add, "rite") {
+		t.Errorf("complete(set role=read-w) = %q", add)
+	}
+	// The painter resolves the words instead of leaving them red.
+	painted := s.paintLine("set role=admin")
+	if strings.Contains(painted, cUnres) {
+		t.Errorf("something stayed unresolved: %q", painted)
+	}
+	if !strings.Contains(painted, cAttr+"role") {
+		t.Errorf("role not painted as an attribute: %q", painted)
+	}
+}
