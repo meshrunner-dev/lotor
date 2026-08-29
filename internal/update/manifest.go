@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"meshrunner.dev/lotor/internal/product"
 	"strings"
 	"time"
 )
@@ -59,6 +60,12 @@ func ParseManifest(raw []byte) (*Manifest, error) {
 	switch {
 	case m.Product == "":
 		return nil, errors.New("manifest names no product")
+	case m.Product != product.Slug:
+		// A perfectly signed manifest for ANOTHER product must not
+		// update this one: the signature proves who published it, not
+		// that these bytes are ours to run. One shared signing key —
+		// or one misrouted channel URL — must fail here, by name.
+		return nil, fmt.Errorf("manifest is for product %q, this is %q", m.Product, product.Slug)
 	case m.Channel == "":
 		return nil, errors.New("manifest names no channel")
 	case m.Version == "":
