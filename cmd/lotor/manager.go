@@ -72,6 +72,15 @@ type manager struct {
 	logKnob   zap.AtomicLevel
 	bootLevel zapcore.Level
 
+	// air carries mutations ordered over the air to a goroutine that
+	// is not the engine's: a relay bounce joins the engine goroutine,
+	// so the engine may never wait on a mutation itself. snapMu — its
+	// own lock, never held across a bounce — guards the read-only
+	// view an over-the-air get answers from without touching mu.
+	air    chan airOrder
+	snapMu sync.RWMutex
+	snaps  map[string]map[string]string
+
 	mu        sync.Mutex
 	ctx       context.Context //nolint:containedctx // the daemon's lifetime, set once at Start
 	file      *config.File
@@ -107,12 +116,122 @@ func (m *manager) Start(ctx context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ctx = ctx
+	m.air = make(chan airOrder, 16)
+	m.wg.Go(func() { m.serveAir(ctx) })
 	for name := range m.file.Relays {
 		m.startRelay(ctx, name)
 	}
 	for name := range m.file.MQTT {
 		m.startObserver(ctx, name)
 	}
+}
+
+// airOrder is one thing ordered from the air, waiting for a goroutine
+// that is not the engine's — a bounce joins the engine, and an advert
+// waits on the engine's own loop, so neither may run in it. advert set
+// makes it an announcement; otherwise it is a mutation.
+type airOrder struct {
+	relay     string
+	principal string
+	set       map[string]string
+	unset     []string
+	advert    bool
+	flood     bool
+}
+
+// serveAir applies over-the-air mutations off the engine's goroutine,
+// one at a time. The reply to the admin has already been enqueued by
+// the time an order lands here, so it radiates before the bounce this
+// triggers tears the engine down — and the admin's session, persisted,
+// is there when the successor comes up.
+func (m *manager) serveAir(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case o := <-m.air:
+			m.serveAirOrder(ctx, o)
+		}
+	}
+}
+
+// airReplyGrace is how long an over-the-air mutation waits so its
+// admin's reply radiates before the bounce clears the queue.
+const airReplyGrace = 2 * time.Second
+
+// serveAirOrder carries out one order off the engine's goroutine.
+func (m *manager) serveAirOrder(ctx context.Context, o airOrder) {
+	if o.advert {
+		// The reply is already queued; the announcement can go at once.
+		// Reading the trigger takes mu, which is safe here — this is
+		// not the engine goroutine the trigger's ack loop runs in.
+		m.mu.Lock()
+		info, ok := m.infos[o.relay]
+		m.mu.Unlock()
+		if ok && info.TriggerAdvert != nil {
+			if err := info.TriggerAdvert(o.flood); err != nil {
+				m.log.Warn("over-the-air advert refused",
+					zap.String("relay", o.relay), zap.Error(err))
+			}
+		}
+		return
+	}
+	// A short grace lets the admin's reply leave the queue before the
+	// bounce drains it: the answer was optimistic, the change is what
+	// a follow-up get confirms.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(airReplyGrace):
+	}
+	if _, err := m.Mutate(ctx, "relay", o.relay, o.set, o.unset, o.principal); err != nil {
+		m.log.Warn("over-the-air mutation refused",
+			zap.String("relay", o.relay), zap.String("principal", o.principal),
+			zap.Error(err))
+	}
+}
+
+// orderAir queues one over-the-air order and reports what to tell the
+// admin now — optimistically, because the work happens after the
+// reply leaves. A full channel means the daemon is already swamped
+// with air orders, which is the one time refusing is the honest word.
+func (m *manager) orderAir(o airOrder, ok string) string {
+	select {
+	case m.air <- o:
+		return ok
+	default:
+		return "busy — try again"
+	}
+}
+
+// snapshotRelay caches a relay's effective values for lock-free
+// over-the-air reads, refreshed after every change under snapMu, which
+// no bounce ever holds. The caller holds mu.
+func (m *manager) snapshotRelay(name string) {
+	rows := m.traces["relay "+name]
+	snap := make(map[string]string, len(rows))
+	for _, t := range rows {
+		snap[t.Key] = fmt.Sprintf("%v", t.Value)
+	}
+	m.snapMu.Lock()
+	if m.snaps == nil {
+		m.snaps = map[string]map[string]string{}
+	}
+	m.snaps[name] = snap
+	m.snapMu.Unlock()
+}
+
+// relayValue reads one effective attribute from the lock-free
+// snapshot; ok is false when nothing is known.
+func (m *manager) relayValue(relay, attr string) (string, bool) {
+	m.snapMu.RLock()
+	defer m.snapMu.RUnlock()
+	snap, ok := m.snaps[relay]
+	if !ok {
+		return "", false
+	}
+	v, ok := snap[attr]
+	return v, ok
 }
 
 // Wait blocks until every relay has stopped — the shutdown's phase
@@ -130,11 +249,7 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 	rc := m.file.Relays[name]
 	var r *relay.Relay
 	asm, err := assemble(ctx, name, rc, m.file.Radios[rc.Radio], m.bus, m.log, m.sen,
-		m.sessionStore(name),
-		//nolint:contextcheck // deliberate: a mutation ordered from the air
-		// outlives the reception that carried it, like a console one
-		// outlives its session.
-		m.otaCommands(m.ctx, name))
+		m.sessionStore(name), m.otaCommands(name))
 	if err != nil {
 		m.log.Error("relay configuration failed",
 			zap.String("relay", name), zap.Error(err))
@@ -155,6 +270,7 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 			radioStructural(m.file.Radios[rc.Radio]))
 		m.traces["relay "+name] = withStructural(asm.relayTraces, relayStructural(rc))
 	}
+	m.snapshotRelay(name)
 	rctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	m.running[name] = &managedRelay{cancel: cancel, done: done}

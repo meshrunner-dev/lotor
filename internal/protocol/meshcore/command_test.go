@@ -115,3 +115,56 @@ func TestAGuestCommandIsNotAdministration(t *testing.T) {
 		t.Errorf("a guest reached the mutation door %d times", ran)
 	}
 }
+
+func TestAMutatingCommandDoesNotBlockTheLoop(t *testing.T) {
+	// The freeze: a set command called the manager synchronously from
+	// this very goroutine, and the bounce it triggered waited for the
+	// goroutine to die — deadlock. The command hook must return at
+	// once, whatever the line does. Here the hook stands in for the
+	// manager, and the test proves the engine answers and keeps
+	// serving.
+	e, dev, sub, peer := txRig(t, "on-air")
+	e.p.AdminPassword = "mask"
+	done := make(chan struct{})
+	e.AttachCommands(func(line string, admin []byte) string {
+		close(done) // a real hook queues async and returns; never blocks
+		return "applied — tx_power_dbm will change, relay restarting"
+	})
+	runEngine(t, e, dev)
+
+	frame, secret := login(t, e.id, peer, nowTS(800), "mask", false)
+	dev.frames <- frame
+	awaitSent(t, sub)
+	<-dev.sent
+
+	dev.frames <- commandFrame(t, e.id, peer, time.Unix(int64(nowTS(810)), 0), "set tx 6")
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the command hook was never reached — the loop is stuck")
+	}
+	if sent := awaitSent(t, sub); sent.Kind != "cmd-resp" {
+		t.Fatalf("no reply to the set: %+v", sent)
+	}
+	raw := <-dev.sent
+	pkt, _ := meshcore.ParsePacket(raw)
+	d, _ := meshcore.ParseDatagram(pkt.Payload)
+	plain, err := d.Open(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := meshcore.ParseTextPlaintext(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text.Text == "" {
+		t.Fatal("the admin got no OK back")
+	}
+
+	// The loop still serves the next thing: a plain status request
+	// after the set is answered normally.
+	dev.frames <- request(t, e.id, peer, nowTS(811), []byte{meshcore.ReqGetStatus, 0, 0, 0, 0})
+	if sent := awaitSent(t, sub); sent.Kind != "req-resp" {
+		t.Fatalf("the loop stopped serving after a set: %+v", sent)
+	}
+}

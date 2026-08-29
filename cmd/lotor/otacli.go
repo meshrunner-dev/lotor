@@ -9,9 +9,7 @@ package main
 // principal saying the change came from the air.
 
 import (
-	"context"
 	"encoding/hex"
-	"fmt"
 	"strings"
 	"time"
 )
@@ -49,23 +47,23 @@ var otaReadOnly = map[string]bool{
 
 // otaCommands runs one administration line from the air and returns
 // what to answer. It is the engine's commands hook.
-func (m *manager) otaCommands(ctx context.Context, relay string) func(line string, admin []byte) string {
+func (m *manager) otaCommands(relay string) func(line string, admin []byte) string {
 	return func(line string, admin []byte) string {
 		principal := "air:" + hex.EncodeToString(admin[:6])
-		return m.runOTA(ctx, relay, principal, line)
+		return m.runOTA(relay, principal, line)
 	}
 }
 
 // runOTA dispatches one line. Every answer is a single short string:
 // the reference's clients show it as a message.
-func (m *manager) runOTA(ctx context.Context, relay, principal, line string) string {
+func (m *manager) runOTA(relay, principal, line string) string {
 	verb, rest, _ := strings.Cut(line, " ")
 	rest = strings.TrimSpace(rest)
 	switch verb {
 	case "get":
 		return m.otaGet(relay, rest)
 	case "set":
-		return m.otaSet(ctx, relay, principal, rest)
+		return m.otaSet(relay, principal, rest)
 	case "advert":
 		return m.otaAdvert(relay, true)
 	case "advert.zerohop":
@@ -90,19 +88,14 @@ func (m *manager) otaGet(relay, name string) string {
 	if !known {
 		return "unknown setting: " + name
 	}
-	m.mu.Lock()
-	traces := m.traces["relay "+relay]
-	m.mu.Unlock()
-	for _, t := range traces {
-		if t.Key == attr {
-			return fmt.Sprintf("%s: %v", name, t.Value)
-		}
+	if v, ok := m.relayValue(relay, attr); ok {
+		return name + ": " + v
 	}
 	return name + ": unset"
 }
 
 // otaSet applies one setting through the mutation door.
-func (m *manager) otaSet(ctx context.Context, relay, principal, rest string) string {
+func (m *manager) otaSet(relay, principal, rest string) string {
 	name, value, ok := strings.Cut(rest, " ")
 	if !ok || strings.TrimSpace(value) == "" {
 		return "set what to what? try: set name Raccoon City"
@@ -126,27 +119,23 @@ func (m *manager) otaSet(ctx context.Context, relay, principal, rest string) str
 			return "repeat wants on or off"
 		}
 	}
-	msg, err := m.Mutate(ctx, "relay", relay,
-		map[string]string{attr: value}, nil, principal)
-	if err != nil {
-		return "refused: " + err.Error()
-	}
-	return msg
+	// Never Mutate from here: this runs in the engine's goroutine, and
+	// a relay bounce joins that very goroutine. The order goes to a
+	// goroutine that can safely bounce, the reply optimistic.
+	return m.orderAir(airOrder{
+		relay: relay, principal: principal, set: map[string]string{attr: value},
+	}, "applied — "+name+" will change, relay restarting")
 }
 
 // otaAdvert announces this node, flooded or to the neighbourhood.
 func (m *manager) otaAdvert(relay string, flood bool) string {
-	m.mu.Lock()
-	info, ok := m.infos[relay]
-	m.mu.Unlock()
-	if !ok || info.TriggerAdvert == nil {
-		return "this relay cannot advertise"
-	}
-	if err := info.TriggerAdvert(flood); err != nil {
-		return "refused: " + err.Error()
-	}
+	// Advert waits on the engine's own loop, so it cannot run in the
+	// engine goroutine either: queued like a mutation, triggered off
+	// it. The reply leaves first.
+	where := "the neighbourhood"
 	if flood {
-		return "advert flooded"
+		where = "the mesh"
 	}
-	return "advert sent to the neighbourhood"
+	return m.orderAir(airOrder{relay: relay, advert: true, flood: flood},
+		"advert queued for "+where)
 }
