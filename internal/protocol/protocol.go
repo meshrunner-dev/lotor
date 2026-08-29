@@ -5,19 +5,17 @@
 package protocol
 
 import (
-	"meshrunner.dev/lotor/internal/schema"
-
-	"time"
-
 	"context"
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/radio"
+	"meshrunner.dev/lotor/internal/schema"
 )
 
 // Engine judges frames for one relay.
@@ -46,8 +44,11 @@ type TXPolicy struct {
 	Mode           string // dry, shadow, on-air
 	LBTThresholdDB float64
 	LBTExhausted   string // transmit or drop
-	QueueDepth     int
-	PowerDBm       int8
+	// CAD asks the radio's own activity detection before keying.
+	// Resolved from the configuration, where unset leaves it on.
+	CAD        bool
+	QueueDepth int
+	PowerDBm   int8
 	// Spent seeds the duty ledger with the journal's memory of the
 	// last hour; empty when no journal runs — best effort, by design.
 	Spent []Spent

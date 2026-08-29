@@ -119,7 +119,9 @@ func txRig(t *testing.T, mode string) (*engine, *fakeDevice, *bus.Subscription, 
 	t.Cleanup(sub.Close)
 	e := newEngine("test-868", params{NodeName: "test", DutyCyclePct: 100}, self, b, zap.NewNop())
 	if err := e.Arm(protocol.TXPolicy{
-		Mode: mode, LBTExhausted: "transmit", QueueDepth: 2, PowerDBm: -5,
+		// CAD on, as an unset configuration resolves it: this rig
+		// stands in for a running relay, not for a bare policy.
+		Mode: mode, LBTExhausted: "transmit", QueueDepth: 2, PowerDBm: -5, CAD: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1354,5 +1356,36 @@ func TestADueFloodAdvertOutranksAnOrderedLocalOne(t *testing.T) {
 	}
 	if len(e.queue.entries) != 1 || e.queue.entries[0].kind != "advert-local" {
 		t.Fatalf("queue = %+v", e.queue.entries)
+	}
+}
+
+func TestTheCADKnobIsADeclaredDivergence(t *testing.T) {
+	// The firmware ships its scan disabled and this daemon does not:
+	// a Linux host with a healthy SPI bus can afford to look before it
+	// speaks. The divergence has to be one a site can turn off, or it
+	// cannot be measured against the reference at all.
+	e, dev, _, _ := txRig(t, "on-air")
+	dev.busy = 3 // the channel would be found busy three times over
+	log := zap.NewNop()
+
+	// On — this node's default — the busy channel is waited out.
+	outcome, err := e.clearChannel(context.Background(), dev, log, txn.New())
+	if err != nil || outcome != lbtGo {
+		t.Fatalf("outcome %v err %v", outcome, err)
+	}
+	if dev.busy != 0 {
+		t.Errorf("%d refusals unused — the scan did not run", dev.busy)
+	}
+
+	// Off — the reference's own posture — nothing is asked of the
+	// radio at all, and the frame is keyed straight away.
+	e.policy.CAD = false
+	dev.busy = 3
+	outcome, err = e.clearChannel(context.Background(), dev, log, txn.New())
+	if err != nil || outcome != lbtGo {
+		t.Fatalf("with CAD off: outcome %v err %v", outcome, err)
+	}
+	if dev.busy != 3 {
+		t.Errorf("the channel was assessed %d times with CAD off", 3-dev.busy)
 	}
 }

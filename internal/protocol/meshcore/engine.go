@@ -641,10 +641,15 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 		// from: the backoff alone outlived their usefulness.
 		e.dropQueued("session-restart")
 		e.scheduleAdverts(time.Now())
+		// The CAD line is announced rather than assumed: leaving it on
+		// is this daemon's own posture, one step politer than the
+		// firmware, and a divergence nobody can read in the log is a
+		// divergence nobody can measure.
 		e.log.Info("transmit pipeline up",
 			zap.String("mode", e.policy.Mode),
 			zap.Int8("power_dbm", e.policy.PowerDBm),
-			zap.Int("queue_depth", e.policy.QueueDepth))
+			zap.Int("queue_depth", e.policy.QueueDepth),
+			zap.Bool("cad", e.policy.CAD))
 	} else {
 		e.log.Info("dry run: judging frames, transmitting nothing")
 	}

@@ -235,6 +235,16 @@ Never while a reception is in progress. On a busy verdict, randomized
 anyway — the mesh's convention — unless the site chose
 `lbt_exhausted: drop`, in which case the drop is counted and visible.
 
+The CAD scan is a **declared divergence**: the reference firmware
+ships it disabled and only scans when a site turns it on, while this
+daemon leaves it on. A Linux host with a healthy SPI bus can afford to
+look before it speaks, and a repeater talking over its neighbours
+costs the mesh more than it costs itself. `tx.cad: false` restores the
+firmware's posture — the driver still refuses to key over a reception
+actually in progress, which is a hardware guard rather than a
+politeness — and the resolved choice is named in the startup line, so
+a site measuring the difference can read which one it ran.
+
 **Queue.** The reference's shape exactly: one bounded queue of
 `(priority, not-before)` entries served by priority once due. Two
 priorities: direct traffic and ACKs ahead, flood relays behind. The

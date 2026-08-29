@@ -73,6 +73,15 @@ type TX struct {
 	// past the bounded wait: "transmit" (default — the mesh's
 	// convention) or "drop", counted and visible.
 	LBTExhausted string `yaml:"lbt_exhausted"`
+	// CAD gates the hardware's own channel activity detection before
+	// keying. Unset leaves it on, which is a deliberate step away
+	// from the reference: its firmware ships the scan disabled, while
+	// a Linux host with a healthy SPI bus can afford to look before
+	// it speaks, and a repeater that talks over its neighbours costs
+	// the mesh more than it costs itself. A site measuring the
+	// difference — latency, false busy, preambles missed — turns it
+	// off here.
+	CAD *bool `yaml:"cad"`
 	// QueueDepth bounds the outbound queue. The default holds about
 	// ten seconds of backlog at the narrow waveforms this daemon
 	// ships for; a field knob because sites will want to experiment.

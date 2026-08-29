@@ -52,6 +52,7 @@ const (
 	attrTXThreshold  = "tx.lbt_threshold_db"
 	attrTXExhausted  = "tx.lbt_exhausted"
 	attrTXQueueDepth = "tx.queue_depth"
+	attrTXCAD        = "tx.cad"
 	attrSocket       = "socket"
 	attrName         = "name"
 
@@ -711,6 +712,7 @@ func relayStructural(rc config.Relay) []config.Trace {
 			config.Trace{Key: attrTXMode, Value: rc.TX.Mode, Source: sourceConfig},
 			config.Trace{Key: attrTXExhausted, Value: rc.TX.LBTExhausted, Source: sourceConfig},
 			config.Trace{Key: attrTXQueueDepth, Value: rc.TX.QueueDepth, Source: sourceConfig},
+			config.Trace{Key: attrTXCAD, Value: rc.TX.CAD == nil || *rc.TX.CAD, Source: sourceConfig},
 		)
 		if rc.TX.LBTThresholdDB != 0 {
 			rows = append(rows, config.Trace{Key: attrTXThreshold, Value: rc.TX.LBTThresholdDB, Source: sourceConfig})
@@ -1692,7 +1694,7 @@ func setRelayAttr(rc *config.Relay, attr string, v any) (old any, err error) {
 		}
 		rc.NoiseHistory = &b
 		return old, nil
-	case attrTXMode, attrTXThreshold, attrTXExhausted, attrTXQueueDepth:
+	case attrTXMode, attrTXThreshold, attrTXExhausted, attrTXQueueDepth, attrTXCAD:
 		return setTXAttr(rc, attr, v)
 	default:
 		return setOverride(&rc.Layered, attr, v), nil
@@ -1706,6 +1708,12 @@ func unsetRelayAttr(rc *config.Relay, attr string) (old any, err error) {
 	case attrProtocol, attrRadio, attrProfile,
 		attrTXMode, attrTXThreshold, attrTXExhausted, attrTXQueueDepth:
 		return nil, fmt.Errorf("%s cannot be unset — set it to what it should be", attr)
+	case attrTXCAD:
+		if rc.TX != nil && rc.TX.CAD != nil {
+			old = *rc.TX.CAD
+			rc.TX.CAD = nil
+		}
+		return old, nil
 	case attrNoiseHistory:
 		if rc.NoiseHistory != nil {
 			old = *rc.NoiseHistory
@@ -1749,6 +1757,14 @@ func setTXAttr(rc *config.Relay, attr string, v any) (old any, err error) {
 	case attrTXQueueDepth:
 		old = rc.TX.QueueDepth
 		rc.TX.QueueDepth, err = asInt(attr, v)
+	case attrTXCAD:
+		if rc.TX.CAD != nil {
+			old = *rc.TX.CAD
+		}
+		var b bool
+		if b, err = asBool(attr, v); err == nil {
+			rc.TX.CAD = &b
+		}
 	}
 	return old, err
 }

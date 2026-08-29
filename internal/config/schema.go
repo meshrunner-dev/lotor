@@ -29,6 +29,9 @@ func RelayAttrs() []schema.Attr {
 			Doc:  "what a channel busy past the bounded wait earns"},
 		{Name: "tx.queue_depth", Type: schema.Int,
 			Doc: "outbound queue bound, 1..63 (0 takes 32)"},
+		{Name: "tx.cad", Type: schema.Bool,
+			Doc: "listen with the radio's own activity detection before keying " +
+				"(unset leaves it on — the reference ships it off)"},
 	}
 }
 

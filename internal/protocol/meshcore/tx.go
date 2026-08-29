@@ -816,6 +816,13 @@ func (e *engine) requeue(entry txEntry) {
 func (e *engine) clearChannel(ctx context.Context, dev radio.Device, log *zap.Logger,
 	origin txn.ID,
 ) (lbtOutcome, error) {
+	if !e.policy.CAD {
+		// The reference's own default posture: key and let the mesh's
+		// dedup sort out the collisions. The driver still refuses to
+		// key over a reception actually in progress, which is a
+		// hardware guard rather than a politeness.
+		return lbtGo, nil
+	}
 	deadline := time.Now().Add(lbtMaxWait)
 	for {
 		busy, err := dev.AssessChannel(ctx, e.policy.LBTThresholdDB)

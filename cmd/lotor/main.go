@@ -1207,6 +1207,7 @@ func resolveTX(rc config.Relay, env radio.Envelope, eng protocol.Engine,
 	policy.LBTThresholdDB = rc.TX.LBTThresholdDB
 	policy.LBTExhausted = rc.TX.LBTExhausted
 	policy.QueueDepth = rc.TX.QueueDepth
+	policy.CAD = rc.TX.CAD == nil || *rc.TX.CAD
 	dbm, explicit := eng.TxPower()
 	if !explicit {
 		if env.MaxTxPowerDBm == 0 {
