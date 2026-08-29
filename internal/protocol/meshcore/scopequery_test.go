@@ -1,6 +1,7 @@
 package meshcore
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -115,4 +116,101 @@ func TestAStrangersAnswerIsNotOurs(t *testing.T) {
 		t.Fatal("our own question was retired by a stranger's answer")
 	}
 	_ = txn.New()
+}
+
+func TestASecondQuestionIsRefusedNotSwallowed(t *testing.T) {
+	// The channel empties the moment the first question is taken, so
+	// a second one enqueues freely and the pipeline then finds one
+	// already in flight. Returning silently there left the caller
+	// waiting out the whole window to be told the neighbour had not
+	// answered — for a question that never left.
+	e, dev, _, peer := txRig(t, "on-air")
+	e.queue.depth = 8
+	// A question already in flight, as a first AskScopes would leave.
+	e.pendingScope = &scopeQuery{
+		peer: peer.PubKey, tag: 1, answer: make(chan []string, 1), asked: time.Now(),
+	}
+	q := &scopeQuery{
+		peer: peer.PubKey, tag: 2, answer: make(chan []string, 1),
+		asked: time.Now(), started: newAck(),
+	}
+	e.scopeAsk <- q
+	e.drainScopeAsk(dev, time.Now())
+
+	err := q.started.wait("scopes question")
+	if err == nil {
+		t.Fatal("the second question was taken while one was in flight")
+	}
+	if !strings.Contains(err.Error(), "in flight") {
+		t.Errorf("refusal = %v", err)
+	}
+	if len(e.queue.entries) != 0 {
+		t.Errorf("a refused question queued %d emissions", len(e.queue.entries))
+	}
+}
+
+func TestAQuestionTheQueueRefusesSaysSo(t *testing.T) {
+	e, dev, _, peer := txRig(t, "on-air")
+	e.queue.depth = 0 // nothing may be scheduled
+	secret, err := e.id.SharedSecret(peer.PubKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &scopeQuery{
+		peer: peer.PubKey, secret: secret, tag: 3, answer: make(chan []string, 1),
+		asked: time.Now(), started: newAck(),
+	}
+	e.scopeAsk <- q
+	e.drainScopeAsk(dev, time.Now())
+
+	err = q.started.wait("scopes question")
+	if err == nil {
+		t.Fatal("a question the queue refused reported success")
+	}
+	if !strings.Contains(err.Error(), "never left") {
+		t.Errorf("refusal = %v", err)
+	}
+	// And the slot is free again: a refused question must not block
+	// the next one behind a window it never opened.
+	if e.pendingScope != nil {
+		t.Error("the refused question still holds the slot")
+	}
+}
+
+func TestScopeNamesRefuseTheirOwnDelimiter(t *testing.T) {
+	// The scopes answer separates names with commas, so a name
+	// holding one is served as a pair and read back at the other end
+	// as two names nobody can derive a key for. The reference's own
+	// grammar refuses it, along with the rest of the punctuation.
+	for _, bad := range []string{"eu,lab", "eu lab", "eu.lab", "eu:lab", "eu/lab", "eu\x00lab", "eu\nlab"} {
+		if err := checkScopeName(bad); err == nil {
+			t.Errorf("scope %q accepted", bad)
+		}
+	}
+	for _, good := range []string{"eu", "EU-868", "#lab", "lab2", "café"} {
+		if err := checkScopeName(good); err != nil {
+			t.Errorf("scope %q refused: %v", good, err)
+		}
+	}
+	// And the refusal reaches the configuration wherever a name is
+	// written as one: the sequence form's entries, and default_scope.
+	for _, cfg := range []map[string]any{
+		{"frequency_hz": 869_618_000, "default_scope": "eu,lab"},
+		{"frequency_hz": 869_618_000, "accept_scopes": []any{"eu,lab"}},
+	} {
+		if _, err := paramsFrom(cfg); err == nil {
+			t.Errorf("config %v accepted a comma in a scope name", cfg)
+		}
+	}
+	// The scalar form is the exception that proves it: there a comma
+	// is the operator's own separator, and "eu,lab" is two scopes.
+	p, err := paramsFrom(map[string]any{
+		"frequency_hz": 869_618_000, "accept_scopes": "eu,lab",
+	})
+	if err != nil {
+		t.Fatalf("the scalar list form was refused: %v", err)
+	}
+	if len(p.AcceptScopes) != 2 {
+		t.Errorf("scalar accept_scopes read as %v", p.AcceptScopes)
+	}
 }

@@ -38,6 +38,12 @@ type scopeQuery struct {
 	tag    uint32
 	answer chan []string
 	asked  time.Time
+	// started says whether the pipeline took the question at all, and
+	// why not when it did not. Without it every refusal read as the
+	// silence of a neighbour that never answered: the caller waited
+	// out the whole window and was told nobody replied, for a
+	// question that never left.
+	started ack
 }
 
 // Neighbour resolves a key prefix against the neighbourhood: the
@@ -87,10 +93,11 @@ func (e *engine) AskScopes(peer []byte) ([]string, error) {
 		return nil, err
 	}
 	q := &scopeQuery{
-		secret: secret,
-		tag:    uint32(time.Now().Unix()),
-		answer: make(chan []string, 1),
-		asked:  time.Now(),
+		secret:  secret,
+		tag:     uint32(time.Now().Unix()),
+		answer:  make(chan []string, 1),
+		asked:   time.Now(),
+		started: newAck(),
 	}
 	copy(q.peer[:], peer)
 
@@ -99,12 +106,14 @@ func (e *engine) AskScopes(peer []byte) ([]string, error) {
 	default:
 		return nil, errors.New("a scopes question is already in flight — they are asked one at a time")
 	}
-	e.wakeMu.Lock()
-	if e.wakeRx != nil {
-		e.wakeRx() // close the receive window: ask now
+	e.wakeReceiver()
+	// Whether the question left at all comes back first, and only
+	// then does the window mean anything: ErrNoAnswer is the word for
+	// a neighbour that stayed quiet, never for a question this node
+	// declined to ask.
+	if err := q.started.wait("scopes question"); err != nil {
+		return nil, err
 	}
-	e.wakeMu.Unlock()
-
 	select {
 	case names := <-q.answer:
 		return names, nil
@@ -122,11 +131,18 @@ func (e *engine) drainScopeAsk(dev radio.Device, now time.Time) {
 	select {
 	case q := <-e.scopeAsk:
 		if e.pendingScope != nil {
-			return // one at a time; the caller's wait will expire
+			// The channel emptied when the first question was taken,
+			// so a second one enqueues freely; it is refused here, and
+			// told so rather than left to time out as if a neighbour
+			// had gone quiet.
+			q.started.refused(errors.New(
+				"another scopes question is still in flight — they are asked one at a time"))
+			return
 		}
 		pkt, err := e.scopeRequest(q)
 		if err != nil {
 			e.log.Warn("scopes question build failed", zap.Error(err))
+			q.started.refused(fmt.Errorf("the question could not be composed: %w", err))
 			return
 		}
 		e.pendingScope = q
@@ -137,7 +153,13 @@ func (e *engine) drainScopeAsk(dev radio.Device, now time.Time) {
 		id := txn.New()
 		e.log.Info("asking a neighbour for its scopes",
 			zap.String("txn", id.Short()), zap.String("peer", shortKey(q.peer[:])))
-		e.enqueue(dev, pkt, "scope-req", id, prioDirect, 0)
+		if !e.enqueue(dev, pkt, "scope-req", id, prioDirect, 0) {
+			e.pendingScope = nil
+			q.started.refused(errors.New(
+				"the outbound queue is full — the question never left"))
+			return
+		}
+		q.started.taken()
 	default:
 	}
 }

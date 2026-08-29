@@ -146,7 +146,29 @@ func checkScopeName(name string) error {
 		return fmt.Errorf("meshcore params: scope %q is longer than the %d characters the mesh holds",
 			name, maxScopeNameLen)
 	}
+	for i := range len(name) {
+		if !scopeNameChar(name[i]) {
+			return fmt.Errorf(
+				"meshcore params: scope %q holds %q, which the mesh's name grammar refuses",
+				name, name[i:i+1])
+		}
+	}
 	return nil
+}
+
+// scopeNameChar is the reference's own grammar
+// (RegionMap::is_name_char): digits, everything from 'A' up — letters
+// and the accented bytes above them — and the three punctuation marks
+// it keeps. What it refuses is the rest of the punctuation, control
+// bytes and the space.
+//
+// The comma is the one that matters most here. It is the byte the
+// scopes answer uses to separate one name from the next, so a scope
+// called "eu,lab" would be served as a pair and read back by the peer
+// as two names it could not derive a key for — a name that quietly
+// means something else at the other end.
+func scopeNameChar(c byte) bool {
+	return c == '-' || c == '$' || c == '#' || (c >= '0' && c <= '9') || c >= 'A'
 }
 
 // scopeOf resolves a frame's scope once and remembers the answer.

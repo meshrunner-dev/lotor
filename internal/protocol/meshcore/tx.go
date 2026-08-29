@@ -200,24 +200,26 @@ func (e *engine) paperOnly(pkt *meshcore.Packet) bool {
 }
 
 // enqueue schedules one emission, publishing the drop when the queue
-// refuses. jitterFactor scales the desynchronisation delay.
+// refuses. jitterFactor scales the desynchronisation delay. It reports
+// whether the entry was taken, for the callers that owe somebody an
+// answer about it.
 func (e *engine) enqueue(dev radio.Device, pkt *meshcore.Packet, kind string,
 	origin txn.ID, priority int, jitterFactor float64,
-) {
+) bool {
 	delay := time.Duration(0)
 	if jitterFactor > 0 {
 		air := dev.Airtime(pkt.RawLength())
 		span := max(time.Duration(5*jitterFactor*float64(air)), time.Millisecond)
 		delay = rand.N(span) //nolint:gosec // desync jitter, not security
 	}
-	e.enqueueAfter(pkt, kind, origin, priority, delay)
+	return e.enqueueAfter(pkt, kind, origin, priority, delay)
 }
 
 // enqueueAfter schedules one emission a fixed delay out, publishing
 // the drop when the queue refuses.
 func (e *engine) enqueueAfter(pkt *meshcore.Packet, kind string, origin txn.ID,
 	priority int, delay time.Duration,
-) {
+) bool {
 	entry := txEntry{
 		pkt: pkt, kind: kind, origin: origin,
 		priority: priority, notBefore: time.Now().Add(delay),
@@ -228,7 +230,9 @@ func (e *engine) enqueueAfter(pkt *meshcore.Packet, kind string, origin txn.ID,
 		e.bus.Publish(bus.TxDropped{
 			Relay: e.relay, Txn: origin, At: time.Now(), Reason: "queue-full",
 		})
+		return false
 	}
+	return true
 }
 
 // relayFor turns a judged reception into its scheduled retransmission.
