@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -2080,46 +2081,94 @@ func TestExportCarriesInactiveScopes(t *testing.T) {
 }
 
 func TestExportedValuesSurviveTheirOwnGrammar(t *testing.T) {
-	// The renderer and the tokenizer are one symmetric grammar: what
-	// export writes, paste reads back byte-identical — quotes inside a
-	// password, backslashes, tabs and newlines included. Anything less
-	// is an export that recreates a different secret.
+	// Two grammars, deliberately: the historic quoted form reads
+	// EXACTLY as it always did — an old export's backslashes are
+	// bytes, never escapes — and the values that form cannot carry
+	// (quotes, line breaks) travel under the set64 verb, a marker in
+	// the command grammar no old export can have produced.
+
+	// The legacy matrix from the review: replayed after the upgrade,
+	// every backslash sequence stays the literal bytes it was.
+	for _, c := range []struct{ line, want string }{
+		{`set node_name="C:\new folder"`, `C:\new folder`},
+		{`set node_name="tab\there"`, `tab\there`},
+		{`set node_name="cr\rthere"`, `cr\rthere`},
+		{`set node_name="double\\slash"`, `double\\slash`},
+		{`set node_name="test raccoon"`, "test raccoon"},
+	} {
+		args := splitArgs(c.line)
+		if len(args) != 2 {
+			t.Fatalf("%q split into %q", c.line, args)
+		}
+		_, got, _ := strings.Cut(args[1], "=")
+		if got != c.want {
+			t.Errorf("legacy export changed: %q read as %q, want %q", c.line, got, c.want)
+		}
+	}
+
+	// The current matrix: inline where the historic form is faithful,
+	// set64 where it is not — and both round-trip byte-identical
+	// through the REAL framing.
 	for _, v := range []string{
 		"plain",
 		"two words",
-		`hunter "two"`,
 		`back\slash`,
 		"tab\there",
+		`hunter "two"`,
 		"line\nbreak",
 		"line\rbreak",
 		"crlf\r\nboth",
 		`"`,
-		`\"`,
 		"",
-		`mix "of \ every` + "\tthing\n\r",
 	} {
-		rendered := quoteIfSpaced(v)
-		// Through the REAL framing first: readBounded ends a command
-		// on LF or CR alike, so an unescaped control in the rendering
-		// would split the export into two commands right here — the
-		// boundary a direct splitArgs call never crosses.
-		line, err := readBounded(bufio.NewReader(strings.NewReader(
-			"set password=" + rendered + "\n")))
+		var line string
+		if inlineRenderable(v) {
+			line = "set password=" + quoteIfSpaced(v)
+		} else {
+			line = "set64 password=" + base64.StdEncoding.EncodeToString([]byte(v))
+		}
+		framed, err := readBounded(bufio.NewReader(strings.NewReader(line + "\n")))
 		if err != nil && !errors.Is(err, io.EOF) {
 			t.Fatalf("%q framing: %v", v, err)
 		}
-		args := splitArgs(line)
+		args := splitArgs(framed)
 		if len(args) != 2 {
-			t.Fatalf("%q rendered %q split into %q", v, rendered, args)
+			t.Fatalf("%q rendered %q split into %q", v, line, args)
 		}
 		_, got, _ := strings.Cut(args[1], "=")
+		if args[0] == "set64" {
+			raw, err := base64.StdEncoding.DecodeString(got)
+			if err != nil {
+				t.Fatalf("%q decode: %v", v, err)
+			}
+			got = string(raw)
+		}
 		if got != v {
-			t.Errorf("round trip lost bytes: %q → %q → %q", v, rendered, got)
+			t.Errorf("round trip lost bytes: %q → %q → %q", v, line, got)
 		}
 	}
-	// The old export's escape-free quoting still reads as before.
-	if args := splitArgs(`set node_name="test raccoon"`); len(args) != 2 ||
-		args[1] != "node_name=test raccoon" {
-		t.Errorf("legacy quoting broke: %q", args)
+}
+
+func TestSet64IsTheOrdinaryMutation(t *testing.T) {
+	// The verb decodes and then walks the same path set walks — the
+	// same journal, the same gates — so a control-laden secret from an
+	// export lands exactly as typed.
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	var got map[string]string
+	deps.Mutate = func(ctx context.Context, kind, name string, set map[string]string, unset []string, principal string) (string, error) {
+		got = set
+		return "", nil
+	}
+	secret := "pa\nss\"word\""
+	run(t, deps, "/relay meshcore-868 set64 guest_password="+
+		base64.StdEncoding.EncodeToString([]byte(secret)))
+	if got == nil || got["guest_password"] != secret {
+		t.Errorf("set64 delivered %q, want %q", got["guest_password"], secret)
+	}
+	// A payload that is not base64 refuses by name.
+	out := run(t, deps, "/relay meshcore-868 set64 guest_password=%%%")
+	if !strings.Contains(out, "set64") {
+		t.Errorf("bad payload refusal:\n%s", out)
 	}
 }

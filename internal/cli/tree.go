@@ -15,6 +15,7 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"reflect"
@@ -54,7 +55,7 @@ func (s *session) treeLine(line string) bool {
 // vocabularies without either shadowing the other.
 func isTreeVerb(word string) bool {
 	switch word {
-	case verbPrint, verbSet, verbUnset, verbAdd, verbRemove, verbExport:
+	case verbPrint, verbSet, verbSet64, verbUnset, verbAdd, verbRemove, verbExport:
 		return true
 	}
 	return false
@@ -341,8 +342,8 @@ func (s *session) treeVerb(ctx context.Context, path []string,
 		return s.treePrint(ctx, path, args)
 	case verb == verbStatus && len(path) == 2:
 		return s.treeStatus(ctx, path)
-	case verb == verbSet || verb == verbUnset:
-		return s.treeSet(ctx, path, verb, args)
+	case isMutationVerb(verb):
+		return s.treeMutate(ctx, path, verb, args)
 	case verb == verbDisable || verb == verbEnable:
 		return s.treeToggle(ctx, path, verb, args)
 	case verb == verbAdd || verb == verbRemove:
@@ -386,8 +387,14 @@ func (e *unknownVerbError) Error() string {
 
 // The mutation verbs.
 const (
-	verbSet    = "set"
-	verbUnset  = "unset"
+	verbSet   = "set"
+	verbUnset = "unset"
+	// verbSet64 is set for the values the historic inline form cannot
+	// carry byte-for-byte — quotes and line breaks — with each value
+	// base64-encoded. A marker in the COMMAND grammar, deliberately:
+	// an old export renders free value bytes, never a new verb, so no
+	// pre-existing backup can trip into the encoded reading.
+	verbSet64  = "set64"
 	verbExport = "export"
 	verbAdd    = "add"
 	verbRemove = "remove"
@@ -515,6 +522,37 @@ func attrPairs(words []string) (map[string]string, error) {
 // treeSet applies one line of changes: every attr=value on it lands
 // in one transaction, so a retune touching three attributes bounces
 // the relay once, not three times.
+// isMutationVerb says whether a verb writes configuration.
+func isMutationVerb(verb string) bool {
+	return verb == verbSet || verb == verbUnset || verb == verbSet64
+}
+
+// treeMutate routes the three mutation spellings to their door.
+func (s *session) treeMutate(ctx context.Context, path []string, verb string, args []string) error {
+	if verb == verbSet64 {
+		return s.treeSet64(ctx, path, args)
+	}
+	return s.treeSet(ctx, path, verb, args)
+}
+
+// treeSet64 is set with base64 values: decoded here, then exactly the
+// ordinary mutation — same validation, same journal, same gates.
+func (s *session) treeSet64(ctx context.Context, path []string, args []string) error {
+	decoded := make([]string, 0, len(args))
+	for _, a := range args {
+		key, value, valued := strings.Cut(a, "=")
+		if !valued {
+			return fmt.Errorf("%s takes attr=<base64>, not %q", verbSet64, a)
+		}
+		raw, err := base64.StdEncoding.DecodeString(value)
+		if err != nil {
+			return fmt.Errorf("%s %s: %w", verbSet64, key, err)
+		}
+		decoded = append(decoded, key+"="+string(raw))
+	}
+	return s.treeSet(ctx, path, verbSet, decoded)
+}
+
 func (s *session) treeSet(ctx context.Context, path []string, verb string, args []string) error {
 	// Standing in a drawer, set is the item's own — the access
 	// list's role — and never the config door: what a drawer holds
@@ -669,9 +707,9 @@ func (s *session) exportInstance(kind, name string) {
 			if strings.HasPrefix(t.Source, "profile:") {
 				continue // the preset restates itself
 			}
-			pairs = append(pairs, [2]string{t.Key, exportValue(t.Value)})
+			pairs = append(pairs, [2]string{t.Key, rawValue(t.Value)})
 		}
-		s.exportLine(kind, verbAdd, name, pairs)
+		s.emitObject(kind, verbAdd, name, pairs)
 		return
 	}
 	// The persisted form whole: the add line carries the structural
@@ -690,10 +728,10 @@ func (s *session) exportInstance(kind, name string) {
 			strings.HasPrefix(t.Source, "override:") {
 			continue // presets restate themselves; overrides go by scope
 		}
-		pairs = append(pairs, [2]string{t.Key, exportValue(t.Value)})
+		pairs = append(pairs, [2]string{t.Key, rawValue(t.Value)})
 	}
 	pairs = append(pairs, scopePairs(overrides[active])...)
-	s.exportLine(kind, verbAdd, name, pairs)
+	s.emitObject(kind, verbAdd, name, pairs)
 
 	others := make([]string, 0, len(overrides))
 	for scope, kv := range overrides {
@@ -704,14 +742,15 @@ func (s *session) exportInstance(kind, name string) {
 	sort.Strings(others)
 	for _, scope := range others {
 		line := append([][2]string{{attrKeyProfile, scope}}, scopePairs(overrides[scope])...)
-		s.exportLine(kind, verbSet, name, line)
+		s.emitObject(kind, verbSet, name, line)
 	}
 	if len(others) > 0 {
 		s.exportLine(kind, verbSet, name, [][2]string{{attrKeyProfile, active}})
 	}
 }
 
-// scopePairs renders one override scope's keys, sorted.
+// scopePairs renders one override scope's keys, sorted — raw values,
+// the emitter decides their carrier.
 func scopePairs(kv map[string]any) [][2]string {
 	keys := make([]string, 0, len(kv))
 	for k := range kv {
@@ -720,9 +759,29 @@ func scopePairs(kv map[string]any) [][2]string {
 	sort.Strings(keys)
 	out := make([][2]string, 0, len(keys))
 	for _, k := range keys {
-		out = append(out, [2]string{k, exportValue(kv[k])})
+		out = append(out, [2]string{k, rawValue(kv[k])})
 	}
 	return out
+}
+
+// emitObject writes one object's recreating lines: the verb line with
+// every attribute the historic inline form carries whole, then one
+// set64 line for the rest — base64, under the grammar marker no old
+// export can have produced.
+func (s *session) emitObject(kind, verb, name string, raw [][2]string) {
+	var inline, encoded [][2]string
+	for _, p := range raw {
+		if inlineRenderable(p[1]) {
+			inline = append(inline, [2]string{p[0], quoteIfSpaced(p[1])})
+		} else {
+			encoded = append(encoded,
+				[2]string{p[0], base64.StdEncoding.EncodeToString([]byte(p[1]))})
+		}
+	}
+	s.exportLine(kind, verb, name, inline)
+	if len(encoded) > 0 {
+		s.exportLine(kind, verbSet64, name, encoded)
+	}
 }
 
 // attrKeyProfile is the layering knob's name, as set accepts it.
@@ -736,9 +795,9 @@ func (s *session) exportSingleton(kind string) {
 	}
 	pairs := make([][2]string, 0, len(traces))
 	for _, t := range traces {
-		pairs = append(pairs, [2]string{t.Key, exportValue(t.Value)})
+		pairs = append(pairs, [2]string{t.Key, rawValue(t.Value)})
 	}
-	s.exportLine(kind, verbSet, "", pairs)
+	s.emitObject(kind, verbSet, "", pairs)
 }
 
 // exportLine writes one recreating line, coloured by symbol class the
@@ -766,6 +825,13 @@ func (s *session) exportLine(kind, verb, name string, pairs [][2]string) {
 // a line that cannot be pasted back, which is the one thing an export
 // has to be.
 func exportValue(v any) string {
+	return quoteIfSpaced(rawValue(v))
+}
+
+// rawValue renders one value the way set accepts it back, before any
+// quoting decision. Every list joins on commas whatever its element
+// type, because commas are the only form the parser reads.
+func rawValue(v any) string {
 	rv := reflect.ValueOf(v)
 	if rv.IsValid() && rv.Kind() == reflect.Slice &&
 		rv.Type().Elem().Kind() != reflect.Uint8 {
@@ -773,23 +839,28 @@ func exportValue(v any) string {
 		for i := range parts {
 			parts[i] = fmt.Sprintf("%v", rv.Index(i).Interface())
 		}
-		return quoteIfSpaced(strings.Join(parts, ","))
+		return strings.Join(parts, ",")
 	}
-	return quoteIfSpaced(fmt.Sprintf("%v", v))
+	return fmt.Sprintf("%v", v)
 }
 
 func quoteIfSpaced(s string) string {
-	if !strings.ContainsAny(s, " \t\"\\\n\r") {
-		return s
+	if strings.ContainsAny(s, " \t") {
+		return `"` + s + `"`
 	}
-	// The escaping the tokenizer undoes, symmetrically: a password
-	// holding its own quotes — perfectly legal — used to come back
-	// from an export with them silently gone, which is an export that
-	// recreates a different secret. CR is escaped like LF because the
-	// console's own framing ends a command on either.
-	r := strings.NewReplacer(
-		"\\", "\\\\", "\"", "\\\"", "\n", "\\n", "\t", "\\t", "\r", "\\r")
-	return `"` + r.Replace(s) + `"`
+	return s
+}
+
+// inlineRenderable reports whether the historic quoted form carries a
+// value byte-for-byte: quotes are its delimiters and the framing ends
+// a command on LF or CR, so a value holding any of the three cannot
+// travel inline. Backslashes CAN — they always passed literally, and
+// giving the old quoted form a second, escaped meaning silently
+// rewrote every pre-existing export that held one. Values the inline
+// form cannot carry go through the set64 verb instead: a marker in
+// the COMMAND grammar, which no old export can have produced.
+func inlineRenderable(s string) bool {
+	return !strings.ContainsAny(s, "\"\n\r")
 }
 
 // verbPrint is the tree's one universal verb, the console family's
@@ -1365,6 +1436,7 @@ var verbDoc = map[string]string{
 	verbStatus:  "show it as it is running",
 	verbExport:  "print the lines that would recreate this",
 	verbSet:     "change an attribute",
+	verbSet64:   "change an attribute from a base64 value — the export's carrier for control-laden bytes",
 	verbUnset:   "clear an attribute, back to what the preset says",
 	verbAdd:     "bring a new one into existence",
 	verbRemove:  "take one out of existence",
@@ -1461,7 +1533,7 @@ func (s *session) verbNamesAt(path []string) []string {
 	case s.isSingleton(path):
 		// One block, always there: set it, clear it, take it away —
 		// and whatever commands name the block as their subject.
-		verbs := []string{verbPrint, verbSet, verbUnset, verbExport, verbRemove}
+		verbs := []string{verbPrint, verbSet, verbSet64, verbUnset, verbExport, verbRemove}
 		for _, v := range commandNames() {
 			if c := lookup(v); c != nil && c.onOne && c.on == path[0] {
 				verbs = append(verbs, v)
@@ -1490,7 +1562,7 @@ func (s *session) verbNamesAt(path []string) []string {
 			}
 			return verbs
 		}
-		verbs := []string{verbPrint, verbStatus, verbSet, verbUnset, verbExport}
+		verbs := []string{verbPrint, verbStatus, verbSet, verbSet64, verbUnset, verbExport}
 		if disableable(path[0]) {
 			verbs = append(verbs, verbDisable, verbEnable)
 		}
@@ -1828,6 +1900,14 @@ func match(prefix string, cands []string) (matched []string, common string) {
 	sort.Strings(matched)
 	if len(matched) == 0 {
 		return nil, prefix
+	}
+	// A word that already IS a candidate is that candidate, even when
+	// it also prefixes a longer one: "set" completes to set, not to
+	// the set/set64 ambiguity.
+	for _, m := range matched {
+		if m == prefix {
+			return []string{m}, m
+		}
 	}
 	common = matched[0]
 	for _, m := range matched[1:] {
