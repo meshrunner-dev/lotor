@@ -129,3 +129,51 @@ func TestFloorRestsBetweenBatches(t *testing.T) {
 		t.Fatalf("floor = %v, want -100 after the rest", nf.DBm)
 	}
 }
+
+func TestStarvationIsCountedWhileItLasts(t *testing.T) {
+	// A non-LoRa carrier parked above the gate rejects every sample.
+	// The counter exists to report precisely that, so it must move
+	// during the starvation — not at the first quiet sample after the
+	// trouble is over, when nobody needs telling any more.
+	var t0 time.Time
+	tr := &floorTracker{}
+	// Converge a first batch so the gate has a floor to work from.
+	for i := range floorSamples {
+		tr.sample(-105, t0.Add(time.Duration(i)*sampleEvery))
+	}
+	if _, ok := tr.value(); !ok {
+		t.Fatal("the first batch did not converge")
+	}
+	// A second batch opens on a quiet sample, once the rest between
+	// batches has elapsed, and then the carrier arrives.
+	last := t0.Add(time.Duration(floorSamples-1) * sampleEvery)
+	at := last.Add(floorRestEvery + time.Second)
+	if tr.collecting(at) == false {
+		t.Fatalf("the tracker is still resting at %v", at.Sub(t0))
+	}
+	tr.sample(-104, at)
+	if tr.starvedCount() != 0 {
+		t.Fatalf("starved = %d before any starvation", tr.starvedCount())
+	}
+	// Loud samples past the batch's maximum age: the batch is
+	// abandoned and counted, while the channel is still occupied.
+	at = at.Add(floorBatchMaxAge + time.Second)
+	tr.sample(-60, at)
+	if tr.starvedCount() != 1 {
+		t.Errorf("starved = %d during the starvation, want 1", tr.starvedCount())
+	}
+	// It keeps counting for as long as the occupation lasts, one
+	// abandoned batch at a time rather than once per rejected sample.
+	tr.sample(-60, at.Add(time.Second))
+	if got := tr.starvedCount(); got != 1 {
+		t.Errorf("starved = %d — a rejected sample must not open a batch to abandon", got)
+	}
+	// And the quiet channel converges again afterwards.
+	quiet := at.Add(2 * time.Second)
+	for i := range floorSamples {
+		tr.sample(-105, quiet.Add(time.Duration(i)*sampleEvery))
+	}
+	if nf, ok := tr.value(); !ok || nf.DBm > -100 {
+		t.Errorf("the floor did not come back: %+v ok=%v", nf, ok)
+	}
+}

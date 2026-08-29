@@ -26,8 +26,27 @@ func init() {
 	})
 }
 
+// chipRadio is the part of the driver library this adapter actually
+// consumes. It exists so the transitions and mappings around it —
+// which frame errors, decide what is a busy channel rather than a
+// fault, and account for an emission — can be exercised without a
+// GPIO line or an SPI bus. The library's own transcripts prove the
+// wire; this proves the adaptation.
+type chipRadio interface {
+	Configure(p lora.Params) error
+	StartReceive() error
+	Poll() (*sx126x.RxFrame, error)
+	Events() <-chan struct{}
+	RSSI() (float64, error)
+	ReceiveInProgress() (detected, unread bool, err error)
+	AssessChannel(ctx context.Context, c sx126x.CAD) (bool, error)
+	Transmit(ctx context.Context, payload []byte, powerDBm int8) (*sx126x.TxResult, error)
+	Stats() (sx126x.Stats, error)
+	Close() error
+}
+
 type device struct {
-	r    *sx126x.Radio
+	r    chipRadio
 	env  radio.Envelope
 	held []lora.OutputPin
 	// dio1 is kept for its level: the line stays high while an IRQ is
@@ -396,9 +415,14 @@ func (d *device) Close() error {
 	if d.wdTicker != nil {
 		d.wdTicker.Stop()
 	}
-	err := d.r.Close()
+	// Every line is released even when one refuses, and every refusal
+	// is reported: a cleanup that closed the chip and then dropped a
+	// pin error leaves the diagnosis short of the one fact that
+	// explains why the next session cannot have the line back.
+	errs := make([]error, 0, 1+len(d.held))
+	errs = append(errs, d.r.Close())
 	for _, h := range d.held {
-		_ = h.Close()
+		errs = append(errs, h.Close())
 	}
-	return err
+	return errors.Join(errs...)
 }

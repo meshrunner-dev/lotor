@@ -56,12 +56,19 @@ func (t *floorTracker) sample(rssi float64, now time.Time) (converged bool) {
 	if len(t.samples) == 0 && now.Before(t.rest) {
 		return false
 	}
-	if nf, ok := t.value(); ok && rssi >= nf.DBm+floorGateDB {
-		return false
-	}
+	// The batch's age is judged before the sample is judged, and that
+	// order is the whole point: a non-LoRa carrier parked above the
+	// gate rejects every sample, so a check that ran after the gate
+	// never reached it. The batch stayed open for as long as the
+	// interference lasted and the starvation counter — whose only job
+	// is to report exactly that — moved at the first quiet sample,
+	// after the trouble was over.
 	if len(t.samples) > 0 && now.Sub(t.began) > floorBatchMaxAge {
 		t.samples = t.samples[:0]
 		t.starved.Add(1)
+	}
+	if nf, ok := t.value(); ok && rssi >= nf.DBm+floorGateDB {
+		return false
 	}
 	if len(t.samples) == 0 {
 		t.began = now
