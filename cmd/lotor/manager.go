@@ -1131,8 +1131,11 @@ func (m *manager) Create(ctx context.Context, kind, name string,
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if name == "" || strings.ContainsAny(name, " /\"=") {
-		return "", fmt.Errorf("%q is not a usable name", name)
+	// The same grammar the file and the import answer to: one rule,
+	// so what an operator may create is exactly what a configuration
+	// may carry and an export may restore.
+	if err := config.ValidInstanceName(name); err != nil {
+		return "", err
 	}
 	next, err := cloneFile(m.file)
 	if err != nil {

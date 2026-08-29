@@ -381,22 +381,105 @@ func TestOldImportRevisionsBecomeReadable(t *testing.T) {
 	}
 }
 
-func TestImportRunLeavesARefusedBaseUntouched(t *testing.T) {
-	// The CFG-009 regression the review asked for: the whole command
-	// path with an invalid file, proving the target base never moves.
+// goodRadio is the one healthy radio the invalid-import matrix hangs
+// its subjects from, so each case fails for its own reason alone.
+const goodRadio = "radios:\n  r:\n    driver: sx126x-spi\n" +
+	"    profile: rak6421-13300x-slot1\n    overrides:\n" +
+	"      rak6421-13300x-slot1:\n        spi: /dev/spidev0.0\n"
+
+// goodRelay is the same for a relay: valid, so an observer or sensor
+// case is judged on itself.
+const goodRelay = "relays:\n  mc:\n    protocol: meshcore\n    radio: r\n" +
+	"    profile: eu-868-narrow\n"
+
+func TestParkedObserversImportOnTheirShapeAlone(t *testing.T) {
+	// Disabled means the configuration is kept and nothing runs — an
+	// operator parks an observer precisely because it is not ready.
+	// Judging a parked one on whether it could connect refuses files
+	// the daemon boots happily, and makes its own export unimportable.
+	// The lab's store is exactly this shape.
 	dir := t.TempDir()
-	yaml := filepath.Join(dir, "bad.yaml")
-	if err := os.WriteFile(yaml, []byte(
-		"radios:\n  r:\n    driver: sx126x-spi\n    profile: rak6421-13300x-slot1\n"+
-			"relays:\n  mc:\n    protocol: not-a-protocol\n    radio: r\n"), 0o600); err != nil {
+	yaml := filepath.Join(dir, "parked.yaml")
+	if err := os.WriteFile(yaml, []byte(goodRadio+goodRelay+
+		"mqtt:\n  parked:\n    disabled: true\n    profile: analyzer-eu\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	db := filepath.Join(dir, "config.db")
-	cmd := &configImportCmd{Path: yaml, DB: db, Force: true}
-	if err := cmd.Run(); err == nil {
-		t.Fatal("an unknown protocol imported")
+	if err := (&configImportCmd{Path: yaml, DB: db, Force: true}).Run(); err != nil {
+		t.Fatalf("a parked observer was refused: %s", err)
 	}
-	if _, err := os.Stat(db); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("the refused import touched the base: %v", err)
+	// Its shape is still judged: a parked observer may be incomplete,
+	// never incoherent.
+	bad := filepath.Join(dir, "bad.yaml")
+	if err := os.WriteFile(bad, []byte(goodRadio+goodRelay+
+		"mqtt:\n  parked:\n    disabled: true\n    profile: no-such-preset\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&configImportCmd{Path: bad, DB: filepath.Join(dir, "bad.db"),
+		Force: true}).Run(); err == nil {
+		t.Error("a parked observer naming no known profile imported")
+	}
+}
+
+func TestImportRefusesEveryFamilyOfInvalidity(t *testing.T) {
+	// The CFG-009 matrix: the preflight promises to refuse a file that
+	// would not boot, and it must do so through the whole command
+	// path — one case per family, each proving the existing base is
+	// left exactly as it was. An import that half-lands is the one
+	// outcome a configuration store may never have.
+	for _, c := range []struct{ family, yaml string }{
+		{"unknown protocol", goodRadio +
+			"relays:\n  mc:\n    protocol: not-a-protocol\n    radio: r\n"},
+		{"unknown driver",
+			"radios:\n  r:\n    driver: not-a-driver\n" + goodRelay},
+		{"unknown profile", goodRadio +
+			"relays:\n  mc:\n    protocol: meshcore\n    radio: r\n" +
+			"    profile: no-such-preset\n"},
+		{"unknown attribute", goodRadio +
+			"relays:\n  mc:\n    protocol: meshcore\n    radio: r\n" +
+			"    profile: eu-868-narrow\n    overrides:\n" +
+			"      eu-868-narrow:\n        not_an_attribute: 1\n"},
+		{"attribute of the wrong type", goodRadio +
+			"relays:\n  mc:\n    protocol: meshcore\n    radio: r\n" +
+			"    profile: eu-868-narrow\n    overrides:\n" +
+			"      eu-868-narrow:\n        tx_power_dbm: not-a-number\n"},
+		{"inactive scope holding an unknown attribute", goodRadio +
+			"relays:\n  mc:\n    protocol: meshcore\n    radio: r\n" +
+			"    profile: eu-868-narrow\n    overrides:\n" +
+			"      eu-433:\n        not_an_attribute: 1\n"},
+		{"waveform outside the chip's envelope", goodRadio +
+			"relays:\n  mc:\n    protocol: meshcore\n    radio: r\n" +
+			"    profile: eu-868-narrow\n    overrides:\n" +
+			"      eu-868-narrow:\n        frequency_hz: 2400000000\n"},
+		{"dangling radio reference", goodRadio +
+			"relays:\n  mc:\n    protocol: meshcore\n    radio: nowhere\n"},
+		{"unknown sensor driver", goodRadio + goodRelay +
+			"sensors:\n  part:\n    driver: not-a-sensor\n"},
+		{"sensor read faster than the floor", goodRadio + goodRelay +
+			"sensors:\n  part:\n    driver: bme280\n    sample_interval: 1ms\n"},
+		{"observer with no broker", goodRadio + goodRelay +
+			"mqtt:\n  obs:\n    profile: custom\n"},
+		{"observer whose topic cannot be built", goodRadio + goodRelay +
+			"mqtt:\n  obs:\n    profile: analyzer-eu\n"},
+		{"observer whose relay does not exist", goodRadio + goodRelay +
+			"mqtt:\n  obs:\n    profile: analyzer-eu\n    overrides:\n" +
+			"      analyzer-eu:\n        iata: TLS\n        relay: nowhere\n"},
+		{"unspellable instance name", goodRadio + goodRelay +
+			"mqtt:\n  obs one:\n    disabled: true\n"},
+	} {
+		t.Run(c.family, func(t *testing.T) {
+			dir := t.TempDir()
+			yaml := filepath.Join(dir, "bad.yaml")
+			if err := os.WriteFile(yaml, []byte(c.yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			db := filepath.Join(dir, "config.db")
+			if err := (&configImportCmd{Path: yaml, DB: db, Force: true}).Run(); err == nil {
+				t.Fatalf("%s imported", c.family)
+			}
+			if _, err := os.Stat(db); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the refused import touched the base: %v", err)
+			}
+		})
 	}
 }

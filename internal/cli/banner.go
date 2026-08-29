@@ -16,7 +16,7 @@ func banner(w io.Writer, version, system string, priv Privilege) {
 		priv = ReadOnly
 	}
 	info := map[int]string{
-		1: product.Name + " " + version + " on " + system,
+		1: product.Name + " " + version + " on " + printable(system),
 		2: product.Description + " — " + product.Homepage,
 		4: string(priv) + " console",
 		5: "\"help\" lists commands, \"quit\" leaves.",

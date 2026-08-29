@@ -1585,11 +1585,35 @@ func validateWholeFile(f *config.File) error {
 		}
 	}
 	for name, mq := range f.MQTT {
-		if _, err := resolveMQTTParams(mq); err != nil {
+		if err := checkObserverAlone(f, mq); err != nil {
 			return fmt.Errorf("observer %q: %w", name, err)
 		}
 	}
 	return nil
+}
+
+// checkObserverAlone judges one observer the way the daemon will. A
+// PARKED one is judged on its shape alone: disabled means the
+// configuration is kept and nothing runs, so demanding that it could
+// connect would refuse a file the daemon boots happily — and would
+// make a parked observer's own export unimportable, which is the one
+// thing an export may not be.
+func checkObserverAlone(f *config.File, mq config.MQTT) error {
+	if mq.Disabled {
+		_, _, err := mq.Layered.Resolve(mqtt.Presets())
+		return err
+	}
+	p, err := resolveMQTTParams(mq)
+	if err != nil {
+		return err
+	}
+	// Which relay it watches is part of whether it would run: an
+	// observer naming a relay that does not exist — or leaving the
+	// choice implicit where it is ambiguous — never connects, and a
+	// file whose observer can only sit down is a file that would not
+	// boot.
+	_, err = observerRelayIn(f, p.Relay)
+	return err
 }
 
 // modeWord names a file's kind for a refusal an operator will read.

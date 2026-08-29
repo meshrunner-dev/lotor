@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/product"
@@ -94,7 +95,7 @@ func (s *session) promptWith(query string) string {
 		priv = ReadOnly
 	}
 	head := "[" + s.color(cUser, string(priv)) + "@" +
-		s.color(cSystem, s.systemName()) + "] "
+		s.color(cSystem, printable(s.systemName())) + "] "
 	body := ""
 	if p := s.curPath(); len(p) > 0 {
 		body = s.color(cPath, "/"+strings.Join(p, "/"))
@@ -878,10 +879,12 @@ func (s *session) exportLine(kind, verb, name string, pairs [][2]string) {
 }
 
 // displayValue renders one value for the screen. Inline values read
-// as the command line carries them; control-laden ones appear in
-// Go-quoted notation — a form for eyes, deliberately not one the
-// command grammar reads, so print stays legible without handing the
-// quoted form a second meaning.
+// as the command line carries them; anything the inline form refuses
+// — a quote, a line break, an ESC, any control rune — appears in
+// Go-quoted notation, which shows every such rune as an escape. A
+// form for eyes, deliberately not one the command grammar reads, so
+// print stays legible and no stored value can type into the
+// operator's terminal.
 func displayValue(v any) string {
 	raw := rawValue(v)
 	if inlineRenderable(raw) {
@@ -914,15 +917,25 @@ func quoteIfSpaced(s string) string {
 }
 
 // inlineRenderable reports whether the historic quoted form carries a
-// value byte-for-byte: quotes are its delimiters and the framing ends
-// a command on LF or CR, so a value holding any of the three cannot
-// travel inline. Backslashes CAN — they always passed literally, and
-// giving the old quoted form a second, escaped meaning silently
-// rewrote every pre-existing export that held one. Values the inline
-// form cannot carry go through the set64 verb instead: a marker in
-// the COMMAND grammar, which no old export can have produced.
+// value byte-for-byte AND safely: quotes are its delimiters, the
+// framing ends a command on LF or CR, and every other control rune —
+// an ESC above all — would be written raw into an export whose whole
+// purpose is to be pasted back into a terminal. Backslashes DO ride
+// inline: they always passed literally, and giving the old quoted
+// form a second, escaped meaning silently rewrote every pre-existing
+// export that held one. What the inline form cannot carry goes
+// through the set64 verb instead: a marker in the COMMAND grammar,
+// which no old export can have produced.
 func inlineRenderable(s string) bool {
-	return !strings.ContainsAny(s, "\"\n\r")
+	if strings.ContainsRune(s, '"') {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsGraphic(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // verbPrint is the tree's one universal verb, the console family's

@@ -12,7 +12,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -261,6 +264,104 @@ const (
 	MaxSampleInterval = time.Hour
 )
 
+// InstanceNameError says why a name cannot be one.
+type InstanceNameError struct {
+	Name string
+	Why  string
+}
+
+func (e *InstanceNameError) Error() string {
+	return fmt.Sprintf("%q is not a usable name: %s", e.Name, e.Why)
+}
+
+// nameForbidden are the runes a name may not carry, each because the
+// console grammar already spends it: space and tab separate words,
+// "/" walks the tree, the quote delimits, and "=" opens a value.
+const nameForbidden = " \t/\"="
+
+// ValidInstanceName judges an instance name against the ONE grammar
+// every door must agree on. A name is the operator's handle: it walks
+// the tree as a path step, stands bare on a command line, and is
+// written back by export to be replayed. A name the console cannot
+// spell is a name no export can restore and no operator can reach —
+// so the file, the import and the console all ask this question, and
+// a store that predates the rule is healed by migration rather than
+// left holding objects nobody can address.
+func ValidInstanceName(name string) error {
+	if name == "" {
+		return &InstanceNameError{Name: name, Why: "it is empty"}
+	}
+	if i := strings.IndexAny(name, nameForbidden); i >= 0 {
+		return &InstanceNameError{
+			Name: name,
+			Why:  fmt.Sprintf("%q is the console's own punctuation", name[i:i+1]),
+		}
+	}
+	for _, r := range name {
+		if !unicode.IsGraphic(r) {
+			return &InstanceNameError{
+				Name: name,
+				Why:  fmt.Sprintf("it carries %q, which no terminal can show", r),
+			}
+		}
+	}
+	return nil
+}
+
+// CanonicalInstanceName is the name a legacy one becomes: every rune
+// the grammar refuses turns into a dash, so a healed store keeps a
+// handle an operator recognises. It is only ever applied by an
+// explicit migration — nothing renames an object silently at runtime.
+func CanonicalInstanceName(name string) string {
+	if name == "" {
+		return "unnamed"
+	}
+	canon := strings.Map(func(r rune) rune {
+		if strings.ContainsRune(nameForbidden, r) || !unicode.IsGraphic(r) {
+			return '-'
+		}
+		return r
+	}, name)
+	if ValidInstanceName(canon) != nil {
+		// Unreachable for any non-empty name — every substitution
+		// yields a legal rune — but minting an unusable handle would
+		// defeat the healing, so the guarantee is stated, not assumed.
+		return "unnamed"
+	}
+	return canon
+}
+
+// validateNames judges every instance name in the file. The keys of
+// these maps are handles, not free text: they reach the console, the
+// export and the operator's fingers.
+func validateNames(f *File) error {
+	for _, set := range []struct {
+		kind  string
+		names []string
+	}{
+		{"relay", keysOf(f.Relays)}, {"radio", keysOf(f.Radios)},
+		{"sensor", keysOf(f.Sensors)}, {"observer", keysOf(f.MQTT)},
+	} {
+		for _, name := range set.names {
+			if err := ValidInstanceName(name); err != nil {
+				return fmt.Errorf("%s %w", set.kind, err)
+			}
+		}
+	}
+	return nil
+}
+
+// keysOf names one map's instances, sorted so a refusal is the same
+// one on every run.
+func keysOf[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // validateSensors checks what every sensor must say. Nothing claims
 // one, so there is no exclusivity to enforce — the bus belongs to the
 // machine, and every relay on it reads the same part.
@@ -322,6 +423,12 @@ func (f *File) validate() error { return f.Validate(true) }
 func (f *File) Validate(requireRelays bool) error {
 	if requireRelays && len(f.Relays) == 0 {
 		return errors.New("no relays declared")
+	}
+	// The handles first: a name the console cannot spell makes every
+	// later judgement moot, because the object it names could never
+	// be reached or restored.
+	if err := validateNames(f); err != nil {
+		return err
 	}
 	owner := make(map[string]string, len(f.Radios))
 	for name, r := range f.Relays {

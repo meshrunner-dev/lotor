@@ -74,7 +74,207 @@ func storeMigrations() []confdb.Migration {
 		Doc: "import revisions from before the delta shape become readable: " +
 			"the raw-object form wraps into the change the history view speaks",
 		Run: migrateImportRevisions,
+	}, {
+		To: 12,
+		Doc: "instance names settle into the one grammar every door now asks " +
+			"for: a name the console cannot spell is renamed, references and " +
+			"runtime state following it",
+		Run: migrateInstanceNames,
 	}}
+}
+
+// migrateInstanceNames heals the names an older import let through.
+// The file's map keys were never judged, so a YAML could name an
+// observer "obs one" — importable, but unreachable from the console
+// and unrestorable from its own export, since the name would read as
+// a name and an attribute. Refusing such a store at load would strand
+// the operator: the console that could rename the object lives inside
+// the daemon that will not start. So the migration renames, with
+// every reference and every runtime table following, and the journal
+// records it as the deliberate act it is.
+func migrateInstanceNames(ctx context.Context, tx *sql.Tx) error {
+	renames, err := planNameRenames(ctx, tx)
+	if err != nil || len(renames) == 0 {
+		return err
+	}
+	for _, r := range renames {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE objects SET name = ? WHERE kind = ? AND name = ?",
+			r.to, r.kind, r.from); err != nil {
+			return err
+		}
+		if r.kind == confdb.KindRelay {
+			// A relay's name keys its sessions and its transport
+			// policy; both must arrive at the new name or the relay
+			// comes up having forgotten who may talk to it.
+			for _, stmt := range []string{
+				"UPDATE acl SET relay = ? WHERE relay = ?",
+				"UPDATE regions SET relay = ? WHERE relay = ?",
+				"UPDATE regions_meta SET relay = ? WHERE relay = ?",
+			} {
+				if _, err := tx.ExecContext(ctx, stmt, r.to, r.from); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return retargetNameReferences(ctx, tx, renames)
+}
+
+// attrWatchedRelay is the observer attribute naming the relay whose
+// frames it publishes.
+const attrWatchedRelay = "relay"
+
+// nameRename is one object's healing, from the name a loose import
+// wrote to the one the grammar admits.
+type nameRename struct{ kind, from, to string }
+
+// planNameRenames decides every rename before any is applied: the
+// canonical form, and a suffix when two legacy names would canonicalise
+// onto the same handle or onto one already taken.
+func planNameRenames(ctx context.Context, tx *sql.Tx) ([]nameRename, error) {
+	rows, err := tx.QueryContext(ctx, "SELECT kind, name FROM objects ORDER BY kind, name")
+	if err != nil {
+		return nil, err
+	}
+	taken := map[string]bool{}
+	var loose []nameRename
+	collect := func() error {
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var kind, name string
+			if err := rows.Scan(&kind, &name); err != nil {
+				return err
+			}
+			if config.ValidInstanceName(name) == nil {
+				taken[kind+" "+name] = true
+				continue
+			}
+			loose = append(loose, nameRename{kind: kind, from: name})
+		}
+		return rows.Err()
+	}
+	if err := collect(); err != nil {
+		return nil, err
+	}
+	out := make([]nameRename, 0, len(loose))
+	for _, r := range loose {
+		base := config.CanonicalInstanceName(r.from)
+		to := base
+		for n := 2; taken[r.kind+" "+to]; n++ {
+			to = fmt.Sprintf("%s-%d", base, n)
+		}
+		taken[r.kind+" "+to] = true
+		r.to = to
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// retargetNameReferences follows a rename into the attributes that
+// name it: a relay says which radio it owns, an observer which relay
+// it watches. A dangling reference would refuse the whole file at the
+// next load, so the pointers move with their targets.
+func retargetNameReferences(ctx context.Context, tx *sql.Tx, renames []nameRename) error {
+	pointing := map[string]map[string]string{
+		confdb.KindRelay: {}, confdb.KindMQTT: {},
+	}
+	for _, r := range renames {
+		switch r.kind {
+		case confdb.KindRadio:
+			pointing[confdb.KindRelay][r.from] = r.to
+		case confdb.KindRelay:
+			pointing[confdb.KindMQTT][r.from] = r.to
+		}
+	}
+	for kind, attr := range map[string]string{
+		confdb.KindRelay: attrRadio, confdb.KindMQTT: attrWatchedRelay,
+	} {
+		if len(pointing[kind]) == 0 {
+			continue
+		}
+		if err := repointAttr(ctx, tx, kind, attr, pointing[kind]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// repointAttr rewrites one attribute wherever it names a renamed
+// object — at the top level AND inside every override scope, because
+// a layered attribute is stored where the profile that sets it lives,
+// and a scope kept for another band names the same relay.
+func repointAttr(ctx context.Context, tx *sql.Tx, kind, attr string, moved map[string]string) error {
+	rows, err := tx.QueryContext(ctx,
+		"SELECT name, attrs FROM objects WHERE kind = ?", kind)
+	if err != nil {
+		return err
+	}
+	type patch struct{ name, attrs string }
+	var patches []patch
+	collect := func() error {
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var name, attrs string
+			if err := rows.Scan(&name, &attrs); err != nil {
+				return err
+			}
+			var obj map[string]any
+			if err := json.Unmarshal([]byte(attrs), &obj); err != nil {
+				continue // unreadable attrs are not this migration's to judge
+			}
+			if !repointIn(obj, attr, moved) {
+				continue
+			}
+			next, err := json.Marshal(obj)
+			if err != nil {
+				return err
+			}
+			patches = append(patches, patch{name: name, attrs: string(next)})
+		}
+		return rows.Err()
+	}
+	if err := collect(); err != nil {
+		return err
+	}
+	for _, p := range patches {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE objects SET attrs = ? WHERE kind = ? AND name = ?",
+			p.attrs, kind, p.name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// repointIn retargets one attribute in an object's own map and in each
+// of its override scopes, reporting whether anything moved.
+func repointIn(obj map[string]any, attr string, moved map[string]string) bool {
+	touched := retarget(obj, attr, moved)
+	scopes, ok := obj["overrides"].(map[string]any)
+	if !ok {
+		return touched
+	}
+	for _, kv := range scopes {
+		if scope, ok := kv.(map[string]any); ok && retarget(scope, attr, moved) {
+			touched = true
+		}
+	}
+	return touched
+}
+
+// retarget rewrites one attribute in one map.
+func retarget(kv map[string]any, attr string, moved map[string]string) bool {
+	target, ok := kv[attr].(string)
+	if !ok {
+		return false
+	}
+	to, moving := moved[target]
+	if !moving {
+		return false
+	}
+	kv[attr] = to
+	return true
 }
 
 // deltaNew is the Change form's "new" side, named for the wrap.
