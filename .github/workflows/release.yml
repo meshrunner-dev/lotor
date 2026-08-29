@@ -55,6 +55,18 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Rebuild every target for the reproducibility proof
+        # BEFORE the artifacts land: -buildvcs stamps a tree holding
+        # an untracked file as modified, so a rebuild standing beside
+        # the downloaded binaries could never match them. The proof
+        # builds from the pristine checkout, outside it, and the
+        # comparison happens once the artifacts are here.
+        run: |
+          for t in arm64 amd64 arm; do
+            goarm=""; [ "$t" = "arm" ] && goarm="7"
+            ./scripts/build -o "${RUNNER_TEMP}/repro_${t}" -version "$VERSION" \
+              -goos linux -goarch "$t" -goarm "$goarm"
+          done
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
@@ -62,18 +74,15 @@ jobs:
         run: grep -q "untrusted comment" internal/update/trust.go ||
           { echo "no embedded official key — mint one and embed it first"; exit 1; }
       - name: Prove the release reproduces
-        # A second clean build of every target, compared byte-for-byte
-        # with the artifacts about to ship: "officially reproducible"
-        # is proved on the stable path itself, with the real version,
-        # not on a laptop with a task nobody is obliged to run.
+        # The rebuilt bytes against the ones about to ship:
+        # "officially reproducible" is proved on the stable path
+        # itself, with the real version, not on a laptop with a task
+        # nobody is obliged to run.
         run: |
           for t in arm64 amd64 arm; do
-            goarm=""; [ "$t" = "arm" ] && goarm="7"
-            ./scripts/build -o "repro_${t}" -version "$VERSION" \
-              -goos linux -goarch "$t" -goarm "$goarm"
-            cmp -s "repro_${t}" "${PRODUCT}_linux_${t}" \
+            cmp -s "${RUNNER_TEMP}/repro_${t}" "${PRODUCT}_linux_${t}" \
               || { echo "linux/${t} does not reproduce byte-for-byte"; exit 1; }
-            rm "repro_${t}"
+            rm "${RUNNER_TEMP}/repro_${t}"
           done
       - name: Create the release page
         # Notes for humans, an anchor for the TRIGGERING tag — gh
