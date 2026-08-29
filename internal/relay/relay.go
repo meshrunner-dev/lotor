@@ -59,6 +59,11 @@ type Relay struct {
 	// be visible in the error state, never to retry — a config error
 	// does not heal by waiting.
 	stillborn bool
+	// backoffFirst and backoffCap pace the retry ladder — fields
+	// rather than constants so the lifecycle tests can walk the whole
+	// ladder in milliseconds.
+	backoffFirst time.Duration
+	backoffCap   time.Duration
 }
 
 // lifecycle is the state/cause pair status stores atomically.
@@ -83,6 +88,8 @@ func New(name string, drv radio.Driver, radioCfg map[string]any,
 		log:          log.With(zap.String("relay", name)),
 		noiseHistory: NoiseHistoryDefault,
 		txMode:       txMode,
+		backoffFirst: backoffFirst,
+		backoffCap:   backoffCap,
 	}
 	if txMode == "" {
 		r.txMode = "dry"
@@ -144,7 +151,7 @@ func (r *Relay) Run(ctx context.Context) {
 		<-ctx.Done()
 		return
 	}
-	backoff := backoffFirst
+	backoff := r.backoffFirst
 	for {
 		reached, err := r.session(ctx)
 		if ctx.Err() != nil {
@@ -161,7 +168,7 @@ func (r *Relay) Run(ctx context.Context) {
 		if reached {
 			// A session that ran resets the ladder: the next fault is
 			// a fresh incident, not the continuation of the last one.
-			backoff = backoffFirst
+			backoff = r.backoffFirst
 		}
 		r.setState(StateError, err)
 		r.log.Error("relay down, will retry",
@@ -171,7 +178,7 @@ func (r *Relay) Run(ctx context.Context) {
 			return
 		case <-time.After(backoff):
 		}
-		backoff = min(backoff*2, backoffCap)
+		backoff = min(backoff*2, r.backoffCap)
 	}
 }
 
