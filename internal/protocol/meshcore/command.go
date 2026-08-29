@@ -86,6 +86,14 @@ func (e *engine) runCommand(rx *reception, origin txn.ID) {
 	}
 
 	line := strings.TrimSpace(text.Text)
+	// The companion's optional pairing prefix — two characters and a
+	// bar — is stripped before the words and reflected at the head of
+	// the answer: it is how the app matches replies to the commands
+	// it sent, and a reply without it reads as a timeout over there.
+	tag := ""
+	if len(line) > 4 && line[2] == '|' {
+		tag, line = line[:3], line[3:]
+	}
 	var out string
 	if retry {
 		// The reference answers a retry with an empty reply rather
@@ -105,6 +113,7 @@ func (e *engine) runCommand(rx *reception, origin txn.ID) {
 	if out == "" {
 		return
 	}
+	out = tag + out
 	if len(out) > commandMaxReply {
 		out = out[:commandMaxReply-1] + "…"
 	}

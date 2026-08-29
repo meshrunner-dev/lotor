@@ -1,6 +1,7 @@
 package meshcore
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -272,5 +273,54 @@ func TestTelemetryMaskReachesTheSensors(t *testing.T) {
 
 	if len(masks) != 2 || masks[0] != 0xF0 || masks[1] != 0x00 {
 		t.Fatalf("masks = %#v — want [0xF0 0x00]", masks)
+	}
+}
+
+func TestThePairingPrefixComesBackOnTheAnswer(t *testing.T) {
+	// The companion numbers its commands — "08|setperm …" — and
+	// matches replies by the reflected prefix; an answer without it
+	// reads as a timeout on the phone, which is exactly how this was
+	// found. The words reach the hook bare, the tag rides the reply.
+	e, dev, sub, peer := txRig(t, "on-air")
+	e.p.AdminPassword = "mask"
+	var lines []string
+	e.AttachCommands(func(line string, admin []byte) string {
+		lines = append(lines, line)
+		return "OK"
+	})
+	runEngine(t, e, dev)
+
+	frame, secret := login(t, e.id, peer, nowTS(970), "mask", false)
+	dev.frames <- frame
+	awaitSent(t, sub)
+	<-dev.sent
+
+	at := time.Unix(int64(nowTS(971)), 0)
+	dev.frames <- commandFrame(t, e.id, peer, at, "08|setperm "+strings.Repeat("ab", 32)+" 1")
+	awaitSent(t, sub)
+	raw := <-dev.sent
+	pkt, _ := meshcore.ParsePacket(raw)
+	d, _ := meshcore.ParseDatagram(pkt.Payload)
+	plain, err := d.Open(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := meshcore.ParseTextPlaintext(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text.Text != "08|OK" {
+		t.Errorf("reply = %q, want the prefix reflected", text.Text)
+	}
+	if len(lines) != 1 || strings.HasPrefix(lines[0], "08|") {
+		t.Errorf("the hook saw %v — the tag must not reach the words", lines)
+	}
+
+	// A line that merely contains a bar later is not a prefix.
+	dev.frames <- commandFrame(t, e.id, peer, time.Unix(int64(nowTS(972)), 0), "get name")
+	awaitSent(t, sub)
+	<-dev.sent
+	if len(lines) != 2 || lines[1] != "get name" {
+		t.Errorf("bare line mangled: %v", lines)
 	}
 }
