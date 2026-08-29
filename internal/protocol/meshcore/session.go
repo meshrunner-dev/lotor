@@ -10,6 +10,7 @@ import (
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/txn"
 	"meshrunner.dev/lotor/internal/version"
 )
@@ -241,6 +242,11 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 		return
 	}
 	body, answered := e.answerRequest(args)
+	if len(args) > 0 {
+		logging.Trace(e.log, "session request answered",
+			zap.String("txn", origin.Short()), zap.String("request", reqName(args[0])),
+			zap.Bool("answered", answered), zap.Int("body_bytes", len(body)))
+	}
 	// A question we do not answer still proves the client is there:
 	// the keep-alive exists for exactly that, and retiring the
 	// companion that sends one instead of polling would be perverse.

@@ -101,6 +101,25 @@ func describeControl(pkt *meshcore.Packet, judged *bus.FrameJudged) []zap.Field 
 	return nil
 }
 
+// reqName names an authenticated request, so a log says what a
+// companion asked for rather than only that it asked.
+func reqName(r uint8) string {
+	switch r {
+	case meshcore.ReqGetStatus:
+		return "status"
+	case meshcore.ReqGetTelemetry:
+		return "telemetry"
+	case meshcore.ReqGetNeighbours:
+		return "neighbours"
+	case meshcore.ReqGetOwnerInfo:
+		return "owner-info"
+	case meshcore.ReqKeepAlive:
+		return "keep-alive"
+	default:
+		return fmt.Sprintf("req-%d", r)
+	}
+}
+
 func advTypeName(t uint8) string {
 	switch t {
 	case meshcore.AdvTypeChat:

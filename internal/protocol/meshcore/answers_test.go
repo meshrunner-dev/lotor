@@ -34,3 +34,20 @@ func TestNeighbourOrderings(t *testing.T) {
 		}
 	}
 }
+
+func TestTelemetryAlwaysLeadsWithAVoltage(t *testing.T) {
+	// Companion apps show no telemetry at all without a voltage on
+	// the self channel, and every emitter in the reference sends one
+	// first. A relay with no battery still owes them the reading.
+	e := &engine{}
+	body := e.telemetryBody()
+	if len(body) < 4 {
+		t.Fatalf("telemetry body is %d bytes, want at least one reading", len(body))
+	}
+	if body[0] != telemChannelSelf {
+		t.Errorf("first reading rides channel %d, want %d", body[0], telemChannelSelf)
+	}
+	if body[1] != meshcore.LPPVoltage {
+		t.Errorf("first reading is type %d, want LPPVoltage (%d)", body[1], meshcore.LPPVoltage)
+	}
+}

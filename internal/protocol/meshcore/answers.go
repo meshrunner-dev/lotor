@@ -6,6 +6,8 @@ package meshcore
 // allowed to ask.
 
 import (
+	"go.uber.org/zap"
+
 	"sort"
 	"time"
 
@@ -43,14 +45,33 @@ func (e *engine) statusBody() []byte {
 	}.AppendTo(nil)
 }
 
-// telemetryBody reports what this node can honestly measure about
-// itself, in the Cayenne encoding companions expect.
+// telemetryBody reports what this node measures about itself, in the
+// Cayenne encoding companions expect.
+//
+// The voltage leads and is always present: companion apps show no
+// telemetry at all without it, and every emitter in the reference
+// sends it first and unconditionally, so no companion has met a
+// channel-1 payload lacking one. A mains relay has no battery and
+// this host exposes no rail either, so zero stands in — transparently
+// not measured, the answer statusBody already gives for the same
+// reason.
 func (e *engine) telemetryBody() []byte {
 	enc := meshcore.NewLPPEncoder()
+	if err := enc.Add(meshcore.LPPReading{
+		Channel: telemChannelSelf, Type: meshcore.LPPVoltage, Value: float64(0),
+	}); err != nil {
+		// A rejected reading leaves its header in the buffer, so the
+		// payload would decode as truncated rather than short.
+		e.log.Warn("telemetry voltage refused by the encoder", zap.Error(err))
+		return nil
+	}
 	if c, ok := hostTemperature(); ok {
-		_ = enc.Add(meshcore.LPPReading{
+		if err := enc.Add(meshcore.LPPReading{
 			Channel: telemChannelSelf, Type: meshcore.LPPTemperature, Value: c,
-		})
+		}); err != nil {
+			e.log.Warn("telemetry temperature refused by the encoder", zap.Error(err))
+			return nil
+		}
 	}
 	return enc.Bytes()
 }
