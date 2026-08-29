@@ -1834,3 +1834,45 @@ func TestHistoryConfessesItsCap(t *testing.T) {
 		t.Errorf("no confession:\n%s", out)
 	}
 }
+
+func TestACLDrawerGrantsAndRevokes(t *testing.T) {
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	var granted [][2]any // {pubkeyHex, revoke}
+	live := []Access{{Admin: true, Granted: true, LastActive: time.Now()}}
+	for i := range live[0].PubKey {
+		live[0].PubKey[i] = byte(i)
+	}
+	for i := range deps.Relays {
+		deps.Relays[i].Access = func() ([]Access, error) { return live, nil }
+		deps.Relays[i].Grant = func(pub []byte, admin, revoke bool) error {
+			granted = append(granted, [2]any{hex.EncodeToString(pub), revoke})
+			return nil
+		}
+	}
+	// The drawer lists the grant, its role and how it was earned.
+	out := run(t, deps, "/relay meshcore-868 acl print")
+	for _, want := range []string{"admin", "granted", "000102030405"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("acl listing missing %q:\n%s", want, out)
+		}
+	}
+	// grant needs a whole key; a short one is refused before the door.
+	if out := run(t, deps, "/relay meshcore-868 acl grant key=abcd"); !strings.Contains(out, "64") {
+		t.Errorf("short key not refused:\n%s", out)
+	}
+	if len(granted) != 0 {
+		t.Fatalf("a bad grant reached the engine: %v", granted)
+	}
+	full := strings.Repeat("ab", 32)
+	run(t, deps, "/relay meshcore-868 acl grant key="+full)
+	if len(granted) != 1 || granted[0][0] != full || granted[0][1] != false {
+		t.Fatalf("grant door saw %v", granted)
+	}
+	// revoke names an entry by prefix; the engine gets the whole key.
+	run(t, deps, "/relay/meshcore-868/acl/000102030405/revoke")
+	if len(granted) != 2 || granted[1][1] != true ||
+		granted[1][0] != "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" {
+		t.Fatalf("revoke door saw %v", granted)
+	}
+}

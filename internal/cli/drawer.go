@@ -93,9 +93,13 @@ func pairs(row []field) [][2]string {
 // sessions on /cli, the over-the-air ones on a relay. Same word on
 // purpose — each reads as "the sessions this thing holds".
 const (
+	colKeyHdr        = "KEY"
+	colNameHdr       = "NAME"
+	fieldName        = "name"
 	drawerNeighbours = "neighbours"
 	drawerSessions   = "sessions"
 	drawerHistory    = "history"
+	drawerACL        = "acl"
 	kindCLI          = "cli"
 	kindSystem       = "system"
 )
@@ -124,6 +128,16 @@ var drawers = []drawer{{
 	empty: "nobody logged in",
 	keys:  (*session).airSessionKeys,
 	view:  (*session).airSessionView,
+}, {
+	name:      drawerACL,
+	doc:       "who may administer this relay — grants and live sessions",
+	on:        scopeRelay,
+	verbs:     []string{cmdGrant},
+	itemVerbs: []string{cmdRevoke},
+	itemFlag:  optKey,
+	empty:     "nobody granted, nobody logged in",
+	keys:      (*session).accessKeys,
+	view:      (*session).accessView,
 }, {
 	name:     drawerHistory,
 	doc:      "the configuration's revision journal — who changed what, when",
@@ -290,14 +304,14 @@ func (s *session) airSessionView(ctx context.Context, instance string, _ frameSe
 	}
 	named := s.nodeNames(ctx)
 	v := drawerView{
-		header: []string{"KEY", "NAME", "WHO", "ANSWERS", "PATH", "ACTIVE"},
+		header: []string{colKeyHdr, colNameHdr, "WHO", "ANSWERS", "PATH", "ACTIVE"},
 		rows:   map[string][]field{},
 	}
 	for _, c := range rows {
 		key := hex.EncodeToString(c.PubKey[:6])
 		v.keys = append(v.keys, key)
 		v.rows[key] = []field{
-			{name: "name", value: meshName(named[key]), rendered: true},
+			{name: fieldName, value: meshName(named[key]), rendered: true},
 			{name: "who", value: airRole(c)},
 			{name: "answers", value: airAnswers(c)},
 			{name: "path", value: airPath(c)},
@@ -341,6 +355,84 @@ func airPath(c AirSession) string {
 		}
 		return strings.Join(hops, "→") + fmt.Sprintf(" (%d hops)", len(c.Path))
 	}
+}
+
+// access reads a relay's access list, refusing with the relay's own
+// reason when it is down.
+func (s *session) access(instance string) ([]Access, error) {
+	r, err := s.findRelay(instance)
+	if err != nil {
+		return nil, err
+	}
+	if err := working(r); err != nil {
+		return nil, err
+	}
+	if r.Access == nil {
+		return nil, fmt.Errorf("relay %q keeps no access list", r.Name)
+	}
+	return r.Access()
+}
+
+// accessKeys answers the walker and completion, bounded.
+func (s *session) accessKeys(instance string) map[string]string {
+	type result struct{ rows []Access }
+	ch := make(chan result, 1)
+	go func() {
+		rows, _ := s.access(instance)
+		ch <- result{rows}
+	}()
+	select {
+	case got := <-ch:
+		out := map[string]string{}
+		for _, a := range got.rows {
+			out[hex.EncodeToString(a.PubKey[:6])] = accessRole(a)
+		}
+		return out
+	case <-time.After(completionBudget):
+		return nil
+	}
+}
+
+// accessView reads the access list for printing.
+func (s *session) accessView(ctx context.Context, instance string, _ frameSelectors) (drawerView, error) {
+	rows, err := s.access(instance)
+	if err != nil {
+		return drawerView{}, err
+	}
+	named := s.nodeNames(ctx)
+	v := drawerView{
+		header: []string{colKeyHdr, colNameHdr, "ROLE", "HOW", "ACTIVE"},
+		rows:   map[string][]field{},
+	}
+	for _, a := range rows {
+		key := hex.EncodeToString(a.PubKey[:6])
+		v.keys = append(v.keys, key)
+		v.rows[key] = []field{
+			{name: fieldName, value: meshName(named[key]), rendered: true},
+			{name: "role", value: accessRole(a)},
+			{name: "how", value: accessHow(a)},
+			{name: "active", value: ago(a.LastActive)},
+		}
+	}
+	sort.Strings(v.keys)
+	return v, nil
+}
+
+// accessRole names the role an entry carries.
+func accessRole(a Access) string {
+	if a.Admin {
+		return "admin"
+	}
+	return "guest"
+}
+
+// accessHow says whether the entry was granted or merely logged in —
+// the distinction that decides whether it outlives idle.
+func accessHow(a Access) string {
+	if a.Granted {
+		return "granted"
+	}
+	return "logged in"
 }
 
 // drawerSite is where a path stands relative to a drawer: which one,
@@ -510,7 +602,7 @@ func (s *session) neighbourView(ctx context.Context, instance string, _ frameSel
 		return drawerView{}, fmt.Errorf("relay %q does not keep a neighbourhood", r.Name)
 	}
 	named := s.nodeNames(ctx)
-	v := drawerView{header: []string{"KEY", "NAME", "SNR", "HEARD"}, rows: map[string][]field{}}
+	v := drawerView{header: []string{colKeyHdr, colNameHdr, "SNR", "HEARD"}, rows: map[string][]field{}}
 	for _, n := range r.Neighbours() {
 		key := hex.EncodeToString(n.PubKey[:6])
 		name := n.Name
@@ -519,7 +611,7 @@ func (s *session) neighbourView(ctx context.Context, instance string, _ frameSel
 		}
 		v.keys = append(v.keys, key)
 		v.rows[key] = []field{
-			{name: "name", value: meshName(name), rendered: true},
+			{name: fieldName, value: meshName(name), rendered: true},
 			{name: "snr", value: fmt.Sprintf("%+.2f dB", n.SNR)},
 			{name: "heard", value: ago(n.Heard)},
 		}

@@ -829,6 +829,8 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		TriggerAdvert: advertTrigger(eng),
 		Neighbours:    neighboursOf(eng),
 		AirSessions:   airSessionsOf(eng),
+		Access:        accessOf(eng),
+		Grant:         grantOf(eng),
 		Identity:      eng.Identity(),
 		Started:       time.Now(),
 		NodeName:      nodeNameOf(eng),
@@ -905,6 +907,48 @@ func neighboursOf(eng protocol.Engine) func() []cli.Neighbour {
 			out[i] = cli.Neighbour{PubKey: r.PubKey, Name: r.Name, SNR: r.SNR, Heard: r.Heard}
 		}
 		return out
+	}
+}
+
+// accessOf exposes an engine's access list — grants and sessions —
+// when it keeps one.
+func accessOf(eng protocol.Engine) func() ([]cli.Access, error) {
+	a, ok := eng.(interface {
+		AccessList() ([]enginemc.ACLEntry, error)
+	})
+	if !ok {
+		return nil
+	}
+	return func() ([]cli.Access, error) {
+		rows, err := a.AccessList()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]cli.Access, len(rows))
+		for i, r := range rows {
+			out[i] = cli.Access{
+				PubKey: r.PubKey, Admin: r.Admin,
+				Granted: r.Granted, LastActive: r.LastActive,
+			}
+		}
+		return out, nil
+	}
+}
+
+// grantOf exposes an engine's grant door.
+func grantOf(eng protocol.Engine) func(pubKey []byte, admin, revoke bool) error {
+	g, ok := eng.(interface {
+		Grant(pubKey []byte, perms byte, revoke bool) error
+	})
+	if !ok {
+		return nil
+	}
+	return func(pubKey []byte, admin, revoke bool) error {
+		perms := byte(enginemc.PermGuest)
+		if admin {
+			perms = enginemc.PermAdmin
+		}
+		return g.Grant(pubKey, perms, revoke)
 	}
 }
 

@@ -99,6 +99,46 @@ func init() {
 	commands = append(commands, journalCommands()...)
 	commands = append(commands, updateCommands()...)
 	commands = append(commands, sessionCommands()...)
+	commands = append(commands, accessCommands()...)
+}
+
+// accessCommands manage a relay's access list — who may administer it.
+func accessCommands() []*command {
+	return []*command{
+		{
+			name:  cmdGrant,
+			forms: []form{{cmdGrant + " key=<hex>", "grant this key the admin role, no password shared"}},
+			detail: []string{
+				cmdGrant + " key=<64-hex>",
+				"admin only. It records an admin permission for a whole",
+				"public key — the node need not have logged in, and the",
+				"grant outlives idle where a login does not. The key must",
+				"be complete: a prefix could name the wrong node.",
+			},
+			flags: []flagSpec{
+				{name: scopeRelay, valued: true, doc: docRelay},
+				{name: optKey, valued: true, doc: "the whole public key, 64 hex characters"},
+			},
+			admin: true,
+			run:   (*session).grantAccess,
+		},
+		{
+			name:  cmdRevoke,
+			forms: []form{{cmdRevoke, "take back a grant, or drop a session"}},
+			detail: []string{
+				cmdRevoke,
+				"admin only. It removes the entry you stand on from the",
+				"access list — a granted admin loses the role, a session",
+				"is dropped. Named by key prefix from the drawer.",
+			},
+			flags: []flagSpec{
+				{name: scopeRelay, valued: true, doc: docRelay},
+				{name: optKey, valued: true, doc: "which entry, by key prefix"},
+			},
+			admin: true,
+			run:   (*session).revokeAccess,
+		},
+	}
 }
 
 // daemonCommands inspect the running daemon and its configuration.

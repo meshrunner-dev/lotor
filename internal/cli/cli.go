@@ -55,6 +55,9 @@ const (
 	cmdScopes    = "scopes"
 	cmdDiscover  = "discover"
 	cmdAskScopes = "ask-scopes"
+	cmdGrant     = "grant"
+	cmdRevoke    = "revoke"
+	optKey       = "key"
 	cmdAdvert    = "advert"
 	cmdUndo      = "undo"
 	verbList     = "list"
@@ -154,6 +157,12 @@ type RelayInfo struct {
 	// AirSessions lists the companions logged in over the air; nil
 	// when the protocol keeps no sessions.
 	AirSessions func() ([]AirSession, error)
+	// Access lists the grants and live sessions — the access list an
+	// admin manages; nil when the protocol keeps none.
+	Access func() ([]Access, error)
+	// Grant records a role for a key, or takes it back (revoke true);
+	// nil when the protocol grants nothing.
+	Grant func(pubKey []byte, admin, revoke bool) error
 	// Duty reports the sliding-hour airtime spent against the band's
 	// budget; may be nil, ok false when unbudgeted or not transmitting.
 	Duty func() (used, budget time.Duration, ok bool)
@@ -196,6 +205,15 @@ type AttrDelta struct {
 	Attr string
 	Old  string
 	New  string
+}
+
+// Access is one entry of the access list: who, what role, whether it
+// was granted or merely logged in, and how fresh.
+type Access struct {
+	PubKey     [32]byte
+	Admin      bool
+	Granted    bool
+	LastActive time.Time
 }
 
 // MQTTInfo is what the CLI knows about one observer connection.

@@ -642,6 +642,103 @@ func (s *session) scopes(_ context.Context, in input) error {
 // askScopes puts the question on the air. It reads nothing we already
 // hold: the answer is the neighbour's own, which is the whole point of
 // asking rather than looking.
+// grantAccess records an admin permission for a whole public key.
+func (s *session) grantAccess(_ context.Context, in input) error {
+	r, err := s.oneRelay(in.opts[scopeRelay])
+	if err != nil {
+		return err
+	}
+	if err := working(r); err != nil {
+		return err
+	}
+	if r.Grant == nil {
+		return fmt.Errorf("relay %q grants nothing", r.Name)
+	}
+	key := in.opts[optKey]
+	if key == "" {
+		return fmt.Errorf("whose key? %s=<64 hex characters>", optKey)
+	}
+	pub, err := hex.DecodeString(key)
+	if err != nil || len(pub) != 32 {
+		return fmt.Errorf("%s wants a whole 64-character hex public key", optKey)
+	}
+	if err := r.Grant(pub, true, false); err != nil {
+		return err
+	}
+	fmt.Fprintf(s.out, "granted admin to %s\r\n", key[:12])
+	return nil
+}
+
+// revokeAccess takes back a grant or drops a session, by key prefix.
+func (s *session) revokeAccess(_ context.Context, in input) error {
+	r, err := s.oneRelay(in.opts[scopeRelay])
+	if err != nil {
+		return err
+	}
+	if err := working(r); err != nil {
+		return err
+	}
+	if r.Grant == nil || r.Access == nil {
+		return fmt.Errorf("relay %q keeps no access list", r.Name)
+	}
+	key := in.opts[optKey]
+	if key == "" {
+		return fmt.Errorf("which one? %s=<key prefix>", optKey)
+	}
+	prefix, err := hex.DecodeString(key)
+	if err != nil {
+		return fmt.Errorf("%q is not a hex key prefix", key)
+	}
+	// A revoke needs the whole key the engine holds; the prefix names
+	// which entry, the access list supplies the rest.
+	rows, err := r.Access()
+	if err != nil {
+		return err
+	}
+	full, err := matchAccess(rows, prefix)
+	if err != nil {
+		return err
+	}
+	if err := r.Grant(full[:], false, true); err != nil {
+		return err
+	}
+	fmt.Fprintf(s.out, "revoked %s\r\n", hex.EncodeToString(full[:6]))
+	return nil
+}
+
+// matchAccess finds the one entry a prefix names, refusing a prefix
+// that names none or several.
+func matchAccess(rows []Access, prefix []byte) ([32]byte, error) {
+	var found [32]byte
+	hits := 0
+	for _, a := range rows {
+		if len(prefix) <= len(a.PubKey) && bytesHasPrefix(a.PubKey[:], prefix) {
+			found, hits = a.PubKey, hits+1
+		}
+	}
+	switch hits {
+	case 0:
+		return found, fmt.Errorf("no entry starts with %x", prefix)
+	case 1:
+		return found, nil
+	default:
+		return found, fmt.Errorf("%x names more than one entry — give more of it", prefix)
+	}
+}
+
+// bytesHasPrefix reports whether b starts with prefix.
+func bytesHasPrefix(b, prefix []byte) bool {
+	if len(prefix) > len(b) {
+		return false
+	}
+	for i := range prefix {
+		if b[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *session) askScopes(_ context.Context, in input) error {
 	r, err := s.oneRelay(in.opts[scopeRelay])
 	if err != nil {

@@ -29,6 +29,11 @@ const (
 	permAdmin    = 3
 	permRoleMask = 3
 
+	// PermGuest and PermAdmin are the roles as callers outside name
+	// them: the manager translates a grant's admin flag into one.
+	PermGuest = permGuest
+	PermAdmin = permAdmin
+
 	// firmwareVerLevel tells a companion which reply fields to expect;
 	// 2 is the level whose shapes this engine answers with.
 	firmwareVerLevel = 2
