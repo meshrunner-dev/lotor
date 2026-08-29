@@ -780,6 +780,8 @@ func writeEscaped(cur *strings.Builder, r rune) {
 		cur.WriteRune('\n')
 	case 't':
 		cur.WriteRune('\t')
+	case 'r':
+		cur.WriteRune('\r')
 	default:
 		cur.WriteRune('\\')
 		cur.WriteRune(r)

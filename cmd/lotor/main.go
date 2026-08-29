@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -747,15 +748,27 @@ func listenConsole(ctx context.Context, path string) (net.Listener, error) {
 		// A socket someone still answers on is not a leftover: the
 		// instance lock only proves nobody shares OUR config, not that
 		// another daemon — another base, another program — does not
-		// legitimately own this path. Probe before unlinking; only an
-		// inode nobody listens on is a previous life's.
+		// legitimately own this path. Probe before unlinking, and only
+		// the one error that PROVES an inode without a listener —
+		// ECONNREFUSED — earns the cleanup. Every other outcome
+		// (EACCES, a timeout, a cancelled context) proves nothing
+		// about absence, and an unprobeable socket may still be a
+		// live one: refuse the bind and leave it standing.
 		dialer := net.Dialer{Timeout: time.Second}
-		if conn, err := dialer.DialContext(ctx, "unix", path); err == nil {
+		conn, err := dialer.DialContext(ctx, "unix", path)
+		switch {
+		case err == nil:
 			_ = conn.Close()
 			return nil, fmt.Errorf(
 				"console socket %s is alive — another process answers on it; pick another path", path)
+		case errors.Is(err, syscall.ECONNREFUSED):
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("stale console socket %s would not go: %w", path, err)
+			}
+		default:
+			return nil, fmt.Errorf(
+				"console socket %s cannot be probed — refusing to replace what may be alive: %w", path, err)
 		}
-		_ = os.Remove(path)
 	}
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "unix", path)

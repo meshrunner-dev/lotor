@@ -163,6 +163,16 @@ func Open(ctx context.Context, path string, maxShape int) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	// The shape is judged FIRST, on a bare connection: the pragmas
+	// are writes too — journal_mode=DELETE durably rewrites a WAL
+	// base's journaling protocol — and a store a newer binary owns
+	// must be refused before this binary changes anything about it.
+	if maxShape > 0 {
+		if err := refuseFutureShape(ctx, db, maxShape); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
 	if path != Memory {
 		// DELETE journaling, not WAL: WAL leaves -wal/-shm companions
 		// beside the file, and "back up the relay" must stay "copy one
@@ -171,12 +181,6 @@ func Open(ctx context.Context, path string, maxShape int) (*Store, error) {
 			"PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;"); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("config pragmas: %w", err)
-		}
-	}
-	if maxShape > 0 {
-		if err := refuseFutureShape(ctx, db, maxShape); err != nil {
-			_ = db.Close()
-			return nil, err
 		}
 	}
 	if _, err := db.ExecContext(ctx, schemaDDL); err != nil {

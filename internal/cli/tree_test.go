@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -2088,13 +2091,24 @@ func TestExportedValuesSurviveTheirOwnGrammar(t *testing.T) {
 		`back\slash`,
 		"tab\there",
 		"line\nbreak",
+		"line\rbreak",
+		"crlf\r\nboth",
 		`"`,
 		`\"`,
 		"",
-		`mix "of \ every` + "\tthing\n",
+		`mix "of \ every` + "\tthing\n\r",
 	} {
 		rendered := quoteIfSpaced(v)
-		args := splitArgs("set password=" + rendered)
+		// Through the REAL framing first: readBounded ends a command
+		// on LF or CR alike, so an unescaped control in the rendering
+		// would split the export into two commands right here — the
+		// boundary a direct splitArgs call never crosses.
+		line, err := readBounded(bufio.NewReader(strings.NewReader(
+			"set password=" + rendered + "\n")))
+		if err != nil && !errors.Is(err, io.EOF) {
+			t.Fatalf("%q framing: %v", v, err)
+		}
+		args := splitArgs(line)
 		if len(args) != 2 {
 			t.Fatalf("%q rendered %q split into %q", v, rendered, args)
 		}

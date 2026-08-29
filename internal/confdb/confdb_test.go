@@ -497,3 +497,41 @@ func TestAFutureStoreIsRefusedBeforeAnyDDL(t *testing.T) {
 	}
 	_ = ok.Close()
 }
+
+func TestAFutureStoreKeepsItsJournalMode(t *testing.T) {
+	// The pragmas are writes too: journal_mode=DELETE durably rewrote
+	// a future base's journaling protocol before the refusal landed.
+	// The shape is judged on a bare connection now — a WAL base owned
+	// by a newer binary comes back from the refusal still WAL.
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "config.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA journal_mode=WAL;
+		CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+		INSERT INTO meta VALUES('shape', '99');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Open(ctx, path, 10); err == nil {
+		t.Fatal("the future store opened")
+	}
+
+	raw, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	var mode string
+	if err := raw.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if mode != "wal" {
+		t.Errorf("journal mode = %q after the refusal, want the owner's wal", mode)
+	}
+}

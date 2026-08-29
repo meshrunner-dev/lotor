@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -1021,5 +1022,32 @@ func TestALiveSocketIsNotALeftover(t *testing.T) {
 	if _, err := listenConsole(context.Background(), path); err == nil ||
 		!strings.Contains(err.Error(), "alive") {
 		t.Fatalf("a live socket was replaced: %v", err)
+	}
+}
+
+func TestAnUnprobeableSocketIsLeftStanding(t *testing.T) {
+	// EACCES, a timeout, a cancelled context — none of them proves
+	// the absence of a listener. Only ECONNREFUSED does; everything
+	// else must refuse the bind and leave the socket exactly where
+	// its possible owner put it.
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores socket modes; the probe cannot fail with EACCES")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "console.sock")
+	first, err := listenConsole(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Close() }()
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := listenConsole(context.Background(), path); err == nil ||
+		!strings.Contains(err.Error(), "cannot be probed") {
+		t.Fatalf("an unprobeable live socket was replaced: %v", err)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("the live socket was unlinked anyway: %v", err)
 	}
 }

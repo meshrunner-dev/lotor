@@ -779,15 +779,16 @@ func exportValue(v any) string {
 }
 
 func quoteIfSpaced(s string) string {
-	if !strings.ContainsAny(s, " \t\"\\\n") {
+	if !strings.ContainsAny(s, " \t\"\\\n\r") {
 		return s
 	}
 	// The escaping the tokenizer undoes, symmetrically: a password
 	// holding its own quotes — perfectly legal — used to come back
 	// from an export with them silently gone, which is an export that
-	// recreates a different secret.
+	// recreates a different secret. CR is escaped like LF because the
+	// console's own framing ends a command on either.
 	r := strings.NewReplacer(
-		"\\", "\\\\", "\"", "\\\"", "\n", "\\n", "\t", "\\t")
+		"\\", "\\\\", "\"", "\\\"", "\n", "\\n", "\t", "\\t", "\r", "\\r")
 	return `"` + r.Replace(s) + `"`
 }
 
