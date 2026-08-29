@@ -80,19 +80,19 @@ CREATE TABLE IF NOT EXISTS acl(
 );
 CREATE TABLE IF NOT EXISTS regions(
   relay  TEXT NOT NULL,
-  id     INTEGER NOT NULL,
-  parent INTEGER NOT NULL,
+  id     INTEGER NOT NULL CHECK(id BETWEEN 1 AND 65535),
+  parent INTEGER NOT NULL CHECK(parent BETWEEN 0 AND 65535),
   name   TEXT NOT NULL,
-  flags  INTEGER NOT NULL,
-  seq    INTEGER NOT NULL,
+  flags  INTEGER NOT NULL CHECK(flags BETWEEN 0 AND 255),
+  seq    INTEGER NOT NULL CHECK(seq >= 0),
   PRIMARY KEY(relay, id)
 );
 CREATE TABLE IF NOT EXISTS regions_meta(
   relay          TEXT PRIMARY KEY,
-  next_id        INTEGER NOT NULL,
-  home_id        INTEGER NOT NULL,
-  default_id     INTEGER NOT NULL,
-  wildcard_flags INTEGER NOT NULL
+  next_id        INTEGER NOT NULL CHECK(next_id BETWEEN 0 AND 65535),
+  home_id        INTEGER NOT NULL CHECK(home_id BETWEEN 0 AND 65535),
+  default_id     INTEGER NOT NULL CHECK(default_id BETWEEN 0 AND 65535),
+  wildcard_flags INTEGER NOT NULL CHECK(wildcard_flags BETWEEN 0 AND 255)
 );
 INSERT INTO meta(key, value) VALUES('schema_version', '1')
   ON CONFLICT(key) DO NOTHING;
@@ -382,7 +382,11 @@ func (s *Store) LastMutation(ctx context.Context) (*Revision, error) {
 }
 
 // Remove deletes one object, keeping its last shape in the revision —
-// the audit must show what died, not only that something did.
+// the audit must show what died, not only that something did. A relay
+// takes its runtime state with it, in the same transaction: sessions,
+// regions and their meta row. Leaving them was resurrection — a relay
+// recreated under the same name silently inherited the old grants and
+// the old transport policy, when the operation says "added anew".
 func (s *Store) Remove(ctx context.Context, kind, name, principal string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -397,6 +401,17 @@ func (s *Store) Remove(ctx context.Context, kind, name, principal string) error 
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM objects WHERE kind = ? AND name = ?", kind, name); err != nil {
 		return err
+	}
+	if kind == KindRelay {
+		for _, stmt := range []string{
+			"DELETE FROM acl WHERE relay = ?",
+			"DELETE FROM regions WHERE relay = ?",
+			"DELETE FROM regions_meta WHERE relay = ?",
+		} {
+			if _, err := tx.ExecContext(ctx, stmt, name); err != nil {
+				return err
+			}
+		}
 	}
 	diff, err := json.Marshal(map[string]Change{"object": {Old: json.RawMessage(attrs)}})
 	if err != nil {

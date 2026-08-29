@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 )
 
 // RegionRow is one persisted region entry. Seq is the insertion
@@ -50,6 +51,17 @@ func (s *Store) LoadRegions(ctx context.Context, relay string,
 	if err != nil {
 		return nil, meta, false, err
 	}
+	// Ranges are judged on the values as stored, BEFORE any narrowing:
+	// a conversion first would turn corruption into a different, valid
+	// policy — wildcard_flags 256 read back as 0 is "carry every plain
+	// flood", where the promise is fail-closed on a table that does
+	// not restore.
+	if err := within16(next, home, def); err != nil {
+		return nil, meta, false, fmt.Errorf("regions meta for %q: %w", relay, err)
+	}
+	if wild < 0 || wild > 255 {
+		return nil, meta, false, fmt.Errorf("regions meta for %q: wildcard_flags %d is not a byte", relay, wild)
+	}
 	meta = RegionsMeta{
 		NextID: uint16(next), HomeID: uint16(home),
 		DefaultID: uint16(def), WildcardFlags: uint8(wild),
@@ -67,6 +79,13 @@ func (s *Store) LoadRegions(ctx context.Context, relay string,
 		var id, parent, flags, seq int64
 		if err := rows.Scan(&id, &parent, &r.Name, &flags, &seq); err != nil {
 			return nil, meta, false, err
+		}
+		if err := within16(id, parent); err != nil {
+			return nil, meta, false, fmt.Errorf("region row %q of %q: %w", r.Name, relay, err)
+		}
+		if flags < 0 || flags > 255 || seq < 0 {
+			return nil, meta, false, fmt.Errorf(
+				"region row %q of %q: flags %d / seq %d out of range", r.Name, relay, flags, seq)
 		}
 		r.ID, r.Parent = uint16(id), uint16(parent)
 		r.Flags, r.Seq = uint8(flags), int(seq)
@@ -111,4 +130,14 @@ func (s *Store) ReplaceRegions(ctx context.Context, relay string,
 		return err
 	}
 	return tx.Commit()
+}
+
+// within16 refuses any value a uint16 cannot hold as it stands.
+func within16(vs ...int64) error {
+	for _, v := range vs {
+		if v < 0 || v > 65535 {
+			return fmt.Errorf("value %d does not fit the wire's 16 bits", v)
+		}
+	}
+	return nil
 }
