@@ -82,6 +82,8 @@ func policySchema() []schema.Attr {
 		{Name: "guest_access", Type: schema.String,
 			Enum: []string{guestBlocked, guestPassword, guestOpen},
 			Doc:  "whether a stranger may open a read-only session over the air"},
+		{Name: "admin_password", Type: schema.String, Secret: true,
+			Doc: "grants the admin role over the air — empty keeps OTA administration off"},
 		{Name: "guest_password", Type: schema.String, Secret: true,
 			Doc: "the guest credential, with guest_access password"},
 		{Name: "session_limit", Type: schema.Int,

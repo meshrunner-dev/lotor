@@ -578,3 +578,55 @@ func awaitJudged(t *testing.T, sub *bus.Subscription) bus.FrameJudged {
 		}
 	}
 }
+
+func TestAdminLoginGrantsTheRole(t *testing.T) {
+	e, dev, sub, peer := txRig(t, "on-air")
+	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
+	e.p.AdminPassword = "mask"
+	runEngine(t, e, dev)
+
+	frame, secret := login(t, e.id, peer, nowTS(300), "mask", false)
+	dev.frames <- frame
+	if sent := awaitSent(t, sub); sent.Kind != "login-resp" {
+		t.Fatalf("sent = %+v", sent)
+	}
+	_, body := openReply(t, <-dev.sent, secret)
+	if len(body) < 4 || body[0] != meshcore.LoginOK || body[2] != 1 || body[3]&permRoleMask != permAdmin {
+		t.Fatalf("login reply = % x — want OK, admin bit, admin perms", body)
+	}
+
+	// A later guest-word login does not demote the admin.
+	frame, secret = login(t, e.id, peer, nowTS(301), "raccoon", false)
+	dev.frames <- frame
+	if sent := awaitSent(t, sub); sent.Kind != "login-resp" {
+		t.Fatalf("sent = %+v", sent)
+	}
+	if _, body := openReply(t, <-dev.sent, secret); body[2] != 1 {
+		t.Fatalf("guest word demoted the admin: % x", body)
+	}
+}
+
+func TestAnEmptyAdminPasswordGrantsNothing(t *testing.T) {
+	// OTA admin is off until a password exists: an empty submission
+	// must not match an empty setting.
+	e, _, _, peer := txRig(t, "on-air")
+	e.p.GuestAccess = guestBlocked
+	e.queue.depth = 8
+	frame, _ := login(t, e.id, peer, nowTS(310), "", false)
+	pkt, err := meshcore.ParsePacket(frame.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.respondAnon(rxOf(e, pkt), txn.New())
+	if n := len(e.queue.entries); n != 0 {
+		t.Fatalf("an empty password earned %d replies", n)
+	}
+}
+
+func TestAdminEqualsGuestIsRefused(t *testing.T) {
+	p := params{NodeName: "x", GuestAccess: guestPassword,
+		GuestPassword: "same", AdminPassword: "same"}
+	if err := normalizeGuest(&p); err == nil {
+		t.Fatal("one word granting two roles was accepted")
+	}
+}

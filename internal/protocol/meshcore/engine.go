@@ -111,6 +111,9 @@ type params struct {
 	SessionLimit int `yaml:"session_limit"`
 	// GuestPassword is the credential when GuestAccess asks for one.
 	GuestPassword string `yaml:"guest_password"`
+	// AdminPassword grants the admin role over the air — the whole
+	// switch: empty keeps over-the-air administration off.
+	AdminPassword string `yaml:"admin_password"`
 	// OwnerInfo rides the anonymous owner reply after the name — the
 	// reference's free-text field for "who runs this node"; optional.
 	OwnerInfo string `yaml:"owner_info"`
@@ -290,6 +293,11 @@ func normalizeGuest(p *params) error {
 	default:
 		return fmt.Errorf(
 			"meshcore params: guest_access %q — want blocked, password or open", p.GuestAccess)
+	}
+	if p.AdminPassword != "" && p.AdminPassword == p.GuestPassword {
+		return errors.New(
+			"meshcore params: admin_password equals guest_password — " +
+				"one word cannot grant two roles")
 	}
 	return nil
 }

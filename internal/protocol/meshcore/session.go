@@ -121,7 +121,11 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	c.asks = rateLimiter{max: e.p.SessionLimit, window: sessionLimitWindow}
 	e.acl.put(c)
 
-	e.log.Info("guest logged in", zap.String("txn", origin.Short()),
+	role := "guest"
+	if c.isAdmin() {
+		role = "admin"
+	}
+	e.log.Info(role+" logged in", zap.String("txn", origin.Short()),
 		zap.String("pubkey", shortKey(c.pubKey[:])))
 	// A login reply echoes no tag: the reference puts its own clock in
 	// that position, so the frame's timestamp is the clock and the
@@ -146,11 +150,28 @@ func (e *engine) admitLogin(senderPub, secret []byte, password string,
 	switch {
 	case password == "" && c != nil:
 		// A blank password re-checks an existing session.
+	case e.p.AdminPassword != "" &&
+		subtle.ConstantTimeCompare([]byte(password), []byte(e.p.AdminPassword)) == 1:
+		// The admin word, checked first: with an open guest door every
+		// password admits someone, and the roles must not depend on
+		// which arm of a switch ran first.
+		if c == nil {
+			c = &client{}
+			copy(c.pubKey[:], senderPub)
+		}
+		c.perms = (c.perms &^ permRoleMask) | permAdmin
+		c.secret = secret
 	case e.p.GuestAccess == guestOpen ||
 		subtle.ConstantTimeCompare([]byte(password), []byte(e.p.GuestPassword)) == 1:
 		if c == nil {
 			c = &client{perms: permGuest}
 			copy(c.pubKey[:], senderPub)
+		}
+		// A guest word never demotes an admin session: the admin who
+		// idly logs in with the lesser password keeps the greater
+		// role, exactly as the reference's ACL keeps its permissions.
+		if !c.isAdmin() {
+			c.perms = (c.perms &^ permRoleMask) | permGuest
 		}
 		c.secret = secret
 	default:
