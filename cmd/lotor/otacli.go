@@ -10,11 +10,12 @@ package main
 
 import (
 	"encoding/hex"
+	"strconv"
+	"strings"
+	"time"
 
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/protocol"
-	"strings"
-	"time"
 )
 
 // otaSetting maps one CommonCLI variable onto the attribute it means
@@ -76,6 +77,8 @@ func (m *manager) runOTA(relay, principal, line string) string {
 		return m.otaAdvert(relay, true)
 	case "advert.zerohop":
 		return m.otaAdvert(relay, false)
+	case "setperm":
+		return m.otaSetperm(relay, principal, rest)
 	case "ver":
 		return "lotor " + version
 	case "clock":
@@ -195,6 +198,32 @@ func otaErr(err error) string {
 		msg = msg[:keep-1] + "…"
 	}
 	return "ERR: " + msg
+}
+
+// otaSetperm grants or revokes an admin permission — the reference's
+// "setperm {pubkey-hex} {perms-int}", where a guest role (zero) means
+// removal. An admin may hand another admin the role over the air,
+// but never touches the credentials that grant it, which stay the
+// console's: otaReadOnly already keeps admin_password out of set.
+func (m *manager) otaSetperm(relay, principal, rest string) string {
+	keyHex, permStr, ok := strings.Cut(rest, " ")
+	if !ok {
+		return "ERR: bad params"
+	}
+	pub, err := hex.DecodeString(strings.TrimSpace(keyHex))
+	if err != nil || len(pub) != 32 {
+		return "ERR: bad pubkey"
+	}
+	perms, err := strconv.Atoi(strings.TrimSpace(permStr))
+	if err != nil {
+		return "ERR: bad perms"
+	}
+	// The role lives in the low two bits; zero is guest, which the
+	// reference treats as removal.
+	revoke := perms&3 == 0
+	return m.orderAir(airOrder{
+		relay: relay, principal: principal, grant: true, pubKey: pub, revoke: revoke,
+	}, "OK")
 }
 
 // otaAdvert announces this node, flooded or to the neighbourhood.

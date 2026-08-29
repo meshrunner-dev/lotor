@@ -154,6 +154,10 @@ type airOrder struct {
 	unset     []string
 	advert    bool
 	flood     bool
+	// grant carries a permission change: pubKey to admin, or revoke.
+	grant  bool
+	pubKey []byte
+	revoke bool
 }
 
 // serveAir applies over-the-air mutations off the engine's goroutine,
@@ -178,6 +182,21 @@ const airReplyGrace = 2 * time.Second
 
 // serveAirOrder carries out one order off the engine's goroutine.
 func (m *manager) serveAirOrder(ctx context.Context, o airOrder) {
+	if o.grant {
+		// Reading the door takes viewMu; calling it waits on the
+		// engine's ack loop, safe here on the manager's own goroutine.
+		m.viewMu.RLock()
+		info, ok := m.infos[o.relay]
+		m.viewMu.RUnlock()
+		if ok && info.Grant != nil {
+			if err := info.Grant(o.pubKey, !o.revoke, o.revoke); err != nil {
+				m.log.Warn("over-the-air permission change refused",
+					zap.String("relay", o.relay), zap.String("principal", o.principal),
+					zap.Error(err))
+			}
+		}
+		return
+	}
 	if o.advert {
 		// The reply is already queued; the announcement can go at
 		// once. This is the manager's own goroutine — waiting on the
