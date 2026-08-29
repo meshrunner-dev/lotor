@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -963,8 +962,15 @@ func TestSocketPathRefusesWhatIsNotASocket(t *testing.T) {
 	// nothing about what sits at the socket path. Deleting it blind
 	// destroyed whatever it was — the config database included, when
 	// the two paths were set equal.
-	dir := t.TempDir()
-	path := filepath.Join(dir, "console.sock")
+	//
+	// Bound from inside the directory rather than by its full path: a
+	// unix address carries the path in a fixed array — 104 bytes on
+	// darwin, 108 on linux — and macOS hands out temporary
+	// directories under /var/folders/... long enough to overflow it.
+	// bind resolves a relative path against the working directory, so
+	// only "console.sock" travels in the address.
+	t.Chdir(t.TempDir())
+	path := "console.sock"
 	if err := os.WriteFile(path, []byte("somebody's data"), 0o600); err != nil {
 		t.Fatal(err)
 	}
