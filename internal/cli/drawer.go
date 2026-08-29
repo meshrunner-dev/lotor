@@ -385,7 +385,7 @@ func (s *session) accessKeys(instance string) map[string]string {
 	case got := <-ch:
 		out := map[string]string{}
 		for _, a := range got.rows {
-			out[hex.EncodeToString(a.PubKey[:6])] = accessRole(a)
+			out[hex.EncodeToString(a.PubKey[:6])] = a.Role
 		}
 		return out
 	case <-time.After(completionBudget):
@@ -409,21 +409,13 @@ func (s *session) accessView(ctx context.Context, instance string, _ frameSelect
 		v.keys = append(v.keys, key)
 		v.rows[key] = []field{
 			{name: fieldName, value: meshName(named[key]), rendered: true},
-			{name: "role", value: accessRole(a)},
+			{name: "role", value: a.Role},
 			{name: "how", value: accessHow(a)},
 			{name: "active", value: ago(a.LastActive)},
 		}
 	}
 	sort.Strings(v.keys)
 	return v, nil
-}
-
-// accessRole names the role an entry carries.
-func accessRole(a Access) string {
-	if a.Admin {
-		return "admin"
-	}
-	return "guest"
 }
 
 // accessHow says whether the entry was granted or merely logged in —

@@ -1838,15 +1838,19 @@ func TestHistoryConfessesItsCap(t *testing.T) {
 func TestACLDrawerGrantsAndRevokes(t *testing.T) {
 	deps := testDeps(t)
 	deps.Privilege = Admin
-	var granted [][2]any // {pubkeyHex, revoke}
-	live := []Access{{Admin: true, Granted: true, LastActive: time.Now()}}
+	var granted [][2]any // {pubkeyHex, verb}
+	live := []Access{{Role: "admin", Granted: true, LastActive: time.Now()}}
 	for i := range live[0].PubKey {
 		live[0].PubKey[i] = byte(i)
 	}
 	for i := range deps.Relays {
 		deps.Relays[i].Access = func() ([]Access, error) { return live, nil }
-		deps.Relays[i].Grant = func(pub []byte, admin, revoke bool) error {
-			granted = append(granted, [2]any{hex.EncodeToString(pub), revoke})
+		deps.Relays[i].GrantAdmin = func(pub []byte) error {
+			granted = append(granted, [2]any{hex.EncodeToString(pub), "grant"})
+			return nil
+		}
+		deps.Relays[i].Revoke = func(pub []byte) error {
+			granted = append(granted, [2]any{hex.EncodeToString(pub), "revoke"})
 			return nil
 		}
 	}
@@ -1866,12 +1870,12 @@ func TestACLDrawerGrantsAndRevokes(t *testing.T) {
 	}
 	full := strings.Repeat("ab", 32)
 	run(t, deps, "/relay meshcore-868 acl grant key="+full)
-	if len(granted) != 1 || granted[0][0] != full || granted[0][1] != false {
+	if len(granted) != 1 || granted[0][0] != full || granted[0][1] != "grant" {
 		t.Fatalf("grant door saw %v", granted)
 	}
 	// revoke names an entry by prefix; the engine gets the whole key.
 	run(t, deps, "/relay/meshcore-868/acl/000102030405/revoke")
-	if len(granted) != 2 || granted[1][1] != true ||
+	if len(granted) != 2 || granted[1][1] != "revoke" ||
 		granted[1][0] != "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" {
 		t.Fatalf("revoke door saw %v", granted)
 	}

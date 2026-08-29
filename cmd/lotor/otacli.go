@@ -215,14 +215,14 @@ func (m *manager) otaSetperm(relay, principal, rest string) string {
 		return "ERR: bad pubkey"
 	}
 	perms, err := strconv.Atoi(strings.TrimSpace(permStr))
-	if err != nil {
+	if err != nil || perms < 0 || perms > 255 {
 		return "ERR: bad perms"
 	}
-	// The role lives in the low two bits; zero is guest, which the
-	// reference treats as removal.
-	revoke := perms&3 == 0
+	// The byte travels whole — the reference's own vocabulary, a
+	// guest role meaning removal, read-only and read-write kept as
+	// what they are rather than flattened into admin.
 	return m.orderAir(airOrder{
-		relay: relay, principal: principal, grant: true, pubKey: pub, revoke: revoke,
+		relay: relay, principal: principal, grant: true, pubKey: pub, perms: byte(perms),
 	}, "OK")
 }
 

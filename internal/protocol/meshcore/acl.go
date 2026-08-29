@@ -202,7 +202,8 @@ func (a *acl) entries() []ACLEntry {
 	out := make([]ACLEntry, 0, len(a.by))
 	for k, c := range a.by {
 		out = append(out, ACLEntry{
-			PubKey: k, Admin: c.isAdmin(), Granted: c.granted, LastActive: c.lastActive,
+			PubKey: k, Perms: c.perms, Admin: c.isAdmin(),
+			Granted: c.granted, LastActive: c.lastActive,
 		})
 	}
 	return out

@@ -158,7 +158,7 @@ func TestAGrantOutlivesIdleAndIsReachable(t *testing.T) {
 	e.AttachSessions(store)
 	runEngine(t, e, dev)
 
-	if err := e.Grant(peer.PubKey[:], permAdmin, false); err != nil {
+	if err := e.Grant(peer.PubKey[:], permAdmin); err != nil {
 		t.Fatalf("grant: %v", err)
 	}
 	c := e.acl.get(peer.PubKey[:])
@@ -186,8 +186,9 @@ func TestAGrantOutlivesIdleAndIsReachable(t *testing.T) {
 		t.Fatalf("access list = %+v", list)
 	}
 
-	// Revoke removes it, from table and store.
-	if err := e.Grant(peer.PubKey[:], permGuest, true); err != nil {
+	// Revoke removes it, from table and store: a guest role is the
+	// reference's word for removal.
+	if err := e.Grant(peer.PubKey[:], permGuest); err != nil {
 		t.Fatal(err)
 	}
 	if e.acl.get(peer.PubKey[:]) != nil {
@@ -195,5 +196,32 @@ func TestAGrantOutlivesIdleAndIsReachable(t *testing.T) {
 	}
 	if _, held := store.rows[peer.PubKey]; held {
 		t.Error("the revoke left the grant in the store")
+	}
+}
+
+func TestAReadOnlyGrantIsNotAnAdmin(t *testing.T) {
+	// setperm 1 and 2 are the reference's read-only and read-write —
+	// stored as what they are, shown as what they are, and admin only
+	// at exactly three. Flattening them into admin was the bug.
+	e, dev, _, peer := txRig(t, "on-air")
+	e.AttachSessions(newMemStore())
+	runEngine(t, e, dev)
+
+	if err := e.Grant(peer.PubKey[:], PermReadOnly); err != nil {
+		t.Fatal(err)
+	}
+	list, err := e.AccessList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Admin || list[0].Perms != PermReadOnly {
+		t.Fatalf("read-only grant = %+v", list)
+	}
+	if RoleName(list[0].Perms) != "read-only" {
+		t.Fatalf("role named %q", RoleName(list[0].Perms))
+	}
+	c := e.acl.get(peer.PubKey[:])
+	if c == nil || c.isAdmin() {
+		t.Fatal("a read-only grant reached the admin role")
 	}
 }

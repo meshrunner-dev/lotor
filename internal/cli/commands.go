@@ -651,7 +651,7 @@ func (s *session) grantAccess(_ context.Context, in input) error {
 	if err := working(r); err != nil {
 		return err
 	}
-	if r.Grant == nil {
+	if r.GrantAdmin == nil {
 		return fmt.Errorf("relay %q grants nothing", r.Name)
 	}
 	key := in.opts[optKey]
@@ -662,7 +662,7 @@ func (s *session) grantAccess(_ context.Context, in input) error {
 	if err != nil || len(pub) != 32 {
 		return fmt.Errorf("%s wants a whole 64-character hex public key", optKey)
 	}
-	if err := r.Grant(pub, true, false); err != nil {
+	if err := r.GrantAdmin(pub); err != nil {
 		return err
 	}
 	fmt.Fprintf(s.out, "granted admin to %s\r\n", key[:12])
@@ -678,7 +678,7 @@ func (s *session) revokeAccess(_ context.Context, in input) error {
 	if err := working(r); err != nil {
 		return err
 	}
-	if r.Grant == nil || r.Access == nil {
+	if r.Revoke == nil || r.Access == nil {
 		return fmt.Errorf("relay %q keeps no access list", r.Name)
 	}
 	key := in.opts[optKey]
@@ -699,7 +699,7 @@ func (s *session) revokeAccess(_ context.Context, in input) error {
 	if err != nil {
 		return err
 	}
-	if err := r.Grant(full[:], false, true); err != nil {
+	if err := r.Revoke(full[:]); err != nil {
 		return err
 	}
 	fmt.Fprintf(s.out, "revoked %s\r\n", hex.EncodeToString(full[:6]))

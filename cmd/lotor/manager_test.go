@@ -10,6 +10,7 @@ import (
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/protocol"
+	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 	"time"
 )
 
@@ -533,5 +534,32 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	}
 	if out := m.runOTA("mc", "air:test", "get name"); out != "> Raccoon City" {
 		t.Errorf("get shape: %q", out)
+	}
+
+	// setperm queues a grant; a short key is refused before the queue.
+	if out := m.runOTA("mc", "air:test", "setperm abcd 3"); !strings.Contains(out, "ERR") {
+		t.Errorf("short setperm key got %q", out)
+	}
+	full := strings.Repeat("ab", 32)
+	if out := m.runOTA("mc", "air:test", "setperm "+full+" 3"); out != "OK" {
+		t.Errorf("setperm got %q", out)
+	}
+	g := <-m.air
+	if !g.grant || g.perms != enginemc.PermAdmin || len(g.pubKey) != 32 {
+		t.Errorf("grant order = %+v", g)
+	}
+	// The byte travels whole: read-only stays read-only, not admin.
+	if out := m.runOTA("mc", "air:test", "setperm "+full+" 1"); out != "OK" {
+		t.Errorf("setperm read-only got %q", out)
+	}
+	if g := <-m.air; g.perms != enginemc.PermReadOnly {
+		t.Errorf("read-only flattened: %+v", g)
+	}
+	// A guest role is the reference's word for removal.
+	if out := m.runOTA("mc", "air:test", "setperm "+full+" 0"); out != "OK" {
+		t.Errorf("setperm revoke got %q", out)
+	}
+	if g := <-m.air; !g.grant || g.perms != enginemc.PermGuest {
+		t.Errorf("revoke order = %+v", g)
 	}
 }

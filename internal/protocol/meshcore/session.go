@@ -25,14 +25,24 @@ import (
 // happens on the local console socket, where the operating system's
 // own permissions are the authentication.
 const (
-	permGuest    = 0
-	permAdmin    = 3
-	permRoleMask = 3
+	// The reference's ClientACL roles — PERM_ACL_* in ClientACL.h —
+	// living in the low two bits of the permission byte. Guest is not
+	// persisted: setting it is how an entry is removed. Admin is
+	// admin at exactly three, never at "non-zero".
+	permRoleMask  = 0x03
+	permGuest     = 0x00
+	permReadOnly  = 0x01
+	permReadWrite = 0x02
+	permAdmin     = 0x03
 
-	// PermGuest and PermAdmin are the roles as callers outside name
-	// them: the manager translates a grant's admin flag into one.
-	PermGuest = permGuest
-	PermAdmin = permAdmin
+	// PermRoleMask and the Perm* roles are the same ladder for the
+	// callers that speak grants — one vocabulary, defined once, so an
+	// edit that changes a role changes it everywhere or nowhere.
+	PermRoleMask  = permRoleMask
+	PermGuest     = permGuest
+	PermReadOnly  = permReadOnly
+	PermReadWrite = permReadWrite
+	PermAdmin     = permAdmin
 
 	// firmwareVerLevel tells a companion which reply fields to expect;
 	// 2 is the level whose shapes this engine answers with.

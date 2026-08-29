@@ -154,10 +154,11 @@ type airOrder struct {
 	unset     []string
 	advert    bool
 	flood     bool
-	// grant carries a permission change: pubKey to admin, or revoke.
+	// grant carries a permission change: the byte for pubKey, zero
+	// role meaning removal.
 	grant  bool
 	pubKey []byte
-	revoke bool
+	perms  byte
 }
 
 // serveAir applies over-the-air mutations off the engine's goroutine,
@@ -189,7 +190,7 @@ func (m *manager) serveAirOrder(ctx context.Context, o airOrder) {
 		info, ok := m.infos[o.relay]
 		m.viewMu.RUnlock()
 		if ok && info.Grant != nil {
-			if err := info.Grant(o.pubKey, !o.revoke, o.revoke); err != nil {
+			if err := info.Grant(o.pubKey, o.perms); err != nil {
 				m.log.Warn("over-the-air permission change refused",
 					zap.String("relay", o.relay), zap.String("principal", o.principal),
 					zap.Error(err))

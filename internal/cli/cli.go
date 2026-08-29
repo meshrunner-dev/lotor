@@ -160,9 +160,15 @@ type RelayInfo struct {
 	// Access lists the grants and live sessions — the access list an
 	// admin manages; nil when the protocol keeps none.
 	Access func() ([]Access, error)
-	// Grant records a role for a key, or takes it back (revoke true);
+	// Grant records a permission byte for a key — the wire's own
+	// value, passed through whole for the channels that carry one;
 	// nil when the protocol grants nothing.
-	Grant func(pubKey []byte, admin, revoke bool) error
+	Grant func(pubKey []byte, perms byte) error
+	// GrantAdmin and Revoke are the console's two words for the
+	// same door, wired from the protocol's named roles so no number
+	// ever appears here.
+	GrantAdmin func(pubKey []byte) error
+	Revoke     func(pubKey []byte) error
 	// Duty reports the sliding-hour airtime spent against the band's
 	// budget; may be nil, ok false when unbudgeted or not transmitting.
 	Duty func() (used, budget time.Duration, ok bool)
@@ -210,8 +216,10 @@ type AttrDelta struct {
 // Access is one entry of the access list: who, what role, whether it
 // was granted or merely logged in, and how fresh.
 type Access struct {
-	PubKey     [32]byte
-	Admin      bool
+	PubKey [32]byte
+	// Role is the protocol's own word for what this entry may do —
+	// named at the boundary, so the console renders and never decodes.
+	Role       string
 	Granted    bool
 	LastActive time.Time
 }

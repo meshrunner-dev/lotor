@@ -37,28 +37,27 @@ type sessionsOrder struct {
 	reply chan []ClientSession
 }
 
-// aclOrder carries a grant or revoke into the pipeline's goroutine,
-// which owns the table. A grant with role guest, or perms zero, is a
-// revoke — the reference's setperm, where a guest role is not
-// persisted and so means removal.
+// aclOrder carries a permission change into the pipeline's goroutine,
+// which owns the table. The perms byte is the reference's own: the
+// role in the low two bits, a guest role meaning removal — setperm's
+// contract, where a guest is not persisted.
 type aclOrder struct {
 	pubKey [meshcore.PubKeySize]byte
 	perms  byte
-	revoke bool
 	reply  chan error
 }
 
-// Grant records or lifts a permission for a public key — an admin
-// naming another admin, or taking the grant back. The full key is
-// required: a permission set to a prefix could name the wrong node.
-func (e *engine) Grant(pubKey []byte, perms byte, revoke bool) error {
+// Grant records a permission byte for a public key — the role in its
+// low bits, zero taking the entry away. The full key is required: a
+// permission set to a prefix could name the wrong node.
+func (e *engine) Grant(pubKey []byte, perms byte) error {
 	if e.id == nil {
 		return errors.New("this relay has no identity — it grants nothing")
 	}
 	if len(pubKey) != meshcore.PubKeySize {
 		return fmt.Errorf("a permission needs the whole %d-byte key", meshcore.PubKeySize)
 	}
-	o := &aclOrder{perms: perms, revoke: revoke, reply: make(chan error, 1)}
+	o := &aclOrder{perms: perms, reply: make(chan error, 1)}
 	copy(o.pubKey[:], pubKey)
 	select {
 	case e.aclAsk <- o:
@@ -78,7 +77,10 @@ func (e *engine) Grant(pubKey []byte, perms byte, revoke bool) error {
 // list: who, what role, whether it was granted or merely logged in,
 // and how fresh.
 type ACLEntry struct {
-	PubKey     [meshcore.PubKeySize]byte
+	PubKey [meshcore.PubKeySize]byte
+	// Perms is the byte as stored — the reference's vocabulary, the
+	// role in the low two bits.
+	Perms      byte
 	Admin      bool
 	Granted    bool
 	LastActive time.Time
@@ -106,6 +108,21 @@ type aclListOrder struct {
 	reply chan []ACLEntry
 }
 
+// RoleName names the role a permission byte carries — the reference's
+// four, by the low two bits. The one place the words exist.
+func RoleName(perms byte) string {
+	switch perms & permRoleMask {
+	case permAdmin:
+		return "admin"
+	case permReadWrite:
+		return "read-write"
+	case permReadOnly:
+		return "read-only"
+	default:
+		return "guest"
+	}
+}
+
 // drainACLAsk serves a pending grant or revoke, on the pipeline's
 // turn. The secret is computed here so a granted admin can be reached
 // before it has ever logged in — the reference calcs it at setperm.
@@ -125,7 +142,7 @@ func (e *engine) drainACLAsk() {
 // applyGrant carries out one grant or revoke on the table the
 // pipeline owns.
 func (e *engine) applyGrant(o *aclOrder) error {
-	if o.revoke || o.perms&permRoleMask == permGuest {
+	if o.perms&permRoleMask == permGuest {
 		// A guest role is not a grant; setting it, like the reference,
 		// removes the entry entirely.
 		e.acl.remove(o.pubKey)
@@ -142,7 +159,10 @@ func (e *engine) applyGrant(o *aclOrder) error {
 		c.pubKey = o.pubKey
 	}
 	c.secret = secret
-	c.perms = (c.perms &^ permRoleMask) | (o.perms & permRoleMask)
+	// The whole byte, as the reference stores it — upper bits are
+	// future capability flags, and flattening them here would erase
+	// what a companion asked for.
+	c.perms = o.perms
 	c.granted = true
 	if c.lastActive.IsZero() {
 		c.lastActive = time.Now()

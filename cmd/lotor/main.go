@@ -831,6 +831,8 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		AirSessions:   airSessionsOf(eng),
 		Access:        accessOf(eng),
 		Grant:         grantOf(eng),
+		GrantAdmin:    roleDoor(eng, enginemc.PermAdmin),
+		Revoke:        roleDoor(eng, enginemc.PermGuest),
 		Identity:      eng.Identity(),
 		Started:       time.Now(),
 		NodeName:      nodeNameOf(eng),
@@ -927,7 +929,7 @@ func accessOf(eng protocol.Engine) func() ([]cli.Access, error) {
 		out := make([]cli.Access, len(rows))
 		for i, r := range rows {
 			out[i] = cli.Access{
-				PubKey: r.PubKey, Admin: r.Admin,
+				PubKey: r.PubKey, Role: enginemc.RoleName(r.Perms),
 				Granted: r.Granted, LastActive: r.LastActive,
 			}
 		}
@@ -935,21 +937,27 @@ func accessOf(eng protocol.Engine) func() ([]cli.Access, error) {
 	}
 }
 
-// grantOf exposes an engine's grant door.
-func grantOf(eng protocol.Engine) func(pubKey []byte, admin, revoke bool) error {
+// roleDoor fixes one named role onto the grant door — the console's
+// grant and revoke, with the number written exactly once, in the
+// protocol's own constants.
+func roleDoor(eng protocol.Engine, perms byte) func(pubKey []byte) error {
+	g := grantOf(eng)
+	if g == nil {
+		return nil
+	}
+	return func(pubKey []byte) error { return g(pubKey, perms) }
+}
+
+// grantOf exposes an engine's grant door, the permission byte passed
+// through whole.
+func grantOf(eng protocol.Engine) func(pubKey []byte, perms byte) error {
 	g, ok := eng.(interface {
-		Grant(pubKey []byte, perms byte, revoke bool) error
+		Grant(pubKey []byte, perms byte) error
 	})
 	if !ok {
 		return nil
 	}
-	return func(pubKey []byte, admin, revoke bool) error {
-		perms := byte(enginemc.PermGuest)
-		if admin {
-			perms = enginemc.PermAdmin
-		}
-		return g.Grant(pubKey, perms, revoke)
-	}
+	return g.Grant
 }
 
 // airSessionsOf exposes an engine's over-the-air session table when
