@@ -61,12 +61,34 @@ endorsed by the MeshCore project.
   journal's `would-drop-flood-scoped` verdict keeps its name, because
   renaming a recorded event would cut every archived query in two.
 
-  Divergence, assumed: the reference persists its table only on
-  `region save`; here every mutation persists before it installs, and
-  `region save` is an honest OK that only bumps the discovery
-  timestamp. A reload (`region load` … blank line) preserves the
-  home/default designations and the wildcard's flags by name, where
-  the reference silently drops all three.
+  Divergences, assumed — each one deliberate, none of them wire-visible
+  in replies:
+
+  - the reference persists its table only on `region save`; here every
+    mutation persists before it installs, and `region save` is an
+    honest OK that only bumps the discovery timestamp;
+  - a reload (`region load` … blank line) preserves the home/default
+    designations and the wildcard's flags by name, where the reference
+    silently drops all three — and the loader strips the `^` home mark
+    the dump glues onto a name, which read literally would corrupt the
+    very region it designates;
+  - `region def` composes on a candidate and applies atomically: a
+    refused batch answers the reference's exact words but leaves the
+    live table untouched, where the firmware keeps the segments that
+    ran before the error;
+  - the model refuses what the reference lets through and later chokes
+    on: empty names, parent cycles, parents that name no entry, and
+    duplicate names at restore;
+  - private `$` regions are refused at every door — put, def, load,
+    default, migration and the restored store alike — because the
+    keystore they promise is not implemented, and announcing a region
+    this relay can never match would be a lie on the air;
+  - a `region load` staging is an exclusive transaction: owned by the
+    admin who armed it (full key over the air, per-session at the
+    console — where the modal is refused outright, the REPL having no
+    way to carry indentation or a blank commit), expiring after a
+    minute of silence, and refusing other admins' region commands with
+    a stable busy until it commits or lapses.
 
 ## Architecture
 

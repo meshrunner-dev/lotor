@@ -116,27 +116,6 @@ func withinBudget(text string, budget int) []byte {
 	return []byte(cut)
 }
 
-// joinWithin joins names with the wire's comma, stopping at the last
-// whole one that fits. A truncated name would read at the far end as
-// a scope nobody carries.
-func joinWithin(names []string, budget int) string {
-	var b strings.Builder
-	for _, n := range names {
-		next := len(n)
-		if b.Len() > 0 {
-			next++ // the separator this name would need
-		}
-		if b.Len()+next > budget {
-			break
-		}
-		if b.Len() > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(n)
-	}
-	return b.String()
-}
-
 func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 	if rx.opened == nil {
 		return
@@ -163,11 +142,14 @@ func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 	case meshcore.AnonReqClock:
 		// The clock alone is the whole answer.
 	case meshcore.AnonReqScopes:
-		// Cut at the last whole name that fits, the way the reference
-		// bounds its own export: a list composed past the packet is a
-		// question left unanswered, and half a scope name at the far
-		// end is a scope nobody can derive a key for.
-		text = joinWithin(e.regions.served(), e.answerBudget(pkt)-anonReplyClockLen)
+		// The reference's own export rule, skip-and-continue: a name
+		// that will not fit is left out and the walk keeps looking for
+		// shorter ones, where a break at the first misfit answered a
+		// shorter list than the reference does. The +1 mirrors its
+		// buffer arithmetic, which reserves the terminator our wire
+		// never carries.
+		text = e.regions.m.ExportNames(meshcore.RegionDenyFlood, false,
+			e.answerBudget(pkt)-anonReplyClockLen+1)
 	default:
 		return // a question nobody defined stays unanswered
 	}
