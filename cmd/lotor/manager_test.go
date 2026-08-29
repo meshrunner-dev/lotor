@@ -897,7 +897,9 @@ func TestOTASetRefusesWhatTheBoardCannotDo(t *testing.T) {
 	m := &manager{kinds: buildKinds(), file: &config.File{},
 		infos: map[string]cli.RelayInfo{"mc": {Name: "mc", Radio: "sx"}},
 		radios: map[string]cli.RadioInfo{"sx": {Name: "sx", Envelope: radio.Envelope{
-			MaxTxPowerDBm: 22, FreqRangeLowHz: 850_000_000, FreqRangeHiHz: 930_000_000,
+			MaxTxPowerDBm: 22, MaxTxPowerSet: true,
+			ChipMinDBm: -9, ChipMaxDBm: 22,
+			FreqRangeLowHz: 850_000_000, FreqRangeHiHz: 930_000_000,
 		}}},
 		traces: map[string][]config.Trace{
 			"relay mc": {{Key: "protocol", Value: "meshcore", Source: "config"}},

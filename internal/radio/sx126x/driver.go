@@ -56,12 +56,13 @@ type Settings struct {
 	// the knob lives here, next to the pin it guards.
 	DIO1Watchdog time.Duration `yaml:"dio1_watchdog"`
 
-	// Envelope: what the board physically allows. Zero means
-	// undeclared at the seam — and, passed through to the driver
-	// library, transmit disabled: the two readings agree for a
-	// receive-only daemon, and a transmit path will require the cap
-	// to be declared.
-	MaxTxPowerDBm    int8     `yaml:"max_tx_power_dbm"`
+	// Envelope: what the board physically allows. The ceiling is a
+	// pointer so that absent and zero read differently — a board
+	// whose front end tops out at exactly 0 dBm is a real board, and
+	// a lone zero cannot say whether it means that or means nobody
+	// declared one. Absent leaves the relay receive-only: transmit
+	// requires the integrator to commit to a figure.
+	MaxTxPowerDBm    *int8    `yaml:"max_tx_power_dbm"`
 	FrequencyRangeHz []uint32 `yaml:"frequency_range"`
 }
 
@@ -92,8 +93,19 @@ func checkTransmit(cfg map[string]any) error {
 	if !knownChips[s.Chip] {
 		return fmt.Errorf("sx126x-spi: unknown chip %q", s.Chip)
 	}
-	if s.MaxTxPowerDBm == 0 {
+	if s.MaxTxPowerDBm == nil {
 		return errors.New("sx126x-spi: transmitting needs max_tx_power_dbm declared")
+	}
+	// A ceiling the part cannot reach is a relay that refuses its
+	// first frame rather than its configuration.
+	chip, err := chipFrom(s.Chip)
+	if err != nil {
+		return err
+	}
+	lo, hi := chip.PowerRange()
+	if ceiling := *s.MaxTxPowerDBm; ceiling < lo || ceiling > hi {
+		return fmt.Errorf("sx126x-spi: max_tx_power_dbm %d is outside the %s range (%d..%d)",
+			ceiling, s.Chip, lo, hi)
 	}
 	return nil
 }
@@ -123,6 +135,14 @@ func settingsFrom(cfg map[string]any) (Settings, error) {
 	if s.SPIHz > maxSPIHz {
 		return s, fmt.Errorf("sx126x-spi settings: spi_hz %d — the part is specified to %d",
 			s.SPIHz, maxSPIHz)
+	}
+	// The library reads -128 in its own configuration as "a ceiling of
+	// exactly 0 dBm". Here it would be a power of -128 dBm, which no
+	// part keys: the two meanings must not meet silently.
+	if s.MaxTxPowerDBm != nil && *s.MaxTxPowerDBm == sx126x.MaxTxPowerZero {
+		return s, fmt.Errorf(
+			"sx126x-spi settings: max_tx_power_dbm %d is the driver's sentinel for a 0 dBm ceiling — write 0",
+			sx126x.MaxTxPowerZero)
 	}
 	if s.DIO1Watchdog < 0 {
 		return s, fmt.Errorf(
@@ -245,8 +265,32 @@ func Inspect(cfg map[string]any) (radio.Envelope, error) {
 	return s.envelope(), nil
 }
 
+// libraryTxCap states the ceiling in the driver library's own terms,
+// where zero means "transmit disabled" and a named sentinel carries a
+// ceiling of exactly 0 dBm. Keeping the translation here is what lets
+// the configuration mean the plain thing.
+func (s Settings) libraryTxCap() int8 {
+	switch {
+	case s.MaxTxPowerDBm == nil:
+		return 0 // undeclared: the library refuses to transmit
+	case *s.MaxTxPowerDBm == 0:
+		return sx126x.MaxTxPowerZero
+	default:
+		return *s.MaxTxPowerDBm
+	}
+}
+
 func (s Settings) envelope() radio.Envelope {
-	e := radio.Envelope{MaxTxPowerDBm: s.MaxTxPowerDBm}
+	var e radio.Envelope
+	if s.MaxTxPowerDBm != nil {
+		e.MaxTxPowerDBm, e.MaxTxPowerSet = *s.MaxTxPowerDBm, true
+	}
+	// The part's own range travels with the board's, so a power
+	// resolved from the ceiling is judged before a frame discovers it.
+	// An undeclared chip leaves the two equal, which reads as unknown.
+	if chip, err := chipFrom(s.Chip); err == nil && chip != sx126x.ChipUnset {
+		e.ChipMinDBm, e.ChipMaxDBm = chip.PowerRange()
+	}
 	if len(s.FrequencyRangeHz) == 2 {
 		e.FreqRangeLowHz, e.FreqRangeHiHz = s.FrequencyRangeHz[0], s.FrequencyRangeHz[1]
 	}

@@ -155,3 +155,108 @@ func TestTheThreeDoorsAgree(t *testing.T) {
 		t.Errorf("spi_hz = %d, want the 2 MHz default", s.SPIHz)
 	}
 }
+
+func TestThePowerCeilingIsJudgedAgainstThePart(t *testing.T) {
+	// A ceiling the part cannot reach, or an auto that resolves to
+	// one, used to pass every door and fail at the first frame.
+	cases := []struct {
+		name string
+		chip string
+		cap  any
+		want string // empty: accepted
+	}{
+		{"the lab board", chipSX1262, 22, ""},
+		{"sx1262 at its floor", chipSX1262, -9, ""},
+		{"sx1262 below its floor", chipSX1262, -10, "outside the sx1262 range"},
+		{"sx1262 above its ceiling", chipSX1262, 23, "outside the sx1262 range"},
+		{"the impossible 127", chipSX1262, 127, "outside the sx1262 range"},
+		{"sx1261 stops at 15", chipSX1261, 22, "outside the sx1261 range"},
+		{"sx1261 at 15", chipSX1261, 15, ""},
+		{"a ceiling of exactly 0 dBm", chipSX1262, 0, ""},
+	}
+	for _, c := range cases {
+		cfg := board()
+		cfg["chip"] = c.chip
+		cfg["max_tx_power_dbm"] = c.cap
+		err := checkTransmit(cfg)
+		switch {
+		case c.want == "" && err != nil:
+			t.Errorf("%s: refused: %v", c.name, err)
+		case c.want != "" && err == nil:
+			t.Errorf("%s: accepted", c.name)
+		case c.want != "" && err != nil && !strings.Contains(err.Error(), c.want):
+			t.Errorf("%s: refused for the wrong reason: %v", c.name, err)
+		}
+	}
+
+	// The driver library's sentinel is not a power: write the plain
+	// figure instead of the value that means something else there.
+	cfg := board()
+	cfg["max_tx_power_dbm"] = -128
+	if _, err := Inspect(cfg); err == nil || !strings.Contains(err.Error(), "sentinel") {
+		t.Errorf("the -128 sentinel was taken as a power: %v", err)
+	}
+
+	// Absent and zero now read differently, which is the whole point:
+	// a board topping out at 0 dBm is a board, and one that declared
+	// nothing is receive-only.
+	absent := board()
+	delete(absent, "max_tx_power_dbm")
+	env, err := Inspect(absent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.MaxTxPowerSet {
+		t.Error("an undeclared ceiling reads as declared")
+	}
+	if err := checkTransmit(absent); err == nil {
+		t.Error("transmit was allowed with no ceiling declared")
+	}
+	zero := board()
+	zero["max_tx_power_dbm"] = 0
+	if env, err = Inspect(zero); err != nil {
+		t.Fatal(err)
+	}
+	if !env.MaxTxPowerSet || env.MaxTxPowerDBm != 0 {
+		t.Errorf("a 0 dBm ceiling reads as %+v", env)
+	}
+	// And the part's own range travels with it, so a resolved auto is
+	// judged before a frame discovers it.
+	if env.ChipMinDBm != -9 || env.ChipMaxDBm != 22 {
+		t.Errorf("chip range = %d..%d", env.ChipMinDBm, env.ChipMaxDBm)
+	}
+}
+
+func TestAutoResolvesAgainstThePart(t *testing.T) {
+	// auto takes the board's ceiling, so an impossible ceiling is an
+	// impossible power — judged here, not at the first keying.
+	w := meshcoreWaveform()
+	env := radio.Envelope{
+		MaxTxPowerDBm: 22, MaxTxPowerSet: true, ChipMinDBm: -9, ChipMaxDBm: 22,
+	}
+	if err := env.Permits(w, 0, false); err != nil {
+		t.Errorf("auto under a reachable ceiling: %v", err)
+	}
+	if err := env.Permits(w, -5, true); err != nil {
+		t.Errorf("an explicit power inside the range: %v", err)
+	}
+	if err := env.Permits(w, -10, true); err == nil {
+		t.Error("an explicit power below the part's floor was allowed")
+	}
+	// A ceiling no part can key: auto resolves to it and is refused.
+	impossible := radio.Envelope{
+		MaxTxPowerDBm: 127, MaxTxPowerSet: true, ChipMinDBm: -9, ChipMaxDBm: 22,
+	}
+	err := impossible.Permits(w, 0, false)
+	if err == nil {
+		t.Fatal("auto resolved to 127 dBm unchallenged")
+	}
+	if !strings.Contains(err.Error(), "auto resolves") {
+		t.Errorf("refusal does not name the resolution: %v", err)
+	}
+	// With no chip range published, nothing is checked against it.
+	unknown := radio.Envelope{MaxTxPowerDBm: 127, MaxTxPowerSet: true}
+	if err := unknown.Permits(w, 0, false); err != nil {
+		t.Errorf("an undeclared part was judged anyway: %v", err)
+	}
+}

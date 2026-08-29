@@ -80,7 +80,7 @@ func open(cfg map[string]any, log *zap.Logger) (radio.Device, error) {
 		DIO2AsRFSwitch: s.DIO2RFSwitch,
 		RXBoostedGain:  s.RXBoosted,
 		Chip:           chip,
-		MaxTxPower:     s.MaxTxPowerDBm,
+		MaxTxPower:     s.libraryTxCap(),
 	})
 	if err != nil {
 		release()

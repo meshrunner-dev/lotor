@@ -31,10 +31,22 @@ type Waveform struct {
 	CRC             bool   `yaml:"crc"`
 }
 
-// Envelope is what a board physically allows. Zero values mean
-// "undeclared": nothing is checked for that axis.
+// Envelope is what a board physically allows. A zero frequency bound
+// means "undeclared": nothing is checked for that axis.
 type Envelope struct {
-	MaxTxPowerDBm  int8
+	// MaxTxPowerDBm is the integrator's declared ceiling, meaningful
+	// only when MaxTxPowerSet. The two are separate because a ceiling
+	// of exactly 0 dBm is a real board, and a lone zero cannot say
+	// whether it means that or means nobody declared one.
+	MaxTxPowerDBm int8
+	MaxTxPowerSet bool
+	// ChipMinDBm and ChipMaxDBm are what the part itself can be
+	// programmed for, whatever ceiling sits on top. Equal values mean
+	// the driver did not say, and nothing is checked against them —
+	// but where it does say, a ceiling outside that range is a relay
+	// that refuses its first frame instead of its configuration.
+	ChipMinDBm, ChipMaxDBm int8
+
 	FreqRangeLowHz uint32
 	FreqRangeHiHz  uint32
 }
@@ -42,13 +54,36 @@ type Envelope struct {
 // Permits judges a whole demand — the waveform and the power choice
 // — against the board. Allows covers the waveform alone, for callers
 // that have nothing to say about power.
+//
+// The power judged is the one that will actually be programmed: an
+// explicit figure as written, and "auto" as the ceiling it resolves
+// to. Judging only the explicit case let a board declaring 127 dBm —
+// or the -128 the driver library reads as a sentinel — resolve auto
+// to a power no part can key, and discover it at the first frame.
 func (e Envelope) Permits(w Waveform, dbm int8, explicit bool) error {
 	if err := e.Allows(w); err != nil {
 		return err
 	}
-	if explicit && e.MaxTxPowerDBm != 0 && dbm > e.MaxTxPowerDBm {
+	want := dbm
+	if !explicit {
+		if !e.MaxTxPowerSet {
+			// Nothing to resolve auto against; the transmit gate
+			// refuses this on its own terms, with its own words.
+			return nil
+		}
+		want = e.MaxTxPowerDBm
+	}
+	if e.MaxTxPowerSet && want > e.MaxTxPowerDBm {
 		return fmt.Errorf("tx_power_dbm %d exceeds the radio's %d dBm cap — refusing, not clamping",
-			dbm, e.MaxTxPowerDBm)
+			want, e.MaxTxPowerDBm)
+	}
+	if e.ChipMinDBm != e.ChipMaxDBm && (want < e.ChipMinDBm || want > e.ChipMaxDBm) {
+		how := "tx_power_dbm"
+		if !explicit {
+			how = "tx_power_dbm auto resolves to the radio's cap, which"
+		}
+		return fmt.Errorf("%s %d is outside what this part can key (%d..%d dBm)",
+			how, want, e.ChipMinDBm, e.ChipMaxDBm)
 	}
 	return nil
 }

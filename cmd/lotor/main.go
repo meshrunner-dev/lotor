@@ -1210,14 +1210,14 @@ func resolveTX(rc config.Relay, env radio.Envelope, eng protocol.Engine,
 	policy.CAD = rc.TX.CAD == nil || *rc.TX.CAD
 	dbm, explicit := eng.TxPower()
 	if !explicit {
-		if env.MaxTxPowerDBm == 0 {
+		if !env.MaxTxPowerSet {
 			return policy, fmt.Errorf(
 				"tx: mode %s with tx_power_dbm auto needs the radio's max_tx_power_dbm declared", policy.Mode)
 		}
 		dbm = env.MaxTxPowerDBm
 	}
 	if (policy.Mode == config.TXOnAir || policy.Mode == config.TXOnAirZeroHop) &&
-		env.MaxTxPowerDBm == 0 {
+		!env.MaxTxPowerSet {
 		return policy, fmt.Errorf("tx: %s requires the radio's max_tx_power_dbm declared", policy.Mode)
 	}
 	policy.PowerDBm = dbm

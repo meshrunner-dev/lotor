@@ -50,7 +50,9 @@ func newFakeDevice() *fakeDevice {
 	}
 }
 
-func (d *fakeDevice) Envelope() radio.Envelope             { return radio.Envelope{MaxTxPowerDBm: 5} }
+func (d *fakeDevice) Envelope() radio.Envelope {
+	return radio.Envelope{MaxTxPowerDBm: 5, MaxTxPowerSet: true}
+}
 func (d *fakeDevice) Configure(radio.Waveform) error       { return nil }
 func (d *fakeDevice) StartReceive() error                  { return nil }
 func (d *fakeDevice) NoiseFloor() (radio.NoiseFloor, bool) { return radio.NoiseFloor{}, false }
