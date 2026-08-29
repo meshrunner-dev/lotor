@@ -135,7 +135,7 @@ func TestStarvationIsCountedWhileItLasts(t *testing.T) {
 	// The counter exists to report precisely that, so it must move
 	// during the starvation — not at the first quiet sample after the
 	// trouble is over, when nobody needs telling any more.
-	var t0 time.Time
+	t0 := time.Unix(1_000_000, 0) // a real epoch: the zero time is the tracker's "no attempt" sentinel
 	tr := &floorTracker{}
 	// Converge a first batch so the gate has a floor to work from.
 	for i := range floorSamples {
@@ -170,6 +170,57 @@ func TestStarvationIsCountedWhileItLasts(t *testing.T) {
 	}
 	// And the quiet channel converges again afterwards.
 	quiet := at.Add(2 * time.Second)
+	for i := range floorSamples {
+		tr.sample(-105, quiet.Add(time.Duration(i)*sampleEvery))
+	}
+	if nf, ok := tr.value(); !ok || nf.DBm > -100 {
+		t.Errorf("the floor did not come back: %+v ok=%v", nf, ok)
+	}
+}
+
+func TestStarvationNeedsNoQuietSampleToBeSeen(t *testing.T) {
+	// The review's residuals: a carrier already strong when the
+	// window opens used to leave the counter at zero forever — no
+	// batch existed to expire — and after one abandoned batch the
+	// following windows were never recounted. The attempt model
+	// counts every expired window, samples or none.
+	t0 := time.Unix(2_000_000, 0)
+	tr := &floorTracker{}
+	for i := range floorSamples {
+		tr.sample(-105, t0.Add(time.Duration(i)*sampleEvery))
+	}
+	last := t0.Add(time.Duration(floorSamples-1) * sampleEvery)
+
+	// The carrier precedes the first quiet sample of the next window:
+	// every opportunity is gated, and the attempt still ages.
+	at := last.Add(floorRestEvery + time.Second)
+	tr.sample(-60, at) // opens the attempt, gated
+	if got := tr.starvedCount(); got != 0 {
+		t.Fatalf("starved = %d before any window expired", got)
+	}
+	at = at.Add(floorBatchMaxAge + time.Second)
+	tr.sample(-60, at)
+	if got := tr.starvedCount(); got != 1 {
+		t.Errorf("starved = %d: a carrier that precedes the first quiet sample is invisible", got)
+	}
+	// The second expired window counts too: starvation is ongoing.
+	at = at.Add(floorBatchMaxAge + time.Second)
+	tr.sample(-60, at)
+	if got := tr.starvedCount(); got != 2 {
+		t.Errorf("second expired window: starved = %d, want 2", got)
+	}
+
+	// Continuous LoRa reception never yields a sample at all: the
+	// denied opportunities age the attempt the same way.
+	busy := at.Add(floorRestEvery + time.Second)
+	tr.denied(busy)
+	tr.denied(busy.Add(floorBatchMaxAge + time.Second))
+	if got := tr.starvedCount(); got != 3 {
+		t.Errorf("continuous reception: starved = %d, want 3", got)
+	}
+
+	// And the calm channel converges again afterwards.
+	quiet := busy.Add(2 * (floorBatchMaxAge + time.Second))
 	for i := range floorSamples {
 		tr.sample(-105, quiet.Add(time.Duration(i)*sampleEvery))
 	}

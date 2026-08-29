@@ -390,11 +390,19 @@ func (d *device) sampleFloor() {
 	}
 	preamble, header, err := d.r.ReceiveInProgress()
 	if err != nil || preamble || header {
+		// The opportunity existed and the channel took it: continuous
+		// reception is starvation too, and a tracker that only heard
+		// about accepted samples could never age an attempt through it.
+		d.floor.denied(time.Now())
 		return
 	}
 	rssi, err := d.r.RSSI()
 	if err != nil {
-		return // not receiving (ErrNotReceiving covers TX and standby)
+		// Not receiving (ErrNotReceiving covers TX and standby) — our
+		// own transmit occupying the channel is a missed opportunity
+		// like anyone else's.
+		d.floor.denied(time.Now())
+		return
 	}
 	if d.floor.sample(rssi, time.Now()) {
 		nf, _ := d.floor.value()
