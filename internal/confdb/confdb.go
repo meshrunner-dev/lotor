@@ -83,16 +83,17 @@ CREATE TABLE IF NOT EXISTS regions(
   id     INTEGER NOT NULL CHECK(id BETWEEN 1 AND 65535),
   parent INTEGER NOT NULL CHECK(parent BETWEEN 0 AND 65535),
   name   TEXT NOT NULL,
-  flags  INTEGER NOT NULL CHECK(flags BETWEEN 0 AND 255),
-  seq    INTEGER NOT NULL CHECK(seq >= 0),
-  PRIMARY KEY(relay, id)
+  flags  INTEGER NOT NULL CHECK(flags BETWEEN 0 AND 3),
+  seq    INTEGER NOT NULL CHECK(seq BETWEEN 0 AND 2147483647),
+  PRIMARY KEY(relay, id),
+  UNIQUE(relay, seq)
 );
 CREATE TABLE IF NOT EXISTS regions_meta(
   relay          TEXT PRIMARY KEY,
   next_id        INTEGER NOT NULL CHECK(next_id BETWEEN 0 AND 65535),
   home_id        INTEGER NOT NULL CHECK(home_id BETWEEN 0 AND 65535),
   default_id     INTEGER NOT NULL CHECK(default_id BETWEEN 0 AND 65535),
-  wildcard_flags INTEGER NOT NULL CHECK(wildcard_flags BETWEEN 0 AND 255)
+  wildcard_flags INTEGER NOT NULL CHECK(wildcard_flags BETWEEN 0 AND 3)
 );
 INSERT INTO meta(key, value) VALUES('schema_version', '1')
   ON CONFLICT(key) DO NOTHING;

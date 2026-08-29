@@ -168,3 +168,86 @@ func TestRemovingARelayTakesItsRuntimeStateAlong(t *testing.T) {
 		t.Error("a radio's removal purged a relay's regions")
 	}
 }
+
+func TestLoadRegionsRefusesWhatTheModelNeverWrote(t *testing.T) {
+	// Beyond raw ranges: flag bits no policy defines, a sequence past
+	// a 32-bit int (the ARM artefact narrows there), and two rows
+	// sharing a sequence — the insertion order is a functional
+	// identity, and an ambiguous one is a different policy.
+	ctx := context.Background()
+	s, err := Open(ctx, Memory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if _, err := s.db.ExecContext(ctx, "PRAGMA ignore_check_constraints = ON"); err != nil {
+		t.Fatal(err)
+	}
+	seed := func(rows ...[5]any) {
+		_, _ = s.db.ExecContext(ctx, "DELETE FROM regions; DELETE FROM regions_meta")
+		if _, err := s.db.ExecContext(ctx,
+			"INSERT INTO regions_meta VALUES('mc', 9, 0, 0, 0)"); err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range rows {
+			if _, err := s.db.ExecContext(ctx,
+				"INSERT INTO regions VALUES('mc', ?, ?, ?, ?, ?)",
+				r[0], r[1], r[2], r[3], r[4]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	cases := []struct {
+		name string
+		rows [][5]any
+	}{
+		{"unknown flag bit", [][5]any{{1, 0, "x", 4, 0}}},
+		{"seq past 32 bits", [][5]any{{1, 0, "x", 0, int64(4294967296)}}},
+	}
+	for _, c := range cases {
+		seed(c.rows...)
+		if _, _, _, err := s.LoadRegions(ctx, "mc"); err == nil {
+			t.Errorf("%s: loaded without a word", c.name)
+		}
+	}
+	// Duplicate sequences cannot even be planted through the born
+	// schema — UNIQUE holds regardless of the pragma — so the Go wall
+	// is proved against a table shaped like a pre-10 store.
+	if _, err := s.db.ExecContext(ctx, `DROP TABLE regions;
+		CREATE TABLE regions(relay TEXT NOT NULL, id INTEGER NOT NULL,
+			parent INTEGER NOT NULL, name TEXT NOT NULL,
+			flags INTEGER NOT NULL, seq INTEGER NOT NULL,
+			PRIMARY KEY(relay, id))`); err != nil {
+		t.Fatal(err)
+	}
+	seed([5]any{1, 0, "x", 0, 0}, [5]any{2, 0, "y", 0, 0})
+	if _, _, _, err := s.LoadRegions(ctx, "mc"); err == nil {
+		t.Error("two rows one seq: loaded without a word")
+	}
+	if _, err := s.db.ExecContext(ctx, `DROP TABLE regions`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE TABLE regions(
+		relay TEXT NOT NULL, id INTEGER NOT NULL CHECK(id BETWEEN 1 AND 65535),
+		parent INTEGER NOT NULL, name TEXT NOT NULL,
+		flags INTEGER NOT NULL CHECK(flags BETWEEN 0 AND 3),
+		seq INTEGER NOT NULL, PRIMARY KEY(relay, id), UNIQUE(relay, seq))`); err != nil {
+		t.Fatal(err)
+	}
+	// The fresh schema refuses the same at insertion.
+	if _, err := s.db.ExecContext(ctx, "PRAGMA ignore_check_constraints = OFF"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT INTO regions VALUES('mc', 5, 0, 'a', 0, 7)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT INTO regions VALUES('mc', 6, 0, 'b', 0, 7)"); err == nil {
+		t.Error("UNIQUE(relay, seq) let a duplicate sequence in")
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT INTO regions VALUES('mc', 7, 0, 'c', 4, 8)"); err == nil {
+		t.Error("the flags CHECK let an undefined bit in")
+	}
+}

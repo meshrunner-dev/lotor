@@ -197,12 +197,28 @@ func TestScopeLiftBoundsAndPolicies(t *testing.T) {
 		!strings.Contains(err.Error(), "region table holds 32") {
 		t.Errorf("33 scopes = %v", err)
 	}
-	// A stray private scope migrates to nothing rather than to a
-	// table the policy gate then refuses whole.
+	// A truly private scope fails the migration whole, backup in
+	// hand: erasing it silently would turn a stored policy into
+	// unscoped emission.
+	if _, _, _, err := liftScopeAttrs(
+		`{"overrides":{"custom":{"accept_scopes":["eu","$secret"]}}}`); err == nil ||
+		!strings.Contains(err.Error(), "private region") {
+		t.Errorf("$ scope = %v, want the refusal", err)
+	}
+	// "#$secret" is NOT private: the '#' marks an auto region whose
+	// bare name merely begins with '$' — MeshCore derives its key from
+	// "#$secret" like any other. The class rides the first character,
+	// so the stored name keeps its '#'.
 	_, entries, meta, err := liftScopeAttrs(
-		`{"overrides":{"custom":{"accept_scopes":["eu","$secret"]}}}`)
-	if err != nil || len(entries) != 1 || entries[0].Name != "eu" || meta == nil {
-		t.Errorf("$ skip: entries=%+v meta=%+v err=%v", entries, meta, err)
+		`{"overrides":{"custom":{"accept_scopes":["#fr","#$secret"],"default_scope":"#$secret"}}}`)
+	if err != nil || len(entries) != 2 || entries[1].Name != "#$secret" {
+		t.Fatalf("#$ lift: entries=%+v err=%v", entries, err)
+	}
+	if meta.DefaultID != entries[1].ID {
+		t.Errorf("meta=%+v — the default lost its region", meta)
+	}
+	if entries[0].Name != "fr" {
+		t.Errorf("entries=%+v — a plain auto name keeps its bare form", entries)
 	}
 }
 
@@ -249,5 +265,32 @@ func TestOTARegionDoorGetsTheRawLine(t *testing.T) {
 		if l != want[i] {
 			t.Errorf("line %d = %q, want %q — normalisation crept in", i, l, want[i])
 		}
+	}
+}
+
+func TestOrphanRuntimeIsDroppedOnUpgrade(t *testing.T) {
+	// A removal before the cascade existed left sessions and regions
+	// behind; shape 9 sweeps them so a recreated name starts anew.
+	ctx := context.Background()
+	s, err := confdb.Open(ctx, confdb.Memory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	seedRelay(ctx, t, s, "kept", `{"overrides":{},"protocol":"meshcore","radio":"r"}`)
+	for _, relay := range []string{"kept", "gone"} {
+		if err := s.ReplaceRegions(ctx, relay,
+			[]confdb.RegionRow{{ID: 1, Name: "eu"}}, confdb.RegionsMeta{NextID: 2}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Migrate(ctx, storeMigrations()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, _ := s.LoadRegions(ctx, "gone"); ok {
+		t.Error("the orphan's regions survived the sweep")
+	}
+	if _, _, ok, _ := s.LoadRegions(ctx, "kept"); !ok {
+		t.Error("the living relay's regions were swept too")
 	}
 }

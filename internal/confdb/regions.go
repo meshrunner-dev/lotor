@@ -11,7 +11,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 )
+
+// regionFlagsMask is every flag bit the model defines: deny-flood,
+// and the deny-direct bit the reference reserves. Anything above is
+// no policy at all, and a store carrying one fails closed rather
+// than running a policy nobody wrote.
+const regionFlagsMask = 0x03
 
 // RegionRow is one persisted region entry. Seq is the insertion
 // order, which is load-bearing on the wire: every export and every
@@ -59,8 +66,9 @@ func (s *Store) LoadRegions(ctx context.Context, relay string,
 	if err := within16(next, home, def); err != nil {
 		return nil, meta, false, fmt.Errorf("regions meta for %q: %w", relay, err)
 	}
-	if wild < 0 || wild > 255 {
-		return nil, meta, false, fmt.Errorf("regions meta for %q: wildcard_flags %d is not a byte", relay, wild)
+	if wild&^regionFlagsMask != 0 {
+		return nil, meta, false, fmt.Errorf(
+			"regions meta for %q: wildcard_flags %d carries bits no policy defines", relay, wild)
 	}
 	meta = RegionsMeta{
 		NextID: uint16(next), HomeID: uint16(home),
@@ -74,6 +82,7 @@ func (s *Store) LoadRegions(ctx context.Context, relay string,
 	}
 	defer func() { _ = rows.Close() }()
 	var out []RegionRow
+	seqs := map[int64]bool{}
 	for rows.Next() {
 		var r RegionRow
 		var id, parent, flags, seq int64
@@ -83,10 +92,24 @@ func (s *Store) LoadRegions(ctx context.Context, relay string,
 		if err := within16(id, parent); err != nil {
 			return nil, meta, false, fmt.Errorf("region row %q of %q: %w", r.Name, relay, err)
 		}
-		if flags < 0 || flags > 255 || seq < 0 {
+		// Flags outside the defined policy bits, a sequence past what a
+		// 32-bit int holds (the ARM artefact narrows there), and two
+		// rows sharing a sequence all fail closed: the insertion order
+		// is a functional identity — matching and every export walk it
+		// — and a silent reinterpretation is a different policy.
+		if flags&^regionFlagsMask != 0 {
 			return nil, meta, false, fmt.Errorf(
-				"region row %q of %q: flags %d / seq %d out of range", r.Name, relay, flags, seq)
+				"region row %q of %q: flags %d carries bits no policy defines", r.Name, relay, flags)
 		}
+		if seq < 0 || seq > math.MaxInt32 {
+			return nil, meta, false, fmt.Errorf(
+				"region row %q of %q: seq %d is out of range", r.Name, relay, seq)
+		}
+		if seqs[seq] {
+			return nil, meta, false, fmt.Errorf(
+				"region rows of %q share seq %d — the wire order is ambiguous", relay, seq)
+		}
+		seqs[seq] = true
 		r.ID, r.Parent = uint16(id), uint16(parent)
 		r.Flags, r.Seq = uint8(flags), int(seq)
 		out = append(out, r)

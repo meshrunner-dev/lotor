@@ -59,7 +59,72 @@ func storeMigrations() []confdb.Migration {
 		Doc: "the shape-4 scrub missed admin_password — the journal is " +
 			"rescrubbed with the completed list",
 		Run: scrubRevisionSecrets,
+	}, {
+		To: 9,
+		Doc: "runtime state whose relay no longer exists is dropped — " +
+			"before the cascade, a removal left sessions and regions behind",
+		Run: dropOrphanRuntime,
+	}, {
+		To: 10,
+		Doc: "the region tables tighten to the model: flags to the defined " +
+			"bits, sequences 32-bit and unique per relay",
+		Run: migrateRegionIdentity,
 	}}
+}
+
+// dropOrphanRuntime removes sessions and region tables that outlived
+// their relay: removals before the cascade existed left them behind,
+// and a relay recreated under the name would have inherited them.
+func dropOrphanRuntime(ctx context.Context, tx *sql.Tx) error {
+	for _, stmt := range []string{
+		"DELETE FROM acl WHERE relay NOT IN (SELECT name FROM objects WHERE kind = 'relay')",
+		"DELETE FROM regions WHERE relay NOT IN (SELECT name FROM objects WHERE kind = 'relay')",
+		"DELETE FROM regions_meta WHERE relay NOT IN (SELECT name FROM objects WHERE kind = 'relay')",
+	} {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateRegionIdentity rebuilds the region tables through the
+// tightened shape fresh stores are born with: flags bounded to the
+// defined policy bits, sequences 32-bit and unique per relay — the
+// insertion order is a functional identity, and a store where it is
+// ambiguous fails the copy, backup in hand.
+func migrateRegionIdentity(ctx context.Context, tx *sql.Tx) error {
+	steps := []string{
+		`ALTER TABLE regions RENAME TO regions_pre10`,
+		`CREATE TABLE regions(
+		   relay  TEXT NOT NULL,
+		   id     INTEGER NOT NULL CHECK(id BETWEEN 1 AND 65535),
+		   parent INTEGER NOT NULL CHECK(parent BETWEEN 0 AND 65535),
+		   name   TEXT NOT NULL,
+		   flags  INTEGER NOT NULL CHECK(flags BETWEEN 0 AND 3),
+		   seq    INTEGER NOT NULL CHECK(seq BETWEEN 0 AND 2147483647),
+		   PRIMARY KEY(relay, id),
+		   UNIQUE(relay, seq)
+		 )`,
+		`INSERT INTO regions SELECT relay, id, parent, name, flags, seq FROM regions_pre10`,
+		`DROP TABLE regions_pre10`,
+		`ALTER TABLE regions_meta RENAME TO regions_meta_pre10`,
+		`CREATE TABLE regions_meta(
+		   relay          TEXT PRIMARY KEY,
+		   next_id        INTEGER NOT NULL CHECK(next_id BETWEEN 0 AND 65535),
+		   home_id        INTEGER NOT NULL CHECK(home_id BETWEEN 0 AND 65535),
+		   default_id     INTEGER NOT NULL CHECK(default_id BETWEEN 0 AND 65535),
+		   wildcard_flags INTEGER NOT NULL CHECK(wildcard_flags BETWEEN 0 AND 3)
+		 )`,
+		`INSERT INTO regions_meta SELECT relay, next_id, home_id, default_id, wildcard_flags FROM regions_meta_pre10`,
+		`DROP TABLE regions_meta_pre10`,
+	}
+	for _, stmt := range steps {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // revisionMasker builds the journal's secrets mask from every schema
@@ -241,17 +306,43 @@ func liftScopeAttrs(attrs string) (string, []confdb.RegionRow, *confdb.RegionsMe
 		return string(healed), nil, nil, err
 	}
 
+	entries, meta, err := regionRowsFrom(accept, defaultScope, unscoped)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	healed, err := json.Marshal(o)
+	return string(healed), entries, meta, err
+}
+
+// regionRowsFrom translates the active scope policy into region rows.
+func regionRowsFrom(accept []string, defaultScope string, unscoped *bool,
+) ([]confdb.RegionRow, *confdb.RegionsMeta, error) {
 	seen := map[string]uint16{}
 	var entries []confdb.RegionRow
 	nextID := uint16(1)
+	var badName error
 	add := func(name string) uint16 {
 		bare := strings.TrimPrefix(name, "#")
-		// A private '$' scope could never match anything — the keystore
-		// it promises was never implemented, and the old validation
-		// refused the syntax — so a stray one in stored data migrates
-		// to nothing rather than to a table the engine refuses whole.
-		if bare == "" || strings.HasPrefix(bare, "$") {
+		if bare == "" {
 			return 0
+		}
+		stored := bare
+		if strings.HasPrefix(bare, "$") {
+			// The class of a name is decided BEFORE the hash strip:
+			// "#$secret" is an auto region whose bare name begins with
+			// '$' — MeshCore derives its key from "#$secret" like any
+			// other — while a name that starts with '$' outright is a
+			// private region whose keystore was never implemented.
+			// The auto one keeps its '#', which is what keeps its
+			// class; the truly private one fails the migration whole,
+			// backup in hand — erasing it silently would turn a stored
+			// policy into unscoped emission.
+			if name == bare {
+				badName = fmt.Errorf(
+					"scope %q is a private region — not supported; remove it before migrating", name)
+				return 0
+			}
+			stored = name
 		}
 		if id, held := seen[bare]; held {
 			return id
@@ -259,7 +350,7 @@ func liftScopeAttrs(attrs string) (string, []confdb.RegionRow, *confdb.RegionsMe
 		id := nextID
 		nextID++
 		seen[bare] = id
-		entries = append(entries, confdb.RegionRow{ID: id, Name: bare})
+		entries = append(entries, confdb.RegionRow{ID: id, Name: stored})
 		return id
 	}
 	for _, n := range accept {
@@ -269,21 +360,23 @@ func liftScopeAttrs(attrs string) (string, []confdb.RegionRow, *confdb.RegionsMe
 	if defaultScope != "" {
 		meta.DefaultID = add(defaultScope)
 	}
+	if badName != nil {
+		return nil, nil, badName
+	}
 	meta.NextID = nextID
 	// The region table holds 32 entries; a list past that would
 	// migrate into a store the engine then refuses to attach. Failing
 	// here, before anything is written, leaves the pre-shape backup as
 	// the operator's rollback and names the problem.
 	if len(entries) > 32 {
-		return "", nil, nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"%d accepted scopes — the region table holds 32; trim accept_scopes before migrating",
 			len(entries))
 	}
 	if unscoped != nil && !*unscoped {
 		meta.WildcardFlags = uint8(meshcore.RegionDenyFlood)
 	}
-	healed, err := json.Marshal(o)
-	return string(healed), entries, meta, err
+	return entries, meta, nil
 }
 
 // takeScopeAttrs reads the three scope keys from the SELECTED
