@@ -15,6 +15,9 @@ import (
 
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/protocol"
+	"meshrunner.dev/lotor/internal/radio"
+	"meshrunner.dev/lotor/internal/schema"
 	"meshrunner.dev/pkg/meshcore"
 )
 
@@ -51,7 +54,53 @@ func storeMigrations() []confdb.Migration {
 		Doc: "the region tables gain their range CHECKs — a store from before " +
 			"them is rebuilt through the constrained shape",
 		Run: migrateRegionBounds,
+	}, {
+		To: 8,
+		Doc: "the shape-4 scrub missed admin_password — the journal is " +
+			"rescrubbed with the completed list",
+		Run: scrubRevisionSecrets,
 	}}
+}
+
+// revisionMasker builds the journal's secrets mask from every schema
+// the daemon knows: structural attributes, what every registered
+// protocol and driver contributes, and the observers'. Derived, never
+// listed by hand — a secret a future schema declares is masked the
+// day it exists.
+func revisionMasker(kinds []schema.Kind) func(string) string {
+	secret := map[string]bool{}
+	take := func(attrs []schema.Attr) {
+		for _, a := range attrs {
+			if a.Secret {
+				secret[a.Name] = true
+			}
+		}
+	}
+	for _, k := range kinds {
+		take(k.Attrs)
+	}
+	for _, n := range protocol.Registered() {
+		if b, err := protocol.Lookup(n); err == nil {
+			take(b.Schema)
+		}
+	}
+	for _, n := range radio.Registered() {
+		if d, err := radio.Lookup(n); err == nil {
+			take(d.Schema)
+		}
+	}
+	return func(raw string) string {
+		var v any
+		if err := json.Unmarshal([]byte(raw), &v); err != nil {
+			return raw
+		}
+		scrubSecretsIn(v, secret)
+		masked, err := json.Marshal(v)
+		if err != nil {
+			return raw
+		}
+		return string(masked)
+	}
 }
 
 // migrateRegionBounds rebuilds the two region tables through the
@@ -345,6 +394,9 @@ func addACLGranted(ctx context.Context, tx *sql.Tx) error {
 // including inside the whole-object shape a remove keeps.
 var secretKeys = map[string]bool{
 	"identity": true, "guest_password": true, "password": true, "token": true,
+	// admin_password was missing from the shape-4 scrub; shape 8
+	// reruns the scrub with it so history aligns at last.
+	"admin_password": true,
 }
 
 // scrubRevisionSecrets masks those values across the whole journal.
@@ -372,7 +424,7 @@ func scrubRevisionSecrets(ctx context.Context, tx *sql.Tx) error {
 			if err = json.Unmarshal([]byte(change), &c); err != nil {
 				return
 			}
-			if !scrubSecrets(c) {
+			if !scrubSecretsIn(c, secretKeys) {
 				continue
 			}
 			var raw []byte
@@ -395,29 +447,29 @@ func scrubRevisionSecrets(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// scrubSecrets walks a decoded change and masks every secret value in
-// place, however deep the shape nested it. A secret key's value may
-// be the string itself (an object shape) or the {old, new} pair a
+// scrubSecretsIn walks a decoded change and masks every secret value
+// in place, however deep the shape nested it. A secret key's value
+// may be the string itself (an object shape) or the {old, new} pair a
 // revision records — everything under the key is masked either way,
 // because under-masking is the failure that matters here.
-func scrubSecrets(node any) bool {
+func scrubSecretsIn(node any, keys map[string]bool) bool {
 	dirty := false
 	switch node := node.(type) {
 	case map[string]any:
 		for key, v := range node {
-			if secretKeys[key] {
+			if keys[key] {
 				if maskUnder(node, key, v) {
 					dirty = true
 				}
 				continue
 			}
-			if scrubSecrets(v) {
+			if scrubSecretsIn(v, keys) {
 				dirty = true
 			}
 		}
 	case []any:
 		for _, v := range node {
-			if scrubSecrets(v) {
+			if scrubSecretsIn(v, keys) {
 				dirty = true
 			}
 		}

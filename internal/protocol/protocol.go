@@ -93,6 +93,19 @@ var (
 	builders = map[string]Builder{}
 )
 
+// Registered lists every protocol name, sorted — for cross-cutting
+// derivations like the secrets mask, which must see every schema.
+func Registered() []string {
+	mu.RLock()
+	defer mu.RUnlock()
+	names := make([]string, 0, len(builders))
+	for n := range builders {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // Register adds a protocol under its config name. Protocols register
 // from init; a duplicate name is a programming error and panics.
 func Register(name string, b Builder) {

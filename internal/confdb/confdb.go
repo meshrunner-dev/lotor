@@ -98,16 +98,56 @@ INSERT INTO meta(key, value) VALUES('schema_version', '1')
   ON CONFLICT(key) DO NOTHING;
 `
 
+// precreate births a missing base 0600 before SQLite touches it: the
+// chmod after the DDL left a window where a fresh base sat readable
+// under the usual umask with the schema already inside.
+func precreate(path string) error {
+	if path == Memory {
+		return nil
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- the store's own path
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil
+		}
+		return fmt.Errorf("config create: %w", err)
+	}
+	return f.Close()
+}
+
 // Store is the open configuration database.
 type Store struct {
 	db   *sql.DB
 	path string
+	// masker rewrites an object's attrs JSON with its secrets masked
+	// before the copy enters the revision journal; nil records raw.
+	// The daemon installs one derived from the schemas — the journal
+	// outlives rotations and travels in every backup, so what it must
+	// not hold is decided where the attributes are declared.
+	masker func(raw string) string
+}
+
+// SetRevisionMasker installs the journal's secrets mask.
+func (s *Store) SetRevisionMasker(fn func(raw string) string) { s.masker = fn }
+
+// maskRaw runs one attrs JSON through the installed mask.
+func (s *Store) maskRaw(raw string) string {
+	if s.masker == nil {
+		return raw
+	}
+	return s.masker(raw)
 }
 
 // Open creates or opens the store and tightens its permissions: the
 // file carries the node's private key, so whoever reads it is the
 // node.
 func Open(ctx context.Context, path string) (*Store, error) {
+	if err := precreate(path); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -259,35 +299,7 @@ func assignSingleton(f *config.File, kind string, attrs []byte) error {
 // assembled elsewhere — the migration door, and the restore door. One
 // transaction: the store never holds half of two configurations.
 func (s *Store) ImportFile(ctx context.Context, f *config.File, principal string) error {
-	type object struct {
-		kind, name string
-		section    any
-	}
-	objects := make([]object, 0, len(f.Radios)+len(f.Relays)+len(f.Sensors)+2)
-	for name, r := range f.Radios {
-		objects = append(objects, object{KindRadio, name, r})
-	}
-	for name, r := range f.Relays {
-		objects = append(objects, object{KindRelay, name, r})
-	}
-	for name, s := range f.Sensors {
-		objects = append(objects, object{KindSensor, name, s})
-	}
-	if f.Sentinel != nil {
-		objects = append(objects, object{KindSentinel, "", *f.Sentinel})
-	}
-	if f.CLI != nil {
-		objects = append(objects, object{KindCLI, "", *f.CLI})
-	}
-	if f.System != nil {
-		objects = append(objects, object{KindSystem, "", *f.System})
-	}
-	if f.Update != nil {
-		objects = append(objects, object{KindUpdate, "", *f.Update})
-	}
-	for name, mq := range f.MQTT {
-		objects = append(objects, object{KindMQTT, name, mq})
-	}
+	objects := fileObjects(f)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -295,6 +307,9 @@ func (s *Store) ImportFile(ctx context.Context, f *config.File, principal string
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, "DELETE FROM objects"); err != nil {
+		return err
+	}
+	if err := purgeRuntimeState(ctx, tx); err != nil {
 		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -308,13 +323,76 @@ func (s *Store) ImportFile(ctx context.Context, f *config.File, principal string
 			o.kind, o.name, attrs); err != nil {
 			return err
 		}
+		// The revision keeps the masked copy, in the delta shape every
+		// other revision speaks — raw whole objects put secrets in a
+		// journal that outlives them, and a form Changes cannot read
+		// showed the operator garbage where an import happened.
+		diff, err := json.Marshal(map[string]Change{
+			"object": {New: json.RawMessage(s.maskRaw(attrs))},
+		})
+		if err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO revisions(at, principal, kind, name, op, change) VALUES(?, ?, ?, ?, 'import', ?)",
-			now, principal, o.kind, o.name, attrs); err != nil {
+			now, principal, o.kind, o.name, string(diff)); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// importObject is one row an import writes.
+type importObject struct {
+	kind, name string
+	section    any
+}
+
+// fileObjects flattens a configuration into its store rows.
+func fileObjects(f *config.File) []importObject {
+	objects := make([]importObject, 0, len(f.Radios)+len(f.Relays)+len(f.Sensors)+2)
+	for name, r := range f.Radios {
+		objects = append(objects, importObject{KindRadio, name, r})
+	}
+	for name, r := range f.Relays {
+		objects = append(objects, importObject{KindRelay, name, r})
+	}
+	for name, sn := range f.Sensors {
+		objects = append(objects, importObject{KindSensor, name, sn})
+	}
+	if f.Sentinel != nil {
+		objects = append(objects, importObject{KindSentinel, "", *f.Sentinel})
+	}
+	if f.CLI != nil {
+		objects = append(objects, importObject{KindCLI, "", *f.CLI})
+	}
+	if f.System != nil {
+		objects = append(objects, importObject{KindSystem, "", *f.System})
+	}
+	if f.Update != nil {
+		objects = append(objects, importObject{KindUpdate, "", *f.Update})
+	}
+	for name, mq := range f.MQTT {
+		objects = append(objects, importObject{KindMQTT, name, mq})
+	}
+	return objects
+}
+
+// purgeRuntimeState empties what belongs to running relays, not to
+// configuration. An import is a NEW configuration: sessions with
+// their replay guards and region tables must not survive into it by
+// mere equality of names — a relay the new file recreates is a new
+// relay; its admins log in again and its flood policy starts from
+// what the file says.
+func purgeRuntimeState(ctx context.Context, tx *sql.Tx) error {
+	for _, stmt := range []string{
+		"DELETE FROM acl", "DELETE FROM regions", "DELETE FROM regions_meta",
+	} {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Change is one attribute's before and after inside a revision. A nil
@@ -413,7 +491,7 @@ func (s *Store) Remove(ctx context.Context, kind, name, principal string) error 
 			}
 		}
 	}
-	diff, err := json.Marshal(map[string]Change{"object": {Old: json.RawMessage(attrs)}})
+	diff, err := json.Marshal(map[string]Change{"object": {Old: json.RawMessage(s.maskRaw(attrs))}})
 	if err != nil {
 		return err
 	}
