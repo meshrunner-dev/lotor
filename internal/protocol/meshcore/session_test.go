@@ -265,14 +265,18 @@ func TestDryEngineSurvivesAStrangersRequest(t *testing.T) {
 	// Surviving the call is the assertion.
 }
 
-func TestEveryLoginAttemptCostsAToken(t *testing.T) {
-	// A limiter that only sees successes bounds the honest client and
-	// lets the guesser run free.
+func TestAGuesserCannotLockTheOwnerOut(t *testing.T) {
+	// The reference bounds logins not at all, and neither does this
+	// engine any more: a failed attempt earns silence, so a guesser
+	// pays the airtime of every try and gains nothing — while the
+	// honest word must work immediately after any burst of wrong
+	// ones. The old login limiter had it backwards: a companion's
+	// retry burst after a restart locked its own owner out.
 	e, _, _, peer := txRig(t, "shadow")
 	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "open-sesame"
 	e.queue.depth = 16
 
-	for i := range loginLimitMax {
+	for i := range 12 {
 		frame, _ := login(t, e.id, peer, nowTS(uint32(i+1)), "wrong", false)
 		pkt, err := meshcore.ParsePacket(frame.Payload)
 		if err != nil {
@@ -283,15 +287,52 @@ func TestEveryLoginAttemptCostsAToken(t *testing.T) {
 	if n := len(e.queue.entries); n != 0 {
 		t.Fatalf("%d replies to wrong passwords", n)
 	}
-	// The window is spent: even the right password waits its turn.
+	// The right password is served at once, whatever came before.
 	frame, _ := login(t, e.id, peer, nowTS(99), "open-sesame", false)
 	pkt, err := meshcore.ParsePacket(frame.Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.respondAnon(rxOf(e, pkt), txn.New())
-	if n := len(e.queue.entries); n != 0 {
-		t.Fatalf("%d replies past the exhausted window — guessing is unbounded", n)
+	if n := len(e.queue.entries); n != 1 {
+		t.Fatalf("%d replies to the right password after a guess burst, want 1", n)
+	}
+}
+
+func TestARoutedSessionIsNeverCharged(t *testing.T) {
+	// The budget exists for amplification, and a client that taught a
+	// route home amplifies nothing: its answers walk one directed
+	// path, and flow as freely as the reference serves them.
+	e, _, _, peer := txRig(t, "shadow")
+	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
+	e.queue.depth = 64
+	frame, _ := login(t, e.id, peer, nowTS(700), "raccoon", false)
+	pkt, err := meshcore.ParsePacket(frame.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.respondAnon(rxOf(e, pkt), txn.New())
+	c := e.acl.get(peer.PubKey[:])
+	if c == nil {
+		t.Fatal("no session after login")
+	}
+	c.out = &outPath{pathLen: 0, path: nil, learned: time.Now()} // adjacent
+
+	served := len(e.queue.entries)
+	for i := range sessionLimitMax + 4 {
+		req := request(t, e.id, peer, nowTS(uint32(701+i)), []byte{meshcore.ReqGetStatus, 0, 0, 0, 0})
+		rpkt, err := meshcore.ParsePacket(req.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rx := rxOf(e, rpkt)
+		if _, _, handled := e.reqVerdict(rx); !handled {
+			t.Fatal("request not recognised")
+		}
+		e.respondRequest(rx, txn.New())
+	}
+	if n := len(e.queue.entries) - served; n != sessionLimitMax+4 {
+		t.Fatalf("%d answers down the taught route, want all %d", n, sessionLimitMax+4)
 	}
 }
 

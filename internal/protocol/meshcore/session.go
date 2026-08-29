@@ -40,15 +40,13 @@ const (
 	// session makes room for a new one.
 	maxClients = 32
 
-	// A logged-in guest gets its own budget, which the reference does
-	// without. Two reasons to keep it. A client is answered directly
-	// only once it has taught us a route home, and until then — for a
-	// companion that never sends one, always — every answer floods and
-	// one poller in a loop would spend the whole mesh's airtime. And
-	// even a direct answer costs an emission at every repeater along
-	// the way, so unbounded questioning is never free. Generous enough
-	// for a status page and a neighbourhood query in the same breath,
-	// and session_limit moves it for a site that wants otherwise.
+	// A logged-in client's budget — charged only on the answers that
+	// flood, which the reference does not bound and we do: a client
+	// that never taught a route home makes every answer cross the
+	// whole mesh, and one poller in a loop would spend everyone's
+	// airtime. An answer down a taught route costs one directed
+	// emission and is never charged, exactly as freely as the
+	// reference serves it. session_limit moves the figure.
 	sessionLimitMax    = 6
 	sessionLimitWindow = time.Minute
 
@@ -57,13 +55,6 @@ const (
 	// deriving it again — and a table of live credentials should not
 	// outlive the conversations that made it.
 	sessionIdle = time.Hour
-
-	// Login attempts are bounded on their own — separate from the
-	// anonymous questions, so a password guesser cannot starve the
-	// name lookups, and slower than the reference, which bounds them
-	// not at all.
-	loginLimitMax    = 4
-	loginLimitWindow = 3 * time.Minute
 
 	// loginMaxSkew bounds how far a login's own timestamp may sit from
 	// ours before we read it as a recording rather than a request.
@@ -84,14 +75,11 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 		e.p.GuestAccess != guestPassword && e.p.GuestAccess != guestOpen {
 		return
 	}
-	// Charged before the password is even read: a limiter that only
-	// sees successes bounds the honest client and lets the guesser
-	// run free — the exact inverse of what it is for.
-	if !e.limits.login.allow(time.Now()) {
-		e.log.Debug("login rate-limited", zap.String("txn", origin.Short()))
-		e.dropRateLimited(origin)
-		return
-	}
+	// No limiter here, deliberately — the reference has none either.
+	// A failed attempt is answered with silence, so a guesser earns
+	// no emission and pays the airtime of every try; charging logins
+	// was bounding nothing but the honest companion, whose retry
+	// burst after a restart locked it out for minutes.
 	ts, password, err := meshcore.AnonPassword(plain)
 	if err != nil {
 		return
@@ -258,11 +246,13 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 		e.log.Debug("request replay refused", zap.String("txn", origin.Short()))
 		return
 	}
-	// A live session still costs the mesh something, whether the
-	// answer floods or walks a route home. Charged before the answer
-	// is built, like every other limiter here.
-	if !c.asks.allow(time.Now()) {
-		e.log.Debug("session rate-limited", zap.String("txn", origin.Short()))
+	// The budget charges only the answers that flood — the reference
+	// limits nothing here, and what justifies a bound at all is the
+	// amplification: a client that never taught a route home makes
+	// every answer cross the whole mesh. One that did costs a single
+	// directed emission, and flows as freely as the reference lets it.
+	if c.out == nil && !c.asks.allow(time.Now()) {
+		e.log.Debug("session rate-limited — flood answers", zap.String("txn", origin.Short()))
 		e.dropRateLimited(origin)
 		return
 	}

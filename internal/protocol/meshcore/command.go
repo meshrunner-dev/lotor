@@ -76,8 +76,11 @@ func (e *engine) runCommand(rx *reception, origin txn.ID) {
 		return
 	}
 	retry := ts == c.lastTimestamp
-	if !c.asks.allow(time.Now()) {
-		e.log.Debug("command rate-limited", zap.String("txn", origin.Short()))
+	// Charged only when the answer would flood, like every session
+	// answer: an admin at the end of a taught route is the person
+	// this node exists to obey, not an amplification risk.
+	if c.out == nil && !c.asks.allow(time.Now()) {
+		e.log.Debug("command rate-limited — flood answers", zap.String("txn", origin.Short()))
 		e.dropRateLimited(origin)
 		return
 	}

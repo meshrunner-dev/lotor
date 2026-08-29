@@ -60,14 +60,12 @@ func (r *rateLimiter) allow(now time.Time) bool {
 type limits struct {
 	discover rateLimiter
 	anon     rateLimiter
-	login    rateLimiter
 }
 
 func newLimits() limits {
 	return limits{
 		discover: rateLimiter{max: discoverLimitMax, window: discoverLimitWindow},
 		anon:     rateLimiter{max: anonLimitMax, window: anonLimitWindow},
-		login:    rateLimiter{max: loginLimitMax, window: loginLimitWindow},
 	}
 }
 
