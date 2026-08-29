@@ -151,7 +151,7 @@ func (c *updateSelfcheckCmd) Run() error {
 	// under the running daemon, and out from under the rollback path
 	// that may still restart it.
 	ctx := context.Background()
-	source, err := confdb.Open(ctx, c.DB)
+	source, err := confdb.Open(ctx, c.DB, shapeCeiling())
 	if err != nil {
 		return err
 	}
@@ -248,7 +248,7 @@ func (c *configImportCmd) Run() error {
 	defer release()
 
 	ctx := context.Background()
-	store, err := confdb.Open(ctx, c.DB)
+	store, err := confdb.Open(ctx, c.DB, shapeCeiling())
 	if err != nil {
 		return err
 	}
@@ -547,7 +547,7 @@ func singletonKinds() []schema.Kind {
 // running daemon.
 func openConfig(dbPath string, log *zap.Logger) (*confdb.Store, *config.File, error) {
 	ctx := context.Background()
-	store, err := confdb.Open(ctx, dbPath)
+	store, err := confdb.Open(ctx, dbPath, shapeCeiling())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -709,6 +709,17 @@ func listenConsole(ctx context.Context, path string) (net.Listener, error) {
 			return nil, fmt.Errorf(
 				"console socket path %s holds a %s, not a socket — refusing to delete it; pick another path",
 				path, modeWord(st.Mode()))
+		}
+		// A socket someone still answers on is not a leftover: the
+		// instance lock only proves nobody shares OUR config, not that
+		// another daemon — another base, another program — does not
+		// legitimately own this path. Probe before unlinking; only an
+		// inode nobody listens on is a previous life's.
+		dialer := net.Dialer{Timeout: time.Second}
+		if conn, err := dialer.DialContext(ctx, "unix", path); err == nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf(
+				"console socket %s is alive — another process answers on it; pick another path", path)
 		}
 		_ = os.Remove(path)
 	}

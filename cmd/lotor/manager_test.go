@@ -987,3 +987,29 @@ func TestSocketPathRefusesWhatIsNotASocket(t *testing.T) {
 	}
 	_ = ln.Close()
 }
+
+func TestALiveSocketIsNotALeftover(t *testing.T) {
+	// The instance lock proves nobody shares our config — nothing
+	// more. A daemon on another base, or another program entirely,
+	// may own this path; unlinking its live socket silently cut every
+	// client off it.
+	path := filepath.Join(t.TempDir(), "console.sock")
+	first, err := listenConsole(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Close() }()
+	go func() {
+		for {
+			c, err := first.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	if _, err := listenConsole(context.Background(), path); err == nil ||
+		!strings.Contains(err.Error(), "alive") {
+		t.Fatalf("a live socket was replaced: %v", err)
+	}
+}

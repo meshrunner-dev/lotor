@@ -10,7 +10,7 @@ import (
 
 func TestACLRoundTripsAndForgets(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, filepath.Join(t.TempDir(), "acl.db"))
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "acl.db"), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestSwapACLIsOneStep(t *testing.T) {
 	// must never be caught holding both — a crash between two writes
 	// would decide by accident which one survives.
 	ctx := context.Background()
-	s, err := Open(ctx, Memory)
+	s, err := Open(ctx, Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestACLLoadsFreshestFirst(t *testing.T) {
 	// Which sessions a restart keeps when the store holds more than
 	// the table has places for is a policy, not row order.
 	ctx := context.Background()
-	s, err := Open(ctx, Memory)
+	s, err := Open(ctx, Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

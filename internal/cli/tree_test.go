@@ -2075,3 +2075,37 @@ func TestExportCarriesInactiveScopes(t *testing.T) {
 		t.Errorf("export order broken (%d %d %d %d):\n%s", main, other, kept, restore, out)
 	}
 }
+
+func TestExportedValuesSurviveTheirOwnGrammar(t *testing.T) {
+	// The renderer and the tokenizer are one symmetric grammar: what
+	// export writes, paste reads back byte-identical — quotes inside a
+	// password, backslashes, tabs and newlines included. Anything less
+	// is an export that recreates a different secret.
+	for _, v := range []string{
+		"plain",
+		"two words",
+		`hunter "two"`,
+		`back\slash`,
+		"tab\there",
+		"line\nbreak",
+		`"`,
+		`\"`,
+		"",
+		`mix "of \ every` + "\tthing\n",
+	} {
+		rendered := quoteIfSpaced(v)
+		args := splitArgs("set password=" + rendered)
+		if len(args) != 2 {
+			t.Fatalf("%q rendered %q split into %q", v, rendered, args)
+		}
+		_, got, _ := strings.Cut(args[1], "=")
+		if got != v {
+			t.Errorf("round trip lost bytes: %q → %q → %q", v, rendered, got)
+		}
+	}
+	// The old export's escape-free quoting still reads as before.
+	if args := splitArgs(`set node_name="test raccoon"`); len(args) != 2 ||
+		args[1] != "node_name=test raccoon" {
+		t.Errorf("legacy quoting broke: %q", args)
+	}
+}

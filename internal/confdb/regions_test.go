@@ -8,7 +8,7 @@ import (
 
 func TestRegionsReplaceAndLoadRoundTrip(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, Memory)
+	s, err := Open(ctx, Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestLoadRegionsJudgesRangesBeforeNarrowing(t *testing.T) {
 	// wall, for stores written before the constraints existed or
 	// edited around them.
 	ctx := context.Background()
-	s, err := Open(ctx, Memory)
+	s, err := Open(ctx, Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestRemovingARelayTakesItsRuntimeStateAlong(t *testing.T) {
 	// the old sessions and regions behind silently resurrected the
 	// grants and the transport policy of a thing the operator deleted.
 	ctx := context.Background()
-	s, err := Open(ctx, Memory)
+	s, err := Open(ctx, Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestLoadRegionsRefusesWhatTheModelNeverWrote(t *testing.T) {
 	// sharing a sequence — the insertion order is a functional
 	// identity, and an ambiguous one is a different policy.
 	ctx := context.Background()
-	s, err := Open(ctx, Memory)
+	s, err := Open(ctx, Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -35,21 +35,45 @@ type Migration struct {
 // CopyTo writes a consistent snapshot of the store to a fresh file —
 // the probe copy a selfcheck migrates and reads so the live store is
 // never touched from outside the daemon that owns it. The snapshot
-// carries everything the store does, identity included, so it is
-// born under a dotted name, tightened to 0600, and only then renamed
-// into place: a copy that sat readable for even a moment under the
-// usual umask handed the node's key to every local account.
+// carries everything the store does, identity included, so it fills
+// inside a 0700 directory on the destination's own filesystem — not
+// merely under a dotted name, which the umask left readable for the
+// whole VACUUM, precisely while the key streamed into it — then is
+// tightened, synced, renamed into place, and the parent directory
+// synced too, so what the rename promised survives a power cut. The
+// staging directory goes away on every path out, a failed VACUUM's
+// partial copy with it.
 func (s *Store) CopyTo(ctx context.Context, path string) error {
-	tmp := filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".tmp")
-	_ = os.Remove(tmp)
+	dir, err := os.MkdirTemp(filepath.Dir(path), ".confdb-snapshot-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	tmp := filepath.Join(dir, "snapshot.db")
 	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", tmp); err != nil {
 		return err
 	}
 	if err := os.Chmod(tmp, 0o600); err != nil {
-		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := syncFile(tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return syncFile(filepath.Dir(path))
+}
+
+// syncFile fsyncs one path — file or directory — so a rename that
+// claimed durability has it.
+func syncFile(path string) error {
+	f, err := os.Open(path) // #nosec G304 -- the store's own paths
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	return f.Sync()
 }
 
 // Shape reads the store's current shape.
@@ -101,7 +125,9 @@ func (s *Store) Migrate(ctx context.Context, migrations []Migration) error {
 	if s.path != Memory {
 		// History is corrected on every start, lifted or not: backups
 		// written before snapshots were born 0600 hold the identity.
-		s.tightenBackups()
+		if err := s.tightenBackups(); err != nil {
+			return err
+		}
 	}
 	if shape == supported {
 		return nil
@@ -130,15 +156,20 @@ func (s *Store) Migrate(ctx context.Context, migrations []Migration) error {
 
 // tightenBackups closes the door on history: pre-shape copies written
 // before snapshots were born 0600 carry the same identity the main
-// file guards, and an upgrade is the moment to correct them.
-func (s *Store) tightenBackups() {
+// file guards, and every start is the moment to correct them. A copy
+// that cannot be protected is a failure worth stopping for — leaving
+// it readable and booting anyway would silently keep the exposure.
+func (s *Store) tightenBackups() error {
 	matches, err := filepath.Glob(s.path + ".pre-shape*")
 	if err != nil {
-		return
+		return err
 	}
 	for _, m := range matches {
-		_ = os.Chmod(m, 0o600)
+		if err := os.Chmod(m, 0o600); err != nil {
+			return fmt.Errorf("backup %s cannot be protected: %w", m, err)
+		}
 	}
+	return nil
 }
 
 // runMigration is one lift, transactional, stamp included.

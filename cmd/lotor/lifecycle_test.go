@@ -25,7 +25,7 @@ import (
 func lifecycleManager(t *testing.T) *manager {
 	t.Helper()
 	f := sampleFile()
-	store, err := confdb.Open(context.Background(), confdb.Memory)
+	store, err := confdb.Open(context.Background(), confdb.Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestManagerStartBringsUpTheTree(t *testing.T) {
 			config.CustomProfile: {"url": "tcp://127.0.0.1:1", "iata": "PAR"},
 		}}},
 	}
-	store, err := confdb.Open(context.Background(), confdb.Memory)
+	store, err := confdb.Open(context.Background(), confdb.Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

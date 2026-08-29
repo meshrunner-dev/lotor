@@ -128,7 +128,7 @@ func TestObserverStopsWithItsImplicitRelay(t *testing.T) {
 	// One relay, implicit observer: removing the relay must not leave
 	// the observer publishing the captured face of a ghost.
 	m := observerManager(t, observerFile(1, ""))
-	store, err := confdb.Open(context.Background(), confdb.Memory)
+	store, err := confdb.Open(context.Background(), confdb.Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestObserverStartsWhenAmbiguityLifts(t *testing.T) {
 	// relay makes "the only relay" answerable again — a restart would
 	// start the observer, so the reconciliation does too.
 	m := observerManager(t, observerFile(2, ""))
-	store, err := confdb.Open(context.Background(), confdb.Memory)
+	store, err := confdb.Open(context.Background(), confdb.Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestRemoveRefusesARelayAnObserverClaims(t *testing.T) {
 	// An explicit relay= is a reference; removal is refused the way a
 	// claimed radio's is, instead of leaving the reference dangling.
 	m := observerManager(t, observerFile(1, "mc-a"))
-	store, err := confdb.Open(context.Background(), confdb.Memory)
+	store, err := confdb.Open(context.Background(), confdb.Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

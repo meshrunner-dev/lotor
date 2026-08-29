@@ -81,7 +81,7 @@ func sample() *config.File {
 
 func openTest(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(context.Background(), Memory)
+	s, err := Open(context.Background(), Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestImportReplacesWhole(t *testing.T) {
 
 func TestTheFileIsNobodyElsesToRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.db")
-	s, err := Open(context.Background(), path)
+	s, err := Open(context.Background(), path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestUndoStopsAtAnImport(t *testing.T) {
 
 func TestMigrationsLiftTheShapeOnce(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, Memory)
+	s, err := Open(ctx, Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestMigrationsLiftTheShapeOnce(t *testing.T) {
 
 func TestMigrationsFailClosedTowardTheFuture(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, Memory)
+	s, err := Open(ctx, Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestMigrationsFailClosedTowardTheFuture(t *testing.T) {
 		t.Errorf("future shape = %v, want the refusal to say a newer binary wrote it", err)
 	}
 	// A broken list is named before anything runs.
-	fresh, _ := Open(ctx, Memory)
+	fresh, _ := Open(ctx, Memory, 0)
 	defer func() { _ = fresh.Close() }()
 	err = fresh.Migrate(ctx, []Migration{
 		{To: 2, Doc: "t", Run: func(context.Context, *sql.Tx) error { return nil }},
@@ -330,7 +330,7 @@ func TestAFailedMigrationIsResumable(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.db")
-	s, err := Open(ctx, path)
+	s, err := Open(ctx, path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +377,7 @@ func TestRevisionsKeepMaskedCopiesEverywhere(t *testing.T) {
 	// ordinary mutation masked its deltas: the journal outlives
 	// rotations and rides every backup.
 	ctx := context.Background()
-	s, err := Open(ctx, Memory)
+	s, err := Open(ctx, Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +426,7 @@ func TestImportReplacesRuntimeState(t *testing.T) {
 	// An import is a NEW configuration: sessions and regions must not
 	// survive it by mere equality of names.
 	ctx := context.Background()
-	s, err := Open(ctx, Memory)
+	s, err := Open(ctx, Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,4 +448,52 @@ func TestImportReplacesRuntimeState(t *testing.T) {
 	if _, _, ok, _ := s.LoadRegions(ctx, "mc"); ok {
 		t.Error("regions survived the import")
 	}
+}
+
+func TestAFutureStoreIsRefusedBeforeAnyDDL(t *testing.T) {
+	// The review's real-restart shape: a future binary removed a table
+	// on purpose; reopening with this binary must refuse BEFORE the
+	// CREATE IF NOT EXISTS resurrects it.
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "config.db")
+	s, err := Open(ctx, path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, "DROP TABLE acl"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT INTO meta(key, value) VALUES('shape', '99') "+
+			"ON CONFLICT(key) DO UPDATE SET value = excluded.value"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Open(ctx, path, 10); err == nil ||
+		!strings.Contains(err.Error(), "newer") {
+		t.Fatalf("future store opened: %v", err)
+	}
+	// The dropped table stayed dropped: nothing was written.
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	var n int
+	if err := raw.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='acl'").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Error("Open recreated a table the future shape had removed")
+	}
+	// And a base within the ceiling opens normally.
+	ok, err := Open(ctx, filepath.Join(t.TempDir(), "fresh.db"), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = ok.Close()
 }

@@ -768,6 +768,24 @@ func (s *session) needSentinel() (*sentinel.Sentinel, error) {
 	return s.deps.Sentinel, nil
 }
 
+// writeEscaped resolves one backslash escape inside quotes: exactly
+// what the renderer emits — itself, the quote, and the two controls a
+// value may legally hold. Anything else keeps the backslash
+// literally, so an old escape-free export stays readable.
+func writeEscaped(cur *strings.Builder, r rune) {
+	switch r {
+	case '\\', '"':
+		cur.WriteRune(r)
+	case 'n':
+		cur.WriteRune('\n')
+	case 't':
+		cur.WriteRune('\t')
+	default:
+		cur.WriteRune('\\')
+		cur.WriteRune(r)
+	}
+}
+
 // splitArgs tokenises a command line, honouring double quotes so
 // arguments may carry spaces — the mesh's names do.
 func splitArgs(line string) []string {
@@ -791,8 +809,14 @@ func splitArgsAt(line string) (args []string, columns []int) {
 			has = false
 		}
 	}
+	escaped := false
 	for _, r := range line {
 		switch {
+		case escaped:
+			writeEscaped(&cur, r)
+			escaped = false
+		case inQuote && r == '\\':
+			escaped = true
 		case r == '"':
 			if cur.Len() == 0 && !has {
 				start = col

@@ -779,10 +779,16 @@ func exportValue(v any) string {
 }
 
 func quoteIfSpaced(s string) string {
-	if strings.ContainsAny(s, " \t") {
-		return `"` + s + `"`
+	if !strings.ContainsAny(s, " \t\"\\\n") {
+		return s
 	}
-	return s
+	// The escaping the tokenizer undoes, symmetrically: a password
+	// holding its own quotes — perfectly legal — used to come back
+	// from an export with them silently gone, which is an export that
+	// recreates a different secret.
+	r := strings.NewReplacer(
+		"\\", "\\\\", "\"", "\\\"", "\n", "\\n", "\t", "\\t")
+	return `"` + r.Replace(s) + `"`
 }
 
 // verbPrint is the tree's one universal verb, the console family's

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -145,7 +146,14 @@ func (s *Store) maskRaw(raw string) string {
 // Open creates or opens the store and tightens its permissions: the
 // file carries the node's private key, so whoever reads it is the
 // node.
-func Open(ctx context.Context, path string) (*Store, error) {
+//
+// maxShape is the newest shape this binary understands; zero waives
+// the check (tools that only copy bytes). The refusal happens BEFORE
+// the schema DDL touches anything: a future shape may have removed a
+// table on purpose, and CREATE IF NOT EXISTS would quietly resurrect
+// it — the very mutation the versioning promises an old binary
+// cannot make.
+func Open(ctx context.Context, path string, maxShape int) (*Store, error) {
 	if err := precreate(path); err != nil {
 		return nil, err
 	}
@@ -165,6 +173,12 @@ func Open(ctx context.Context, path string) (*Store, error) {
 			return nil, fmt.Errorf("config pragmas: %w", err)
 		}
 	}
+	if maxShape > 0 {
+		if err := refuseFutureShape(ctx, db, maxShape); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
 	if _, err := db.ExecContext(ctx, schemaDDL); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("config schema: %w", err)
@@ -176,6 +190,40 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		}
 	}
 	return &Store{db: db, path: path}, nil
+}
+
+// refuseFutureShape reads the stamp with the lightest possible touch
+// — no DDL, no writes — and refuses a store a newer binary wrote.
+// A base with no meta table is new or pre-versioning: shape 1 either
+// way, never future.
+func refuseFutureShape(ctx context.Context, db *sql.DB, maxShape int) error {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='meta'").Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	var text string
+	err := db.QueryRowContext(ctx,
+		"SELECT value FROM meta WHERE key = ?", shapeKey).Scan(&text)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	shape, err := strconv.Atoi(text)
+	if err != nil {
+		return fmt.Errorf("the store's shape stamp %q is unreadable", text)
+	}
+	if shape > maxShape {
+		return fmt.Errorf(
+			"the store is shape %d and this binary speaks at most %d — "+
+				"a newer lotor wrote it; refusing to touch what it means", shape, maxShape)
+	}
+	return nil
 }
 
 // Close releases the database.
@@ -417,6 +465,11 @@ func (s *Store) Replace(ctx context.Context, kind, name string, section any,
 	if err != nil {
 		return err
 	}
+	// The store's own mask runs over EVERY revision, the manager's
+	// pre-masking notwithstanding: masking twice is idempotent, and a
+	// future caller that skips the manager's step must not be a new
+	// leak. One encoder, one policy.
+	masked := s.maskRaw(string(diff))
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -430,7 +483,7 @@ func (s *Store) Replace(ctx context.Context, kind, name string, section any,
 	}
 	if _, err := tx.ExecContext(ctx,
 		"INSERT INTO revisions(at, principal, kind, name, op, change) VALUES(?, ?, ?, ?, ?, ?)",
-		time.Now().UTC().Format(time.RFC3339), principal, kind, name, op, string(diff)); err != nil {
+		time.Now().UTC().Format(time.RFC3339), principal, kind, name, op, masked); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -648,3 +701,12 @@ func stripNulls(v any) any {
 // ErrNotEmpty refuses an import over a store that already holds a
 // configuration; replacing one is a decision, not a default.
 var ErrNotEmpty = errors.New("the configuration database is not empty")
+
+// PlantRevision writes one raw revision row — the door migration
+// tests use to reproduce what past binaries recorded.
+func PlantRevision(ctx context.Context, s *Store, op, change string) error {
+	_, err := s.db.ExecContext(ctx,
+		"INSERT INTO revisions(at, principal, kind, name, op, change) VALUES(?, 'test', 'relay', 'mc', ?, ?)",
+		time.Now().UTC().Format(time.RFC3339), op, change)
+	return err
+}
