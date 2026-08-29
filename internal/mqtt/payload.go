@@ -209,8 +209,8 @@ type NeighborEntry struct {
 	SNR          float64
 	HeardSecsAgo int
 	HeardUnknown bool
-	Scopes       string
-	// Status is the scopes question's outcome: responded, timeout, or
+	Regions      string
+	// Status is the regions question's outcome: responded, timeout, or
 	// send_failed — the ecosystem's own vocabulary.
 	Status string
 }
@@ -227,6 +227,10 @@ type neighborsMessage struct {
 }
 
 type neighborsSelf struct {
+	Regions       string `json:"regions"`
+	DefaultRegion string `json:"default_region"`
+	// The scope spellings are deprecated duplicates, kept one release
+	// for consumers mid-migration; same values.
 	Scopes       string `json:"scopes"`
 	DefaultScope string `json:"default_scope"`
 }
@@ -235,14 +239,16 @@ type neighborEntry struct {
 	PubKey       string  `json:"pubkey"`
 	SNR          float64 `json:"snr"`
 	HeardSecsAgo *int    `json:"heard_secs_ago"`
-	Scopes       string  `json:"scopes"`
-	Status       string  `json:"status"`
+	Regions      string  `json:"regions"`
+	// Scopes is the deprecated duplicate of Regions, kept one release.
+	Scopes string `json:"scopes"`
+	Status string `json:"status"`
 }
 
 // NeighborsJSON builds the neighbourhood message. queried counts the
 // entries actually asked this round; an unknown age travels as null,
 // not as zero.
-func NeighborsJSON(at time.Time, origin, originID, selfScopes, defaultScope string,
+func NeighborsJSON(at time.Time, origin, originID, selfRegions, defaultRegion string,
 	entries []NeighborEntry, queried int,
 ) ([]byte, error) {
 	m := neighborsMessage{
@@ -251,12 +257,16 @@ func NeighborsJSON(at time.Time, origin, originID, selfScopes, defaultScope stri
 		OriginID:         originID,
 		TotalNeighbors:   len(entries),
 		QueriedNeighbors: queried,
-		Self:             neighborsSelf{Scopes: selfScopes, DefaultScope: defaultScope},
-		Neighbors:        make([]neighborEntry, 0, len(entries)),
+		Self: neighborsSelf{
+			Regions: selfRegions, DefaultRegion: defaultRegion,
+			Scopes: selfRegions, DefaultScope: defaultRegion,
+		},
+		Neighbors: make([]neighborEntry, 0, len(entries)),
 	}
 	for _, e := range entries {
 		out := neighborEntry{
-			PubKey: e.PubKey, SNR: e.SNR, Scopes: e.Scopes, Status: e.Status,
+			PubKey: e.PubKey, SNR: e.SNR,
+			Regions: e.Regions, Scopes: e.Regions, Status: e.Status,
 		}
 		if !e.HeardUnknown {
 			age := e.HeardSecsAgo

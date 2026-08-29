@@ -80,7 +80,7 @@ func TestTreeMountedVerbTellsTheRelay(t *testing.T) {
 	deps := testDeps(t)
 	deps.Relays[0].Neighbours = func() []Neighbour { return nil }
 	out := run(t, deps, "/relay meshcore-868 scopes")
-	if !strings.Contains(out, "carries no scopes") {
+	if !strings.Contains(out, "has no regions") {
 		t.Errorf("the mounted verb did not reach the relay:\n%s", out)
 	}
 }
@@ -1405,13 +1405,13 @@ func TestAskingANeighbourIsAVerbWhereTheNeighbourIs(t *testing.T) {
 	deps := withNeighbour(t)
 	deps.Privilege = Admin
 	var asked []byte
-	deps.Relays[0].AskScopes = func(prefix []byte) ([]string, error) {
+	deps.Relays[0].AskRegions = func(prefix []byte) ([]string, error) {
 		asked = prefix
 		return []string{"eu", "fr-idf"}, nil
 	}
 	// Standing on one of them says which, so the verb takes no target
 	// of its own: the path is the target.
-	out := run(t, deps, "/relay/meshcore-868/neighbours/0d139b6421d0/ask-scopes")
+	out := run(t, deps, "/relay/meshcore-868/neighbours/0d139b6421d0/ask-regions")
 	if !strings.Contains(out, "eu, fr-idf") {
 		t.Errorf("the answer never came back:\n%s", out)
 	}

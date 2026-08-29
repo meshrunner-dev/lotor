@@ -136,6 +136,12 @@ func (m *manager) otaCommands(relay string) func(line string, admin []byte) stri
 // runOTA dispatches one line. Every answer is a single short string:
 // the reference's clients show it as a message.
 func (m *manager) runOTA(relay, principal, line string) string {
+	// The region door goes first, exactly as the reference's modal
+	// load check does: while a load staging is armed for this admin,
+	// EVERY line — the blank commit included — belongs to it.
+	if reply, handled := m.otaRegion(relay, principal, line); handled {
+		return reply
+	}
 	verb, rest, _ := strings.Cut(line, " ")
 	rest = strings.TrimSpace(rest)
 	switch verb {
@@ -410,4 +416,27 @@ func (m *manager) otaAdvert(relay string, flood bool) string {
 		ok = "OK - Advert sent"
 	}
 	return m.orderAir(airOrder{relay: relay, advert: true, flood: flood}, ok)
+}
+
+// otaRegion routes one line to the engine's region door when it is
+// region business: the `region` grammar, or any line at all while a
+// modal load staging is armed for this principal. The replies are the
+// engine's — the same words the console gets.
+func (m *manager) otaRegion(relay, principal, line string) (string, bool) {
+	m.viewMu.RLock()
+	info, ok := m.infos[relay]
+	m.viewMu.RUnlock()
+	if !ok || info.RegionLine == nil {
+		return "", false
+	}
+	armed := info.RegionLoadArmed != nil && info.RegionLoadArmed(principal)
+	verb, _, _ := strings.Cut(strings.TrimLeft(line, " "), " ")
+	if !armed && verb != "region" {
+		return "", false
+	}
+	reply, handled, err := info.RegionLine(principal, line)
+	if err != nil {
+		return "Err - " + err.Error(), true
+	}
+	return reply, handled
 }

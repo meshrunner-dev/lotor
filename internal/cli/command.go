@@ -96,6 +96,9 @@ var commands []*command
 func init() {
 	commands = append(commands, daemonCommands()...)
 	commands = append(commands, relayCommands()...)
+	commands = append(commands, regionCommands()...)
+	commands = append(commands, regionFlagCommands()...)
+	commands = append(commands, deprecatedRegionSpellings()...)
 	commands = append(commands, journalCommands()...)
 	commands = append(commands, updateCommands()...)
 	commands = append(commands, sessionCommands()...)
@@ -157,31 +160,97 @@ func daemonCommands() []*command {
 
 // relayCommands reach into one relay's own state: what its engine
 // knows, and the two things an operator can ask it to put on the air.
-func relayCommands() []*command {
+// deprecatedRegionSpellings answer to the old scope words for one
+// release, so a habit or a script survives the rename.
+func deprecatedRegionSpellings() []*command {
 	return []*command{
 		{
-			name:   cmdScopes,
-			on:     scopeRelay,
-			forms:  []form{{cmdScopes, "the transport scopes this relay carries"}},
-			detail: []string{cmdScopes},
-			flags:  []flagSpec{{name: scopeRelay, valued: true, doc: docRelay}},
-			run:    (*session).scopes,
+			name: cmdScopes,
+			on:   scopeRelay,
+			forms: []form{
+				{cmdScopes, "deprecated spelling of " + cmdRegions},
+			},
+			detail: []string{
+				cmdScopes,
+				"deprecated: the word is " + cmdRegions + " now — this",
+				"spelling answers the same and leaves next release.",
+			},
+			flags: []flagSpec{{name: scopeRelay, valued: true, doc: docRelay}},
+			run:   (*session).regions,
 		},
 		{
-			name:  cmdAskScopes,
-			forms: []form{{cmdAskScopes, "ask a neighbour which scopes it carries"}},
+			name: cmdAskScopes,
+			forms: []form{
+				{cmdAskScopes, "deprecated spelling of " + cmdAskRegions},
+			},
 			detail: []string{
 				cmdAskScopes,
-				"admin only; it emits, and the answer comes from the",
-				"neighbour itself rather than from anything already known",
+				"deprecated: the word is " + cmdAskRegions + " now — this",
+				"spelling answers the same and leaves next release.",
 			},
 			flags: []flagSpec{
 				{name: scopeRelay, valued: true, doc: docRelay},
 				{name: optNeighbour, valued: true, doc: "which one, by key prefix"},
 			},
 			admin: true,
-			run:   (*session).askScopes,
+			run:   (*session).askRegions,
 		},
+	}
+}
+
+// regionFlagCommands are the drawer's per-region verbs.
+func regionFlagCommands() []*command {
+	return []*command{
+		{
+			name:  cmdAllowF,
+			forms: []form{{cmdAllowF, "allow floods in one region"}},
+			detail: []string{
+				cmdAllowF + " " + optRegion + "=<name>",
+				"admin only; clears the region's deny-flood flag —",
+				"the wildcard included, which governs plain floods.",
+			},
+			flags: []flagSpec{
+				{name: scopeRelay, valued: true, doc: docRelay},
+				{name: optRegion, valued: true, doc: "which region, by name or prefix"},
+			},
+			admin: true,
+			run:   (*session).regionAllow,
+		},
+		{
+			name:  cmdDenyF,
+			forms: []form{{cmdDenyF, "deny floods in one region"}},
+			detail: []string{
+				cmdDenyF + " " + optRegion + "=<name>",
+				"admin only; sets the region's deny-flood flag —",
+				"the wildcard included, which governs plain floods.",
+			},
+			flags: []flagSpec{
+				{name: scopeRelay, valued: true, doc: docRelay},
+				{name: optRegion, valued: true, doc: "which region, by name or prefix"},
+			},
+			admin: true,
+			run:   (*session).regionDeny,
+		},
+		{
+			name:  cmdDrop,
+			forms: []form{{cmdDrop, "remove one region from the table"}},
+			detail: []string{
+				cmdDrop + " " + optRegion + "=<name>",
+				"admin only; exact name, children first — what is",
+				"destroyed is looked up, never guessed at.",
+			},
+			flags: []flagSpec{
+				{name: scopeRelay, valued: true, doc: docRelay},
+				{name: optRegion, valued: true, doc: "which region, by its exact name"},
+			},
+			admin: true,
+			run:   (*session).regionDrop,
+		},
+	}
+}
+
+func relayCommands() []*command {
+	return []*command{
 		{
 			name: cmdDiscover,
 			forms: []form{
@@ -216,6 +285,49 @@ func relayCommands() []*command {
 			},
 			admin: true,
 			run:   (*session).advert,
+		},
+	}
+}
+
+// regionCommands administer the region table — the wire's own
+// grammar, spoken from the console.
+func regionCommands() []*command {
+	return []*command{
+		{
+			name: cmdRegion,
+			on:   scopeRelay,
+			forms: []form{
+				{cmdRegion + ` ["<verb …>"]`, "administer the region table, the wire's own grammar"},
+			},
+			detail: []string{
+				cmdRegion + ` ["put <name> [parent]"]`,
+				"admin only. One line of the ecosystem's region grammar,",
+				"quoted when it holds spaces: put, remove, get, home,",
+				"default, allowf, denyf, list allowed|denied, def, save.",
+				"Bare " + cmdRegion + " prints the tree. Replies are the wire's,",
+				"and every change applies at once — no relay restart.",
+			},
+			flags: []flagSpec{{name: scopeRelay, valued: true, doc: docRelay}},
+			takes: &positional{name: "verb", doc: "the rest of the region line, quoted if spaced"},
+			admin: true,
+			run:   (*session).regionLine,
+		},
+		{
+			name: cmdAskRegions,
+			forms: []form{
+				{cmdAskRegions, "ask a neighbour which regions it carries"},
+			},
+			detail: []string{
+				cmdAskRegions,
+				"admin only; it emits, and the answer comes from the",
+				"neighbour itself rather than from anything already known",
+			},
+			flags: []flagSpec{
+				{name: scopeRelay, valued: true, doc: docRelay},
+				{name: optNeighbour, valued: true, doc: "which one, by key prefix"},
+			},
+			admin: true,
+			run:   (*session).askRegions,
 		},
 	}
 }

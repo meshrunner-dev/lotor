@@ -63,8 +63,9 @@ type Config struct {
 	// neighbourhood is still an answer.
 	Neighbors         func(ctx context.Context) (entries []NeighborEntry, queried int, ran bool)
 	NeighborsInterval time.Duration
-	// The self block of the neighbourhood message.
-	SelfScopes, DefaultScope string
+	// The self block of the neighbourhood message, read live at each
+	// publication: the region table mutates over the air.
+	SelfRegions, DefaultRegion func() string
 
 	// The watched relay's face: name on the air, public key in hex.
 	Origin, OriginID string
@@ -188,7 +189,7 @@ func (o *Observer) startNeighbors(ctx context.Context, busy *bool, done chan<- s
 			return
 		}
 		payload, err := NeighborsJSON(time.Now(), o.cfg.Origin, o.cfg.OriginID,
-			o.cfg.SelfScopes, o.cfg.DefaultScope, entries, queried)
+			liveWord(o.cfg.SelfRegions), liveWord(o.cfg.DefaultRegion), entries, queried)
 		if err != nil {
 			return
 		}
@@ -311,4 +312,12 @@ func (o *Observer) filtered() {
 	o.mu.Lock()
 	o.n.Filtered++
 	o.mu.Unlock()
+}
+
+// liveWord reads an optional live string; absent reads empty.
+func liveWord(f func() string) string {
+	if f == nil {
+		return ""
+	}
+	return f()
 }

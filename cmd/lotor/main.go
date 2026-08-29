@@ -893,10 +893,11 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		ChipStats:        r.ChipStats,
 		TXMode:           r.TXMode(),
 		Duty:             dutyOf(eng),
-		Scopes:           scopesOf(eng),
-		DefaultScope:     defaultScopeOf(eng),
+		Regions:          regionsOf(eng),
+		RegionLine:       regionLineOf(eng),
+		RegionLoadArmed:  regionLoadArmedOf(eng),
 		Sign:             signOf(eng),
-		AskScopes:        askScopesOf(eng),
+		AskRegions:       askRegionsOf(eng),
 		Discover:         discoverOf(eng),
 		ScanWindow:       scanWindowOf(eng),
 		TriggerAdvert:    advertTrigger(eng),
@@ -921,15 +922,6 @@ func scanWindowOf(eng protocol.Engine) func() (time.Time, bool) {
 		return nil
 	}
 	return w.ScanWindow
-}
-
-// defaultScopeOf reads which scope the relay itself speaks under.
-func defaultScopeOf(eng protocol.Engine) string {
-	d, ok := eng.(interface{ DefaultScope() string })
-	if !ok {
-		return ""
-	}
-	return d.DefaultScope()
 }
 
 // signOf exposes the engine's identity signature when it has one to
@@ -1096,19 +1088,65 @@ func advertTrigger(eng protocol.Engine) func(bool) error {
 	return a.RequestAdvert
 }
 
-// scopesOf exposes the transport scopes an engine carries, when it
-// speaks a protocol that has any.
-func scopesOf(eng protocol.Engine) []string {
-	s, ok := eng.(interface{ Scopes() []string })
+// regionsOf exposes the relay's region state — live, since the table
+// mutates over the air — when the protocol has one.
+func regionsOf(eng protocol.Engine) func() (cli.RegionInfo, error) {
+	r, ok := eng.(interface {
+		Regions() (enginemc.RegionSnapshot, error)
+	})
 	if !ok {
 		return nil
 	}
-	return s.Scopes()
+	return func() (cli.RegionInfo, error) {
+		snap, err := r.Regions()
+		if err != nil {
+			return cli.RegionInfo{}, err
+		}
+		info := cli.RegionInfo{
+			Tree: snap.Tree, Served: snap.Served,
+			Default: snap.Default, Home: snap.Home, Unscoped: snap.Unscoped,
+		}
+		byID := map[uint16]string{0: "*"}
+		for _, e := range snap.Entries {
+			byID[e.ID] = strings.TrimPrefix(e.Name, "#")
+		}
+		for _, e := range snap.Entries {
+			bare := strings.TrimPrefix(e.Name, "#")
+			info.Entries = append(info.Entries, cli.RegionEntry{
+				Name:    bare,
+				Parent:  byID[e.Parent],
+				Flood:   e.Flags&meshcore.RegionDenyFlood == 0,
+				Home:    bare == snap.Home,
+				Default: bare == snap.Default,
+			})
+		}
+		return info, nil
+	}
 }
 
-// askScopesOf exposes the question an operator may put to a
-// neighbour, when the protocol has scopes to ask about.
-func askScopesOf(eng protocol.Engine) func(prefix []byte) ([]string, error) {
+// regionLineOf exposes the region command door, when the protocol has
+// one; regionLoadArmedOf its modal pre-check.
+func regionLineOf(eng protocol.Engine) func(owner, line string) (string, bool, error) {
+	c, ok := eng.(interface {
+		RegionCommand(owner, line string) (string, bool, error)
+	})
+	if !ok {
+		return nil
+	}
+	return c.RegionCommand
+}
+
+func regionLoadArmedOf(eng protocol.Engine) func(owner string) bool {
+	a, ok := eng.(interface{ RegionLoadArmed(owner string) bool })
+	if !ok {
+		return nil
+	}
+	return a.RegionLoadArmed
+}
+
+// askRegionsOf exposes the question an operator may put to a
+// neighbour, when the protocol has regions to ask about.
+func askRegionsOf(eng protocol.Engine) func(prefix []byte) ([]string, error) {
 	a, ok := eng.(interface {
 		Neighbour(prefix []byte) ([]byte, error)
 		AskScopes(peer []byte) ([]string, error)

@@ -172,7 +172,7 @@ func TestNeighborsJSONPinsTheSchema(t *testing.T) {
 	age := 42
 	payload, err := NeighborsJSON(at, "Raccoon City", "2e88", "eu-868,eu-868-narrow", "eu-868",
 		[]NeighborEntry{
-			{PubKey: "aaaa", SNR: 7.5, HeardSecsAgo: age, Scopes: "eu-868", Status: "responded"},
+			{PubKey: "aaaa", SNR: 7.5, HeardSecsAgo: age, Regions: "eu-868", Status: "responded"},
 			{PubKey: "bbbb", SNR: -3.25, HeardUnknown: true, Status: "timeout"},
 		}, 2)
 	if err != nil {
@@ -180,9 +180,9 @@ func TestNeighborsJSONPinsTheSchema(t *testing.T) {
 	}
 	want := `{"timestamp":"2026-08-28T03:20:14.417494+00:00","origin":"Raccoon City",` +
 		`"origin_id":"2e88","total_neighbors":2,"queried_neighbors":2,"truncated":false,` +
-		`"self":{"scopes":"eu-868,eu-868-narrow","default_scope":"eu-868"},` +
-		`"neighbors":[{"pubkey":"aaaa","snr":7.5,"heard_secs_ago":42,"scopes":"eu-868","status":"responded"},` +
-		`{"pubkey":"bbbb","snr":-3.25,"heard_secs_ago":null,"scopes":"","status":"timeout"}]}`
+		`"self":{"regions":"eu-868,eu-868-narrow","default_region":"eu-868","scopes":"eu-868,eu-868-narrow","default_scope":"eu-868"},` +
+		`"neighbors":[{"pubkey":"aaaa","snr":7.5,"heard_secs_ago":42,"regions":"eu-868","scopes":"eu-868","status":"responded"},` +
+		`{"pubkey":"bbbb","snr":-3.25,"heard_secs_ago":null,"regions":"","scopes":"","status":"timeout"}]}`
 	if string(payload) != want {
 		t.Errorf("neighbors message drifted:\n got %s\nwant %s", payload, want)
 	}

@@ -94,8 +94,10 @@ func (s *session) relayStatus(ctx context.Context, in input) error {
 		r.Waveform.BandwidthHz, r.Waveform.CodingRate, r.Waveform.Preamble,
 		r.Waveform.SyncWord, r.Waveform.CRC))
 	tb.row("noise floor", floorText(r))
-	if len(r.Scopes) > 0 {
-		tb.row(cmdScopes, strings.Join(r.Scopes, ", "))
+	if r.Regions != nil {
+		if info, err := r.Regions(); err == nil && len(info.Served) > 0 {
+			tb.row(cmdRegions, strings.Join(info.Served, ", "))
+		}
 	}
 	tb.row("tx mode", txModeText(r))
 	if r.Duty != nil {
@@ -625,9 +627,9 @@ func (s *session) drainAnswers(found <-chan Neighbour) int {
 	}
 }
 
-// scopes shows what this relay carries, or asks a neighbour what it
-// does. The asking half emits, so it is admin-gated at the table.
-func (s *session) scopes(_ context.Context, in input) error {
+// regions shows the relay's region tree — the reference's own render —
+// with the designations under it.
+func (s *session) regions(_ context.Context, in input) error {
 	r, err := s.oneRelay(in.opts[scopeRelay])
 	if err != nil {
 		return err
@@ -635,10 +637,91 @@ func (s *session) scopes(_ context.Context, in input) error {
 	if err := working(r); err != nil {
 		return err
 	}
-	if len(r.Scopes) == 0 {
-		return fmt.Errorf("relay %q carries no scopes", r.Name)
+	if r.Regions == nil {
+		return fmt.Errorf("relay %q has no regions", r.Name)
 	}
-	fmt.Fprintf(s.out, "%s\r\n", strings.Join(r.Scopes, ", "))
+	info, err := r.Regions()
+	if err != nil {
+		return err
+	}
+	for line := range strings.SplitSeq(strings.TrimRight(info.Tree, "\n"), "\n") {
+		fmt.Fprintf(s.out, "%s\r\n", line)
+	}
+	def := info.Default
+	if def == "" {
+		def = "<null>"
+	}
+	fmt.Fprintf(s.out, "default: %s  home: %s\r\n", def, info.Home)
+	return nil
+}
+
+// regionLine forwards one line of the region grammar to the relay and
+// prints the wire's own reply.
+func (s *session) regionLine(_ context.Context, in input) error {
+	r, err := s.oneRelay(in.opts[scopeRelay])
+	if err != nil {
+		return err
+	}
+	if err := working(r); err != nil {
+		return err
+	}
+	if r.RegionLine == nil {
+		return fmt.Errorf("relay %q has no regions to administer", r.Name)
+	}
+	line := cmdRegion
+	if len(in.pos) > 0 && in.pos[0] != "" {
+		line += " " + in.pos[0]
+	}
+	reply, handled, err := r.RegionLine("console", line)
+	if err != nil {
+		return err
+	}
+	if !handled {
+		return errors.New("the relay did not read that as a region line")
+	}
+	if reply == "" {
+		reply = "(no reply)"
+	}
+	for part := range strings.SplitSeq(strings.TrimRight(reply, "\n"), "\n") {
+		fmt.Fprintf(s.out, "%s\r\n", part)
+	}
+	return nil
+}
+
+// regionAllow, regionDeny and regionDrop are the drawer's verbs: each
+// composes the wire's own line, so the replies match the air's.
+func (s *session) regionAllow(ctx context.Context, in input) error {
+	return s.regionItemVerb(ctx, in, "allowf")
+}
+
+func (s *session) regionDeny(ctx context.Context, in input) error {
+	return s.regionItemVerb(ctx, in, "denyf")
+}
+
+func (s *session) regionDrop(ctx context.Context, in input) error {
+	return s.regionItemVerb(ctx, in, "remove")
+}
+
+func (s *session) regionItemVerb(_ context.Context, in input, verb string) error {
+	r, err := s.oneRelay(in.opts[scopeRelay])
+	if err != nil {
+		return err
+	}
+	if err := working(r); err != nil {
+		return err
+	}
+	if r.RegionLine == nil {
+		return fmt.Errorf("relay %q has no regions to administer", r.Name)
+	}
+	name := in.opts[optRegion]
+	if name == "" {
+		return fmt.Errorf("which one? %s=<name>", optRegion)
+	}
+	reply, _, err := r.RegionLine("console", cmdRegion+" "+verb+" "+name)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(s.out, "%s\r\n", reply)
 	return nil
 }
 
@@ -786,7 +869,7 @@ func bytesHasPrefix(b, prefix []byte) bool {
 	return true
 }
 
-func (s *session) askScopes(_ context.Context, in input) error {
+func (s *session) askRegions(_ context.Context, in input) error {
 	r, err := s.oneRelay(in.opts[scopeRelay])
 	if err != nil {
 		return err
@@ -798,15 +881,15 @@ func (s *session) askScopes(_ context.Context, in input) error {
 	if key == "" {
 		return fmt.Errorf("which one? %s=<key prefix>", optNeighbour)
 	}
-	if r.AskScopes == nil {
-		return fmt.Errorf("relay %q has no scopes to ask about", r.Name)
+	if r.AskRegions == nil {
+		return fmt.Errorf("relay %q has no regions to ask about", r.Name)
 	}
 	prefix, err := hex.DecodeString(key)
 	if err != nil {
 		return fmt.Errorf("%q is not a hex key prefix", key)
 	}
 	fmt.Fprint(s.out, "asking…\r\n")
-	names, err := r.AskScopes(prefix)
+	names, err := r.AskRegions(prefix)
 	if err != nil {
 		return err
 	}

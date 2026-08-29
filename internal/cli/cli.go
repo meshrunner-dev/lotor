@@ -51,14 +51,22 @@ const (
 	cmdQuit      = "quit"
 
 	// The relay-scoped commands, named once: the flat table and the
-	// context tree both mount them.
-	cmdScopes    = "scopes"
-	cmdDiscover  = "discover"
-	cmdAskScopes = "ask-scopes"
-	cmdGrant     = "grant"
-	cmdRevoke    = "revoke"
-	optKey       = "key"
-	optRole      = "role"
+	// context tree both mount them. The scope spellings are deprecated
+	// aliases of the region ones, kept a release.
+	cmdRegions    = "regions"
+	cmdScopes     = "scopes"
+	cmdDiscover   = "discover"
+	cmdAskRegions = "ask-regions"
+	cmdAskScopes  = "ask-scopes"
+	cmdRegion     = "region"
+	cmdAllowF     = "allowf"
+	cmdDenyF      = "denyf"
+	cmdDrop       = "drop"
+	optRegion     = "region"
+	cmdGrant      = "grant"
+	cmdRevoke     = "revoke"
+	optKey        = "key"
+	optRole       = "role"
 	// The role words the console speaks — the boundary's RoleByte is
 	// the authority; a word it refuses is refused at the door.
 	roleAdmin     = "admin"
@@ -134,18 +142,23 @@ type RelayInfo struct {
 	// TXMode is the transmit gate the relay runs behind: dry, shadow
 	// or on-air; empty reads as dry.
 	TXMode string
-	// Scopes lists the transport scopes this relay carries; empty for
-	// a protocol that has none.
-	Scopes []string
-	// DefaultScope is the one the relay itself speaks under.
-	DefaultScope string
+	// Regions reads the relay's region state — live, because the
+	// table mutates over the air; nil for a protocol that has none.
+	Regions func() (RegionInfo, error)
+	// RegionLine runs one line of the region grammar for an owner and
+	// returns the wire's own reply; handled is false when the line was
+	// not region business. Nil when the protocol has no regions.
+	RegionLine func(owner, line string) (reply string, handled bool, err error)
+	// RegionLoadArmed reports whether a modal region load is armed for
+	// this owner — the dispatcher's pre-check; nil with RegionLine.
+	RegionLoadArmed func(owner string) bool
 	// Sign signs a message under the relay's node identity — how an
 	// observer proves the device to a broker; nil without an identity.
 	Sign func(message []byte) []byte
-	// AskScopes puts the scopes question to a neighbour named by a key
-	// prefix, and waits for its answer; nil when the protocol has no
-	// scopes to ask about.
-	AskScopes func(prefix []byte) ([]string, error)
+	// AskRegions puts the regions question to a neighbour named by a
+	// key prefix, and waits for its answer; nil when the protocol has
+	// no regions to ask about.
+	AskRegions func(prefix []byte) ([]string, error)
 	// Discover runs a neighbourhood scan, yielding each answer as it
 	// lands and closing when the window ends; nil when the protocol
 	// has no scan to run.
@@ -796,4 +809,26 @@ func uptime(since time.Time) string {
 		return fmt.Sprintf("%dh %02dm", int(d.Hours()), int(d.Minutes())%60)
 	}
 	return fmt.Sprintf("%dd %dh", int(d.Hours())/24, int(d.Hours())%24)
+}
+
+// RegionInfo is a relay's region state as the console reads it: the
+// reference's own tree render, the carried names, the designations,
+// and the entries for the drawer.
+type RegionInfo struct {
+	Tree     string
+	Served   []string
+	Default  string // bare name; empty when the relay speaks unscoped
+	Home     string // bare name; "*" while none is designated
+	Entries  []RegionEntry
+	Unscoped bool // whether plain floods are carried
+}
+
+// RegionEntry is one region for the drawer: names resolved, the flood
+// policy spelled out.
+type RegionEntry struct {
+	Name    string
+	Parent  string // "*" for a top-level region
+	Flood   bool   // whether floods in this region are carried
+	Home    bool
+	Default bool
 }

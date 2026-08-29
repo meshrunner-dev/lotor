@@ -150,9 +150,9 @@ func (m *manager) observerConfig(name string, p mqtt.Params, log *zap.Logger) (m
 		Radio: mqtt.RadioString(info.Waveform.FrequencyHz,
 			uint32(max(info.Waveform.BandwidthHz, 0)), // a LoRa bandwidth, never negative
 			info.Waveform.SpreadingFactor, info.Waveform.CodingRate),
-		Health:       m.observerHealth(relayName),
-		SelfScopes:   strings.Join(info.Scopes, ","),
-		DefaultScope: info.DefaultScope,
+		Health:        m.observerHealth(relayName),
+		SelfRegions:   selfRegionsOf(info),
+		DefaultRegion: defaultRegionOf(info),
 	}
 	if p.Origin != "" {
 		// The operator may publish under another banner than the air's.
@@ -267,13 +267,13 @@ func (m *manager) neighboursRound(relayName string, log *zap.Logger,
 			} else {
 				e.HeardSecsAgo = int(time.Since(nb.Heard).Seconds())
 			}
-			if info.AskScopes != nil && ctx.Err() == nil {
+			if info.AskRegions != nil && ctx.Err() == nil {
 				queried++
-				scopes, err := info.AskScopes(nb.PubKey[:])
+				regions, err := info.AskRegions(nb.PubKey[:])
 				switch {
 				case err == nil:
 					e.Status = "responded"
-					e.Scopes = strings.Join(scopes, ",")
+					e.Regions = strings.Join(regions, ",")
 				case errors.Is(err, enginemc.ErrNoAnswer):
 					e.Status = "timeout"
 				default:
@@ -554,4 +554,33 @@ func (m *manager) MQTTInfos() []cli.MQTTInfo {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// selfRegionsOf and defaultRegionOf read the region state live at each
+// publication: the table mutates over the air, and a snapshot taken at
+// observer assembly would publish a policy the relay no longer runs.
+func selfRegionsOf(info cli.RelayInfo) func() string {
+	if info.Regions == nil {
+		return func() string { return "" }
+	}
+	return func() string {
+		r, err := info.Regions()
+		if err != nil {
+			return ""
+		}
+		return strings.Join(r.Served, ",")
+	}
+}
+
+func defaultRegionOf(info cli.RelayInfo) func() string {
+	if info.Regions == nil {
+		return func() string { return "" }
+	}
+	return func() string {
+		r, err := info.Regions()
+		if err != nil {
+			return ""
+		}
+		return r.Default
+	}
 }

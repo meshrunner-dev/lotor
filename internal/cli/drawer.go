@@ -120,6 +120,8 @@ const (
 	drawerSessions   = "sessions"
 	drawerHistory    = "history"
 	drawerACL        = "acl"
+	drawerRegions    = "regions"
+	fieldFlood       = "flood"
 	kindCLI          = "cli"
 	kindSystem       = "system"
 )
@@ -129,7 +131,7 @@ var drawers = []drawer{{
 	doc:       "repeaters heard with no relay in between",
 	on:        scopeRelay,
 	verbs:     []string{cmdDiscover},
-	itemVerbs: []string{cmdAskScopes},
+	itemVerbs: []string{cmdAskRegions, cmdAskScopes},
 	itemFlag:  optNeighbour,
 	empty:     "nobody heard directly yet",
 	keys:      (*session).neighbourKeys,
@@ -162,6 +164,16 @@ var drawers = []drawer{{
 	itemAttrs: []schema.Attr{{Name: optRole, Type: schema.String,
 		Enum: []string{roleAdmin, roleReadWrite, roleReadOnly},
 		Doc:  "the entry's role — the same ladder grant speaks"}},
+}, {
+	name:      drawerRegions,
+	doc:       "the regions this relay carries and speaks — its flood policy",
+	on:        scopeRelay,
+	verbs:     []string{cmdRegion},
+	itemVerbs: []string{cmdAllowF, cmdDenyF, cmdDrop},
+	itemFlag:  optRegion,
+	empty:     "only the wildcard — every plain flood, no named region",
+	keys:      (*session).regionKeys,
+	view:      (*session).regionView,
 }, {
 	name:     drawerHistory,
 	doc:      "the configuration's revision journal — who changed what, when",
@@ -358,7 +370,7 @@ func airRole(c AirSession) string {
 // route it taught us, or flooded across the mesh until it does.
 func airAnswers(c AirSession) string {
 	if !c.HasPath {
-		return "flood"
+		return fieldFlood
 	}
 	return "direct"
 }
@@ -698,4 +710,82 @@ func (s *session) printDrawerItem(ctx context.Context, path []string) error {
 		tb.row(f.name, f.value)
 	}
 	return tb.flush(s.out)
+}
+
+// regionKeys answers the walker and completion: the region names, the
+// wildcard included — it holds the plain-flood policy.
+func (s *session) regionKeys(instance string) map[string]string {
+	r, err := s.oneRelay(instance)
+	if err != nil || r.Regions == nil {
+		return nil
+	}
+	info, err := r.Regions()
+	if err != nil {
+		return nil
+	}
+	out := map[string]string{"*": "the wildcard — plain, unscoped floods"}
+	for _, e := range info.Entries {
+		doc := "under " + e.Parent
+		if !e.Flood {
+			doc += ", flood denied"
+		}
+		out[e.Name] = doc
+	}
+	return out
+}
+
+// regionView reads the table for printing: one row per region, the
+// wildcard first, and the tree as the note — the same render the wire
+// answers.
+func (s *session) regionView(_ context.Context, instance string, _ frameSelectors) (drawerView, error) {
+	r, err := s.oneRelay(instance)
+	if err != nil {
+		return drawerView{}, err
+	}
+	if r.Regions == nil {
+		return drawerView{}, fmt.Errorf("relay %q has no regions", r.Name)
+	}
+	info, err := r.Regions()
+	if err != nil {
+		return drawerView{}, err
+	}
+	v := drawerView{
+		header: []string{colNameHdr, "PARENT", "FLOOD", "MARKS"},
+		rows:   map[string][]field{},
+	}
+	flood := func(allowed bool) string {
+		if allowed {
+			return "allowed"
+		}
+		return "denied"
+	}
+	wildMarks := ""
+	if info.Home == "*" {
+		wildMarks = "home"
+	}
+	v.keys = append(v.keys, "*")
+	v.rows["*"] = []field{
+		{name: fieldName, value: "*"},
+		{name: "parent", value: "-"},
+		{name: fieldFlood, value: flood(info.Unscoped)},
+		{name: "marks", value: wildMarks},
+	}
+	for _, e := range info.Entries {
+		var marks []string
+		if e.Home {
+			marks = append(marks, "home")
+		}
+		if e.Default {
+			marks = append(marks, "default")
+		}
+		v.keys = append(v.keys, e.Name)
+		v.rows[e.Name] = []field{
+			{name: fieldName, value: e.Name},
+			{name: "parent", value: e.Parent},
+			{name: fieldFlood, value: flood(e.Flood)},
+			{name: "marks", value: strings.Join(marks, ",")},
+		}
+	}
+	v.note = strings.TrimRight(info.Tree, "\n")
+	return v, nil
 }
