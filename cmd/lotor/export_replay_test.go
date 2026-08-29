@@ -22,6 +22,8 @@ import (
 	"meshrunner.dev/lotor/internal/cli"
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/mqtt"
+	"meshrunner.dev/lotor/internal/product"
 )
 
 // replayManager builds a manager over an in-memory store seeded with
@@ -175,4 +177,43 @@ func TestExportReplaysThroughTheRealChain(t *testing.T) {
 	if got := obs["custom"]["password"]; got != "p\"wd\ntwo" {
 		t.Errorf("inactive scope password = %q — the scope switch travelled apart", got)
 	}
+}
+
+// TestEverySurfaceSpeaksTheSameBuild is the coherence matrix: the one
+// version read at boot is what the banner, the status row, the MQTT
+// heartbeat fields and the OTA reply all repeat. Its absence is what
+// let the status line speak only half the identity.
+func TestEverySurfaceSpeaksTheSameBuild(t *testing.T) {
+	m, b := replayManager(t, sampleFile())
+	out := adminConsole(t, m, b, "status\n")
+	if !strings.Contains(out, product.Name+" "+version) {
+		t.Errorf("the banner does not speak %q:\n%s", product.Name+" "+version, out)
+	}
+	want := product.Slug + " " + version
+	if rev := buildInfo.ShortRevision(); rev != "" {
+		want += " (" + rev + ")"
+	}
+	if !strings.Contains(out, want) {
+		t.Errorf("the status row does not speak %q:\n%s", want, out)
+	}
+	// The heartbeat's fields are built from the same globals the
+	// banner reads — one source, checked at the wiring site. The
+	// stillborn relay gets the identity assembly would have derived.
+	m.viewMu.Lock()
+	info := m.infos["meshcore-868"]
+	info.Identity = "882f6cdf022d"
+	m.infos["meshcore-868"] = info
+	m.viewMu.Unlock()
+	cfg, err := m.observerConfig("obs", mqtt.Params{URL: "tcp://127.0.0.1:1", IATA: "TLS"},
+		zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Firmware != version || cfg.Client != product.Slug+" "+version {
+		t.Errorf("heartbeat fields = %q / %q, want the boot version %q",
+			cfg.Firmware, cfg.Client, version)
+	}
+	// The OTA surface receives the same value at assembly (the
+	// AttachBuild seam); the reply itself is proved in the meshcore
+	// suite against an attached canary build.
 }

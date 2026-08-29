@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/product"
 	"meshrunner.dev/lotor/internal/schema"
 )
 
@@ -116,7 +117,7 @@ func (s *session) systemName() string {
 			return name
 		}
 	}
-	return "lotor"
+	return product.Slug
 }
 
 // relays is the live view when the daemon serves one.

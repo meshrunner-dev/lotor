@@ -334,6 +334,9 @@ func TestOwnerInfoAnswersThreeLines(t *testing.T) {
 	e.p.GuestAccess = guestOpen
 	e.p.NodeName = "Raccoon City"
 	e.p.OwnerInfo = "Raton\nlaveur"
+	// The air answers with the build the daemon handed down, not a
+	// reading of its own.
+	e.AttachBuild("9.9.9-matrix")
 	runEngine(t, e, dev)
 
 	frame, secret := login(t, e.id, peer, nowTS(980), "", false)
@@ -352,8 +355,8 @@ func TestOwnerInfoAnswersThreeLines(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("owner info = %q", text)
 	}
-	if lines[0] == "" || strings.Contains(lines[0], " ") {
-		t.Errorf("first line should be a bare version: %q", lines[0])
+	if lines[0] != "9.9.9-matrix" {
+		t.Errorf("version line = %q, want the attached build", lines[0])
 	}
 	if lines[1] != "Raccoon City" {
 		t.Errorf("name line = %q", lines[1])

@@ -298,7 +298,10 @@ type Deps struct {
 	// Nil is quiet, which is what the tests want.
 	Log *zap.Logger
 
-	Version  string
+	Version string
+	// Revision is the build's short commit, beside Version on the
+	// status row — empty when the build carries none.
+	Revision string
 	Started  time.Time
 	Relays   []RelayInfo
 	Radios   []RadioInfo

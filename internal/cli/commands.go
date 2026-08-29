@@ -16,6 +16,7 @@ import (
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/product"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/relay"
 	"meshrunner.dev/lotor/internal/sentinel"
@@ -24,7 +25,11 @@ import (
 
 func (s *session) status(ctx context.Context, _ input) error {
 	tb := s.table()
-	tb.row("daemon", "up "+uptime(s.deps.Started), "lotor "+s.deps.Version)
+	build := product.Slug + " " + s.deps.Version
+	if s.deps.Revision != "" {
+		build += " (" + s.deps.Revision + ")"
+	}
+	tb.row("daemon", "up "+uptime(s.deps.Started), build)
 	for _, r := range s.relays() {
 		tb.row("relay", r.Name, r.State(), "radio "+r.Radio,
 			fmt.Sprintf("%.3f MHz sf%d bw%.1fk",

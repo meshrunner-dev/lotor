@@ -26,6 +26,7 @@ import (
 	"meshrunner.dev/lotor/internal/protocol"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/txn"
+	"meshrunner.dev/lotor/internal/version"
 )
 
 func init() {
@@ -177,10 +178,15 @@ func (t *txPower) UnmarshalYAML(node *yaml.Node) error {
 type engine struct {
 	relay string
 	p     params
-	id    *meshcore.LocalIdentity // nil when no identity is configured
-	bus   *bus.Bus
-	log   *zap.Logger
-	seen  *seenTable
+	// firmware is what the OTA surfaces answer as this node's build —
+	// handed down at assembly so every surface repeats the ONE value
+	// the daemon read at boot, with the engine's own read as the
+	// fallback for a bare construction.
+	firmware string
+	id       *meshcore.LocalIdentity // nil when no identity is configured
+	bus      *bus.Bus
+	log      *zap.Logger
+	seen     *seenTable
 
 	// The transmit pipeline, armed at assembly when the gate is not
 	// dry; zero values otherwise, and Run never consults them.
@@ -521,6 +527,7 @@ func newEngine(relayName string, p params, id *meshcore.LocalIdentity,
 	return &engine{
 		relay:         relayName,
 		p:             p,
+		firmware:      version.Current().Version,
 		id:            id,
 		bus:           b,
 		log:           log,
@@ -538,6 +545,11 @@ func newEngine(relayName string, p params, id *meshcore.LocalIdentity,
 }
 
 func (e *engine) Waveform() radio.Waveform { return e.p.Waveform }
+
+// AttachBuild hands the engine the build identity the daemon read at
+// boot, so the air answers with the same value every other surface
+// speaks.
+func (e *engine) AttachBuild(firmware string) { e.firmware = firmware }
 
 // NodeName is what this relay calls itself on the air.
 func (e *engine) NodeName() string { return e.p.NodeName }

@@ -312,7 +312,7 @@ func (c *consoleCmd) Run() error { return console(c.Addr) }
 func main() {
 	root := commandLine{}
 	parser, err := kong.New(&root,
-		kong.Name("lotor"),
+		kong.Name(product.Slug),
 		kong.Description(product.Description+"."),
 		kong.Vars{
 			"version":     product.Slug + " " + version,
@@ -443,7 +443,7 @@ func run(dbPath, logLevel string) error {
 	}
 	log.Info("daemon up", zap.Int("relays", len(f.Relays)),
 		zap.String("version", buildInfo.Version),
-		zap.String("revision", buildInfo.ShortRevision()),
+		zap.String("revision", buildInfo.Revision),
 		zap.String("tree", string(buildInfo.Tree)),
 		zap.Time("source_time", buildInfo.SourceTime),
 		zap.String("toolchain", buildInfo.GoVersion),
@@ -637,6 +637,7 @@ func watchProbation(ctx context.Context, stateDir string, log *zap.Logger) {
 func consoleDeps(mgr *manager, b *bus.Bus, sen *sentinel.Sentinel) cli.Deps {
 	return cli.Deps{
 		Version:     version,
+		Revision:    buildInfo.ShortRevision(),
 		Started:     time.Now(),
 		Sessions:    cli.NewSessions(),
 		Bus:         b,
@@ -917,6 +918,11 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 				return nil, err
 			}
 		}
+	}
+	// The build identity every surface must repeat: read once at
+	// boot, handed to the engine here.
+	if a, ok := p.eng.(interface{ AttachBuild(firmware string) }); ok {
+		a.AttachBuild(buildInfo.Version)
 	}
 	// Administration from the air runs through the same door the
 	// console uses; a protocol with no such door simply has none.

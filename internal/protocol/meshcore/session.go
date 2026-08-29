@@ -12,7 +12,6 @@ import (
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/txn"
-	"meshrunner.dev/lotor/internal/version"
 )
 
 // Client sessions, the reference repeater's shape. A companion logs in
@@ -364,7 +363,7 @@ func (e *engine) answerRequest(c *client, args []byte, budget int) (body []byte,
 		// carries its own newlines, and is last so they cannot be
 		// mistaken for a fourth field.
 		return withinBudget(
-			version.Current().Version+"\n"+e.p.NodeName+"\n"+e.p.OwnerInfo, budget), true
+			e.firmware+"\n"+e.p.NodeName+"\n"+e.p.OwnerInfo, budget), true
 	case meshcore.ReqKeepAlive:
 		// The reference answers nothing here either, and the session's
 		// clock has already moved on the request that carried it.
