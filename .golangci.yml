@@ -73,7 +73,7 @@ linters:
           files:
             - "$all"
             - "!**/internal/radio/sx126x/*.go"
-            - "!**/internal/sensor/ina219/*.go"
+            - "!**/internal/sensor/i2c/*.go"
           deny:
             - pkg: meshrunner.dev/pkg/lora
               desc: "chip and channel types stop at internal/radio/sx126x — upper layers speak radio.Device (see AGENTS.md)"
@@ -94,6 +94,8 @@ linters:
             - pkg: meshrunner.dev/lotor/internal/radio/sx126x
               desc: "depend on the radio.Driver registry, not on one driver (see AGENTS.md)"
             - pkg: meshrunner.dev/lotor/internal/sensor/ina219
+              desc: "depend on the sensor.Driver registry, not on one driver (see AGENTS.md)"
+            - pkg: meshrunner.dev/lotor/internal/sensor/bme280
               desc: "depend on the sensor.Driver registry, not on one driver (see AGENTS.md)"
     errcheck:
       # Best-effort writes to interactive streams (CLI sessions): a dead
