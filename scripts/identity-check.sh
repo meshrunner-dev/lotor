@@ -28,5 +28,13 @@ done
 grep -rq "updates.meshrunner.dev/${slug}" internal/product/product.go ||
   say "product.UpdateBase drifted"
 
+# The publish chain must ASK for the slug, never spell it: a renamed
+# product would otherwise build under the new name and publish under
+# the old. The workflows and their scripts read product/meta; any
+# literal occurrence of the slug there is a drift waiting to happen.
+hardcoded="$(grep -rn "\b${slug}_\|\b${slug}/" .github/workflows/ .github/scripts/   | grep -v "internal/product" || true)"
+[ -z "$hardcoded" ] || say "the publish chain spells the slug instead of asking product/meta:
+$hardcoded"
+
 [ "$fail" -eq 0 ] && echo "identity: ok"
 exit "$fail"

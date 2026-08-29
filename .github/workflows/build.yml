@@ -7,6 +7,12 @@
 name: build
 on:
   workflow_call:
+    outputs:
+      # The product slug, read from the source of truth so callers
+      # never spell it: artifact names, S3 keys and URLs all derive
+      # from this one output.
+      slug:
+        value: ${{ jobs.binaries.outputs.slug }}
     inputs:
       version:
         required: true
@@ -26,6 +32,8 @@ on:
 jobs:
   binaries:
     runs-on: ubuntu-latest
+    outputs:
+      slug: ${{ steps.meta.outputs.slug }}
     strategy:
       matrix:
         include:
@@ -46,10 +54,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Read the product identity
+        id: meta
+        run: echo "slug=$(go run ./internal/product/cmd/meta -field slug)" >> "$GITHUB_OUTPUT"
       - name: Build
         run: |
-          slug="$(go run ./internal/product/cmd/meta -field slug)"
-          ./scripts/build -o "${slug}_${{ matrix.goos }}_${{ matrix.goarch }}" \
+          ./scripts/build -o "${{ steps.meta.outputs.slug }}_${{ matrix.goos }}_${{ matrix.goarch }}" \
             -version "${{ inputs.version }}" \
             -goos "${{ matrix.goos }}" -goarch "${{ matrix.goarch }}" \
             -goarm "${{ matrix.goarm }}"
@@ -71,13 +81,12 @@ jobs:
           rm canary
       - name: Verify the binary against its own metadata
         run: |
-          slug="$(go run ./internal/product/cmd/meta -field slug)"
           ./.github/scripts/verify-binary.sh \
-            "${slug}_${{ matrix.goos }}_${{ matrix.goarch }}" \
+            "${{ steps.meta.outputs.slug }}_${{ matrix.goos }}_${{ matrix.goarch }}" \
             "${{ inputs.version }}" "$(git rev-parse HEAD)" \
             "${{ matrix.goos }}" "${{ matrix.goarch }}" "${{ matrix.goarm }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: lotor_${{ matrix.goos }}_${{ matrix.goarch }}
-          path: lotor_${{ matrix.goos }}_${{ matrix.goarch }}
+          name: ${{ steps.meta.outputs.slug }}_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: ${{ steps.meta.outputs.slug }}_${{ matrix.goos }}_${{ matrix.goarch }}
           if-no-files-found: error

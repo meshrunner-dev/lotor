@@ -21,6 +21,7 @@ tasks:
       - task: fmt
       - task: tidy
       - task: lint
+      - task: identity:check
       - task: test:race
       - task: build:lean
       - task: vuln

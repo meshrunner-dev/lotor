@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publish manifest.json{,.minisig} from the working directory onto the
-# update host, under lotor/<channel>/, and refresh channels.json — the
+# update host, under <slug>/<channel>/, and refresh channels.json — the
 # discovery file listing what is published. The host is a plain static
 # tree in the updates repository: leaving GitHub one day is an rsync
 # of this tree and new artifact URLs in fresh manifests, nothing else.

@@ -46,6 +46,7 @@ jobs:
       contents: write
     env:
       VERSION: ${{ needs.meta.outputs.version }}
+      PRODUCT: ${{ needs.build.outputs.slug }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
@@ -84,25 +85,25 @@ jobs:
           # values must fail here, in one line, not as a bent URL or a
           # cryptic aws error three steps later.
           : "${DL_BASE:?the environment must name its public download base}"
-          for f in lotor_linux_arm64 lotor_linux_amd64 lotor_linux_arm; do
-            mv "$f" "${f/lotor_/lotor_${VERSION}_}"
+          for f in "${PRODUCT}_linux_arm64" "${PRODUCT}_linux_amd64" "${PRODUCT}_linux_arm"; do
+            mv "$f" "${f/${PRODUCT}_/${PRODUCT}_${VERSION}_}"
           done
-          base="${DL_BASE}/lotor/${VERSION}"
+          base="${DL_BASE}/${PRODUCT}/${VERSION}"
           printf '%s' "$RELSIGN_KEY" > relsign.key
           # One manifest per channel first: relsign -gzip compresses and
           # hashes in one process, so the .gz files it writes are
           # byte-for-byte what every channel's signature vouches for.
           for channel in ${{ needs.meta.outputs.channels }}; do
             go run ./cmd/relsign manifest -gzip "$channel" "$VERSION" "manifest-${channel}.json" \
-              "linux/arm64=${base}/lotor_${VERSION}_linux_arm64.gz=lotor_${VERSION}_linux_arm64" \
-              "linux/amd64=${base}/lotor_${VERSION}_linux_amd64.gz=lotor_${VERSION}_linux_amd64" \
-              "linux/arm=${base}/lotor_${VERSION}_linux_arm.gz=lotor_${VERSION}_linux_arm"
+              "linux/arm64=${base}/${PRODUCT}_${VERSION}_linux_arm64.gz=${PRODUCT}_${VERSION}_linux_arm64" \
+              "linux/amd64=${base}/${PRODUCT}_${VERSION}_linux_amd64.gz=${PRODUCT}_${VERSION}_linux_amd64" \
+              "linux/arm=${base}/${PRODUCT}_${VERSION}_linux_arm.gz=${PRODUCT}_${VERSION}_linux_arm"
             go run ./cmd/relsign sign relsign.key "manifest-${channel}.json"
           done
           # Artifacts land before any manifest points at them: a
           # published channel never names bytes not yet there.
-          for f in lotor_"${VERSION}"_linux_*.gz; do
-            ./.github/scripts/s3-put-immutable.sh "lotor/${VERSION}/${f}" "$f"
+          for f in "${PRODUCT}_${VERSION}"_linux_*.gz; do
+            ./.github/scripts/s3-put-immutable.sh "${PRODUCT}/${VERSION}/${f}" "$f"
           done
           for channel in ${{ needs.meta.outputs.channels }}; do
             cp "manifest-${channel}.json" manifest.json

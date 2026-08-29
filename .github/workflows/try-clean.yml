@@ -20,6 +20,10 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - name: Sweep stale try channels and dev versions
         env:
           DEPLOY_KEY: ${{ secrets.UPDATES_DEPLOY_KEY }}
@@ -28,57 +32,4 @@ jobs:
           AWS_REGION: ${{ vars.S3_REGION || 'us-east-1' }}
           S3_ENDPOINT: ${{ vars.S3_ENDPOINT }}
           S3_BUCKET: ${{ vars.S3_BUCKET }}
-        run: |
-          eval "$(ssh-agent -s)"
-          ssh-add - <<< "$DEPLOY_KEY"
-          mkdir -p ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-          git clone --depth 1 "git@github.com:${GITHUB_REPOSITORY_OWNER}/updates.git"
-          cutoff=$(date -u -d "14 days ago" +%s)
-
-          # Every object under one version's prefix, deleted by name.
-          sweep_version() {
-            aws s3api list-objects-v2 --endpoint-url "$S3_ENDPOINT" --bucket "$S3_BUCKET" \
-              --prefix "lotor/$1/" --query 'Contents[].Key' --output text 2>/dev/null \
-              | tr '\t' '\n' | while read -r key; do
-              [ -n "$key" ] && [ "$key" != "None" ] || continue
-              aws s3api delete-object --endpoint-url "$S3_ENDPOINT" --bucket "$S3_BUCKET" \
-                --key "$key" >/dev/null
-              echo "deleted s3://${S3_BUCKET}/${key}"
-            done
-          }
-
-          # Try channels: a stale manifest goes, and the one version it
-          # names goes with it — derived from the manifest itself, so
-          # the sweep never guesses at keys.
-          for dir in updates/lotor/try-*/; do
-            [ -d "$dir" ] || continue
-            published=$(jq -r .published "$dir/manifest.json" 2>/dev/null || echo "")
-            [ -n "$published" ] && [ "$(date -u -d "$published" +%s)" -gt "$cutoff" ] && continue
-            version=$(jq -r .version "$dir/manifest.json" 2>/dev/null || echo "")
-            [ -n "$version" ] && sweep_version "$version"
-            echo "sweeping $(basename "$dir")"
-            rm -r "$dir"
-          done
-
-          # Dev versions: every push minted one, and each carries its
-          # instant in its own name — no object metadata needed. All
-          # but the version the live manifest names expire.
-          current=$(jq -r .version updates/lotor/dev/manifest.json 2>/dev/null || echo "")
-          aws s3api list-objects-v2 --endpoint-url "$S3_ENDPOINT" --bucket "$S3_BUCKET" \
-            --prefix "lotor/" --query 'Contents[].Key' --output text 2>/dev/null \
-            | tr '\t' '\n' | sed -n 's#^lotor/\([^/]*-dev\.[^/]*\)/.*#\1#p' | sort -u \
-            | while read -r version; do
-            [ "$version" = "$current" ] && continue
-            stamp=$(echo "$version" | sed -n 's/.*-dev\.\([0-9]\{14\}\)\..*/\1/p')
-            [ -n "$stamp" ] || continue
-            born=$(date -u -d "${stamp:0:8} ${stamp:8:2}:${stamp:10:2}:${stamp:12:2}" +%s)
-            [ "$born" -gt "$cutoff" ] && continue
-            sweep_version "$version"
-          done
-
-          cd updates
-          git add -A
-          git diff --cached --quiet && exit 0
-          git -c user.name=relbot -c user.email=bots@meshrunner.dev \
-            commit -m "chore: sweep stale try channels"
-          git push
+        run: ./.github/scripts/sweep-fast.sh

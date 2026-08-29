@@ -44,6 +44,7 @@ jobs:
       contents: read
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      PRODUCT: ${{ needs.build.outputs.slug }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -70,22 +71,22 @@ jobs:
           # values must fail here, in one line, not as a bent URL or a
           # cryptic aws error three steps later.
           : "${DL_BASE:?the environment must name its public download base}"
-          for f in lotor_linux_arm64 lotor_linux_amd64 lotor_linux_arm; do
-            mv "$f" "${f/lotor_/lotor_${VERSION}_}"
+          for f in "${PRODUCT}_linux_arm64" "${PRODUCT}_linux_amd64" "${PRODUCT}_linux_arm"; do
+            mv "$f" "${f/${PRODUCT}_/${PRODUCT}_${VERSION}_}"
           done
-          base="${DL_BASE}/lotor/${VERSION}"
+          base="${DL_BASE}/${PRODUCT}/${VERSION}"
           printf '%s' "$RELSIGN_KEY" > relsign.key
           # relsign -gzip compresses and hashes in one process: the .gz
           # files it writes are byte-for-byte what the signature vouches
           # for, and they are what gets uploaded.
           go run ./cmd/relsign manifest -gzip dev "$VERSION" manifest.json \
-            "linux/arm64=${base}/lotor_${VERSION}_linux_arm64.gz=lotor_${VERSION}_linux_arm64" \
-            "linux/amd64=${base}/lotor_${VERSION}_linux_amd64.gz=lotor_${VERSION}_linux_amd64" \
-            "linux/arm=${base}/lotor_${VERSION}_linux_arm.gz=lotor_${VERSION}_linux_arm"
+            "linux/arm64=${base}/${PRODUCT}_${VERSION}_linux_arm64.gz=${PRODUCT}_${VERSION}_linux_arm64" \
+            "linux/amd64=${base}/${PRODUCT}_${VERSION}_linux_amd64.gz=${PRODUCT}_${VERSION}_linux_amd64" \
+            "linux/arm=${base}/${PRODUCT}_${VERSION}_linux_arm.gz=${PRODUCT}_${VERSION}_linux_arm"
           go run ./cmd/relsign sign relsign.key manifest.json
           # Artifacts land before the manifest that names them: the
           # published channel never points at bytes not yet there.
-          for f in lotor_"${VERSION}"_linux_*.gz; do
-            ./.github/scripts/s3-put-immutable.sh "lotor/${VERSION}/${f}" "$f"
+          for f in "${PRODUCT}_${VERSION}"_linux_*.gz; do
+            ./.github/scripts/s3-put-immutable.sh "${PRODUCT}/${VERSION}/${f}" "$f"
           done
           ./.github/scripts/publish-manifests.sh dev
