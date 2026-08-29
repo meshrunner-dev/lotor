@@ -29,6 +29,7 @@ type Sentinel struct {
 	journalPath      string
 	reported         uint64
 	dropWarnAt       time.Time
+	dropOpen         bool
 	// The journal's health, kept where any goroutine may read it: the
 	// consumer writes, status and heartbeats read. warnedAt paces the
 	// failure logs on the consumer goroutine alone.
@@ -298,6 +299,14 @@ func (s *Sentinel) drain(ctx context.Context) {
 func (s *Sentinel) reportDrops() {
 	d := s.sub.Dropped()
 	if d <= s.reported {
+		// No new losses. An episode quiet for a whole pacing window
+		// is over, and its end is said once — silence after a WARN
+		// otherwise reads as "still losing".
+		if s.dropOpen && time.Since(s.dropWarnAt) >= healthLogEvery {
+			s.dropOpen = false
+			s.log.Info("journal caught up with the bus",
+				zap.Uint64("events_dropped_total", d))
+		}
 		return
 	}
 	first := s.reported == 0
@@ -305,6 +314,7 @@ func (s *Sentinel) reportDrops() {
 		return
 	}
 	s.dropWarnAt = time.Now()
+	s.dropOpen = true
 	s.log.Warn("journal fell behind the bus",
 		zap.Uint64("events_dropped", d-s.reported),
 		zap.Uint64("events_dropped_total", d),

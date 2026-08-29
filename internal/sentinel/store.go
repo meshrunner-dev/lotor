@@ -167,31 +167,64 @@ type store struct {
 // inherit the main file's mode when SQLite recreates them. Failures
 // surface — a journal that cannot be protected is worth stopping for.
 func tightenJournal(path string) error {
-	st, err := os.Stat(path)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		// #nosec G304 -- the journal's own path
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err != nil {
-			return fmt.Errorf("journal create: %w", err)
-		}
-		return f.Close()
-	case err != nil:
-		return fmt.Errorf("journal stat: %w", err)
-	case st.Mode().Perm() != 0o600:
-		if err := os.Chmod(path, 0o600); err != nil {
-			return fmt.Errorf("journal cannot be protected: %w", err)
-		}
+	if err := tightenFile(path, "journal", true); err != nil {
+		return err
 	}
 	// Sidecars a previous, looser life left behind.
 	for _, side := range []string{path + "-wal", path + "-shm"} {
-		if st, err := os.Stat(side); err == nil && st.Mode().Perm() != 0o600 {
-			if err := os.Chmod(side, 0o600); err != nil {
-				return fmt.Errorf("journal sidecar cannot be protected: %w", err)
-			}
+		if err := tightenFile(side, "journal sidecar", false); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// tightenFile protects ONE regular file, creating it when asked to.
+// Lstat, never Stat, and nothing but a regular file is touched: a
+// symlink would carry the chmod to whatever it points at, and a
+// directory or device at the journal's path is a misconfiguration to
+// refuse intact, not an object to bend first and fail on later.
+func tightenFile(path, what string, create bool) error {
+	st, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if !create {
+			return nil
+		}
+		// #nosec G304 -- the journal's own path
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("%s create: %w", what, err)
+		}
+		return f.Close()
+	case err != nil:
+		return fmt.Errorf("%s stat: %w", what, err)
+	case !st.Mode().IsRegular():
+		return fmt.Errorf("%s path %s is a %s, not a regular file",
+			what, path, fileKind(st.Mode()))
+	case st.Mode().Perm() != 0o600:
+		if err := os.Chmod(path, 0o600); err != nil {
+			return fmt.Errorf("%s cannot be protected: %w", what, err)
+		}
+	}
+	return nil
+}
+
+// fileKind names a non-regular mode for the refusal message.
+func fileKind(m os.FileMode) string {
+	switch {
+	case m.IsDir():
+		return "directory"
+	case m&os.ModeSymlink != 0:
+		return "symlink"
+	case m&os.ModeDevice != 0:
+		return "device"
+	case m&os.ModeSocket != 0:
+		return "socket"
+	case m&os.ModeNamedPipe != 0:
+		return "fifo"
+	}
+	return "non-regular file"
 }
 
 func openStore(ctx context.Context, path string) (*store, error) {

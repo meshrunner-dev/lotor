@@ -3,6 +3,7 @@ package mqtt
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	paho "github.com/eclipse/paho.mqtt.golang"
 	"go.uber.org/zap"
 )
 
@@ -170,5 +172,51 @@ func TestBrokerSpeaksRealMQTT(t *testing.T) {
 	if srv.msgs[1].topic != "meshcore/PAR/feed/status" || srv.msgs[1].qos != 1 ||
 		!strings.Contains(string(srv.msgs[1].payload), "online") {
 		t.Errorf("second message: %+v", srv.msgs[1])
+	}
+}
+
+// TestConnectionLadderWalksTheWholeTimeline feeds the ladder the
+// notifications Paho would emit across an observer's whole life —
+// broker absent at start, then an immediate connect, then flapping —
+// and reads the transitions back in order. Paho numbers a round's
+// attempts from zero, so only attempt 0 opens a round; the retries
+// inside it stay silent.
+func TestConnectionLadderWalksTheWholeTimeline(t *testing.T) {
+	var got []string
+	notify := func(state, cause string) {
+		if cause != "" {
+			state += ":" + cause
+		}
+		got = append(got, state)
+	}
+	ladder := connectionLadder("tcp://b", notify, zap.NewNop())
+	for _, n := range []paho.ConnectionNotification{
+		// Broker absent: one round of two attempts, then the round fails.
+		paho.ConnectionNotificationConnecting{Attempt: 0},
+		paho.ConnectionNotificationBrokerFailed{Reason: errors.New("refused")},
+		paho.ConnectionNotificationConnecting{Attempt: 1},
+		paho.ConnectionNotificationFailed{Reason: errors.New("refused")},
+		// The next round connects at once.
+		paho.ConnectionNotificationConnecting{Attempt: 0},
+		paho.ConnectionNotificationConnected{},
+		// Flapping: lost, a reconnect round with its own retry, back.
+		paho.ConnectionNotificationLost{Reason: errors.New("EOF")},
+		paho.ConnectionNotificationConnecting{IsReconnect: true, Attempt: 0},
+		paho.ConnectionNotificationConnecting{IsReconnect: true, Attempt: 1},
+		paho.ConnectionNotificationConnected{},
+	} {
+		ladder(nil, n)
+	}
+	want := []string{
+		"connecting", "failed:refused", "connecting", "connected",
+		"lost:EOF", "reconnecting", "reconnected",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("timeline = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("timeline = %v, want %v", got, want)
+		}
 	}
 }

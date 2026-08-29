@@ -9,7 +9,9 @@ package main
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -229,5 +231,62 @@ func TestObserverStatusCarriesItsCause(t *testing.T) {
 	}
 	if !strings.Contains(row.Down, "relay=") {
 		t.Errorf("Down = %q", row.Down)
+	}
+}
+
+// TestLiveGateIsABarrierNotAFilter pins the timeline's closure: a
+// callback already INSIDE a gated publish when the stop begins must
+// finish before Close returns, so "stopped" — and a successor's
+// "started" — always land after the incarnation's last word, and
+// nothing of it speaks afterwards.
+func TestLiveGateIsABarrierNotAFilter(t *testing.T) {
+	var mu sync.Mutex
+	var got []string
+	record := func(word string) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, word)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	gate := newLiveGate()
+	pub := gate.gate(func(ev bus.Event) {
+		st, ok := ev.(bus.ObserverState)
+		if !ok {
+			t.Errorf("unexpected event %T", ev)
+			return
+		}
+		record(st.State)
+		close(entered)
+		<-release
+	})
+	go pub(bus.ObserverState{State: "connected"})
+	<-entered // the callback is in flight, holding the gate
+
+	closed := make(chan struct{})
+	go func() { gate.Close(); close(closed) }()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while a publish was still in flight")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	<-closed
+
+	// The sealed incarnation is silent; the stop and the successor
+	// write after its last word.
+	pub(bus.ObserverState{State: "lost"})
+	record("stopped")
+	record("started")
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"connected", "stopped", "started"}
+	if len(got) != len(want) {
+		t.Fatalf("timeline = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("timeline = %v, want %v", got, want)
+		}
 	}
 }

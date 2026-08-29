@@ -88,9 +88,10 @@ func connectionLadder(brokerURL string, notify func(state, cause string),
 		case paho.ConnectionNotificationConnecting:
 			log.Debug("observer broker dialing", url,
 				zap.Int("attempt", e.Attempt), zap.Bool("reconnect", e.IsReconnect))
-			if e.Attempt <= 1 {
-				// The first attempt of a round is the transition; the
-				// retries within it are the socket's own noise.
+			if e.Attempt == 0 {
+				// Paho numbers a round's attempts from zero: the
+				// first is the transition, the retries within it are
+				// the socket's own noise.
 				state := "connecting"
 				if e.IsReconnect {
 					state = "reconnecting"

@@ -64,6 +64,7 @@ type statusStats struct {
 	JournalDegraded *bool  `json:"journal_degraded,omitempty"`
 	JournalFailures *int   `json:"journal_failures,omitempty"`
 	JournalLastErr  string `json:"journal_last_error,omitempty"`
+	JournalLastFail string `json:"journal_last_fail_at,omitempty"`
 }
 
 // rawMessage is the frame without the analysis — the raw topic.
@@ -165,6 +166,9 @@ type Health struct {
 	JournalDegraded *bool
 	JournalFailures *int
 	JournalLastErr  string
+	// JournalLastFailAt dates the last failed write, so a remote
+	// reader can tell a fresh outage from an old scar.
+	JournalLastFailAt time.Time
 }
 
 // StatusJSON builds the heartbeat.
@@ -190,6 +194,9 @@ func StatusJSON(at time.Time, origin, originID, model, firmware, radio,
 		JournalDegraded: h.JournalDegraded,
 		JournalFailures: h.JournalFailures,
 		JournalLastErr:  h.JournalLastErr,
+	}
+	if !h.JournalLastFailAt.IsZero() {
+		stats.JournalLastFail = isoTimestamp(h.JournalLastFailAt)
 	}
 	if stats != (statusStats{}) {
 		m.Stats = &stats

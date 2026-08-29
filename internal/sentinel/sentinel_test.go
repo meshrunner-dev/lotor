@@ -3,6 +3,7 @@ package sentinel
 import (
 	"context"
 	"database/sql"
+	"net"
 	"os"
 	"testing"
 	"time"
@@ -579,5 +580,88 @@ func TestAnExposedJournalIsCorrectedOnOpen(t *testing.T) {
 		if info.Mode().Perm()&0o077 != 0 {
 			t.Errorf("%s mode = %o — still readable beyond the owner", p, info.Mode().Perm())
 		}
+	}
+}
+
+func TestBusLossRecoveryIsAnnouncedOnce(t *testing.T) {
+	// The pacing folds the losses; the episode's END must still be
+	// said, or silence after a WARN reads as "still losing". One
+	// quiet pacing window closes the episode, exactly once.
+	s := testSentinel(t)
+	for range cap(s.sub.C) + 5 {
+		s.bus.Publish(bus.NoiseStarved{Relay: "r"})
+	}
+	s.reportDrops()
+	if !s.dropOpen {
+		t.Fatal("losses happened but no episode opened")
+	}
+	// Still inside the window: quiet, but not yet over.
+	s.reportDrops()
+	if !s.dropOpen {
+		t.Error("the episode closed before a full quiet window")
+	}
+	s.dropWarnAt = time.Now().Add(-healthLogEvery)
+	s.reportDrops()
+	if s.dropOpen {
+		t.Error("a quiet window passed and the episode never closed")
+	}
+}
+
+func TestTightenJournalRefusesWhatIsNotARegularFile(t *testing.T) {
+	// Only a regular file may be protected: a symlink carries a chmod
+	// to its target, and bending a mistaken directory or socket into
+	// 0600 wrecks the misconfigured object before SQLite even gets to
+	// refuse it. Every refusal must leave the object exactly as found.
+	dir := t.TempDir()
+
+	dpath := dir + "/dir.db"
+	if err := os.Mkdir(dpath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := tightenJournal(dpath); err == nil {
+		t.Error("a directory was accepted as the journal")
+	}
+	if st, _ := os.Stat(dpath); st.Mode().Perm() != 0o755 {
+		t.Errorf("the refused directory was modified to %o", st.Mode().Perm())
+	}
+
+	target := dir + "/target"
+	if err := os.WriteFile(target, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lpath := dir + "/link.db"
+	if err := os.Symlink(target, lpath); err != nil {
+		t.Fatal(err)
+	}
+	if err := tightenJournal(lpath); err == nil {
+		t.Error("a symlink was accepted as the journal")
+	}
+	if st, _ := os.Stat(target); st.Mode().Perm() != 0o644 {
+		t.Errorf("the chmod travelled through the symlink: %o", st.Mode().Perm())
+	}
+
+	spath := dir + "/sock.db"
+	l, err := new(net.ListenConfig).Listen(context.Background(), "unix", spath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	if err := tightenJournal(spath); err == nil {
+		t.Error("a socket was accepted as the journal")
+	}
+
+	// A healthy main file does not excuse its sidecars.
+	mpath := dir + "/main.db"
+	if err := os.WriteFile(mpath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, mpath+"-wal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tightenJournal(mpath); err == nil {
+		t.Error("a symlinked sidecar was accepted")
+	}
+	if st, _ := os.Stat(target); st.Mode().Perm() != 0o644 {
+		t.Errorf("the sidecar chmod travelled through the symlink: %o", st.Mode().Perm())
 	}
 }

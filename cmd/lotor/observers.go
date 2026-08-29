@@ -14,7 +14,7 @@ import (
 	"meshrunner.dev/lotor/internal/product"
 	"sort"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -43,9 +43,9 @@ type managedObserver struct {
 	broker *mqtt.Broker
 	url    string
 	relay  string
-	// live gates this incarnation's connection callbacks: flipped off
-	// at stop, so a late Paho notification cannot speak after it.
-	live *atomic.Bool
+	// live gates this incarnation's connection callbacks: closed at
+	// stop, so a late Paho notification cannot speak after it.
+	live *liveGate
 }
 
 // resolveMQTTParams turns one observer's layers into its effective
@@ -380,6 +380,7 @@ func (m *manager) observerHealth(relayName string) func() mqtt.Health {
 				h.JournalDegraded = &degraded
 				h.JournalFailures = &failures
 				h.JournalLastErr = jh.LastErr
+				h.JournalLastFailAt = jh.LastFailAt
 			}
 		}
 		if !ok {
@@ -443,10 +444,9 @@ func (m *manager) startObserver(ctx context.Context, name string) {
 	// event landed, writing history backwards. The liveness gate
 	// keeps a late callback of THIS incarnation from speaking after
 	// its stop — or into its successor's timeline.
-	live := &atomic.Bool{}
-	live.Store(true)
+	live := newLiveGate()
 	m.bus.Publish(bus.ObserverState{Observer: name, At: time.Now(), State: "started"})
-	broker, err := mqtt.Dial(observerDial(p, name, dialInfo, connects, gatedPublish(live, m.bus.Publish), log), log)
+	broker, err := mqtt.Dial(observerDial(p, name, dialInfo, connects, live.gate(m.bus.Publish), log), log)
 	if err != nil {
 		m.observerDown(name, err, log)
 		return
@@ -486,7 +486,10 @@ func (m *manager) stopObserver(name string) {
 		return
 	}
 	if h.live != nil {
-		h.live.Store(false) // this incarnation's callbacks fall silent
+		// When Close returns, no callback of this incarnation is
+		// still in flight: "stopped" lands after its last word, and
+		// a successor's "started" after that.
+		h.live.Close()
 	}
 	h.cancel()
 	<-h.done
@@ -602,13 +605,35 @@ func regionSelfOf(info cli.RelayInfo) func() (string, string) {
 	}
 }
 
-// gatedPublish wraps the bus behind one incarnation's liveness: a
-// Paho callback that fires after the observer stopped must not write
-// into history — least of all into a successor's.
-func gatedPublish(live *atomic.Bool, publish func(bus.Event)) func(bus.Event) {
+// liveGate closes one incarnation's timeline: a Paho callback that
+// fires after the observer stopped must not write into history —
+// least of all into a successor's. The gate is a barrier, not a mere
+// filter: a bare flag would silence only the callbacks that START
+// late, while one already past the check could still publish after
+// the stop. Publishes hold the gate while they speak and Close takes
+// the same gate, so its return means the timeline is sealed.
+type liveGate struct {
+	mu   sync.Mutex
+	live bool
+}
+
+func newLiveGate() *liveGate { return &liveGate{live: true} }
+
+// gate wraps a bus publish behind the incarnation's liveness. The
+// bus never blocks, so holding the gate through the call is cheap.
+func (g *liveGate) gate(publish func(bus.Event)) func(bus.Event) {
 	return func(ev bus.Event) {
-		if live.Load() {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.live {
 			publish(ev)
 		}
 	}
+}
+
+// Close seals the gate and waits out any publish already in flight.
+func (g *liveGate) Close() {
+	g.mu.Lock()
+	g.live = false
+	g.mu.Unlock()
 }
