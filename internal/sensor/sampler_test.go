@@ -6,6 +6,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"time"
 )
 
@@ -295,4 +299,26 @@ func TestAPartThatStopsAnsweringIsOpenedAgain(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+func TestAnUnchangingReasonIsSaidOnce(t *testing.T) {
+	// An absent part would otherwise write an error a minute for as
+	// long as it is absent, into a journal that may be in RAM.
+	core, seen := observer.New(zapcore.DebugLevel)
+	open := func() (Device, error) { return nil, errors.New("no such device") }
+	s := NewSampler(open, time.Hour, zap.New(core))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); s.Run(ctx) }()
+
+	waitFor(t, func() bool { return s.Cause() != "" }, "no reason was kept")
+	// openBackoff is a second, so several attempts pass in this window
+	// and only the first may speak.
+	time.Sleep(2500 * time.Millisecond)
+	cancel()
+	<-done
+
+	if n := seen.FilterMessage("sensor not open").Len(); n != 1 {
+		t.Errorf("the same reason was logged %d times, want once", n)
+	}
 }

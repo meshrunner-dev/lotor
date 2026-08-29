@@ -168,9 +168,13 @@ func (s *Sampler) opening(ctx context.Context) Device {
 			return dev
 		}
 		s.mu.Lock()
+		said := s.cause == err.Error()
 		s.cause = err.Error()
 		s.mu.Unlock()
-		if s.log != nil {
+		// Said once, and again only when the reason changes: an
+		// absent part would otherwise write an error a minute for as
+		// long as it is absent, into a journal that may be in RAM.
+		if s.log != nil && !said {
 			s.log.Error("sensor not open", zap.Error(err), zap.Duration("retry_in", wait))
 		}
 		select {

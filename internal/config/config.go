@@ -241,6 +241,14 @@ type File struct {
 	MQTT     map[string]MQTT   `yaml:"mqtt"`
 }
 
+// The cadence a sensor may be read at. The floor keeps a bus shared
+// with a radio usable; the ceiling is where a reading is too old to
+// answer a telemetry question with.
+const (
+	MinSampleInterval = time.Second
+	MaxSampleInterval = time.Hour
+)
+
 // validateSensors checks what every sensor must say. Nothing claims
 // one, so there is no exclusivity to enforce — the bus belongs to the
 // machine, and every relay on it reads the same part.
@@ -249,9 +257,12 @@ func validateSensors(sensors map[string]Sensor) error {
 		if s.Driver == "" {
 			return fmt.Errorf("sensor %q: driver is required", name)
 		}
-		if s.SampleInterval < 0 {
-			return fmt.Errorf("sensor %q: sample_interval %s — a cadence runs forward",
-				name, s.SampleInterval)
+		// Bounded like every other cadence here: a bus shared with a
+		// radio is not a thing to read a thousand times a second, and
+		// a part read less than hourly is not being watched.
+		if v := s.SampleInterval; v != 0 && (v < MinSampleInterval || v > MaxSampleInterval) {
+			return fmt.Errorf("sensor %q: sample_interval %s — want %s..%s, or 0 for the default",
+				name, v, MinSampleInterval, MaxSampleInterval)
 		}
 	}
 	return nil

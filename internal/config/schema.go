@@ -56,7 +56,7 @@ func SensorAttrs() []schema.Attr {
 		{Name: "driver", Type: schema.String,
 			Doc: "the driver that speaks to this part (chooses the rest of its attributes)"},
 		{Name: "sample_interval", Type: schema.Duration,
-			Doc: "how often the part is read, on its own goroutine (0 takes the default)"},
+			Doc: "how often the part is read, on its own goroutine (1s..1h; 0 takes 30s)"},
 	}
 }
 

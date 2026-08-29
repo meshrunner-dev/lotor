@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 var catalog = map[string]map[string]any{
@@ -268,5 +269,36 @@ func TestTXBlockNormalizes(t *testing.T) {
 func TestTXRejectsANegativeThreshold(t *testing.T) {
 	if err := (&TX{LBTThresholdDB: -6}).Normalize(); err == nil {
 		t.Error("a negative lbt_threshold_db silently disables the RSSI stage")
+	}
+}
+
+func TestASensorsCadenceIsBounded(t *testing.T) {
+	// A bus shared with a radio is not a thing to read a thousand
+	// times a second, and every other cadence here says its range.
+	base := func(every time.Duration) *File {
+		return &File{Sensors: map[string]Sensor{
+			"bat": {Driver: "ina219", SampleInterval: every},
+		}}
+	}
+	for _, c := range []struct {
+		what  string
+		every time.Duration
+		ok    bool
+	}{
+		{"a millisecond hammers the bus", time.Millisecond, false},
+		{"a day is not watching", 24 * time.Hour, false},
+		{"backwards", -time.Second, false},
+		{"the floor", MinSampleInterval, true},
+		{"the ceiling", MaxSampleInterval, true},
+		{"zero takes the default", 0, true},
+		{"a working cadence", 30 * time.Second, true},
+	} {
+		err := base(c.every).Validate(false)
+		if c.ok && err != nil {
+			t.Errorf("%s: %v", c.what, err)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("%s: accepted %s", c.what, c.every)
+		}
 	}
 }
