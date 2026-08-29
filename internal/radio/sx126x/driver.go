@@ -15,6 +15,13 @@ import (
 	"meshrunner.dev/pkg/lora/sx126x"
 )
 
+// sampleEvery paces the noise-floor sampling while a batch collects.
+// It lives here rather than beside the receive loop because it is a
+// cadence, not a syscall: floor_test.go exercises that loop's waiting
+// off-hardware, and a constant behind //go:build linux would keep the
+// whole package's tests from compiling anywhere else.
+const sampleEvery = 20 * time.Millisecond
+
 // Settings is the driver's hardware configuration: the attachment
 // (bus, pins) and the board's envelope. Waveform choices do not
 // belong here — they arrive per relay through Configure.

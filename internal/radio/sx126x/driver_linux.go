@@ -208,9 +208,6 @@ func receptionPending(err error) error {
 
 func (d *device) StartReceive() error { return d.r.StartReceive() }
 
-// sampleEvery paces the noise-floor sampling while a batch collects.
-const sampleEvery = 20 * time.Millisecond
-
 // Receive waits for the next frame, and measures while it waits: the
 // radio has exactly one owning goroutine, so the noise floor is
 // sampled here, between polls, never from outside.
