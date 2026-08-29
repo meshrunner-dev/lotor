@@ -8,7 +8,6 @@ package ina219
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -160,7 +159,9 @@ func ioctl(f *os.File, req, arg uintptr) error {
 		return err
 	}
 	if errno != 0 {
-		return errors.New(errno.Error())
+		// Returned whole: a caller telling a permission refusal from
+		// bus trouble needs errors.Is, not a string to match.
+		return errno
 	}
 	return nil
 }

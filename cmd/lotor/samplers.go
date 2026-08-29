@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -19,6 +20,9 @@ type managedSampler struct {
 	done   chan struct{}
 	smp    *sensor.Sampler
 }
+
+// opened reports whether this part is answering, for the view.
+func (h *managedSampler) opened() bool { return h.smp.Opened() }
 
 // startSampler opens one part and gives it its goroutine. A part that
 // will not open is logged and skipped: a missing sensor is no reason
@@ -46,18 +50,18 @@ func (m *manager) startSampler(ctx context.Context, name string) {
 		log.Error("sensor not started", zap.Error(err))
 		return
 	}
-	dev, err := drv.Open(cfg, log)
-	if err != nil {
-		log.Error("sensor not started", zap.Error(err))
-		return
-	}
 	every := sn.SampleInterval
 	if every <= 0 {
 		every = sensor.DefaultInterval
 	}
 	sctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	smp := sensor.NewSampler(dev, every, log)
+	// Opening is a bus transaction and mu is held here, so the sampler
+	// does it on its own goroutine — and keeps trying, since the
+	// reasons a part refuses are usually temporary.
+	smp := sensor.NewSampler(func() (sensor.Device, error) {
+		return drv.Open(cfg, log)
+	}, every, log)
 	m.samplers[name] = &managedSampler{cancel: cancel, done: done, smp: smp}
 	m.wg.Go(func() {
 		defer close(done)
@@ -66,16 +70,31 @@ func (m *manager) startSampler(ctx context.Context, name string) {
 	log.Info("sensor up", zap.String("driver", sn.Driver), zap.Duration("every", every))
 }
 
-// stopSampler takes one down and waits it out. The caller holds mu.
+// stopWait bounds how long stopSampler waits for a goroutine to
+// notice. It is held under mu, so it may not be unbounded: a part
+// blocked in a syscall would otherwise freeze every console command
+// and every mutation behind the lifecycle lock.
+const stopWait = 3 * time.Second
+
+// stopSampler takes one down. It waits briefly — the usual case is a
+// goroutine asleep on its ticker, which cancel wakes at once — and
+// gives up rather than hold mu on a bus that is not answering. The
+// goroutine closes its own device whenever it comes back. The caller
+// holds mu.
 func (m *manager) stopSampler(name string) {
 	h, ok := m.samplers[name]
 	if !ok {
 		return
 	}
 	h.cancel()
-	<-h.done
 	delete(m.samplers, name)
-	m.log.Named("sensor").Info("sensor stopped", zap.String("sensor", name))
+	log := m.log.Named("sensor").With(zap.String("sensor", name))
+	select {
+	case <-h.done:
+		log.Info("sensor stopped")
+	case <-time.After(stopWait):
+		log.Warn("sensor still stopping — it will close its device when the bus lets go")
+	}
 }
 
 // bounceSampler reopens one part under the daemon's own context: a

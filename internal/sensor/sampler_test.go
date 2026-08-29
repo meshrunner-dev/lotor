@@ -4,9 +4,16 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// opens hands the same part back every time, which is what a driver
+// whose device is already there behaves like.
+func opens(d Device) func() (Device, error) {
+	return func() (Device, error) { return d, nil }
+}
 
 // fakeDevice stands in for a part on a bus: it says when it was read,
 // and it can be made to hang or to fail the way a real one does.
@@ -54,7 +61,7 @@ func TestLatestDoesNotWaitForTheBus(t *testing.T) {
 		entered: make(chan struct{}, 1),
 		release: make(chan struct{}),
 	}
-	s := NewSampler(dev, time.Hour, nil)
+	s := NewSampler(opens(dev), time.Hour, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); s.Run(ctx) }()
@@ -79,7 +86,7 @@ func TestASampleReachesTheCacheAndAFailureKeepsIt(t *testing.T) {
 		entered: make(chan struct{}, 4),
 		give:    []Reading{{Quantity: Voltage, Value: 3.9, At: at}},
 	}
-	s := NewSampler(dev, time.Millisecond, nil)
+	s := NewSampler(opens(dev), time.Millisecond, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); s.Run(ctx) }()
@@ -109,7 +116,7 @@ func TestASampleReachesTheCacheAndAFailureKeepsIt(t *testing.T) {
 }
 
 func TestLatestCopiesWhatItGivesBack(t *testing.T) {
-	s := NewSampler(&fakeDevice{}, time.Hour, nil)
+	s := NewSampler(opens(&fakeDevice{}), time.Hour, nil)
 	s.last = []Reading{{Quantity: Voltage, Value: 3.9}}
 	got := s.Latest()
 	got[0].Value = 0
@@ -119,7 +126,7 @@ func TestLatestCopiesWhatItGivesBack(t *testing.T) {
 }
 
 func TestACadenceOfZeroTakesTheDefault(t *testing.T) {
-	if s := NewSampler(&fakeDevice{}, 0, nil); s.every != DefaultInterval {
+	if s := NewSampler(opens(&fakeDevice{}), 0, nil); s.every != DefaultInterval {
 		t.Fatalf("every = %s", s.every)
 	}
 }
@@ -141,12 +148,60 @@ func TestADriverMayRefillItsOwnBuffer(t *testing.T) {
 	// time. The cache must not be that slice.
 	buf := []Reading{{Quantity: Voltage, Value: 3.9}}
 	dev := &fakeDevice{entered: make(chan struct{}, 1), give: buf}
-	s := NewSampler(dev, time.Hour, nil)
-	s.sample(context.Background())
+	s := NewSampler(opens(dev), time.Hour, nil)
+	s.sample(context.Background(), dev)
 	<-dev.entered
 
 	buf[0] = Reading{Quantity: Current, Value: 0.2}
 	if got := s.Latest(); got[0].Quantity != Voltage || got[0].Value != 3.9 {
 		t.Fatalf("the cache followed the driver's buffer: %+v", got[0])
+	}
+}
+
+func TestAPartThatRefusesIsTriedAgain(t *testing.T) {
+	// The operator fixes a permission, plugs a board in, and the
+	// daemon must notice without being restarted.
+	dev := &fakeDevice{
+		entered: make(chan struct{}, 2),
+		give:    []Reading{{Quantity: Voltage, Value: 5.0}},
+	}
+	var tries atomic.Int32
+	open := func() (Device, error) {
+		if tries.Add(1) < 2 {
+			return nil, errors.New("permission denied")
+		}
+		return dev, nil
+	}
+	s := NewSampler(open, time.Hour, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); s.Run(ctx) }()
+
+	waitFor(t, s.Opened, "the part was never opened after refusing once")
+	waitFor(t, func() bool { return len(s.Latest()) == 1 }, "no reading followed the open")
+	if n := tries.Load(); n < 2 {
+		t.Errorf("opened after %d tries", n)
+	}
+	cancel()
+	<-done
+	if s.Opened() {
+		t.Error("still open after the context ended")
+	}
+}
+
+func TestAPartThatNeverOpensStopsWithTheContext(t *testing.T) {
+	open := func() (Device, error) { return nil, errors.New("no such bus") }
+	s := NewSampler(open, time.Hour, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); s.Run(ctx) }()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run kept retrying after its context ended")
+	}
+	if s.Opened() {
+		t.Error("Opened is true for a part that never opened")
 	}
 }

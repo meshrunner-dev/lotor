@@ -29,10 +29,20 @@ const readBound = 5 * time.Second
 // brisk enough that a telemetry answer is not archaeology.
 const DefaultInterval = 30 * time.Second
 
+// openBackoff is how long a sampler waits before trying a part that
+// would not open again, doubling to openBackoffMax. A part is often
+// absent for a reason that goes away — a permission the unit gains, a
+// board plugged in after boot — and a daemon that only tries at start
+// makes the operator restart it to be believed.
+const (
+	openBackoff    = time.Second
+	openBackoffMax = time.Minute
+)
+
 // Sampler owns one device and reads it on its own goroutine. Every
 // other goroutine sees only the last answer, through Latest.
 type Sampler struct {
-	dev   Device
+	open  func() (Device, error)
 	every time.Duration
 	log   *zap.Logger
 
@@ -40,31 +50,51 @@ type Sampler struct {
 	// that is the whole point: a reader waits for a slice copy, never
 	// for the bus. Plain, not RW: one writer a cadence apart and
 	// readers that copy three values contend over nothing.
-	mu   sync.Mutex
-	last []Reading
+	mu     sync.Mutex
+	last   []Reading
+	opened bool
 }
 
-// NewSampler prepares a sampler. A cadence of zero takes the default.
-func NewSampler(dev Device, every time.Duration, log *zap.Logger) *Sampler {
+// NewSampler prepares a sampler. It does not open anything: opening is
+// a bus transaction, and the caller is holding a lock. A cadence of
+// zero takes the default.
+func NewSampler(open func() (Device, error), every time.Duration, log *zap.Logger) *Sampler {
 	if every <= 0 {
 		every = DefaultInterval
 	}
-	return &Sampler{dev: dev, every: every, log: log}
+	return &Sampler{open: open, every: every, log: log}
 }
 
-// Run reads until the context ends, then closes the device. It samples
-// once before waiting, so a relay that asks for telemetry in the first
-// seconds of its life has something true to say.
+// Opened reports whether the part is answering. False is a part that
+// has not opened yet or would not open, which a console must say
+// rather than showing an empty reading list as a quiet part.
+func (s *Sampler) Opened() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.opened
+}
+
+// Run opens the part, retrying while it refuses, then reads until the
+// context ends and closes it. It samples once before waiting, so a
+// relay that asks for telemetry in the first seconds of its life has
+// something true to say.
 func (s *Sampler) Run(ctx context.Context) {
+	dev := s.opening(ctx)
+	if dev == nil {
+		return // the context ended before the part ever answered
+	}
 	defer func() {
-		if err := s.dev.Close(); err != nil && s.log != nil {
+		s.mu.Lock()
+		s.opened = false
+		s.mu.Unlock()
+		if err := dev.Close(); err != nil && s.log != nil {
 			s.log.Warn("sensor close", zap.Error(err))
 		}
 	}()
 	t := time.NewTicker(s.every)
 	defer t.Stop()
 	for {
-		s.sample(ctx)
+		s.sample(ctx, dev)
 		select {
 		case <-ctx.Done():
 			return
@@ -73,13 +103,41 @@ func (s *Sampler) Run(ctx context.Context) {
 	}
 }
 
+// opening returns a device, or nil when the context ended first. It
+// keeps trying because the reasons a part refuses are usually
+// temporary, and it says so once per attempt so the journal shows
+// what is being waited for.
+func (s *Sampler) opening(ctx context.Context) Device {
+	wait := openBackoff
+	for {
+		dev, err := s.open()
+		if err == nil {
+			s.mu.Lock()
+			s.opened = true
+			s.mu.Unlock()
+			return dev
+		}
+		if s.log != nil {
+			s.log.Error("sensor not open", zap.Error(err), zap.Duration("retry_in", wait))
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(wait):
+		}
+		if wait *= 2; wait > openBackoffMax {
+			wait = openBackoffMax
+		}
+	}
+}
+
 // sample takes one reading set. A failure keeps what was there: the
 // readings carry the moment they were taken, so a consumer can see
 // the answer going stale, which is more use than an empty one.
-func (s *Sampler) sample(ctx context.Context) {
+func (s *Sampler) sample(ctx context.Context, dev Device) {
 	read, cancel := context.WithTimeout(ctx, readBound)
 	defer cancel()
-	got, err := s.dev.Read(read)
+	got, err := dev.Read(read)
 	if err != nil {
 		if s.log != nil && ctx.Err() == nil {
 			s.log.Warn("sensor read", zap.Error(err))

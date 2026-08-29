@@ -582,7 +582,7 @@ func (m *manager) SensorInfos() []cli.SensorInfo {
 			Running: false, Readings: nil,
 		}
 		if h, live := m.samplers[name]; live {
-			info.Running, info.Readings = true, h.smp.Latest()
+			info.Running, info.Readings = h.opened(), h.smp.Latest()
 		}
 		out = append(out, info)
 	}
