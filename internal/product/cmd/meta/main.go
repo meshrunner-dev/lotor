@@ -15,7 +15,8 @@ import (
 )
 
 func main() {
-	field := flag.String("field", "", "print one field: slug, name, description, homepage, update-base, binary, state-dir, service")
+	field := flag.String("field", "",
+		"print one field: slug, name, description, homepage, update-base, binary, state-dir, service")
 	asJSON := flag.Bool("json", false, "print every field as JSON")
 	flag.Parse()
 

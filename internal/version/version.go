@@ -31,12 +31,12 @@ var (
 type TreeState string
 
 const (
-	// Clean: the build is exactly its revision.
+	// Clean — the build is exactly its revision.
 	Clean TreeState = "clean"
-	// Dirty: local modifications rode along — the revision alone does
+	// Dirty — local modifications rode along; the revision alone does
 	// not reproduce these bytes.
 	Dirty TreeState = "dirty"
-	// Unknown: no VCS data at all (an archive build, `go run`).
+	// Unknown — no VCS data at all (an archive build, `go run`).
 	Unknown TreeState = "unknown"
 )
 
@@ -74,26 +74,7 @@ func fromBuildInfo(bi *debug.BuildInfo) Info {
 	}
 	if bi != nil {
 		for _, s := range bi.Settings {
-			switch s.Key {
-			case "vcs":
-				info.VCS = s.Value
-			case "vcs.revision":
-				info.Revision = s.Value
-			case "vcs.time":
-				if t, err := time.Parse(time.RFC3339, s.Value); err == nil {
-					info.SourceTime = t
-				}
-			case "vcs.modified":
-				if s.Value == "true" {
-					info.Tree = Dirty
-				} else {
-					info.Tree = Clean
-				}
-			case "GOOS":
-				info.GOOS = s.Value
-			case "GOARCH":
-				info.GOARCH = s.Value
-			}
+			applySetting(&info, s.Key, s.Value)
 		}
 	}
 	// The archive-build fallbacks apply only where the native data is
@@ -113,6 +94,30 @@ func fromBuildInfo(bi *debug.BuildInfo) Info {
 		}
 	}
 	return info
+}
+
+// applySetting folds one recorded build setting into the identity.
+func applySetting(info *Info, key, value string) {
+	switch key {
+	case "vcs":
+		info.VCS = value
+	case "vcs.revision":
+		info.Revision = value
+	case "vcs.time":
+		if t, err := time.Parse(time.RFC3339, value); err == nil {
+			info.SourceTime = t
+		}
+	case "vcs.modified":
+		if value == "true" {
+			info.Tree = Dirty
+		} else {
+			info.Tree = Clean
+		}
+	case "GOOS":
+		info.GOOS = value
+	case "GOARCH":
+		info.GOARCH = value
+	}
 }
 
 // ShortRevision is the displayed form: enough hex to be unambiguous,

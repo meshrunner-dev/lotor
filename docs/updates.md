@@ -200,3 +200,42 @@ The signature is the privilege boundary: a compromised daemon can
 stage whatever it likes and gain nothing, because the installer
 installs what verifies under `/etc/lotor/trusted-keys` and the
 embedded keys — or nothing.
+
+## Product identity and build provenance
+
+Three contracts, three homes, never confused:
+
+- **the product** (`internal/product`) — slug, name, description,
+  homepage, update base, and the install ABI. The slug is the
+  manifest's `product` field, the artifact prefix and the S3 key
+  prefix; a client refuses any manifest naming another product,
+  however valid its signature. Scripts and workflows read the same Go
+  source through `go run ./internal/product/cmd/meta`;
+- **the build** (`internal/version`) — the functional version is the
+  ONE ldflag the official recipe stamps
+  (`-X …/internal/version.release=1.2.3`); revision, source time,
+  tree state, toolchain and target come from the toolchain's native
+  VCS stamping (`-buildvcs=true`). `lotor version` prints the block,
+  `lotor version --json` feeds inventories, and every surface —
+  banner, status, MQTT, OTA `ver` — repeats the same value;
+- **the install ABI** — `lotor.service`, `/var/lib/lotor`,
+  `/usr/local/bin/lotor` — spelled out in `internal/product`, checked
+  by `task identity:check`, and never derived from the slug: a
+  rebrand must not relocate a running fleet.
+
+Official builds are reproducible: `scripts/build` is the one recipe
+(Task and CI both), it injects no wall clock, and `task build:repro`
+proves two clean builds byte-identical. The three times that matter
+stay distinct — `source time` is the commit's (in the binary),
+`published` is the manifest's (signed), and the job's own clock lives
+only in the CI provenance. Versions are functions of the source: dev
+and try derive their timestamp from the commit, so a rerun mints the
+same identity, and the immutable upload accepts a byte-identical
+replay while refusing a different object under a known name. Git tags
+keep their `v` prefix; product versions drop it, and the update
+comparator tolerates both so old manifests stay valid.
+
+For stable releases, a GitHub artifact attestation can bind the
+distributed bytes to repository, commit and workflow. It complements
+Minisign, never replaces it: the signed manifest and the embedded
+keys remain the auto-update's root of trust.

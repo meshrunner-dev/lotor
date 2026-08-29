@@ -141,6 +141,11 @@ linters:
       - path: ^internal/mqtt/payload\.go$
         linters: [tagliatelle]
 
+      # The version JSON is an inventory/support interface whose keys
+      # match the project's other machine surfaces: snake_case.
+      - path: ^internal/version/version\.go$
+        linters: [tagliatelle]
+
       # The update manifest is a signed, published contract that forks
       # and hands with stock minisign already consume: its keys are
       # snake_case, and restyling them would be publishing a different
@@ -153,8 +158,9 @@ linters:
       - linters: [lll]
         source: '`.*(cmd|arg|help|enum|placeholder):'
 
-      # cmd/ tools are CLIs: printing to stdout is their purpose.
-      - path: ^cmd/
+      # cmd/ tools are CLIs: printing to stdout is their purpose —
+      # the undistributed internal/*/cmd helpers included.
+      - path: (^|/)cmd/
         linters:
           - forbidigo
 
