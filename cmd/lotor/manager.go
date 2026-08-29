@@ -34,6 +34,7 @@ import (
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/relay"
 	"meshrunner.dev/lotor/internal/schema"
+	"meshrunner.dev/lotor/internal/sensor"
 	"meshrunner.dev/lotor/internal/sentinel"
 
 	"meshrunner.dev/pkg/meshcore"
@@ -46,6 +47,7 @@ const (
 	attrIdentity     = "identity"
 	attrRadio        = "radio"
 	attrDriver       = "driver"
+	attrSampleEvery  = "sample_interval"
 	attrProfile      = "profile"
 	attrNoiseHistory = "noise_history"
 	attrTXMode       = "tx.mode"
@@ -562,6 +564,22 @@ func (m *manager) RadioInfos() []cli.RadioInfo {
 	return out
 }
 
+// SensorInfos lists the configured parts. Nothing runs them yet, so
+// the view is what the store says — the readings join it with the
+// sampler.
+func (m *manager) SensorInfos() []cli.SensorInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]cli.SensorInfo, 0, len(m.file.Sensors))
+	for name, sn := range m.file.Sensors {
+		out = append(out, cli.SensorInfo{
+			Name: name, Driver: sn.Driver, SampleInterval: sn.SampleInterval,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 func (m *manager) Traces() map[string][]config.Trace {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -584,6 +602,7 @@ func (m *manager) Traces() map[string][]config.Trace {
 		}
 		out["radio "+name] = rows
 	}
+	addSensorTraces(out, m.file.Sensors)
 	// The singletons have no layering, so their "provenance" is the
 	// store itself — synthesised here so print works the same way
 	// everywhere.
@@ -781,6 +800,28 @@ func relayStructural(rc config.Relay) []config.Trace {
 		}
 	}
 	return rows
+}
+
+// addSensorTraces resolves every sensor's layers without hardware. A
+// sensor is never claimed, so it is always in this shape — there is no
+// assembled counterpart to prefer, as there is for a live radio.
+func addSensorTraces(out map[string][]config.Trace, sensors map[string]config.Sensor) {
+	for name, sn := range sensors {
+		rows := sensorStructural(sn)
+		if _, err := sensor.Lookup(sn.Driver); err == nil {
+			if _, traces, rerr := sn.Layered.Resolve(nil); rerr == nil {
+				rows = withStructural(traces, rows)
+			}
+		}
+		out["sensor "+name] = rows
+	}
+}
+
+func sensorStructural(sn config.Sensor) []config.Trace {
+	return []config.Trace{
+		{Key: attrDriver, Value: sn.Driver, Source: sourceConfig},
+		{Key: attrSampleEvery, Value: sn.SampleInterval.String(), Source: sourceConfig},
+	}
 }
 
 func radioStructural(rd config.Radio) []config.Trace {
@@ -988,6 +1029,8 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 		case confdb.KindUpdate:
 			// check and install read the store live; nothing bounces.
 			return "applied — the next check reads it", nil
+		case confdb.KindSensor:
+			return "applied — sensor " + name, nil
 		case confdb.KindMQTT:
 			m.bounceObserver(name)
 			if next.MQTT[name].Disabled {
@@ -1023,6 +1066,8 @@ func deepCheck(next *config.File, kind, name, relayName string) error {
 		}
 	case kind == confdb.KindRadio:
 		return checkRadioAlone(next.Radios[name])
+	case kind == confdb.KindSensor:
+		return checkSensorAlone(next.Sensors[name])
 	case kind == confdb.KindMQTT:
 		_, err := resolveMQTTParams(next.MQTT[name])
 		return err
@@ -1061,6 +1106,11 @@ func (m *manager) Create(ctx context.Context, kind, name string,
 			return "", fmt.Errorf("radio %q already exists", name)
 		}
 		err = m.createRadio(next, name, attrs, change)
+	case confdb.KindSensor:
+		if _, dup := next.Sensors[name]; dup {
+			return "", fmt.Errorf("sensor %q already exists", name)
+		}
+		err = m.createSensor(next, name, attrs, change)
 	case confdb.KindMQTT:
 		if _, dup := next.MQTT[name]; dup {
 			return "", fmt.Errorf("observer %q already exists", name)
@@ -1097,6 +1147,10 @@ func (m *manager) commitCreate(ctx context.Context, next *config.File,
 		}
 	case confdb.KindRadio:
 		if err := checkRadioAlone(next.Radios[name]); err != nil {
+			return "", err
+		}
+	case confdb.KindSensor:
+		if err := checkSensorAlone(next.Sensors[name]); err != nil {
 			return "", err
 		}
 	case confdb.KindMQTT:
@@ -1352,6 +1406,50 @@ const maskedChange = "<secret>"
 // attrToken is the update block's secret attribute.
 const attrToken = "token"
 
+// createSensor brings one part into existence: the driver it speaks
+// to, and whatever that driver needs to find it on its bus.
+func (m *manager) createSensor(next *config.File, name string,
+	attrs map[string]string, change map[string]confdb.Change,
+) error {
+	sn := config.Sensor{
+		Driver:         attrs[attrDriver],
+		SampleInterval: 0,
+		// No profile: every value lands in the one scope setOverride
+		// gives a layering with none, which is what "custom" means.
+		Layered: config.Layered{Profile: "", Overrides: nil},
+	}
+	if sn.Driver == "" {
+		return errors.New("a new sensor needs driver=")
+	}
+	if v, ok := attrs[attrDriver]; ok {
+		change[attrDriver] = confdb.Change{New: v}
+	}
+	rest := make(map[string]string, len(attrs))
+	for k, v := range attrs {
+		if k == attrDriver {
+			continue
+		}
+		rest[k] = v
+	}
+	if next.Sensors == nil {
+		next.Sensors = map[string]config.Sensor{}
+	}
+	next.Sensors[name] = sn
+	typed, err := m.parseAgainst(confdb.KindSensor, sn.Driver, rest, nil)
+	if err != nil {
+		return err
+	}
+	sn = next.Sensors[name]
+	for attr, v := range typed {
+		if _, err := setSensorAttr(&sn, attr, v); err != nil {
+			return err
+		}
+		change[attr] = confdb.Change{New: v}
+	}
+	next.Sensors[name] = sn
+	return nil
+}
+
 func (m *manager) createRadio(next *config.File, name string,
 	attrs map[string]string, change map[string]confdb.Change,
 ) error {
@@ -1468,6 +1566,14 @@ func removeFromFile(next *config.File, kind, name string) (string, error) {
 		}
 		delete(next.Radios, name)
 		return "removed — radio " + name, nil
+	case confdb.KindSensor:
+		if _, ok := next.Sensors[name]; !ok {
+			return "", fmt.Errorf("no sensor %q", name)
+		}
+		// Nothing claims a sensor, so nothing has to let go of it
+		// first: the relays that read it simply stop finding it.
+		delete(next.Sensors, name)
+		return "removed — sensor " + name, nil
 	case confdb.KindSentinel:
 		next.Sentinel = nil
 		return "removed — takes effect when the daemon restarts", nil
@@ -1580,6 +1686,10 @@ func (m *manager) orphanOverride(kind, name, attr string) bool {
 		if rd, ok := m.file.Radios[name]; ok {
 			l = &rd.Layered
 		}
+	case confdb.KindSensor:
+		if sn, ok := m.file.Sensors[name]; ok {
+			l = &sn.Layered
+		}
 	case confdb.KindMQTT:
 		if mq, ok := m.file.MQTT[name]; ok {
 			l = &mq.Layered
@@ -1639,6 +1749,12 @@ func (m *manager) kindAndChoiceIn(f *config.File, kind, name string) (*schema.Ki
 			return nil, "", fmt.Errorf("no radio %q", name)
 		}
 		return k, rd.Driver, nil
+	case confdb.KindSensor:
+		sn, ok := f.Sensors[name]
+		if !ok {
+			return nil, "", fmt.Errorf("no sensor %q", name)
+		}
+		return k, sn.Driver, nil
 	case confdb.KindMQTT:
 		if _, ok := f.MQTT[name]; !ok {
 			return nil, "", fmt.Errorf("no observer %q", name)
@@ -1675,6 +1791,11 @@ func applyChanges(next *config.File, kind, name string,
 	case confdb.KindRelay:
 		change, err := applyRelayChanges(next, name, typed, unset)
 		return change, name, err
+	case confdb.KindSensor:
+		// No relay restarts for a sensor: its sampler is the daemon's,
+		// and the relays that read its cache never held it.
+		change, err := applySensorChanges(next, name, typed, unset)
+		return change, "", err
 	case confdb.KindRadio:
 		change, err := applyRadioChanges(next, name, typed, unset)
 		if err != nil {
@@ -1711,6 +1832,29 @@ func applyRelayChanges(next *config.File, name string,
 		change[attr] = confdb.Change{Old: old}
 	}
 	next.Relays[name] = rc
+	return change, nil
+}
+
+func applySensorChanges(next *config.File, name string,
+	typed map[string]any, unset []string,
+) (map[string]confdb.Change, error) {
+	change := map[string]confdb.Change{}
+	sn := next.Sensors[name]
+	for attr, v := range typed {
+		old, err := setSensorAttr(&sn, attr, v)
+		if err != nil {
+			return nil, err
+		}
+		change[attr] = confdb.Change{Old: old, New: v}
+	}
+	for _, attr := range unset {
+		old, err := unsetOverride(&sn.Layered, attr)
+		if err != nil {
+			return nil, err
+		}
+		change[attr] = confdb.Change{Old: old}
+	}
+	next.Sensors[name] = sn
 	return change, nil
 }
 
@@ -1784,6 +1928,26 @@ func unsetRelayAttr(rc *config.Relay, attr string) (old any, err error) {
 		return old, nil
 	default:
 		return unsetOverride(&rc.Layered, attr)
+	}
+}
+
+// setSensorAttr writes one sensor attribute and reports what it held.
+// sample_interval is a field rather than an override: it belongs to
+// the sampler, which no preset describes.
+func setSensorAttr(sn *config.Sensor, attr string, v any) (old any, err error) {
+	switch attr {
+	case attrDriver:
+		return nil, errors.New("driver says what the sensor IS — remove it and add it anew")
+	case attrSampleEvery:
+		old = sn.SampleInterval.String()
+		d, derr := asDuration(attr, v)
+		if derr != nil {
+			return nil, derr
+		}
+		sn.SampleInterval = d
+		return old, nil
+	default:
+		return setOverride(&sn.Layered, attr, v), nil
 	}
 }
 
@@ -2086,6 +2250,8 @@ func objectSection(f *config.File, kind, name string) (any, error) {
 		return f.Relays[name], nil
 	case confdb.KindRadio:
 		return f.Radios[name], nil
+	case confdb.KindSensor:
+		return f.Sensors[name], nil
 	case confdb.KindSentinel:
 		if f.Sentinel == nil {
 			return nil, errors.New("no sentinel block")
@@ -2127,6 +2293,31 @@ func checkRadioAlone(rd config.Radio) error {
 		func(cfg map[string]any) error { _, e := drv.Inspect(cfg); return e })
 }
 
+// checkSensorAlone validates a sensor that no relay has to consult:
+// the driver's own dry run, over every override scope.
+func checkSensorAlone(sn config.Sensor) error {
+	drv, err := sensor.Lookup(sn.Driver)
+	if err != nil {
+		return err
+	}
+	if drv.Inspect == nil {
+		return nil
+	}
+	// nil: a sensor has no preset catalogue, so every scope resolves
+	// from nothing but what the operator wrote.
+	if err := checkScopes(sn.Layered, nil, drv.Inspect); err != nil {
+		return err
+	}
+	// The selected scope may hold no overrides at all, and then the
+	// loop above never saw it: a part declared with nothing but its
+	// driver would reach the store unexamined.
+	cfg, _, err := sn.Layered.Resolve(nil)
+	if err != nil {
+		return err
+	}
+	return drv.Inspect(cfg)
+}
+
 // cloneFile deep-copies the configuration through its own dialect.
 func cloneFile(f *config.File) (*config.File, error) {
 	raw, err := yaml.Marshal(f)
@@ -2142,6 +2333,9 @@ func cloneFile(f *config.File) (*config.File, error) {
 	}
 	if out.Relays == nil {
 		out.Relays = map[string]config.Relay{}
+	}
+	if out.Sensors == nil {
+		out.Sensors = map[string]config.Sensor{}
 	}
 	return &out, nil
 }

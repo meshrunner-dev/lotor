@@ -15,7 +15,7 @@ func RelayAttrs() []schema.Attr {
 			Doc: "the protocol this relay speaks (chooses the rest of its attributes)"},
 		{Name: "radio", Type: schema.String,
 			Doc: "the radio this relay owns — one owner per radio"},
-		{Name: "profile", Type: schema.String,
+		{Name: attrProfile, Type: schema.String,
 			Doc: `the band preset; "custom" starts from nothing`},
 		{Name: "noise_history", Type: schema.Bool,
 			Doc: "archive this relay's noise floor (measurement always runs; this is the disk)"},
@@ -35,13 +35,28 @@ func RelayAttrs() []schema.Attr {
 	}
 }
 
+// attrProfile is the layering knob every layered kind carries.
+const attrProfile = "profile"
+
 // RadioAttrs describes a radio's own structure.
 func RadioAttrs() []schema.Attr {
 	return []schema.Attr{
 		{Name: "driver", Type: schema.String,
 			Doc: "the driver that speaks to this transceiver (chooses the rest of its attributes)"},
-		{Name: "profile", Type: schema.String,
+		{Name: attrProfile, Type: schema.String,
 			Doc: `the board preset; "custom" starts from nothing`},
+	}
+}
+
+// SensorAttrs describes what every sensor declares, whatever it is.
+// The driver contributes the rest — a bus, an address, whatever the
+// part needs to be found.
+func SensorAttrs() []schema.Attr {
+	return []schema.Attr{
+		{Name: "driver", Type: schema.String,
+			Doc: "the driver that speaks to this part (chooses the rest of its attributes)"},
+		{Name: "sample_interval", Type: schema.Duration,
+			Doc: "how often the part is read, on its own goroutine (0 takes the default)"},
 	}
 }
 

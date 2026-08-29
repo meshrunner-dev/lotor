@@ -25,6 +25,20 @@ type Radio struct {
 	Layered Layered `yaml:",inline"`
 }
 
+// Sensor declares one peripheral attached to this machine:
+// which driver speaks to it, how often it is sampled, and the layered
+// hardware configuration. Unlike a radio it is not owned — the bus
+// belongs to the machine, so every relay on it reports the same
+// reading, and nothing claims it exclusively.
+type Sensor struct {
+	Driver string `yaml:"driver"`
+	// SampleInterval is the cadence of its own goroutine. Zero takes
+	// the daemon's default; the value belongs to the sensor because
+	// the cost of a sample is the bus's, not any one relay's.
+	SampleInterval time.Duration `yaml:"sample_interval"`
+	Layered        Layered       `yaml:",inline"`
+}
+
 // Relay declares one protocol instance: which protocol it speaks,
 // which radio it owns, and the layered waveform configuration
 // (band presets and their overrides).
@@ -217,13 +231,30 @@ type Update struct {
 
 // File is the top-level configuration.
 type File struct {
-	Radios   map[string]Radio `yaml:"radios"`
-	Relays   map[string]Relay `yaml:"relays"`
-	Sentinel *Sentinel        `yaml:"sentinel"`
-	CLI      *CLI             `yaml:"cli"`
-	System   *System          `yaml:"system"`
-	Update   *Update          `yaml:"update"`
-	MQTT     map[string]MQTT  `yaml:"mqtt"`
+	Radios   map[string]Radio  `yaml:"radios"`
+	Relays   map[string]Relay  `yaml:"relays"`
+	Sensors  map[string]Sensor `yaml:"sensors"`
+	Sentinel *Sentinel         `yaml:"sentinel"`
+	CLI      *CLI              `yaml:"cli"`
+	System   *System           `yaml:"system"`
+	Update   *Update           `yaml:"update"`
+	MQTT     map[string]MQTT   `yaml:"mqtt"`
+}
+
+// validateSensors checks what every sensor must say. Nothing claims
+// one, so there is no exclusivity to enforce — the bus belongs to the
+// machine, and every relay on it reads the same part.
+func validateSensors(sensors map[string]Sensor) error {
+	for name, s := range sensors {
+		if s.Driver == "" {
+			return fmt.Errorf("sensor %q: driver is required", name)
+		}
+		if s.SampleInterval < 0 {
+			return fmt.Errorf("sensor %q: sample_interval %s — a cadence runs forward",
+				name, s.SampleInterval)
+		}
+	}
+	return nil
 }
 
 // Load reads, decodes and cross-validates a configuration file.
@@ -297,6 +328,9 @@ func (f *File) Validate(requireRelays bool) error {
 		if r.Driver == "" {
 			return fmt.Errorf("radio %q: driver is required", name)
 		}
+	}
+	if err := validateSensors(f.Sensors); err != nil {
+		return err
 	}
 	if f.CLI != nil && f.CLI.Listen == "" {
 		f.CLI.Listen = DefaultCLIListen

@@ -185,6 +185,44 @@ func (s *session) radioList() error {
 	return tb.flush(s.out)
 }
 
+// sensorList renders the configured parts as a table — the tree's
+// print at the collection. No owner column: nothing claims a sensor.
+func (s *session) sensorList() error {
+	if len(s.sensors()) == 0 {
+		fmt.Fprint(s.out, "no sensors configured\r\n")
+		return nil
+	}
+	tb := s.table()
+	tb.header("NAME", "DRIVER", "SAMPLED")
+	for _, sn := range s.sensors() {
+		every := "default"
+		if sn.SampleInterval > 0 {
+			every = "every " + sn.SampleInterval.String()
+		}
+		tb.row(sn.Name, sn.Driver, every)
+	}
+	return tb.flush(s.out)
+}
+
+// sensorStatus is one part as it is read. Nothing samples it yet, so
+// what it can honestly say is what it was told to be.
+func (s *session) sensorStatus(name string) error {
+	for _, sn := range s.sensors() {
+		if sn.Name != name {
+			continue
+		}
+		tb := s.table()
+		tb.row("driver", sn.Driver)
+		every := "the default"
+		if sn.SampleInterval > 0 {
+			every = sn.SampleInterval.String()
+		}
+		tb.row("sampled", "every "+every)
+		return tb.flush(s.out)
+	}
+	return fmt.Errorf("no sensor %q", name)
+}
+
 // radioStatus is one radio as it is attached.
 func (s *session) radioStatus(_ context.Context, in input) error {
 	name := in.opts[scopeRadio]

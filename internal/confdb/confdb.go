@@ -38,6 +38,7 @@ const Memory = ":memory:"
 const (
 	KindRadio    = "radio"
 	KindRelay    = "relay"
+	KindSensor   = "sensor"
 	KindSentinel = "sentinel"
 	KindCLI      = "cli"
 	KindSystem   = "system"
@@ -163,8 +164,9 @@ func (s *Store) Load(ctx context.Context) (*config.File, error) {
 	defer func() { _ = rows.Close() }()
 
 	f := &config.File{
-		Radios: map[string]config.Radio{},
-		Relays: map[string]config.Relay{},
+		Radios:  map[string]config.Radio{},
+		Sensors: map[string]config.Sensor{},
+		Relays:  map[string]config.Relay{},
 	}
 	for rows.Next() {
 		var kind, name, attrs string
@@ -199,6 +201,12 @@ func assign(f *config.File, kind, name string, attrs []byte) error {
 			return err
 		}
 		f.Relays[name] = r
+	case KindSensor:
+		s, err := fromAttrs[config.Sensor](attrs)
+		if err != nil {
+			return err
+		}
+		f.Sensors[name] = s
 	case KindSentinel, KindCLI, KindSystem, KindUpdate:
 		return assignSingleton(f, kind, attrs)
 	case KindMQTT:
@@ -255,12 +263,15 @@ func (s *Store) ImportFile(ctx context.Context, f *config.File, principal string
 		kind, name string
 		section    any
 	}
-	objects := make([]object, 0, len(f.Radios)+len(f.Relays)+2)
+	objects := make([]object, 0, len(f.Radios)+len(f.Relays)+len(f.Sensors)+2)
 	for name, r := range f.Radios {
 		objects = append(objects, object{KindRadio, name, r})
 	}
 	for name, r := range f.Relays {
 		objects = append(objects, object{KindRelay, name, r})
+	}
+	for name, s := range f.Sensors {
+		objects = append(objects, object{KindSensor, name, s})
 	}
 	if f.Sentinel != nil {
 		objects = append(objects, object{KindSentinel, "", *f.Sentinel})

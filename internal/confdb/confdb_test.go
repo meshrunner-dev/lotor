@@ -31,6 +31,9 @@ func sample() *config.File {
 				},
 			},
 		},
+		// No sensors here, but the map is what a loaded configuration
+		// carries — Load makes it, so the fixture must too.
+		Sensors: map[string]config.Sensor{},
 		Relays: map[string]config.Relay{
 			"meshcore-868": {
 				Protocol:     "meshcore",

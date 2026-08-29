@@ -36,6 +36,7 @@ import (
 const (
 	scopeRelay   = "relay"
 	scopeRadio   = "radio"
+	scopeSensor  = "sensor"
 	scopeMQTT    = "mqtt"
 	verbShow     = "show"
 	optOn        = "true"
@@ -274,6 +275,14 @@ type RadioInfo struct {
 	Relay    string
 }
 
+// SensorInfo is one configured part as the console shows it. No
+// relay owns it, so it names none: the bus belongs to the machine.
+type SensorInfo struct {
+	Name           string
+	Driver         string
+	SampleInterval time.Duration
+}
+
 // Deps is everything the commands may consult. Sentinel may be nil —
 // the commands that need it say so instead of pretending.
 type Deps struct {
@@ -285,6 +294,7 @@ type Deps struct {
 	Started  time.Time
 	Relays   []RelayInfo
 	Radios   []RadioInfo
+	Sensors  []SensorInfo
 	Sentinel *sentinel.Sentinel
 	Bus      *bus.Bus
 	// Privilege is the session's rights, set per listener by the
@@ -303,6 +313,8 @@ type Deps struct {
 	// and static deployments use the fields.
 	LiveRelays func() []RelayInfo
 	LiveRadios func() []RadioInfo
+	// LiveSensors lists the configured parts as the daemon holds them.
+	LiveSensors func() []SensorInfo
 	// History reads the configuration's revision journal, newest
 	// first — who changed what, when — and says how many the asked
 	// window holds beyond what came back, so a capped listing can

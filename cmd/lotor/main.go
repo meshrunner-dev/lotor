@@ -35,6 +35,7 @@ import (
 	"meshrunner.dev/lotor/internal/protocol"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/relay"
+	"meshrunner.dev/lotor/internal/sensor"
 	"meshrunner.dev/lotor/internal/sentinel"
 	"meshrunner.dev/lotor/internal/single"
 	"meshrunner.dev/lotor/internal/update"
@@ -45,6 +46,7 @@ import (
 	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 	_ "meshrunner.dev/lotor/internal/radio/sx126x"
 	"meshrunner.dev/lotor/internal/schema"
+	_ "meshrunner.dev/lotor/internal/sensor/ina219"
 	lotorversion "meshrunner.dev/lotor/internal/version"
 )
 
@@ -421,19 +423,38 @@ func acquireInstanceLock(configPath string) (func(), error) {
 	return single.Acquire(context.Background(), "lotor", abs)
 }
 
+// sensorKind declares the sensor collection, kept out of buildKinds
+// so that list stays readable as kinds accumulate.
+func sensorKind() schema.Kind {
+	return schema.Kind{
+		Name: confdb.KindSensor, Doc: "one part attached to this machine, and what it measures",
+		Attrs: config.SensorAttrs(), ChoiceAttr: attrDriver,
+		Contributed: func(choice string) []schema.Attr {
+			d, err := sensor.Lookup(choice)
+			if err != nil {
+				return nil
+			}
+			return d.Schema
+		},
+	}
+}
+
+// sortedNames lists a preset catalogue in a stable order — what the
+// console offers when it asks which profiles a choice has.
+func sortedNames(presets map[string]map[string]any) []string {
+	names := make([]string, 0, len(presets))
+	for n := range presets {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // buildKinds assembles the configuration vocabulary the console (and
 // later channels) navigate: the structural attributes from the config
 // package, the contributed ones from whichever protocol or driver an
 // instance chose, straight from their registries.
 func buildKinds() []schema.Kind {
-	sortedNames := func(presets map[string]map[string]any) []string {
-		names := make([]string, 0, len(presets))
-		for n := range presets {
-			names = append(names, n)
-		}
-		sort.Strings(names)
-		return names
-	}
 	kinds := make([]schema.Kind, 0, 8)
 	kinds = append(kinds, []schema.Kind{
 		{
@@ -454,6 +475,7 @@ func buildKinds() []schema.Kind {
 				return sortedNames(b.Presets)
 			},
 		},
+		sensorKind(),
 		{
 			Name: confdb.KindRadio, Doc: "one physical transceiver attachment",
 			Attrs: config.RadioAttrs(), ChoiceAttr: attrDriver,
@@ -565,23 +587,24 @@ func watchProbation(ctx context.Context, stateDir string, log *zap.Logger) {
 // live views and the mutation door, all of them the manager's.
 func consoleDeps(mgr *manager, b *bus.Bus, sen *sentinel.Sentinel) cli.Deps {
 	return cli.Deps{
-		Version:    version,
-		Started:    time.Now(),
-		Sessions:   cli.NewSessions(),
-		Bus:        b,
-		Sentinel:   sen,
-		Kinds:      mgr.kinds,
-		LiveRelays: mgr.RelayInfos,
-		LiveRadios: mgr.RadioInfos,
-		LiveMQTTs:  mgr.MQTTInfos,
-		History:    mgr.History,
-		Log:        mgr.log.Named("cli"),
-		LiveTraces: mgr.Traces,
-		Mutate:     mgr.Mutate,
-		Undo:       mgr.Undo,
-		Create:     mgr.Create,
-		Remove:     mgr.Remove,
-		SystemName: mgr.SystemName,
+		Version:     version,
+		Started:     time.Now(),
+		Sessions:    cli.NewSessions(),
+		Bus:         b,
+		Sentinel:    sen,
+		Kinds:       mgr.kinds,
+		LiveRelays:  mgr.RelayInfos,
+		LiveRadios:  mgr.RadioInfos,
+		LiveSensors: mgr.SensorInfos,
+		LiveMQTTs:   mgr.MQTTInfos,
+		History:     mgr.History,
+		Log:         mgr.log.Named("cli"),
+		LiveTraces:  mgr.Traces,
+		Mutate:      mgr.Mutate,
+		Undo:        mgr.Undo,
+		Create:      mgr.Create,
+		Remove:      mgr.Remove,
+		SystemName:  mgr.SystemName,
 	}
 }
 

@@ -134,6 +134,13 @@ func (s *session) radios() []RadioInfo {
 	return s.deps.Radios
 }
 
+func (s *session) sensors() []SensorInfo {
+	if s.deps.LiveSensors != nil {
+		return s.deps.LiveSensors()
+	}
+	return s.deps.Sensors
+}
+
 // traces is the live view when the daemon serves one.
 func (s *session) traces() map[string][]config.Trace {
 	if s.deps.LiveTraces != nil {
@@ -173,6 +180,10 @@ func (s *session) instances(kind string) map[string]string {
 	case scopeRadio:
 		for _, r := range s.radios() {
 			out[r.Name] = r.Driver
+		}
+	case scopeSensor:
+		for _, sn := range s.sensors() {
+			out[sn.Name] = sn.Driver
 		}
 	case scopeMQTT:
 		for _, mq := range s.mqtts() {
@@ -800,13 +811,19 @@ func (s *session) mountedVerb(kind, verb string) bool {
 // treeStatus shows the instance the session stands in, as it runs.
 func (s *session) treeStatus(ctx context.Context, path []string) error {
 	in := input{opts: map[string]string{path[0]: path[1]}}
+	// Named exhaustively, for the reason print is: a default that fell
+	// through to the radios answered "no radio" about a sensor.
 	switch path[0] {
 	case scopeRelay:
 		return s.relayStatus(ctx, in)
 	case scopeMQTT:
 		return s.mqttStatus(path[1])
-	default:
+	case scopeSensor:
+		return s.sensorStatus(path[1])
+	case scopeRadio:
 		return s.radioStatus(ctx, in)
+	default:
+		return fmt.Errorf("%s has no status", path[0])
 	}
 }
 
@@ -929,13 +946,20 @@ func (s *session) printOnce(ctx context.Context, path []string, want printArgs) 
 		if detail {
 			return s.printDetail(path[0], secrets)
 		}
+		// Named exhaustively: a default that fell through to the
+		// radios made every new collection print somebody else's
+		// table, which reads as a bug in the collection.
 		switch path[0] {
 		case scopeRelay:
 			return s.relayList()
 		case scopeMQTT:
 			return s.mqttList()
-		default:
+		case scopeSensor:
+			return s.sensorList()
+		case scopeRadio:
 			return s.radioList()
+		default:
+			return fmt.Errorf("%s has no listing", path[0])
 		}
 	}
 	switch s.placeAt(path) {
