@@ -605,6 +605,24 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	}
 	// The neighbourhood verbs: refresh queues a scan off the engine's
 	// goroutine, purge — the argument-less remove — sweeps the table.
+	// The pre-flight reads the live view: a relay that cannot key the
+	// radio, or one already scanning, is refused to the admin's face
+	// rather than answered OK and refused in the journal.
+	m.infos["mc"] = cli.RelayInfo{Discover: func() (<-chan cli.Neighbour, time.Time, error) {
+		return nil, time.Time{}, nil
+	}}
+	if out := m.runOTA("mc", "air:test", "discover.neighbors"); out != "Err - transmit gate is dry" {
+		t.Errorf("dry gate got %q", out)
+	}
+	info := m.infos["mc"]
+	info.TXMode = config.TXOnAir
+	info.ScanWindow = func() (time.Time, bool) { return time.Now().Add(42 * time.Second), true }
+	m.infos["mc"] = info
+	if out := m.runOTA("mc", "air:test", "discover.neighbors"); out != "Err - scanning, 42s left" {
+		t.Errorf("busy scan got %q", out)
+	}
+	info.ScanWindow = func() (time.Time, bool) { return time.Time{}, false }
+	m.infos["mc"] = info
 	if out := m.runOTA("mc", "air:test", "discover.neighbors"); out != "OK - Discover sent" {
 		t.Errorf("discover got %q", out)
 	}
@@ -615,10 +633,11 @@ func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 		t.Errorf("discover with options got %q", out)
 	}
 	var removed [][]byte
-	m.infos["mc"] = cli.RelayInfo{RemoveNeighbours: func(prefix []byte) int {
+	info.RemoveNeighbours = func(prefix []byte) int {
 		removed = append(removed, prefix)
 		return len(removed)
-	}}
+	}
+	m.infos["mc"] = info
 	if out := m.runOTA("mc", "air:test", "neighbor.remove"); out != "OK" {
 		t.Errorf("purge got %q", out)
 	}

@@ -10,11 +10,13 @@ package main
 
 import (
 	"encoding/hex"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	"meshrunner.dev/lotor/internal/confdb"
+	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/protocol"
 	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 )
@@ -120,7 +122,7 @@ func (m *manager) runOTA(relay, principal, line string) string {
 		if rest != "" {
 			return "Err - discover.neighbors has no options"
 		}
-		return m.orderAir(airOrder{relay: relay, discover: true}, "OK - Discover sent")
+		return m.otaDiscover(relay)
 	case "neighbor.remove":
 		return m.otaRemoveNeighbour(relay, rest)
 	case "ver":
@@ -287,6 +289,45 @@ func (m *manager) otaSetperm(relay, principal, rest string) string {
 	return m.orderAir(airOrder{
 		relay: relay, principal: principal, grant: true, pubKey: pub, perms: byte(perms),
 	}, "OK")
+}
+
+// otaDiscover keys a neighbourhood scan, refusing first what would
+// be refused anyway. The reference never refuses its own discovers —
+// it overwrites the pending tag and sends again — while this engine
+// runs one window at a time, since two overlapping scans make every
+// responder answer both into the same jitter. That deviation owes
+// the admin a reason: the queued order's own refusal reaches the
+// journal alone, and an OK the scan never honoured is worse than a
+// plain no. Both reads below are lock-free, which is what lets them
+// run in the engine's own goroutine.
+func (m *manager) otaDiscover(relay string) string {
+	m.viewMu.RLock()
+	info, ok := m.infos[relay]
+	m.viewMu.RUnlock()
+	if !ok || info.Discover == nil {
+		return "Err - this relay cannot scan"
+	}
+	if info.TXMode != config.TXOnAir && info.TXMode != config.TXOnAirZeroHop {
+		return "Err - transmit gate is " + txModeWord(info.TXMode)
+	}
+	if info.ScanWindow != nil {
+		if until, listening := info.ScanWindow(); listening {
+			// The answers of the window already open join the same
+			// neighbourhood, so the honest word is wait, not retry.
+			return fmt.Sprintf("Err - scanning, %ds left",
+				int(time.Until(until).Round(time.Second).Seconds()))
+		}
+	}
+	return m.orderAir(airOrder{relay: relay, discover: true}, "OK - Discover sent")
+}
+
+// txModeWord names a gate for a refusal; empty reads as the dry
+// posture it means.
+func txModeWord(mode string) string {
+	if mode == "" {
+		return config.TXDry
+	}
+	return mode
 }
 
 // otaRemoveNeighbour drops neighbours by key prefix — and with no
