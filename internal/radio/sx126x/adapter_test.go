@@ -20,7 +20,9 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
+	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/pkg/lora"
 	"meshrunner.dev/pkg/lora/sx126x"
@@ -163,6 +165,52 @@ func TestBusyChannelIsNotARadioFault(t *testing.T) {
 		case !tc.busy && !tc.fault && err != nil:
 			t.Errorf("%s: %v", tc.name, err)
 		}
+	}
+}
+
+func TestCADTraceDistinguishesVerdictSkipAndFailure(t *testing.T) {
+	cases := []struct {
+		name    string
+		busy    bool
+		err     error
+		message string
+		field   string
+		want    any
+	}{
+		{"clear verdict", false, nil, "lbt cad verdict", "busy", false},
+		{"busy verdict", true, nil, "lbt cad verdict", "busy", true},
+		{"reception in progress", false, sx126x.ErrReceiveInProgress,
+			"lbt cad skipped", "reason", "reception-in-progress"},
+		{"unread frame", false, sx126x.ErrUnreadFrame,
+			"lbt cad skipped", "reason", "unread-frame"},
+		{"radio fault", false, errors.New("spi gave way"),
+			"lbt cad failed", "error", "spi gave way"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			core, observed := observer.New(logging.TraceLevel)
+			d := newDevice(&fakeChip{cadBusy: tc.busy, cadErr: tc.err})
+			d.log = zap.New(core)
+
+			_, _ = d.AssessChannel(context.Background(), 0)
+
+			entries := observed.FilterMessage(tc.message).All()
+			if len(entries) != 1 || observed.Len() != 1 {
+				t.Fatalf("trace entries = %+v, want one %q", observed.All(), tc.message)
+			}
+			fields := entries[0].ContextMap()
+			if got := fields[tc.field]; got != tc.want {
+				t.Errorf("%s = %v, want %v; fields = %+v", tc.field, got, tc.want, fields)
+			}
+			if _, exists := fields["chip"]; exists {
+				t.Errorf("ambiguous chip field survived: %+v", fields)
+			}
+			if tc.message != "lbt cad verdict" {
+				if _, exists := fields["busy"]; exists {
+					t.Errorf("non-verdict trace carries busy: %+v", fields)
+				}
+			}
+		})
 	}
 }
 

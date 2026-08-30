@@ -189,8 +189,19 @@ func (d *device) AssessChannel(ctx context.Context, thresholdDB float64) (bool, 
 	}
 	busy, err := d.r.AssessChannel(ctx, sx126x.CAD{})
 	if logging.On(d.log) {
-		logging.Trace(d.log, "lbt cad verdict",
-			zap.Bool("busy", busy), zap.NamedError("chip", err))
+		switch {
+		case err == nil:
+			// busy is only a verdict when the CAD actually completed.
+			logging.Trace(d.log, "lbt cad verdict", zap.Bool("busy", busy))
+		case errors.Is(err, sx126x.ErrReceiveInProgress):
+			logging.Trace(d.log, "lbt cad skipped",
+				zap.String("reason", "reception-in-progress"))
+		case errors.Is(err, sx126x.ErrUnreadFrame):
+			logging.Trace(d.log, "lbt cad skipped",
+				zap.String("reason", "unread-frame"))
+		default:
+			logging.Trace(d.log, "lbt cad failed", zap.Error(err))
+		}
 	}
 	return busy, receptionPending(err)
 }
