@@ -706,9 +706,11 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	}
 	log := e.log.With(zap.String("corr", entry.origin.Short()), zap.String("kind", entry.kind))
 	e.traceTXSelected(log, entry, now)
-	if !e.admitDuty(dev, entry) {
+	reservation, admitted := e.reserveDuty(dev, entry)
+	if !admitted {
 		return nil
 	}
+	defer reservation.Cancel()
 	outcome, err := e.clearChannel(ctx, dev, log, entry.origin, entry.kind)
 	switch {
 	case err != nil:
@@ -754,7 +756,7 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	}
 	// One place for every consequence of a frame that occupied the
 	// channel, whether the radio came back healthy afterwards or not.
-	e.recordEmission(entry, sent, log, faulted)
+	e.recordEmission(entry, sent, log, faulted, reservation)
 	return faulted
 }
 
@@ -783,11 +785,13 @@ func (e *engine) traceTXSelected(log *zap.Logger, entry txEntry, now time.Time) 
 // reached the ledger and the journal but not the duplicate table or
 // the counters, so GET_STATUS and the heartbeat denied an emission
 // the budget had already paid for.
-func (e *engine) recordEmission(entry txEntry, sent bus.FrameSent, log *zap.Logger, faulted error) {
+func (e *engine) recordEmission(entry txEntry, sent bus.FrameSent, log *zap.Logger, faulted error,
+	reservation *radio.AirtimeReservation,
+) {
 	if !sent.Shadow {
 		e.seen.witness(entry.pkt.Hash(), entry.origin, time.Now())
 	}
-	e.duty.Record(sent.At, sent.Airtime)
+	reservation.Commit(sent.At, sent.Airtime)
 	if !sent.Shadow {
 		// The radio's own tally: paper never counts here.
 		e.stats.countSent(entry.pkt.IsRouteFlood(), sent.Airtime)
@@ -987,18 +991,17 @@ func (e *engine) Duty() (used, budget time.Duration, ok bool) {
 	return e.duty.Usage(time.Now()), e.duty.Budget(), true
 }
 
-// admitDuty applies the budget to one popped entry: requeued for the
-// budget's freeing when that is near, dropped when it is not.
-func (e *engine) admitDuty(dev radio.Device, entry txEntry) bool {
-	if e.duty.Budget() <= 0 {
-		return true
-	}
+// reserveDuty applies the budget to one popped entry and atomically holds its
+// estimated airtime until the radio attempt either commits or cancels. A
+// refusal is requeued for the budget's freeing when that is near, dropped when
+// it is not.
+func (e *engine) reserveDuty(dev radio.Device, entry txEntry) (*radio.AirtimeReservation, bool) {
 	raw := entry.pkt.RawLength()
 	now := time.Now()
 	candidate := dev.Airtime(raw)
-	ok, freeAt, never := e.duty.Admit(now, candidate)
-	if ok {
-		return true
+	reservation, freeAt, never := e.duty.Reserve(now, candidate)
+	if reservation != nil {
+		return reservation, true
 	}
 	log := e.log.With(zap.String("kind", entry.kind), zap.String("corr", entry.origin.Short()))
 	retryIn := freeAt.Sub(now)
@@ -1012,7 +1015,7 @@ func (e *engine) admitDuty(dev radio.Device, entry txEntry) bool {
 		e.bus.Publish(bus.TxDropped{
 			Relay: e.relay, Correlation: entry.origin, At: time.Now(), Reason: "duty", Kind: entry.kind,
 		})
-		return false
+		return nil, false
 	}
 	if log.Core().Enabled(zap.DebugLevel) {
 		log.Debug("tx deferred by duty budget",
@@ -1026,5 +1029,5 @@ func (e *engine) admitDuty(dev radio.Device, entry txEntry) bool {
 			Relay: e.relay, Correlation: entry.origin, At: time.Now(), Reason: "duty", Kind: entry.kind,
 		})
 	}
-	return false
+	return nil, false
 }

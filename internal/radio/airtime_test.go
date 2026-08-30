@@ -42,3 +42,31 @@ func TestAirtimeLedgerKeepsConcurrentRecordsOrdered(t *testing.T) {
 		t.Fatalf("admit = %v, %s, %v", ok, freeAt, never)
 	}
 }
+
+func TestAirtimeLedgerReservationsCloseTheAdmissionRace(t *testing.T) {
+	now := time.Now()
+	ledger := NewAirtimeLedger(10*time.Second, nil)
+	first, _, never := ledger.Reserve(now, 7*time.Second)
+	if first == nil || never {
+		t.Fatal("first candidate was not reserved")
+	}
+	if second, _, never := ledger.Reserve(now, 4*time.Second); second != nil || never {
+		t.Fatalf("overlapping candidate = %#v, never = %v", second, never)
+	}
+	if got := ledger.Usage(now); got != 0 {
+		t.Fatalf("an estimate appeared as spent airtime: %s", got)
+	}
+	first.Cancel()
+	second, _, never := ledger.Reserve(now, 4*time.Second)
+	if second == nil || never {
+		t.Fatal("cancelled capacity was not released")
+	}
+	second.Commit(now, 5*time.Second)
+	if got := ledger.Usage(now); got != 5*time.Second {
+		t.Fatalf("committed usage = %s", got)
+	}
+	second.Commit(now, time.Second)
+	if got := ledger.Usage(now); got != 5*time.Second {
+		t.Fatalf("second commit changed usage to %s", got)
+	}
+}

@@ -127,8 +127,9 @@ func TestEmissionLogsKeepTrafficAtDebugAndRadioAccountingAtTrace(t *testing.T) {
 		PowerDBm: -5, Shadow: true,
 	}
 	log := e.log.With(zap.String("corr", id.Short()), zap.String("kind", entry.kind))
+	reservation, _, _ := e.duty.Reserve(time.Now(), sent.Airtime)
 
-	e.recordEmission(entry, sent, log, nil)
+	e.recordEmission(entry, sent, log, nil, reservation)
 
 	traffic := observedOne(t, observed, "frame sent")
 	if traffic.Level != zap.DebugLevel {
@@ -158,7 +159,7 @@ func TestTerminalPolicyDropsStayAtDebug(t *testing.T) {
 	}
 	entry := txEntry{pkt: pkt, kind: "test", origin: correlation.New()}
 
-	if e.admitDuty(dev, entry) {
+	if _, admitted := e.reserveDuty(dev, entry); admitted {
 		t.Fatal("an emission larger than the whole duty budget was admitted")
 	}
 	duty := observedOne(t, observed, "duty budget refuses the emission, dropping")
@@ -188,7 +189,7 @@ func TestDutyDeferralIsAVisibleDebugDecision(t *testing.T) {
 	}
 	entry := txEntry{pkt: pkt, kind: "test", origin: correlation.New()}
 
-	if e.admitDuty(dev, entry) {
+	if _, admitted := e.reserveDuty(dev, entry); admitted {
 		t.Fatal("the full duty budget admitted another emission")
 	}
 	if len(e.queue.entries) != 1 {
