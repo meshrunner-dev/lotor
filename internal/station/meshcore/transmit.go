@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/correlation"
 
@@ -255,18 +257,34 @@ func (s *service) submitAtLocked(packet *mesh.Packet, kind string, notBefore tim
 func (s *service) submitAtPriorityLocked(packet *mesh.Packet, kind string, notBefore time.Time,
 	priority uint8,
 ) []companion.Response {
-	if s.txPolicy.Mode == "" || s.txPolicy.Mode == config.TXDry || s.rfDevice == nil || s.duty == nil {
-		return []companion.Response{companion.StatusResponse(companion.ResponseDisabled)}
-	}
 	item := emission{
 		packet: packet, correlation: correlation.New(), kind: kind,
 		notBefore: notBefore, priority: priority,
+	}
+	// DISABLED is reserved by the reference for commands compiled out of the
+	// firmware (private-key export/import). Applications wait for OK/SENT or
+	// ERR on transmit commands, so an unavailable TX path is a bad runtime
+	// state, not a disabled command. The packet still deserves correlation even
+	// though it never entered the TX queue.
+	switch {
+	case s.txPolicy.Mode == "" || s.txPolicy.Mode == config.TXDry:
+		return s.refuseSubmission(item, "dry")
+	case s.rfDevice == nil:
+		return s.refuseSubmission(item, "radio-down")
+	case s.duty == nil:
+		return s.refuseSubmission(item, "duty-unavailable")
 	}
 	if s.outbound.offer(item) {
 		s.seen.mark(packet.Hash())
 		return nil
 	}
 	return errorResponses(companion.ErrTableFull)
+}
+
+func (s *service) refuseSubmission(item emission, reason string) []companion.Response {
+	s.log.Debug("station frame refused", zap.String("corr", item.correlation.Short()),
+		zap.String("kind", item.kind), zap.Uint8("priority", item.priority), zap.String("reason", reason))
+	return errorResponses(companion.ErrBadState)
 }
 
 func referencePriority(packet *mesh.Packet) uint8 {

@@ -8,6 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
@@ -671,5 +675,30 @@ func TestStationGroupTextTruncatesAtTheReferenceBoundary(t *testing.T) {
 	if err != nil || message.Sender != svc.p.NodeName ||
 		len(message.Sender)+2+len(message.Text) != stationMaxText {
 		t.Fatalf("group plaintext = %+v, %v", message, err)
+	}
+}
+
+func TestDryStationRejectsTransmissionWithAnApplicationTerminalError(t *testing.T) {
+	core, observed := observer.New(zapcore.DebugLevel)
+	spec := testSpec(t)
+	spec.Log = zap.New(core)
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	responses := svc.handle(t.Context(), companion.SendChannelText{
+		Channel: 0, TextType: mesh.TxtTypePlain, UnixSeconds: 1_800_000_000, Text: "hello",
+	})
+	if len(responses) != 1 || responses[0] != (companion.ErrorResponse{Code: companion.ErrBadState}) {
+		t.Fatalf("dry send responses = %#v", responses)
+	}
+	refused := observed.FilterMessage("station frame refused").All()
+	if len(refused) != 1 {
+		t.Fatalf("dry send refusal logs = %#v", refused)
+	}
+	fields := refused[0].ContextMap()
+	if fields["reason"] != "dry" || fields["kind"] != "station-channel-text" || fields["corr"] == "" {
+		t.Fatalf("dry send refusal fields = %#v", fields)
 	}
 }
