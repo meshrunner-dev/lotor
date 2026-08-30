@@ -408,8 +408,27 @@ func Serve(ctx context.Context, rw io.ReadWriter, deps Deps) {
 	done := make(chan struct{})
 	defer close(done)
 	go readLines(rw, lines, done)
-	s := &session{deps: deps, lines: lines, out: rw, remote: remoteOf(rw)}
+	s := &session{deps: deps, lines: lines, out: syncOut(rw), remote: remoteOf(rw)}
 	s.repl(ctx)
+}
+
+// syncWriter serialises everything a session may say. The REPL owns
+// the prompt and the editor stays silent until a keystroke, so those
+// two never overlap by design — but the daemon's farewell arrives
+// from the shutdown path, on nobody's schedule, and a message that
+// interleaved with a half-drawn line would be the last thing an
+// operator saw.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func syncOut(w io.Writer) *syncWriter { return &syncWriter{w: w} }
+
+func (s *syncWriter) Write(b []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(b)
 }
 
 // terminalGrace bounds how long a session waits to learn whether it is
@@ -594,8 +613,9 @@ func serveEdited(ctx context.Context, rw io.ReadWriter, deps Deps, width int) {
 	lines := make(chan string)
 	done := make(chan struct{})
 	defer close(done)
-	s := &session{deps: deps, lines: lines, out: rw, colors: true, remote: remoteOf(rw)}
-	ed := newEditor(rw, rw)
+	out := syncOut(rw)
+	s := &session{deps: deps, lines: lines, out: out, colors: true, remote: remoteOf(rw)}
+	ed := newEditor(rw, out)
 	ed.width = width
 	// The editor's hooks read the session's context from the transport
 	// goroutine; the session guards that state itself.

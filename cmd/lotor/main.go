@@ -410,8 +410,16 @@ func run(dbPath, logLevel string) error {
 	}
 	defer release()
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	// The signal is caught rather than wired straight to the context,
+	// because the order matters to whoever is watching: the listeners
+	// close their connections the moment the context is done, so the
+	// consoles are told the daemon is going down BEFORE anything is
+	// cancelled. A goodbye racing its own socket is no goodbye.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(signals)
 	// The sentinel outlives the publishers: phase one stops relays and
 	// CLI sessions, phase two lets the journal drain what they left on
 	// the bus before it closes. The last frames of a session are
@@ -448,14 +456,37 @@ func run(dbPath, logLevel string) error {
 		zap.Time("source_time", buildInfo.SourceTime),
 		zap.String("toolchain", buildInfo.GoVersion),
 		zap.String("target", buildInfo.GOOS+"/"+buildInfo.GOARCH))
-	<-ctx.Done()
-	log.Info("shutting down")
-	producers.Wait()
-	mgr.Wait()
-	journalDone()
-	journal.Wait()
-	mgr.Close()
+	<-signals
+	shutdown(log, deps.Sessions, cancel, shutdownWaits{
+		producers: &producers, journal: &journal,
+		journalDone: journalDone, mgr: mgr,
+	})
 	return nil
+}
+
+// shutdownWaits is what the shutdown has to settle, in the order the
+// daemon's two phases need: the publishers stop, then the journal
+// drains what they left on the bus.
+type shutdownWaits struct {
+	producers, journal *sync.WaitGroup
+	journalDone        context.CancelFunc
+	mgr                *manager
+}
+
+// shutdown takes the daemon down in the order that keeps its promises
+// — and tells the consoles first, while their sockets are still open
+// and the sessions are still there to be told.
+func shutdown(log *zap.Logger, sessions *cli.Sessions,
+	cancel context.CancelFunc, w shutdownWaits,
+) {
+	log.Info("shutting down")
+	sessions.Farewell(product.Name + " is shutting down — this console is closing")
+	cancel()
+	w.producers.Wait()
+	w.mgr.Wait()
+	w.journalDone()
+	w.journal.Wait()
+	w.mgr.Close()
 }
 
 // acquireInstanceLock refuses a second daemon on the same

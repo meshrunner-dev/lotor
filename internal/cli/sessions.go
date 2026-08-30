@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"net"
 	"sort"
@@ -53,6 +54,33 @@ func (t *Sessions) snapshot() map[string]*session {
 	out := make(map[string]*session, len(t.open))
 	maps.Copy(out, t.open)
 	return out
+}
+
+// Farewell tells every open session the daemon is going down, while
+// their transports are still there to carry it. The caller says it
+// BEFORE it cancels anything: the listeners close their connections
+// the moment the context is done, and a goodbye racing that close is
+// a goodbye nobody reads.
+func (t *Sessions) Farewell(text string) {
+	if t == nil {
+		return // a daemon that keeps no session table has nobody to tell
+	}
+	for _, s := range t.snapshot() {
+		s.farewell(text)
+	}
+}
+
+// farewell writes one session's last line. The prompt it lands on is
+// taken back first — a terminal erases it, a transcript simply breaks
+// the line — and the trailing newline leaves the cursor at column
+// zero, so the shell that gets the terminal back starts where it
+// should rather than beside a dangling prompt.
+func (s *session) farewell(text string) {
+	if s.colors {
+		fmt.Fprintf(s.out, "\r\x1b[K%s\r\n", text)
+		return
+	}
+	fmt.Fprintf(s.out, "\r\n%s\r\n", text)
 }
 
 // remoteOf names the far end of a session's transport. The local
