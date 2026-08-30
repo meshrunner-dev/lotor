@@ -111,10 +111,11 @@ func (s *service) importContact(raw []byte) []companion.Response {
 	if err != nil || packet.PayloadType() != mesh.PayloadTypeAdvert {
 		return errorResponses(companion.ErrorIllegalArgument)
 	}
-	if _, err := s.storeAdvert(packet, false); err != nil {
+	result, err := s.storeAdvert(packet, false)
+	if err != nil {
 		return errorResponses(companion.ErrorIllegalArgument)
 	}
-	return okResponses()
+	return append(okResponses(), s.advertResponsesLocked(result, packet)...)
 }
 
 func (s *service) shouldAutoAdd(advertType uint8) bool {

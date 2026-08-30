@@ -485,8 +485,10 @@ func (s *service) handle(ctx context.Context, cmd companion.Command) []companion
 		return responses
 	}
 	before := s.snapshotLocked()
+	beforeAdvertPaths := s.advertPaths
 	responses := s.handleMutation(cmd)
 	if err := s.persistLocked(ctx, before); err != nil {
+		s.advertPaths = beforeAdvertPaths
 		s.log.Error("companion state persistence failed", zap.Error(err))
 		s.mu.Unlock()
 		return errorResponses(companion.ErrorFileIO)

@@ -208,13 +208,30 @@ func (s *service) receiveAdvert(ctx context.Context, packet *mesh.Packet) {
 	if err == nil && result.stored {
 		err = s.persistLocked(ctx, before)
 	}
+	var responses []companion.Response
+	if err == nil {
+		responses = s.advertResponsesLocked(result, packet)
+	}
+	s.mu.Unlock()
+	if err != nil {
+		s.log.Error("station advert state failed", zap.Error(err))
+		return
+	}
+	for _, response := range responses {
+		s.push(response)
+	}
+}
+
+func (s *service) advertResponsesLocked(result advertStoreResult,
+	packet *mesh.Packet,
+) []companion.Response {
 	responses := make([]companion.Response, 0, 2)
-	if err == nil && result.hadEviction {
+	if result.hadEviction {
 		responses = append(responses, companion.Push{
 			Code: companion.PushContactDeleted, Body: result.evicted[:],
 		})
 	}
-	if err == nil && result.announce {
+	if result.announce {
 		s.cacheAdvertPathLocked(result.contact.PublicKey, packet)
 		if result.created {
 			wire, _ := companion.MarshalResponse(companion.ContactResponse{Contact: result.contact})
@@ -225,17 +242,10 @@ func (s *service) receiveAdvert(ctx context.Context, packet *mesh.Packet) {
 			})
 		}
 	}
-	if err == nil && result.full {
+	if result.full {
 		responses = append(responses, companion.Push{Code: companion.PushContactsFull})
 	}
-	s.mu.Unlock()
-	if err != nil {
-		s.log.Error("station advert state failed", zap.Error(err))
-		return
-	}
-	for _, response := range responses {
-		s.push(response)
-	}
+	return responses
 }
 
 func (s *service) receiveDirectText(ctx context.Context, packet *mesh.Packet, frame radio.Frame) {

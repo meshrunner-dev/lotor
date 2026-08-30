@@ -612,7 +612,13 @@ func TestImportedAdvertCanBeExported(t *testing.T) {
 		t.Fatal(err)
 	}
 	responses := svc.handle(t.Context(), companion.ImportContact{Packet: raw})
-	if len(responses) != 1 || len(svc.contacts) != 1 {
+	var push companion.Push
+	var pushed bool
+	if len(responses) == 2 {
+		push, pushed = responses[1].(companion.Push)
+	}
+	if len(responses) != 2 || responses[0] != companion.StatusResponse(companion.ResponseOK) ||
+		!pushed || push.Code != companion.PushNewAdvert || len(svc.contacts) != 1 {
 		t.Fatalf("import = %#v contacts %d", responses, len(svc.contacts))
 	}
 	responses = svc.handle(t.Context(), companion.ExportContact{PublicKey: peer.PubKey})
