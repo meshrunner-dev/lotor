@@ -31,8 +31,9 @@ endorsed by the MeshCore project.
   brokers, in the observer ecosystem's own JSON, so analyzers and
   maps consume lotor like any observer node.
 
-See [DESIGN.md](DESIGN.md) for the architecture and
-[docs/](docs/) for the update channels and the MQTT wire contract.
+See [DESIGN.md](DESIGN.md) for the architecture,
+[the update mechanism and its guarantees](docs/updates.md), and
+[the MQTT observer wire contract](docs/mqtt-observer.md).
 
 ## Deploying
 
