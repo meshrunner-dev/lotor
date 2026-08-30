@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -1076,8 +1075,10 @@ func TestAnUnprobeableSocketIsLeftStanding(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores socket modes; the probe cannot fail with EACCES")
 	}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "console.sock")
+	// Bound from inside the directory, for the reason
+	// TestSocketPathRefusesWhatIsNotASocket gives.
+	t.Chdir(t.TempDir())
+	path := "console.sock"
 	first, err := listenConsole(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)

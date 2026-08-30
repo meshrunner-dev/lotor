@@ -883,7 +883,12 @@ func TestTightenJournalRefusesWhatIsNotARegularFile(t *testing.T) {
 		t.Errorf("the chmod travelled through the symlink: %o", st.Mode().Perm())
 	}
 
-	spath := dir + "/sock.db"
+	// Bound from inside the directory: a unix address carries its path
+	// in a fixed array — 104 bytes on darwin — and macOS hands out
+	// temporary directories long enough to overflow it. Only the
+	// socket needs the short name; the paths around it stay whole.
+	t.Chdir(dir)
+	spath := "sock.db"
 	l, err := new(net.ListenConfig).Listen(context.Background(), "unix", spath)
 	if err != nil {
 		t.Fatal(err)
