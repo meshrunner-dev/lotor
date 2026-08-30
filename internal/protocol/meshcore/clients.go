@@ -1,10 +1,9 @@
 package meshcore
 
-// The console's window onto the session table. The table belongs to
-// the pipeline's goroutine and carries live credentials, so nothing
-// outside reads it directly: a snapshot is an order like any other,
-// served on the pipeline's own turn — and unlike every other order it
-// asks for no emission, so a dry gate serves it too.
+// The console's window onto the client table. The mutable table and
+// its credentials belong to the pipeline goroutine; readers receive a
+// complete immutable edition containing no secret. A display read is
+// therefore never an order and never interrupts radio reception.
 
 import (
 	"bytes"
@@ -16,6 +15,8 @@ import (
 	"go.uber.org/zap"
 
 	"meshrunner.dev/pkg/meshcore"
+
+	"meshrunner.dev/lotor/internal/bus"
 )
 
 // ClientSession is one logged-in companion, as an operator may see
@@ -37,9 +38,13 @@ type ClientSession struct {
 	LastActive  time.Time
 }
 
-// sessionsOrder asks the pipeline for a snapshot of the client table.
-type sessionsOrder struct {
-	reply chan []ClientSession
+// ClientSnapshot is one coherent outside edition of both client
+// surfaces. Generation increases whenever the pipeline publishes a
+// changed access, activity, route or session membership state.
+type ClientSnapshot struct {
+	Generation uint64
+	Access     []ACLEntry
+	Sessions   []ClientSession
 }
 
 // sessionCloseOrder asks the pipeline to end one live conversation
@@ -113,24 +118,7 @@ type ACLEntry struct {
 
 // AccessList reports durable non-guest authorisations — any goroutine.
 func (e *engine) AccessList() ([]ACLEntry, error) {
-	o := &aclListOrder{reply: make(chan []ACLEntry, 1)}
-	select {
-	case e.aclListAsk <- o:
-	default:
-		return nil, errors.New("an access-list snapshot is already pending")
-	}
-	e.wakeReceiver("acl-snapshot")
-	select {
-	case rows := <-o.reply:
-		return rows, nil
-	case <-time.After(askWait):
-		return nil, errors.New("the relay never picked the access-list snapshot up")
-	}
-}
-
-// aclListOrder asks the pipeline for the access list.
-type aclListOrder struct {
-	reply chan []ACLEntry
+	return e.Clients().Access, nil
 }
 
 // accessListBody frames the access list the way the reference's
@@ -222,11 +210,6 @@ func (e *engine) drainACLAsk() {
 		}
 	default:
 	}
-	select {
-	case o := <-e.aclListAsk:
-		o.reply <- e.acl.entries()
-	default:
-	}
 }
 
 // applyGrant carries out one grant or revoke on the table the
@@ -243,6 +226,7 @@ func (e *engine) applyGrant(o *aclOrder) error {
 		if err := e.acl.remove(k); err != nil {
 			return fmt.Errorf("the revocation would not persist: %w", err)
 		}
+		e.publishClientView(time.Now(), true)
 		e.log.Info("permission revoked", zap.String("pubkey", shortKey(k[:])))
 		return nil
 	}
@@ -274,6 +258,7 @@ func (e *engine) applyGrant(o *aclOrder) error {
 	if err := e.acl.put(&c); err != nil {
 		return fmt.Errorf("the grant would not persist: %w", err)
 	}
+	e.publishClientView(time.Now(), true)
 	e.log.Info("permission granted",
 		zap.String("pubkey", shortKey(o.pubKey[:])), zap.Bool("admin", c.isAdmin()))
 	return nil
@@ -281,20 +266,7 @@ func (e *engine) applyGrant(o *aclOrder) error {
 
 // ClientSessions reports the logged-in companions — any goroutine.
 func (e *engine) ClientSessions() ([]ClientSession, error) {
-	o := &sessionsOrder{reply: make(chan []ClientSession, 1)}
-	select {
-	case e.sessionsAsk <- o:
-	default:
-		return nil, errors.New("a session snapshot is already pending")
-	}
-	e.wakeReceiver("session-snapshot")
-	select {
-	case rows := <-o.reply:
-		return rows, nil
-	case <-time.After(askWait):
-		return nil, errors.New("the relay never picked the session snapshot up" +
-			" — see \"status\" for what it is doing")
-	}
+	return e.Clients().Sessions, nil
 }
 
 // CloseSession ends one live over-the-air conversation. A durable ACL
@@ -316,10 +288,8 @@ func (e *engine) CloseSession(pubKey []byte) error {
 	return o.done.wait("session close")
 }
 
-// drainSessionsAsk serves a pending close and snapshot, on the
-// pipeline's turn. Close goes first so a snapshot queued beside it
-// cannot report the session after the operator was told it is gone.
-func (e *engine) drainSessionsAsk(now time.Time) {
+// drainSessionCloseAsk serves a pending close on the pipeline's turn.
+func (e *engine) drainSessionCloseAsk() {
 	select {
 	case o := <-e.sessionCloseAsk:
 		if !o.done.claim() {
@@ -331,24 +301,20 @@ func (e *engine) drainSessionsAsk(now time.Time) {
 			}
 			o.done.refused(err)
 		} else {
+			e.publishClientView(time.Now(), true)
 			e.log.Info("session closed", zap.String("pubkey", shortKey(o.pubKey[:])))
 			o.done.taken()
 		}
 	default:
 	}
-	select {
-	case o := <-e.sessionsAsk:
-		o.reply <- e.acl.sessions(now)
-	default:
-	}
 }
 
-// sessions renders the table for the snapshot. Idle entries are
-// skipped rather than retired: a read must not change what it reads.
-func (a *acl) sessions(now time.Time) []ClientSession {
+// sessions renders the active table. Expiry is performed by the
+// engine clock before publication, never by this read.
+func (a *acl) sessions() []ClientSession {
 	out := make([]ClientSession, 0, len(a.by))
 	for _, c := range a.by {
-		if !c.active || now.Sub(c.lastActive) > sessionIdle {
+		if !c.active {
 			continue
 		}
 		row := ClientSession{
@@ -364,4 +330,107 @@ func (a *acl) sessions(now time.Time) []ClientSession {
 		out = append(out, row)
 	}
 	return out
+}
+
+// Clients returns a detached copy of the latest coherent client
+// edition — any goroutine. Path bytes are copied again because the
+// caller is free to retain and edit what it receives.
+func (e *engine) Clients() ClientSnapshot {
+	v := e.clientView.Load()
+	if v == nil {
+		return ClientSnapshot{}
+	}
+	return ClientSnapshot{
+		Generation: v.Generation,
+		Access:     append([]ACLEntry(nil), v.Access...),
+		Sessions:   cloneClientSessions(v.Sessions),
+	}
+}
+
+func cloneClientSessions(in []ClientSession) []ClientSession {
+	out := make([]ClientSession, len(in))
+	copy(out, in)
+	for i := range out {
+		out[i].Path = append([]byte(nil), out[i].Path...)
+	}
+	return out
+}
+
+// publishClientView installs one complete immutable edition. notify
+// wakes views only after Run-time changes; construction and store load
+// establish their initial edition before any reader can subscribe.
+func (e *engine) publishClientView(at time.Time, notify bool) {
+	e.clientGeneration++
+	v := &ClientSnapshot{
+		Generation: e.clientGeneration,
+		Access:     e.acl.entries(),
+		Sessions:   e.acl.sessions(),
+	}
+	sort.Slice(v.Access, func(i, j int) bool {
+		return bytes.Compare(v.Access[i].PubKey[:], v.Access[j].PubKey[:]) < 0
+	})
+	sort.Slice(v.Sessions, func(i, j int) bool {
+		return bytes.Compare(v.Sessions[i].PubKey[:], v.Sessions[j].PubKey[:]) < 0
+	})
+	e.clientView.Store(v)
+	if !notify || e.bus == nil {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	e.bus.Publish(bus.SessionsChanged{
+		Relay: e.relay, At: at, Generation: v.Generation,
+	})
+}
+
+// advanceClient moves the replay clock and publishes the resulting
+// activity only after a durable entry's store accepted it.
+func (e *engine) advanceClient(c *client, ts uint32, now time.Time) error {
+	wasActive := c.active
+	c.active = true
+	if err := e.acl.advance(c, ts, now); err != nil {
+		c.active = wasActive
+		return err
+	}
+	e.publishClientView(now, true)
+	return nil
+}
+
+// clientSessionWake names the earliest active session deadline.
+func (e *engine) clientSessionWake(now time.Time) (time.Duration, bool) {
+	var wait time.Duration
+	set := false
+	for _, c := range e.acl.by {
+		if !c.active {
+			continue
+		}
+		candidate := max(time.Duration(0), c.lastActive.Add(sessionIdle).Sub(now))
+		if !set || candidate < wait {
+			wait, set = candidate, true
+		}
+	}
+	return wait, set
+}
+
+// expireClientSessions applies the deadline under pipeline ownership.
+// Guests disappear with their derived credential; durable principals
+// merely leave the live-session view and remain authorised.
+func (e *engine) expireClientSessions(now time.Time) bool {
+	changed := false
+	for k, c := range e.acl.by {
+		if !c.active || now.Before(c.lastActive.Add(sessionIdle)) {
+			continue
+		}
+		if c.hasAccess() {
+			c.active = false
+		} else {
+			delete(e.acl.by, k)
+		}
+		changed = true
+	}
+	if changed {
+		e.publishClientView(now, true)
+	}
+	return changed
 }

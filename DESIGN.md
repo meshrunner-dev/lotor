@@ -272,6 +272,19 @@ replayable `grant` commands with complete keys and explicit roles; how
 each role was originally earned remains audit history, not recreated
 state.
 
+The protocol engine owns session time as well as session mutation. Its
+next idle deadline bounds the active radio receive window, without a
+detached timer: when it expires, an ephemeral guest and its credential
+are removed, while a durable ACL principal merely becomes inactive and
+keeps its authorisation and learned route. Authenticated activity can
+make that principal live again; an explicit close remains the stronger
+boundary that clears the route and requires a login. After every login,
+accepted activity, learned route, close, grant, revoke or expiry, the
+engine publishes one immutable generation containing both views and a
+credential-free `SessionsChanged` event. CLI reads and completion load
+that atomic view directly, so painting client state never interrupts a
+radio receive window and never filters an entry as a side effect.
+
 ## Build profiles
 
 Two build flavours share one source tree; the `lean` tag selects the

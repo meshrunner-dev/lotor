@@ -205,13 +205,19 @@ type engine struct {
 	// remains owned by the pipeline goroutine; publishing a complete
 	// replacement lets console painting and observers read it without
 	// turning a display lookup into a radio-loop order.
-	regionView     atomic.Pointer[RegionSnapshot]
-	discoverySince time.Time
-	clockWarned    bool
-	acl            *acl
-	neighbours     *neighbourTable
-	stats          Stats
-	started        time.Time
+	regionView atomic.Pointer[RegionSnapshot]
+	// clientView is the immutable outside view of the access and live
+	// session tables. Both slices belong to one generation: a reader
+	// never has to wake the radio loop, nor combine editions published
+	// on opposite sides of a login, close, route learn or expiry.
+	clientView       atomic.Pointer[ClientSnapshot]
+	clientGeneration uint64 // pipeline goroutine only
+	discoverySince   time.Time
+	clockWarned      bool
+	acl              *acl
+	neighbours       *neighbourTable
+	stats            Stats
+	started          time.Time
 	// floor reads the radio's measured noise floor for the status
 	// reply; wired at Run, nil until then.
 	floor func() (radio.NoiseFloor, bool)
@@ -248,10 +254,9 @@ type engine struct {
 	// sweepUntil mirrors the open window's end for readers outside
 	// the loop — zero when no scan listens.
 	sweepUntil atomic.Int64
-	// aclAsk carries a grant or revoke, aclListAsk a request for the
-	// whole access list, both served on the pipeline's own turn.
-	aclAsk     chan *aclOrder
-	aclListAsk chan *aclListOrder
+	// aclAsk carries a grant or revoke, served on the pipeline's own
+	// turn. Reads use clientView and never become radio-loop orders.
+	aclAsk chan *aclOrder
 	// regionAsk carries one region command line; regionStaging is the
 	// armed modal load, engine-goroutine only, mirrored into
 	// regionLoadState for the dispatcher's cheap pre-check.
@@ -260,11 +265,8 @@ type engine struct {
 	regionLoadState atomic.Value
 	// regionStore persists the region map; nil keeps it in memory.
 	regionStore RegionStore
-	// sessionsAsk carries the console's request for a snapshot of the
-	// client table, sessionCloseAsk an explicit close. Neither asks for
-	// an emission, so unlike the others they are served whatever the
-	// gate's mode.
-	sessionsAsk     chan *sessionsOrder
+	// sessionCloseAsk carries an explicit close. Reads use clientView;
+	// the close remains an order because it mutates pipeline state.
 	sessionCloseAsk chan *sessionCloseOrder
 	wakeMu          sync.Mutex
 	wakeRx          context.CancelFunc
@@ -541,15 +543,14 @@ func newEngine(relayName string, p params, id *meshcore.LocalIdentity,
 		seen:            newSeenTable(p.DedupTTL, p.DedupEntries),
 		neighbours:      newNeighbourTable(),
 		acl:             newACL(nil),
-		sessionsAsk:     make(chan *sessionsOrder, 1),
 		sessionCloseAsk: make(chan *sessionCloseOrder, 1),
 		aclAsk:          make(chan *aclOrder, 1),
-		aclListAsk:      make(chan *aclListOrder, 1),
 		regionAsk:       make(chan *regionOrder, 1),
 		limits:          newLimits(),
 		regions:         newRegionTable(meshcore.NewRegionMap()),
 	}
 	e.publishRegionView()
+	e.publishClientView(time.Time{}, false)
 	return e
 }
 
@@ -639,6 +640,7 @@ func (e *engine) AttachSessions(store SessionStore) error {
 	}
 	if n := len(e.acl.by); n > 0 {
 		e.log.Info("access entries restored", zap.Int("count", n))
+		e.publishClientView(time.Time{}, false)
 	}
 	return nil
 }
@@ -654,7 +656,7 @@ func (e *engine) IdentitySign(message []byte) []byte {
 
 // DefaultScope is the region this relay speaks under — the bare name
 // of the default designation, empty when it speaks unscoped. Any
-// goroutine: it reads through the snapshot order.
+// goroutine: it reads through the immutable region view.
 func (e *engine) DefaultScope() string {
 	snap, err := e.Regions()
 	if err != nil {
@@ -715,10 +717,7 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 		e.log.Info("dry run: judging frames, transmitting nothing")
 	}
 	for {
-		e.drainSessionsAsk(time.Now())
-		e.drainACLAsk()
-		e.drainRegionAsk()
-		e.drainHeld(dev, time.Now())
+		e.prepareReceiveTurn(dev)
 		// Reception blocks until the pipeline next needs the radio —
 		// the queue's earliest schedule or an advert clock. Nothing
 		// pending means no deadline at all.
@@ -728,6 +727,10 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 		cancel()
 		switch {
 		case err == nil:
+			// A frame and a deadline can become ready together. Retire
+			// sessions once more before authentication so a guest whose
+			// hour just ended cannot win that select race.
+			e.expireClientSessions(time.Now())
 			e.judge(dev, frame)
 		case errors.Is(err, radio.ErrCorrupt):
 			e.stats.countCorrupt()
@@ -749,8 +752,10 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 			// The receive window closed — by its deadline, or by an
 			// operator order waking the receiver; while the parent
 			// lives, nobody else holds that cancel. The pipeline's
-			// turn — which a dry gate has none of: the only order that
-			// reaches it is the snapshot, served at the loop's top.
+			// turn. Apply any client deadline first: a transmit phase may
+			// spend time in CAD/LBT, and an expired credential must not
+			// remain visible for that unrelated hardware work.
+			e.expireClientSessions(time.Now())
 			if !e.txEnabled() {
 				logging.Trace(e.log, "rx window yielded", zap.String("reason", wakeReason))
 				continue
@@ -768,6 +773,18 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 	}
 }
 
+// prepareReceiveTurn applies every state transition already due, then
+// serves mutation orders before the engine gives the radio another
+// blocking receive window.
+func (e *engine) prepareReceiveTurn(dev radio.Device) {
+	now := time.Now()
+	e.expireClientSessions(now)
+	e.drainSessionCloseAsk()
+	e.drainACLAsk()
+	e.drainRegionAsk()
+	e.drainHeld(dev, now)
+}
+
 // receiveWindow bounds one Receive call by the pipeline's next duty.
 // The window is always cancellable when the pipeline runs, and its
 // cancel is registered so an operator order can close it early; an
@@ -777,8 +794,8 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 	// Held across the choice and the store both: an order landing
 	// between them would otherwise fire a cancel this window has not
 	// published yet, and wait for a frame that may never come. A dry
-	// gate registers the wake too — the snapshot order asks for no
-	// emission, and it must not have to wait for a frame to land.
+	// gate registers the wake too: close, grant and region orders still
+	// need the pipeline's turn even when nothing may be emitted.
 	e.wakeMu.Lock()
 	defer e.wakeMu.Unlock()
 	var rctx context.Context
@@ -793,10 +810,11 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 		rctx, cancel = context.WithDeadline(ctx, now)
 	case !e.txEnabled():
 		// A dry gate schedules no emission, but a held flood is still
-		// owed its judgement: a hold that only released on the next
-		// reception would stretch with the silence around it.
-		if wait, held := e.heldWait(now); held {
-			reason = "held-due"
+		// owed its judgement, and a live session its retirement: either
+		// one releasing only on the next reception would stretch with
+		// the silence around it.
+		if wait, scheduledReason, scheduled := e.receiveStateWake(now); scheduled {
+			reason = scheduledReason
 			rctx, cancel = context.WithDeadline(ctx, now.Add(wait))
 		} else {
 			reason = "external-wake"
@@ -823,12 +841,8 @@ func (e *engine) stateOrderReason() string {
 	switch {
 	case len(e.sessionCloseAsk) > 0:
 		return "session-close"
-	case len(e.sessionsAsk) > 0:
-		return "session-snapshot"
 	case len(e.aclAsk) > 0:
 		return "acl-change"
-	case len(e.aclListAsk) > 0:
-		return "acl-snapshot"
 	case len(e.regionAsk) > 0:
 		return "region-command"
 	default:
@@ -850,11 +864,11 @@ func (e *engine) emissionOrderReason() string {
 }
 
 // receiveWake is the next reason the pipeline must regain its turn.
-// Transmit duties come from txWake; an unanswered scopes question adds
-// its own retirement deadline. Keeping that deadline here means the
-// receive context itself owns the timer, so a received answer discards
-// it with the old context instead of leaving a callback to wake a later
-// window for work that no longer exists.
+// Transmit duties come from txWake; an unanswered scopes question and
+// the earliest active client add their retirement deadlines. Keeping
+// those deadlines here means the receive context itself owns time,
+// instead of detached callbacks waking a later window for work that no
+// longer exists.
 func (e *engine) receiveWake(now time.Time) (time.Duration, string, bool) {
 	wait, reason, scheduled := e.txWake(now)
 	if q := e.pendingScope; q != nil && !q.until.IsZero() {
@@ -862,6 +876,21 @@ func (e *engine) receiveWake(now time.Time) (time.Duration, string, bool) {
 		if !scheduled || scopeWait < wait {
 			wait, reason, scheduled = scopeWait, "scope-deadline", true
 		}
+	}
+	if sessionWait, ok := e.clientSessionWake(now); ok && (!scheduled || sessionWait < wait) {
+		wait, reason, scheduled = sessionWait, "session-deadline", true
+	}
+	return wait, reason, scheduled
+}
+
+// receiveStateWake is the non-emission part of receiveWake, used by a
+// dry gate. Held receptions still need judgement and live sessions
+// still need retirement even though no transmit duty is scheduled.
+func (e *engine) receiveStateWake(now time.Time) (time.Duration, string, bool) {
+	wait, scheduled := e.heldWait(now)
+	reason := "held-due"
+	if sessionWait, ok := e.clientSessionWake(now); ok && (!scheduled || sessionWait < wait) {
+		wait, reason, scheduled = sessionWait, "session-deadline", true
 	}
 	return wait, reason, scheduled
 }

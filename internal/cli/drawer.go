@@ -348,26 +348,15 @@ func (s *session) airSessions(instance string) ([]AirSession, error) {
 	return r.AirSessions()
 }
 
-// airSessionKeys is the walker's and completion's answer — bounded,
-// because a completion that hangs on a stuck relay is worse than one
-// that offers nothing.
+// airSessionKeys is the walker's and completion's answer. The engine
+// supplies an atomic view, so this read neither blocks nor wakes RX.
 func (s *session) airSessionKeys(instance string) map[string]string {
-	type result struct{ rows []AirSession }
-	ch := make(chan result, 1)
-	go func() {
-		rows, _ := s.airSessions(instance)
-		ch <- result{rows}
-	}()
-	select {
-	case got := <-ch:
-		out := map[string]string{}
-		for _, c := range got.rows {
-			out[hex.EncodeToString(c.PubKey[:6])] = airRole(c)
-		}
-		return out
-	case <-time.After(completionBudget):
-		return nil
+	rows, _ := s.airSessions(instance)
+	out := map[string]string{}
+	for _, c := range rows {
+		out[hex.EncodeToString(c.PubKey[:6])] = airRole(c)
 	}
+	return out
 }
 
 // airSessionView reads the table for printing.
@@ -496,24 +485,14 @@ func (s *session) accessExport(site *drawerSite) error {
 	return nil
 }
 
-// accessKeys answers the walker and completion, bounded.
+// accessKeys answers the walker and completion from the atomic view.
 func (s *session) accessKeys(instance string) map[string]string {
-	type result struct{ rows []Access }
-	ch := make(chan result, 1)
-	go func() {
-		rows, _ := s.access(instance)
-		ch <- result{rows}
-	}()
-	select {
-	case got := <-ch:
-		out := map[string]string{}
-		for _, a := range got.rows {
-			out[hex.EncodeToString(a.PubKey[:6])] = a.Role
-		}
-		return out
-	case <-time.After(completionBudget):
-		return nil
+	rows, _ := s.access(instance)
+	out := map[string]string{}
+	for _, a := range rows {
+		out[hex.EncodeToString(a.PubKey[:6])] = a.Role
 	}
+	return out
 }
 
 // accessView reads the access list for printing.

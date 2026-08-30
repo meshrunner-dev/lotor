@@ -136,6 +136,15 @@ func TestRouteHomeIsLearnedAndTheNewestWins(t *testing.T) {
 	if c.out == nil || c.out.pathLen != 2 || string(c.out.path) != string([]byte{0xAA, 0xBB}) {
 		t.Fatalf("route home = %+v", c.out)
 	}
+	view := e.Clients()
+	if len(view.Sessions) != 1 || !view.Sessions[0].HasPath ||
+		string(view.Sessions[0].Path) != string([]byte{0xAA, 0xBB}) {
+		t.Fatalf("published route home = %+v", view)
+	}
+	view.Sessions[0].Path[0] = 0xEE
+	if got := e.Clients().Sessions[0].Path[0]; got != 0xAA {
+		t.Fatalf("a caller changed the immutable edition: %x", got)
+	}
 
 	// The client moved, and says so: the older route no longer reaches.
 	if v := drive(t, e, teachPath(t, e.id, peer, 1, []byte{0xCC})); v != verdictClientPath {

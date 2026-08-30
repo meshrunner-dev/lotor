@@ -345,27 +345,18 @@ func (a *acl) entries() []ACLEntry {
 	return out
 }
 
-// get returns a live session by full public key; one nobody has used
-// within sessionIdle is retired rather than returned.
+// get returns a client by full public key. Time never mutates the
+// table from a lookup: the engine clock retires sessions explicitly.
 func (a *acl) get(pubKey []byte) *client {
 	var k [meshcore.PubKeySize]byte
 	copy(k[:], pubKey)
 	return a.live(k)
 }
 
-// live returns the client under k. An idle guest session is retired;
-// a durable access entry remains authorised independently of current
-// activity.
+// live returns the client under k. Expiration belongs to the engine,
+// before frame judgement, so this lookup has no hidden side effect.
 func (a *acl) live(k [meshcore.PubKeySize]byte) *client {
-	c, ok := a.by[k]
-	if !ok {
-		return nil
-	}
-	if !c.hasAccess() && time.Since(c.lastActive) > sessionIdle {
-		delete(a.by, k)
-		return nil
-	}
-	return c
+	return a.by[k]
 }
 
 // matching returns every session whose key starts with the given hash

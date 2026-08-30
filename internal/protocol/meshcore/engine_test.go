@@ -22,14 +22,8 @@ func TestPendingOrdersNameWhyReceiveYields(t *testing.T) {
 		{"session close", "session-close", func(e *engine) {
 			e.sessionCloseAsk <- &sessionCloseOrder{}
 		}},
-		{"session snapshot", "session-snapshot", func(e *engine) {
-			e.sessionsAsk <- &sessionsOrder{}
-		}},
 		{"acl change", "acl-change", func(e *engine) {
 			e.aclAsk <- &aclOrder{}
-		}},
-		{"acl snapshot", "acl-snapshot", func(e *engine) {
-			e.aclListAsk <- &aclListOrder{}
 		}},
 		{"region command", "region-command", func(e *engine) {
 			e.regionAsk <- &regionOrder{}

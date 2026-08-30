@@ -175,8 +175,8 @@ func cloneStringPointer(p *string) *string {
 }
 
 // drainRegionAsk serves a pending region command on the pipeline's
-// turn. Like the session snapshot, it asks for no emission, so it is
-// served whatever the gate's mode.
+// turn. It asks for no emission, so it is served whatever the gate's
+// mode.
 func (e *engine) drainRegionAsk() {
 	select {
 	case o := <-e.regionAsk:
@@ -729,7 +729,7 @@ func (e *engine) regionSnapshot() RegionSnapshot {
 
 // Scopes reports what this relay carries, for the console and the
 // observers — the same list the anonymous answer gives the mesh. Any
-// goroutine: it reads through the snapshot order.
+// goroutine: it reads through the immutable region view.
 func (e *engine) Scopes() []string {
 	snap, err := e.Regions()
 	if err != nil {

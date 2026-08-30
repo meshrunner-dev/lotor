@@ -395,6 +395,8 @@ func TestKeepAliveKeepsTheSessionAlive(t *testing.T) {
 		t.Fatal("login left no session")
 	}
 	c.lastActive = time.Now().Add(-30 * time.Minute)
+	e.publishClientView(time.Time{}, false)
+	before := e.Clients().Generation
 
 	req, err := meshcore.ParsePacket(request(t, e.id, peer, nowTS(701),
 		[]byte{meshcore.ReqKeepAlive, 0, 0, 0, 0}).Payload)
@@ -408,17 +410,30 @@ func TestKeepAliveKeepsTheSessionAlive(t *testing.T) {
 	} else if time.Since(again.lastActive) > time.Minute {
 		t.Fatalf("keep-alive left lastActive at %v — it keeps nothing alive", again.lastActive)
 	}
+	view := e.Clients()
+	if view.Generation != before+1 {
+		t.Fatalf("keep-alive generation = %d after %d", view.Generation, before)
+	}
+	if len(view.Sessions) != 1 || time.Since(view.Sessions[0].LastActive) > time.Minute {
+		t.Fatalf("the published view missed keep-alive activity: %+v", view)
+	}
 }
 
 func TestIdleSessionsRetire(t *testing.T) {
-	a := newACL(nil)
+	e, _ := testEngine(t)
 	var key [meshcore.PubKeySize]byte
 	key[0] = 0xAB
-	a.put(&client{pubKey: key, lastActive: time.Now().Add(-2 * sessionIdle)})
-	if a.get(key[:]) != nil {
+	if err := e.acl.put(&client{
+		pubKey: key, active: true, lastActive: time.Now().Add(-2 * sessionIdle),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.publishClientView(time.Time{}, false)
+	e.expireClientSessions(time.Now())
+	if e.acl.get(key[:]) != nil {
 		t.Fatal("an idle session answered as live")
 	}
-	if got := a.matching(0xAB); len(got) != 0 {
+	if got := e.acl.matching(0xAB); len(got) != 0 {
 		t.Fatalf("%d idle sessions still matched", len(got))
 	}
 }
@@ -466,8 +481,8 @@ func TestOpenGuestNeedsNoPassword(t *testing.T) {
 	if sent := awaitSent(t, sub); sent.Kind != "login-resp" {
 		t.Fatalf("sent = %+v, want an open door to answer", sent)
 	}
-	if e.acl.get(peer.PubKey[:]) == nil {
-		t.Fatal("the open login left no session")
+	if sessions, err := e.ClientSessions(); err != nil || len(sessions) != 1 {
+		t.Fatalf("the open login left no session: %+v, %v", sessions, err)
 	}
 }
 

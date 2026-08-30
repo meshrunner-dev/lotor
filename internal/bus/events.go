@@ -153,3 +153,13 @@ type ObserverState struct {
 	State    string
 	Cause    string
 }
+
+// SessionsChanged says one relay published a new coherent edition of
+// its durable access list and live companion sessions. Consumers use
+// Generation to coalesce refreshes and then read the engine's current
+// snapshot; the event deliberately carries no key or credential.
+type SessionsChanged struct {
+	Relay      string
+	At         time.Time
+	Generation uint64
+}

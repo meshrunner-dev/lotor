@@ -2,11 +2,14 @@ package meshcore
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"meshrunner.dev/pkg/meshcore"
+
+	"meshrunner.dev/lotor/internal/bus"
 )
 
 func TestSessionSnapshotCarriesTheRouteButNeverTheSecret(t *testing.T) {
@@ -23,9 +26,9 @@ func TestSessionSnapshotCarriesTheRouteButNeverTheSecret(t *testing.T) {
 	a.put(without)
 	a.put(idle)
 
-	rows := a.sessions(now)
-	if len(rows) != 2 {
-		t.Fatalf("snapshot holds %d rows, want 2 — the idle one must be skipped", len(rows))
+	rows := a.sessions()
+	if len(rows) != 3 {
+		t.Fatalf("snapshot holds %d rows, want 3 — expiry belongs to the engine clock", len(rows))
 	}
 	for _, r := range rows {
 		switch r.PubKey[0] {
@@ -39,8 +42,8 @@ func TestSessionSnapshotCarriesTheRouteButNeverTheSecret(t *testing.T) {
 			}
 		}
 	}
-	// A read must not change what it reads: the idle entry is skipped,
-	// not retired.
+	// A read must not change what it reads: even an overdue entry is
+	// left for the engine clock to retire.
 	if _, ok := a.by[idle.pubKey]; !ok {
 		t.Error("the snapshot retired an entry")
 	}
@@ -48,6 +51,106 @@ func TestSessionSnapshotCarriesTheRouteButNeverTheSecret(t *testing.T) {
 	rows[0].Path = append(rows[0].Path, 0xFF)
 	if with.out != nil && len(with.out.path) != 2 {
 		t.Error("the snapshot shares the table's bytes")
+	}
+}
+
+func TestClientViewsNeverWakeReceive(t *testing.T) {
+	e, _ := testEngine(t)
+	ctx, stop := context.WithCancel(t.Context())
+	window, cancel := e.receiveWindow(ctx)
+	defer func() {
+		cancel()
+		stop()
+	}()
+
+	if _, err := e.AccessList(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.ClientSessions(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-window.Done():
+		t.Fatal("reading a client view yielded the receive window")
+	default:
+	}
+}
+
+func TestClientExpiryPublishesOneCoherentGeneration(t *testing.T) {
+	e, sub := testEngine(t)
+	now := time.Now()
+	guest := &client{
+		pubKey: aclKey(0x11), perms: permGuest,
+		active: true, lastActive: now.Add(-sessionIdle),
+	}
+	durable := &client{
+		pubKey: aclKey(0x22), perms: permReadOnly, granted: true,
+		active: true, lastActive: now.Add(-sessionIdle),
+	}
+	durable.out = &outPath{pathLen: 1, path: []byte{0xaa}, learned: now}
+	if err := e.acl.put(guest); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.acl.put(durable); err != nil {
+		t.Fatal(err)
+	}
+	e.publishClientView(time.Time{}, false)
+	before := e.Clients()
+	if len(before.Access) != 1 || len(before.Sessions) != 2 {
+		t.Fatalf("initial view = %+v", before)
+	}
+
+	if !e.expireClientSessions(now) {
+		t.Fatal("the deadline changed nothing")
+	}
+	after := e.Clients()
+	if after.Generation != before.Generation+1 {
+		t.Fatalf("generation %d after %d", after.Generation, before.Generation)
+	}
+	if len(after.Sessions) != 0 || len(after.Access) != 1 || after.Access[0].PubKey != durable.pubKey {
+		t.Fatalf("expired view = %+v", after)
+	}
+	if e.acl.get(guest.pubKey[:]) != nil {
+		t.Fatal("the expired guest kept its live credential")
+	}
+	kept := e.acl.get(durable.pubKey[:])
+	if kept == nil || kept.active || kept.out == nil {
+		t.Fatalf("durable principal was removed or damaged: %+v", kept)
+	}
+
+	select {
+	case raw := <-sub.C:
+		ev, ok := raw.(bus.SessionsChanged)
+		if !ok {
+			t.Fatalf("event = %T, want SessionsChanged", raw)
+		}
+		if ev.Relay != e.relay || ev.Generation != after.Generation || !ev.At.Equal(now) {
+			t.Fatalf("event = %+v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no client-view event")
+	}
+	if e.expireClientSessions(now.Add(time.Second)) {
+		t.Fatal("an unchanged table published another expiry")
+	}
+	select {
+	case ev := <-sub.C:
+		t.Fatalf("unchanged expiry published %T", ev)
+	default:
+	}
+}
+
+func TestDryGateSchedulesClientExpiry(t *testing.T) {
+	e, _ := testEngine(t)
+	now := time.Now()
+	e.acl.by[aclKey(0x44)] = &client{
+		pubKey: aclKey(0x44), active: true,
+		lastActive: now.Add(-sessionIdle).Add(50 * time.Millisecond),
+	}
+
+	wait, reason, scheduled := e.receiveStateWake(now)
+	if !scheduled || reason != "session-deadline" || wait < 45*time.Millisecond || wait > 55*time.Millisecond {
+		t.Fatalf("wake = %v, %q, %v", wait, reason, scheduled)
 	}
 }
 

@@ -73,7 +73,7 @@ func TestAccessEntriesSurviveABounce(t *testing.T) {
 	if got.out == nil || got.out.pathLen != 2 {
 		t.Errorf("the route home was lost: %+v", got.out)
 	}
-	if sessions := b.sessions(time.Now()); len(sessions) != 0 {
+	if sessions := b.sessions(); len(sessions) != 0 {
 		t.Fatalf("restored access appeared as live traffic: %+v", sessions)
 	}
 
@@ -197,8 +197,8 @@ func TestClosingASessionPreservesOnlyDurableAccess(t *testing.T) {
 	if kept.lastTimestamp != 42 {
 		t.Fatalf("close reset replay guard to %d", kept.lastTimestamp)
 	}
-	if len(a.entries()) != 1 || len(a.sessions(now)) != 0 {
-		t.Fatalf("views after close: access=%+v sessions=%+v", a.entries(), a.sessions(now))
+	if len(a.entries()) != 1 || len(a.sessions()) != 0 {
+		t.Fatalf("views after close: access=%+v sessions=%+v", a.entries(), a.sessions())
 	}
 	if len(a.matching(granted.pubKey[0])) != 0 {
 		t.Fatal("ordinary authenticated traffic reopened an explicitly closed session")
@@ -255,25 +255,13 @@ func TestAGrantOutlivesIdleAndIsReachable(t *testing.T) {
 	// setperm's contract: a granted admin stays one whether or not it
 	// is talking, and can be reached before it ever logs in — the
 	// secret is computed at the grant.
-	e, dev, _, peer := txRig(t, "on-air")
+	e, dev, sub, peer := txRig(t, "on-air")
 	store := newMemStore()
 	e.AttachSessions(store)
 	runEngine(t, e, dev)
 
 	if err := e.Grant(peer.PubKey[:], permAdmin); err != nil {
 		t.Fatalf("grant: %v", err)
-	}
-	c := e.acl.get(peer.PubKey[:])
-	if c == nil || !c.isAdmin() || !c.granted {
-		t.Fatalf("grant did not land: %+v", c)
-	}
-	if len(c.secret) == 0 {
-		t.Error("a granted admin has no secret — it cannot be reached before login")
-	}
-	// Age it past idle: a login would be dropped, a grant is not.
-	c.lastActive = time.Now().Add(-2 * sessionIdle)
-	if e.acl.get(peer.PubKey[:]) == nil {
-		t.Error("the grant expired on idle")
 	}
 	// It persisted as a grant.
 	if p, ok := store.rows[peer.PubKey]; !ok || !p.Granted || p.Perms&permRoleMask != permAdmin {
@@ -287,19 +275,23 @@ func TestAGrantOutlivesIdleAndIsReachable(t *testing.T) {
 	if len(list) != 1 || !list[0].Admin || !list[0].Granted {
 		t.Fatalf("access list = %+v", list)
 	}
+	// A blank login proves the grant already carries the derived secret:
+	// no site password is revealed, yet the key is reachable immediately.
+	frame, _ := login(t, e.id, peer, nowTS(350), "", false)
+	dev.frames <- frame
+	if sent := awaitSent(t, sub); sent.Kind != "login-resp" {
+		t.Fatalf("blank login was not answered: %+v", sent)
+	}
+	<-dev.sent
+	if sessions, err := e.ClientSessions(); err != nil || len(sessions) != 1 {
+		t.Fatalf("grant did not become a live session: %+v, %v", sessions, err)
+	}
 
 	// Revoke removes it, from table and store: a guest role is the
-	// reference's word for removal. Make the grant an active session
-	// first so this also proves the live half is closed.
-	c.active, c.lastActive = true, time.Now()
-	if sessions, err := e.ClientSessions(); err != nil || len(sessions) != 1 {
-		t.Fatalf("revoke precondition has no live session: %+v, %v", sessions, err)
-	}
+	// reference's word for removal. It also closes the live session the
+	// blank login just established.
 	if err := e.Grant(peer.PubKey[:], permGuest); err != nil {
 		t.Fatal(err)
-	}
-	if e.acl.get(peer.PubKey[:]) != nil {
-		t.Error("the grant survived its revoke")
 	}
 	if _, held := store.rows[peer.PubKey]; held {
 		t.Error("the revoke left the grant in the store")
@@ -329,10 +321,6 @@ func TestAReadOnlyGrantIsNotAnAdmin(t *testing.T) {
 	}
 	if RoleName(list[0].Perms) != "read-only" {
 		t.Fatalf("role named %q", RoleName(list[0].Perms))
-	}
-	c := e.acl.get(peer.PubKey[:])
-	if c == nil || c.isAdmin() {
-		t.Fatal("a read-only grant reached the admin role")
 	}
 	sessions, err := e.ClientSessions()
 	if err != nil {
@@ -379,8 +367,8 @@ func TestARemovalMayNameItsEntryByPrefix(t *testing.T) {
 	if err := e.Grant(peer.PubKey[:4], PermGuest); err != nil {
 		t.Fatalf("removal by prefix refused: %v", err)
 	}
-	if e.acl.get(peer.PubKey[:]) != nil {
-		t.Error("the entry survived its prefix removal")
+	if rows, err := e.AccessList(); err != nil || len(rows) != 0 {
+		t.Fatalf("the entry survived its prefix removal: %+v, %v", rows, err)
 	}
 	if err := e.Grant(peer.PubKey[:4], PermGuest); !errors.Is(err, ErrNoSuchEntry) {
 		t.Errorf("removing nobody answered %v", err)

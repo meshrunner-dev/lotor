@@ -68,7 +68,6 @@ func (e *engine) openText(pkt *meshcore.Packet) (*client, []byte) {
 	}
 	for _, c := range e.acl.matching(d.SrcHash[0]) {
 		if plain, err := d.Open(c.secret); err == nil && len(plain) >= 5 {
-			c.active = true
 			return c, plain
 		}
 	}
@@ -119,7 +118,7 @@ func (e *engine) runCommand(rx *reception, origin correlation.ID) {
 	// recording applies a second time after the next restart. Ordering
 	// it after the command was the whole exposure — the effect landed,
 	// then the proof it had landed was allowed to fail.
-	if err := e.acl.advance(c, ts, time.Now()); err != nil {
+	if err := e.advanceClient(c, ts, time.Now()); err != nil {
 		e.storeRefused(origin, "command", err)
 		return
 	}

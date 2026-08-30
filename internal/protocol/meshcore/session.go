@@ -139,6 +139,7 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 			zap.String("pubkey", shortKey(c.pubKey[:])), zap.Error(err))
 		return
 	}
+	e.publishClientView(c.lastActive, true)
 
 	role := "guest"
 	if c.isAdmin() {
@@ -261,7 +262,6 @@ func (e *engine) openReq(pkt *meshcore.Packet) (*client, []byte) {
 	}
 	for _, c := range e.acl.matching(d.SrcHash[0]) {
 		if plain, err := d.Open(c.secret); err == nil && len(plain) >= 5 {
-			c.active = true
 			return c, plain
 		}
 	}
@@ -299,7 +299,7 @@ func (e *engine) respondRequest(rx *reception, origin correlation.ID) {
 	// do not answer still moves it — the keep-alive exists for
 	// exactly that, and retiring the companion that sends one instead
 	// of polling would be perverse.
-	if err := e.acl.advance(c, ts, time.Now()); err != nil {
+	if err := e.advanceClient(c, ts, time.Now()); err != nil {
 		e.storeRefused(origin, "request", err)
 		return
 	}
