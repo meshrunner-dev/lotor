@@ -382,6 +382,99 @@ func TestFactoryResetWriteFailureRollsBackWithoutRestartingSession(t *testing.T)
 	}
 }
 
+func TestEveryReferenceCompanionCommandReachesAStationHandler(t *testing.T) {
+	built, err := build(testSpec(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	privateKey := companion.ImportPrivateKey{}
+	copy(privateKey.PrivateKey[:], svc.id.PrvKey())
+	contactKey := [mesh.PubKeySize]byte{1}
+	commands := []companion.Command{
+		companion.AppStart{Name: "test"},
+		companion.SendText{TextType: mesh.TxtTypePlain, RecipientPrefix: [6]byte{1}, Text: "hello"},
+		companion.SendChannelText{TextType: mesh.TxtTypePlain, Channel: 1, Text: "hello"},
+		companion.GetContacts{},
+		companion.SimpleCommand{Kind: companion.CommandGetDeviceTime},
+		companion.SetDeviceTime{UnixSeconds: uint32(time.Now().Add(time.Minute).Unix())},
+		companion.SendSelfAdvert{},
+		companion.SetAdvertName{Name: "station"},
+		companion.AddUpdateContact{Contact: companion.Contact{
+			PublicKey: contactKey, Type: mesh.AdvTypeChat, PathLen: 0xff, Name: "peer",
+		}},
+		companion.SimpleCommand{Kind: companion.CommandSyncNextMessage},
+		companion.SetRadioParams{FrequencyKHz: svc.p.FrequencyHz / 1_000,
+			BandwidthHz: uint32(svc.p.BandwidthHz), Spreading: uint8(svc.p.SpreadingFactor),
+			CodingRate: uint8(svc.p.CodingRate)},
+		companion.SetRadioTXPower{PowerDBm: svc.p.TXPowerDBm},
+		companion.ContactKey{Kind: companion.CommandResetPath, PublicKey: contactKey},
+		companion.SetAdvertLocation{},
+		companion.ContactKey{Kind: companion.CommandRemoveContact, PublicKey: contactKey},
+		companion.ContactKey{Kind: companion.CommandShareContact, PublicKey: contactKey},
+		companion.ExportContact{Self: true},
+		companion.ImportContact{Packet: make([]byte, 98)},
+		companion.SimpleCommand{Kind: companion.CommandGetBatteryAndStorage},
+		companion.SetTuningParams{},
+		companion.DeviceQuery{TargetVersion: protocolVersion},
+		companion.SimpleCommand{Kind: companion.CommandExportPrivateKey},
+		privateKey,
+		companion.SendRawData{Data: []byte{1, 2, 3, 4}},
+		companion.SendLogin{PublicKey: contactKey},
+		companion.ContactRequest{Kind: companion.CommandSendStatusRequest, PublicKey: contactKey},
+		companion.ContactRequest{Kind: companion.CommandHasConnection, PublicKey: contactKey},
+		companion.ContactRequest{Kind: companion.CommandLogout, PublicKey: contactKey},
+		companion.ContactKey{Kind: companion.CommandGetContactByKey, PublicKey: contactKey},
+		companion.GetChannel{Index: 1},
+		companion.SetChannel{Index: 1, Name: "ops"},
+		companion.SimpleCommand{Kind: companion.CommandSignStart},
+		companion.SignData{Data: []byte("data")},
+		companion.SimpleCommand{Kind: companion.CommandSignFinish},
+		companion.SendTracePath{Flags: 0, Path: []byte{1}},
+		companion.SetDevicePIN{PIN: 123456},
+		companion.SetOtherParams{ManualContacts: true},
+		companion.SendTelemetryRequest{Self: true},
+		companion.SimpleCommand{Kind: companion.CommandGetCustomVars},
+		companion.SetCustomVar{Name: "gps", Value: "1"},
+		companion.GetAdvertPath{PublicKey: contactKey},
+		companion.SimpleCommand{Kind: companion.CommandGetTuningParams},
+		companion.ContactDataRequest{Kind: companion.CommandSendBinaryRequest,
+			PublicKey: contactKey, Data: []byte{1}},
+		companion.SendPathDiscovery{PublicKey: contactKey},
+		companion.SetFloodScope{Null: true},
+		companion.SendControlData{Data: []byte{0x80}},
+		companion.GetStats{Type: companion.StatsCore},
+		companion.ContactDataRequest{Kind: companion.CommandSendAnonymousRequest,
+			PublicKey: [mesh.PubKeySize]byte{2}, Data: []byte{mesh.AnonReqClock}},
+		companion.SetAutoAddConfig{},
+		companion.SimpleCommand{Kind: companion.CommandGetAutoAddConfig},
+		companion.SimpleCommand{Kind: companion.CommandGetAllowedRepeatFreq},
+		companion.SetPathHashMode{},
+		companion.SendChannelData{Channel: 1, PathLen: 0xff, DataType: 1},
+		companion.SetDefaultFloodScope{Clear: true},
+		companion.SimpleCommand{Kind: companion.CommandGetDefaultFloodScope},
+		companion.SendRawPacket{Packet: []byte{1, 2}},
+		companion.FactoryReset{},
+		companion.Reboot{},
+	}
+	if len(commands) != 58 {
+		t.Fatalf("command matrix has %d entries, want 58", len(commands))
+	}
+	seen := make(map[companion.CommandCode]struct{}, len(commands))
+	for _, command := range commands {
+		if _, duplicate := seen[command.Code()]; duplicate {
+			t.Fatalf("command code %d appears twice", command.Code())
+		}
+		seen[command.Code()] = struct{}{}
+		for _, response := range svc.handle(t.Context(), command) {
+			if failure, ok := response.(companion.ErrorResponse); ok &&
+				failure.Code == companion.ErrorUnsupportedCommand {
+				t.Fatalf("command %d (%T) reached unsupported fallback", command.Code(), command)
+			}
+		}
+	}
+}
+
 func TestCompanionIdentityImportExportAndSigningSurviveRestart(t *testing.T) {
 	store := &memoryStationState{}
 	spec := testSpec(t)
