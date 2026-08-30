@@ -113,3 +113,11 @@ func CLIAttrs() []schema.Attr {
 			Doc: "the local admin console socket path; empty disables it"},
 	}
 }
+
+// WebAttrs describes the embedded web UI.
+func WebAttrs() []schema.Attr {
+	return []schema.Attr{
+		{Name: "listen", Type: schema.String,
+			Doc: "the web UI address — plain HTTP and read-only, loopback by default"},
+	}
+}

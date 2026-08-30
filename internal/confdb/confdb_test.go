@@ -76,6 +76,7 @@ func sample() *config.File {
 			MaxFrames: 100000,
 		},
 		CLI: &config.CLI{Listen: "127.0.0.1:2323", Socket: &socket},
+		Web: &config.Web{Listen: "127.0.0.1:8695"},
 	}
 }
 
@@ -116,7 +117,7 @@ func TestEmptyStoreIsAValidOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an empty store must load as nothing configured: %v", err)
 	}
-	if len(f.Relays) != 0 || len(f.Radios) != 0 || f.Sentinel != nil || f.CLI != nil {
+	if len(f.Relays) != 0 || len(f.Radios) != 0 || f.Sentinel != nil || f.CLI != nil || f.Web != nil {
 		t.Fatalf("an empty store loaded something: %+v", f)
 	}
 }
@@ -146,7 +147,7 @@ func TestEveryImportLeavesARevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(revs) != 5 { // radio, sensor, relay, sentinel, cli
+	if len(revs) != 6 { // radio, sensor, relay, sentinel, cli, web
 		t.Fatalf("revisions = %d, want one per object", len(revs))
 	}
 	for _, r := range revs {

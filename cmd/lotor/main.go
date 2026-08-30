@@ -298,6 +298,9 @@ func (c *configImportCmd) Run() error {
 	if f.CLI != nil {
 		fmt.Print(", cli")
 	}
+	if f.Web != nil {
+		fmt.Print(", web")
+	}
 	fmt.Println()
 	fmt.Println("the YAML file is no longer read — keep it as a keepsake or delete it")
 	return nil
@@ -603,6 +606,10 @@ func singletonKinds() []schema.Kind {
 		{
 			Name: confdb.KindUpdate, Doc: "where this relay looks for newer versions of itself",
 			Singleton: true, Attrs: config.UpdateAttrs(),
+		},
+		{
+			Name: confdb.KindWeb, Doc: "the embedded web UI", Singleton: true,
+			Attrs: config.WebAttrs(),
 		},
 	}
 }

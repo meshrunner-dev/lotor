@@ -175,6 +175,21 @@ cli:
 	if f.CLI == nil || f.CLI.Listen != DefaultCLIListen {
 		t.Errorf("bare cli: block gave %+v", f.CLI)
 	}
+	// A bare web: key follows the cli's policy: with defaults.
+	withWeb := `
+radios:
+  slot1: {driver: sx126x-spi}
+relays:
+  mesh: {protocol: meshcore, radio: slot1}
+web:
+`
+	f, err = Load(writeConfig(t, withWeb))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Web == nil || f.Web.Listen != DefaultWebListen {
+		t.Errorf("bare web: block gave %+v", f.Web)
+	}
 	// A bare sentinel: key cannot guess a journal path: loud error.
 	withSentinel := `
 radios:

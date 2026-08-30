@@ -634,6 +634,11 @@ func (m *manager) Traces() map[string][]config.Trace {
 		}
 		out[confdb.KindCLI] = rows
 	}
+	if w := m.file.Web; w != nil {
+		out[confdb.KindWeb] = []config.Trace{
+			{Key: "listen", Value: w.Listen, Source: sourceConfig},
+		}
+	}
 	m.mqttTraces(out)
 	if u := m.file.Update; u != nil {
 		rows := []config.Trace{}
@@ -1067,7 +1072,7 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 			m.applyLogLevel()
 			return fmt.Sprintf("applied — this system is now %s, logging at %s",
 				cli.TerminalSafe(m.systemName()), m.liveLevelName()), nil
-		case confdb.KindSentinel, confdb.KindCLI:
+		case confdb.KindSentinel, confdb.KindCLI, confdb.KindWeb:
 			return "applied — takes effect when the daemon restarts", nil
 		case confdb.KindUpdate:
 			// check and install read the store live; nothing bounces.
@@ -1653,6 +1658,9 @@ func removeFromFile(next *config.File, kind, name string) (string, error) {
 	case confdb.KindCLI:
 		next.CLI = nil
 		return "removed — takes effect when the daemon restarts", nil
+	case confdb.KindWeb:
+		next.Web = nil
+		return "removed — takes effect when the daemon restarts", nil
 	case confdb.KindMQTT:
 		if _, ok := next.MQTT[name]; !ok {
 			return "", fmt.Errorf("no observer %q", name)
@@ -1851,6 +1859,9 @@ func applyChanges(next *config.File, kind, name string,
 		return change, "", err
 	case confdb.KindCLI:
 		change, err := applyCLIChanges(next, typed, unset)
+		return change, "", err
+	case confdb.KindWeb:
+		change, err := applyWebChanges(next, typed, unset)
 		return change, "", err
 	case confdb.KindSystem:
 		change, err := applySystemChanges(next, typed, unset)
@@ -2186,6 +2197,33 @@ func applyCLIChanges(next *config.File,
 	return change, nil
 }
 
+// applyWebChanges edits the web UI block, creating it on the first
+// set — a singleton is born from a set, never from a create.
+func applyWebChanges(next *config.File,
+	typed map[string]any, unset []string,
+) (map[string]confdb.Change, error) {
+	change := map[string]confdb.Change{}
+	w := config.Web{}
+	if next.Web != nil {
+		w = *next.Web
+	}
+	for attr, v := range typed {
+		if attr != "listen" {
+			return nil, fmt.Errorf("no attribute %q here", attr)
+		}
+		change[attr] = confdb.Change{Old: orNil(w.Listen), New: v}
+		var err error
+		if w.Listen, err = asString(attr, v); err != nil {
+			return nil, err
+		}
+	}
+	if len(unset) > 0 {
+		return nil, fmt.Errorf("%s cannot be unset — set it to what it should be", unset[0])
+	}
+	next.Web = &w
+	return change, nil
+}
+
 // applySystemChanges edits what this installation calls itself. The
 // name is felt at once — the prompt reads it live — so unsetting it is
 // meaningful too: back to the machine's hostname.
@@ -2347,6 +2385,11 @@ func objectSection(f *config.File, kind, name string) (any, error) {
 			return nil, errors.New("no cli block")
 		}
 		return *f.CLI, nil
+	case confdb.KindWeb:
+		if f.Web == nil {
+			return nil, errors.New("no web block")
+		}
+		return *f.Web, nil
 	case confdb.KindSystem:
 		if f.System == nil {
 			return nil, errors.New("no system block")

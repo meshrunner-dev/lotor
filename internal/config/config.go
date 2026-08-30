@@ -197,6 +197,20 @@ const DefaultCLIListen = "127.0.0.1:2323"
 // DefaultConsoleSocket is where the local admin console listens.
 const DefaultConsoleSocket = "/run/lotor/console.sock"
 
+// Web configures the embedded web UI. The block's absence disables
+// the server entirely — the optionality rule, same as the CLI's
+// network listener.
+type Web struct {
+	// Listen is the TCP address; loopback by default — the transport
+	// is plain HTTP, authenticates nothing, and the UI is read-only.
+	Listen string `yaml:"listen"`
+}
+
+// DefaultWebListen is where the web UI listens when the block is
+// present but silent on the address. 8695 after 869.5 MHz — the band
+// this daemon spends its life on.
+const DefaultWebListen = "127.0.0.1:8695"
+
 // ConsoleSocket resolves the local console's socket path; empty means
 // disabled. The default holds even without a cli block — the local
 // console is a base function, the network listener is the opt-in.
@@ -251,6 +265,7 @@ type File struct {
 	Sensors  map[string]Sensor `yaml:"sensors"`
 	Sentinel *Sentinel         `yaml:"sentinel"`
 	CLI      *CLI              `yaml:"cli"`
+	Web      *Web              `yaml:"web"`
 	System   *System           `yaml:"system"`
 	Update   *Update           `yaml:"update"`
 	MQTT     map[string]MQTT   `yaml:"mqtt"`
@@ -405,6 +420,9 @@ func Load(path string) (*File, error) {
 	if _, ok := presence["cli"]; ok && f.CLI == nil {
 		f.CLI = &CLI{} // bare cli: means "with defaults"
 	}
+	if _, ok := presence["web"]; ok && f.Web == nil {
+		f.Web = &Web{} // bare web: means "with defaults"
+	}
 	if _, ok := presence["sentinel"]; ok && f.Sentinel == nil {
 		return nil, fmt.Errorf(`%s: sentinel: block is empty — set journal: (":memory:" for RAM-only) or remove it`, path)
 	}
@@ -464,6 +482,9 @@ func (f *File) Validate(requireRelays bool) error {
 	}
 	if f.CLI != nil && f.CLI.Listen == "" {
 		f.CLI.Listen = DefaultCLIListen
+	}
+	if f.Web != nil && f.Web.Listen == "" {
+		f.Web.Listen = DefaultWebListen
 	}
 	if f.Sentinel != nil {
 		return f.Sentinel.validate()
