@@ -48,12 +48,14 @@ endorsed by the MeshCore project.
   flat), a deny-flood flag, and two designations — the *default*
   region a node's own traffic is scoped to, and its *home*. This
   daemon keeps the same table in the config store. Locally, the
-  `/relay/<name>/regions` drawer exposes structured `put`, `default`,
-  `home`, `def`, `allowf`, `denyf` and `drop` commands; its raw
-  `region` escape remains available for the ecosystem grammar. Over
-  the air, an authenticated admin carries that grammar in the binary
-  `CLI_COMMAND` text subtype and receives `CLI_DATA`, without a relay
-  restart.
+  `/relay/<name>/regions` drawer exposes structured `put`, `def`,
+  `allowf`, `denyf` and `drop` commands; `default` and `home` are
+  drawer attributes administered with `set` and `unset`. Plain
+  `print` is the structured table, while `print meshcore` emits the
+  ecosystem's tree with its native indentation. The raw `region`
+  grammar is not a local console escape. Over the air, an
+  authenticated admin carries that grammar in the binary `CLI_COMMAND`
+  text subtype and receives `CLI_DATA`, without a relay restart.
 
   The wildcard is unfortunately named: it is not a catch-all region,
   but the absence of a region and therefore of transport codes. Its
@@ -96,12 +98,11 @@ endorsed by the MeshCore project.
     default, migration and the restored store alike — because the
     keystore they promise is not implemented, and announcing a region
     this relay can never match would be a lie on the air;
-  - a `region load` staging is an exclusive transaction: owned by the
-    admin who armed it (full key over the air, per-session at the
-    console — where the modal is refused outright, the REPL having no
-    way to carry indentation or a blank commit), expiring after a
-    minute of silence, and refusing other admins' region commands with
-    a stable busy until it commits or lapses.
+  - a `region load` staging is an exclusive OTA transaction: owned by
+    the admin who armed it (full key), expiring after a minute of
+    silence, and refusing other region mutations — including the
+    structured local drawer — until it commits or lapses. The local
+    console does not expose the raw modal grammar.
 
 ## Architecture
 

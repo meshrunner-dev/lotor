@@ -73,6 +73,7 @@ const regionReplyBudget = 159
 const (
 	regionErrSyntax  = "Err - ??"
 	regionErrUnknown = "Err - unknown region"
+	nullRegion       = "<null>"
 )
 
 // regionLoadWindow expires an armed `region load` staging that hears
@@ -80,18 +81,24 @@ const (
 // swallowing every later line.
 const regionLoadWindow = time.Minute
 
-// regionOrder carries one command line into the pipeline's goroutine,
-// which owns the map. The done ack arbitrates the deadline exactly as
-// a grant's does: a mutation whose author was told it never happened
-// must not happen afterwards.
+// regionOrder carries one region operation into the pipeline's
+// goroutine, which owns the map. The done ack arbitrates the deadline
+// exactly as a grant's does: a mutation whose author was told it never
+// happened must not happen afterwards.
 type regionOrder struct {
 	owner string
 	line  string
+	// designations marks the structured local mutation. Nil pointers
+	// leave the respective value untouched; an empty pointed-to value
+	// clears it. Both changes compose and persist together.
+	designations              bool
+	defaultRegion, homeRegion *string
 	// reply and handled are written before the ack answers; handled
 	// false means the line was not region business after all and the
 	// caller dispatches it as whatever else it is.
 	reply   string
 	handled bool
+	err     error
 	done    *ack
 }
 
@@ -134,7 +141,36 @@ func (e *engine) RegionCommand(owner, line string) (reply string, handled bool, 
 	if err := o.done.wait("region command"); err != nil {
 		return "", true, err
 	}
-	return o.reply, o.handled, nil
+	return o.reply, o.handled, o.err
+}
+
+// SetRegionDesignations is the structured console mutation. Unlike
+// two CommonCLI lines, changing default and home together produces one
+// candidate, one store write and one live install.
+func (e *engine) SetRegionDesignations(owner string, defaultRegion, homeRegion *string) (string, error) {
+	o := &regionOrder{
+		owner: owner, designations: true, done: newAck(),
+		defaultRegion: cloneStringPointer(defaultRegion),
+		homeRegion:    cloneStringPointer(homeRegion),
+	}
+	select {
+	case e.regionAsk <- o:
+	default:
+		return "", errors.New("a region command is already pending")
+	}
+	e.wakeReceiver("operator-order")
+	if err := o.done.wait("region designations"); err != nil {
+		return "", err
+	}
+	return o.reply, o.err
+}
+
+func cloneStringPointer(p *string) *string {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 // drainRegionAsk serves a pending region command on the pipeline's
@@ -146,10 +182,96 @@ func (e *engine) drainRegionAsk() {
 		if !o.done.claim() {
 			break
 		}
-		o.reply, o.handled = e.serveRegionLine(o.owner, o.line)
+		if o.designations {
+			o.reply, o.err = e.setRegionDesignations(o.owner, o.defaultRegion, o.homeRegion)
+			o.handled = true
+		} else {
+			o.reply, o.handled = e.serveRegionLine(o.owner, o.line)
+		}
 		o.done.taken()
 	default:
 	}
+}
+
+// setRegionDesignations composes both designations on one clone. A
+// modal OTA load owns the whole table, so the local structured door
+// waits for it to finish rather than being silently overwritten by
+// the staged snapshot.
+func (e *engine) setRegionDesignations(_ string, defaultRegion, homeRegion *string) (string, error) {
+	if e.regionStaging != nil {
+		if time.Now().After(e.regionStaging.until) {
+			e.dropRegionStaging("expired")
+		} else {
+			return "", fmt.Errorf("regions are busy — %s is loading them", e.regionStaging.owner)
+		}
+	}
+	m := e.cloneRegions()
+	if m == nil {
+		return "", errors.New("the live region table cannot be composed")
+	}
+	if defaultRegion == nil && homeRegion == nil {
+		return "", errors.New("no region designation was requested")
+	}
+	var changed []string
+	if defaultRegion != nil {
+		change, err := setDefaultDesignation(m, *defaultRegion)
+		if err != nil {
+			return "", err
+		}
+		changed = append(changed, change)
+	}
+	if homeRegion != nil {
+		change, err := setHomeDesignation(m, *homeRegion)
+		if err != nil {
+			return "", err
+		}
+		changed = append(changed, change)
+	}
+	if err := e.installRegions(m); err != nil {
+		return "", err
+	}
+	return "updated — " + strings.Join(changed, " "), nil
+}
+
+func setDefaultDesignation(m *meshcore.RegionMap, name string) (string, error) {
+	if name == "" {
+		m.SetDefault(nil)
+		return "default=" + nullRegion, nil
+	}
+	if name == wildcardRegion || name == nullRegion {
+		return "", fmt.Errorf("default clears with an empty value, not %q", name)
+	}
+	def := m.FindByPrefix(name)
+	if def == nil {
+		if err := checkRegionName(name); err != nil {
+			return "", err
+		}
+		created, err := m.Put(name, 0)
+		if err != nil {
+			return "", errors.New("region table full")
+		}
+		def = created
+	}
+	def.Flags = 0
+	m.SetDefault(def)
+	return "default=" + def.BareName(), nil
+}
+
+func setHomeDesignation(m *meshcore.RegionMap, name string) (string, error) {
+	if name == "" {
+		home := m.Wildcard()
+		m.SetHome(home)
+		return "home=" + home.BareName(), nil
+	}
+	if name == wildcardRegion || name == nullRegion {
+		return "", fmt.Errorf("home clears with an empty value, not %q", name)
+	}
+	home := m.FindByPrefix(name)
+	if home == nil {
+		return "", fmt.Errorf("unknown home region %q", name)
+	}
+	m.SetHome(home)
+	return "home=" + home.BareName(), nil
 }
 
 // serveRegionLine is the dispatcher the reference runs first on every
@@ -320,7 +442,7 @@ func (e *engine) serveRegionVerb(parts []string) string {
 	case len(parts) >= 3 && parts[1] == "default":
 		return e.regionDefault(parts[2])
 	case len(parts) == 2 && parts[1] == "default":
-		name := "<null>"
+		name := nullRegion
 		if def := e.regions.m.Default(); def != nil {
 			name = def.Name
 		}
@@ -455,12 +577,12 @@ func (e *engine) regionDefault(name string) string {
 	if m == nil {
 		return regionErrSyntax
 	}
-	if name == "<null>" {
+	if name == nullRegion {
 		m.SetDefault(nil)
 		if err := e.installRegions(m); err != nil {
 			return "Err - " + err.Error()
 		}
-		return " default scope is now <null>"
+		return " default scope is now " + nullRegion
 	}
 	def := m.FindByPrefix(name)
 	if def == nil {

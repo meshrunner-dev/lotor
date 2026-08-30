@@ -1154,6 +1154,8 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		Started:          time.Now(),
 		NodeName:         nodeNameOf(eng),
 		Traffic:          trafficOf(eng),
+
+		RegionDesignations: regionDesignationsOf(eng),
 	}
 }
 
@@ -1385,6 +1387,16 @@ func regionLineOf(eng protocol.Engine) func(owner, line string) (string, bool, e
 		return nil
 	}
 	return c.RegionCommand
+}
+
+func regionDesignationsOf(eng protocol.Engine) func(string, *string, *string) (string, error) {
+	d, ok := eng.(interface {
+		SetRegionDesignations(owner string, defaultRegion, homeRegion *string) (string, error)
+	})
+	if !ok {
+		return nil
+	}
+	return d.SetRegionDesignations
 }
 
 func regionLoadArmedOf(eng protocol.Engine) func(owner string) bool {

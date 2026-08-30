@@ -48,6 +48,12 @@ type drawer struct {
 	// runtime collection. site.item is empty for the whole drawer and
 	// holds a key prefix when exporting one entry.
 	export func(s *session, site *drawerSite) error
+	// mutate, when present, is the drawer's own set/unset door. attrs
+	// declares its vocabulary and values optionally supplies live
+	// completion candidates for an attribute.
+	mutate func(s *session, ctx context.Context, site *drawerSite, set map[string]string, unset []string) error
+	attrs  []schema.Attr
+	values func(s *session, instance, attr string) []string
 	// itemSet, when present, is the one mutation an item answers: set
 	// attr=value while standing on it, the item itself naming the
 	// subject. Everything else about a drawer stays read-only.
@@ -56,9 +62,19 @@ type drawer struct {
 	// completion, the painter and the help all read, so an argument
 	// nobody can discover cannot exist here either.
 	itemAttrs []schema.Attr
+	// formats are alternate, named print renderings. Their output is
+	// written directly: unlike the ordinary drawer view, the generic
+	// table/detail renderer does not reshape it.
+	formats []drawerFormat
 	// windowed says the drawer answers the temporal selectors — the
 	// vocabulary frames speaks, applied to what this drawer holds.
 	windowed bool
+}
+
+type drawerFormat struct {
+	name   string
+	doc    string
+	render func(s *session, ctx context.Context, instance string) error
 }
 
 // drawerView is a drawer as print shows it: the columns of its
@@ -177,12 +193,25 @@ var drawers = []drawer{{
 	name:      drawerRegions,
 	doc:       "the regions this relay carries and speaks — its flood policy",
 	on:        scopeRelay,
-	verbs:     []string{cmdPut, cmdDefault, cmdHome, cmdDef, cmdRegion},
-	itemVerbs: []string{cmdDefault, cmdHome, cmdAllowF, cmdDenyF, cmdDrop},
+	verbs:     []string{cmdPut, cmdDef},
+	itemVerbs: []string{cmdAllowF, cmdDenyF, cmdDrop},
 	itemFlag:  optRegion,
 	empty:     "only the wildcard — every plain flood, no named region",
 	keys:      (*session).regionKeys,
 	view:      (*session).regionView,
+	mutate:    (*session).regionSet,
+	attrs: []schema.Attr{
+		{Name: attrDefault, Type: schema.String,
+			Doc: "the region used for locally originated traffic; an unknown exact name is created, unset means unscoped"},
+		{Name: attrHome, Type: schema.String,
+			Doc: "an existing region designated as home; unset clears it"},
+	},
+	values: (*session).regionAttrValues,
+	formats: []drawerFormat{{
+		name:   argMeshCore,
+		doc:    "the MeshCore tree, with its native indentation",
+		render: (*session).printRegionsMeshCore,
+	}},
 }, {
 	name:     drawerHistory,
 	doc:      "the configuration's revision journal — who changed what, when",
@@ -749,6 +778,30 @@ func (s *session) printDrawer(ctx context.Context, path []string, detail bool, s
 	return tb.flush(s.out)
 }
 
+func drawerFormatNamed(site *drawerSite, name string) *drawerFormat {
+	if site == nil || site.item != "" {
+		return nil
+	}
+	for i := range site.d.formats {
+		if site.d.formats[i].name == name {
+			return &site.d.formats[i]
+		}
+	}
+	return nil
+}
+
+// printDrawerFormat calls an alternate renderer directly. It is kept
+// outside printDrawer so the ordinary table/detail machinery cannot
+// add gutters or otherwise alter a protocol-native representation.
+func (s *session) printDrawerFormat(ctx context.Context, path []string, name string) error {
+	site := s.drawerSiteAt(path)
+	f := drawerFormatNamed(site, name)
+	if f == nil {
+		return fmt.Errorf("no %q print format here", name)
+	}
+	return f.render(s, ctx, site.instance)
+}
+
 // printDrawerItem shows one of them, attribute by attribute — the
 // shape print has everywhere it stands on a single object.
 func (s *session) printDrawerItem(ctx context.Context, path []string) error {
@@ -803,6 +856,10 @@ func (s *session) regionValuesAt(path []string, wildcard bool) []string {
 	} else if len(path) >= 2 && path[0] == scopeRelay {
 		instance = path[1]
 	}
+	return s.regionValues(instance, wildcard)
+}
+
+func (s *session) regionValues(instance string, wildcard bool) []string {
 	keys := s.regionKeys(instance)
 	out := make([]string, 0, len(keys))
 	for name := range keys {
@@ -816,6 +873,8 @@ func (s *session) regionValuesAt(path []string, wildcard bool) []string {
 
 const wildcardRegionCLI = "*"
 
+const nullRegionCLI = "<null>"
+
 func regionAllValues(s *session, path []string) []string {
 	return s.regionValuesAt(path, true)
 }
@@ -824,13 +883,9 @@ func regionNamedValues(s *session, path []string) []string {
 	return s.regionValuesAt(path, false)
 }
 
-func regionDefaultValues(s *session, path []string) []string {
-	return append([]string{"<null>"}, s.regionValuesAt(path, false)...)
-}
-
 // regionView reads the table for printing: one row per region, the
-// wildcard first, and the tree as the note — the same render the wire
-// answers.
+// wildcard first. The native MeshCore tree is a separate, explicitly
+// requested print format so two representations never run together.
 func (s *session) regionView(_ context.Context, instance string, _ frameSelectors) (drawerView, error) {
 	r, err := s.oneRelay(instance)
 	if err != nil {
@@ -878,6 +933,35 @@ func (s *session) regionView(_ context.Context, instance string, _ frameSelector
 			{name: "marks", value: strings.Join(marks, ",")},
 		}
 	}
-	v.note = strings.TrimRight(info.Tree, "\n")
 	return v, nil
+}
+
+func (s *session) regionAttrValues(instance, attr string) []string {
+	switch attr {
+	case attrDefault, attrHome:
+		return s.regionValues(instance, false)
+	default:
+		return nil
+	}
+}
+
+// printRegionsMeshCore writes the reference tree without sending it
+// through the drawer's detail renderer. In particular, every leading
+// space belongs to MeshCore and is preserved exactly.
+func (s *session) printRegionsMeshCore(_ context.Context, instance string) error {
+	r, err := s.oneRelay(instance)
+	if err != nil {
+		return err
+	}
+	if r.Regions == nil {
+		return fmt.Errorf("relay %q has no regions", r.Name)
+	}
+	info, err := r.Regions()
+	if err != nil {
+		return err
+	}
+	for line := range strings.SplitSeq(strings.TrimRight(info.Tree, "\n"), "\n") {
+		fmt.Fprintf(s.out, "%s\r\n", line)
+	}
+	return nil
 }

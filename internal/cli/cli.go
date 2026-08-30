@@ -60,14 +60,13 @@ const (
 	cmdDiscover   = "discover"
 	cmdAskRegions = "ask-regions"
 	cmdAskScopes  = "ask-scopes"
-	cmdRegion     = "region"
 	cmdAllowF     = "allowf"
 	cmdDenyF      = "denyf"
 	cmdDrop       = "drop"
 	cmdPut        = "put"
-	cmdDefault    = "default"
-	cmdHome       = "home"
 	cmdDef        = "def"
+	attrDefault   = "default"
+	attrHome      = "home"
 	optRegion     = "region"
 	optParent     = "parent"
 	cmdGrant      = "grant"
@@ -160,6 +159,11 @@ type RelayInfo struct {
 	// returns the wire's own reply; handled is false when the line was
 	// not region business. Nil when the protocol has no regions.
 	RegionLine func(owner, line string) (reply string, handled bool, err error)
+	// RegionDesignations atomically changes the default and/or home
+	// designation. A nil pointer leaves one unchanged; an empty value
+	// clears it. This is the structured console door, distinct from
+	// the wire grammar carried by RegionLine.
+	RegionDesignations func(owner string, defaultRegion, homeRegion *string) (reply string, err error)
 	// RegionLoadArmed reports whether a modal region load is armed for
 	// this owner — the dispatcher's pre-check; nil with RegionLine.
 	RegionLoadArmed func(owner string) bool

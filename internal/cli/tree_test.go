@@ -1467,6 +1467,25 @@ func withRegions(t *testing.T) (Deps, *[]string) {
 		*lines = append(*lines, line)
 		return "OK", true, nil
 	}
+	deps.Relays[0].RegionDesignations = func(_ string, def, home *string) (string, error) {
+		line := "designations"
+		if def != nil {
+			value := *def
+			if value == "" {
+				value = "<null>"
+			}
+			line += " default=" + value
+		}
+		if home != nil {
+			value := *home
+			if value == "" {
+				value = "*"
+			}
+			line += " home=" + value
+		}
+		*lines = append(*lines, line)
+		return "updated", nil
+	}
 	return deps, lines
 }
 
@@ -1474,21 +1493,19 @@ func TestRegionDrawerExposesStructuredAdministration(t *testing.T) {
 	deps, lines := withRegions(t)
 	out := run(t, deps,
 		"/relay/meshcore-868/regions put be parent=eu",
-		"/relay/meshcore-868/regions default region=be",
-		"/relay/meshcore-868/regions/fr home",
+		"/relay/meshcore-868/regions set default=be home=fr",
 		"/relay/meshcore-868/regions/fr denyf",
 		"/relay/meshcore-868/regions/* allowf",
 		`/relay/meshcore-868/regions def "eu be|eu fr"`,
-		"/relay/meshcore-868/regions default region=<null>",
+		"/relay/meshcore-868/regions unset default home",
 	)
 	want := []string{
 		"region put be eu",
-		"region default be",
-		"region home fr",
+		"designations default=be home=fr",
 		"region denyf fr",
 		"region allowf *",
 		"region def eu be|eu fr",
-		"region default <null>",
+		"designations default=<null> home=*",
 	}
 	if !slices.Equal(*lines, want) {
 		t.Fatalf("region door saw %q, want %q\n%s", *lines, want, out)
@@ -1503,22 +1520,91 @@ func TestRegionAdministrationIsDiscoverableAndCompletesLiveNames(t *testing.T) {
 	s := &session{deps: deps}
 	s.setPath([]string{scopeRelay, "meshcore-868", drawerRegions})
 	verbs := s.verbsAt(s.curPath())
-	for _, want := range []string{cmdPut, cmdDefault, cmdHome, cmdDef, cmdRegion} {
+	for _, want := range []string{cmdPut, cmdDef, verbSet, verbUnset} {
 		if !slices.Contains(verbs, want) {
 			t.Errorf("%q missing from region drawer: %v", want, verbs)
+		}
+	}
+	for _, gone := range []string{wireRegion, attrDefault, attrHome} {
+		if slices.Contains(verbs, gone) {
+			t.Errorf("old local verb %q remains in region drawer: %v", gone, verbs)
 		}
 	}
 	if add, _ := s.complete("put parent=f"); add != "r " {
 		t.Errorf("parent did not complete from the live table: %q", add)
 	}
-	if add, _ := s.complete("default region=<n"); add != "ull> " {
-		t.Errorf("the unscoped default did not complete: %q", add)
+	if add, _ := s.complete("set default=f"); add != "r " {
+		t.Errorf("default did not complete from the live table: %q", add)
+	}
+	if add, _ := s.complete("unset de"); add != "fault " {
+		t.Errorf("unset did not complete the designation: %q", add)
+	}
+	if add, _ := s.complete("print mes"); add != "hcore " {
+		t.Errorf("the native print format did not complete: %q", add)
+	}
+	for _, line := range []string{"set default=fr", "print meshcore"} {
+		if painted := s.paintLine(line); strings.Contains(painted, cUnres) {
+			t.Errorf("%q left a valid word unresolved: %q", line, painted)
+		}
+	}
+	help := s.treeHelp(s.curPath())
+	if !strings.Contains(help, attrDefault) || !strings.Contains(help, attrHome) {
+		t.Errorf("region designations are absent from help:\n%s", help)
 	}
 	s.setPath([]string{scopeRelay, "meshcore-868", drawerRegions, "fr"})
-	for _, want := range []string{cmdDefault, cmdHome, cmdAllowF, cmdDenyF, cmdDrop} {
+	for _, want := range []string{cmdAllowF, cmdDenyF, cmdDrop} {
 		if !slices.Contains(s.verbsAt(s.curPath()), want) {
 			t.Errorf("%q missing from a region item", want)
 		}
+	}
+}
+
+func TestRegionDesignationsClearOnlyThroughUnset(t *testing.T) {
+	deps, lines := withRegions(t)
+	for _, line := range []string{
+		"/relay/meshcore-868/regions set default=<null>",
+		"/relay/meshcore-868/regions set default=*",
+		"/relay/meshcore-868/regions set home=*",
+	} {
+		if out := run(t, deps, line); !strings.Contains(out, "clears with unset") {
+			t.Errorf("%q did not direct the operator to unset:\n%s", line, out)
+		}
+	}
+	if len(*lines) != 0 {
+		t.Fatalf("a clear sentinel reached the structured door: %q", *lines)
+	}
+}
+
+func TestRegionPrintChoosesOneRepresentation(t *testing.T) {
+	deps, _ := withRegions(t)
+	table := run(t, deps, "/relay/meshcore-868/regions print")
+	if !strings.Contains(table, "PARENT") || !strings.Contains(table, "MARKS") {
+		t.Fatalf("ordinary print did not render the structured table:\n%s", table)
+	}
+	if strings.Contains(table, "*^ F\r\n eu F\r\n  fr F\r\n") {
+		t.Fatalf("ordinary print also rendered the MeshCore tree:\n%s", table)
+	}
+
+	native := run(t, deps, "/relay/meshcore-868/regions print meshcore")
+	if !strings.Contains(native, "*^ F\r\n eu F\r\n  fr F\r\n") {
+		t.Fatalf("native print changed MeshCore indentation:\n%q", native)
+	}
+	if strings.Contains(native, "PARENT") || strings.Contains(native, "MARKS") {
+		t.Fatalf("native print also rendered the structured table:\n%s", native)
+	}
+	if out := run(t, deps, "/relay/meshcore-868/regions print meshcore detail"); !strings.Contains(out, "two different renderings") {
+		t.Fatalf("two print renderings were accepted together:\n%s", out)
+	}
+}
+
+func TestRawRegionGrammarIsNotALocalCommand(t *testing.T) {
+	deps, lines := withRegions(t)
+	out := run(t, deps, `/relay/meshcore-868/regions region "put be"`)
+	if !strings.Contains(out, `no "region" here`) {
+		t.Fatalf("raw region grammar was not refused locally:\n%s", out)
+	}
+	if len(*lines) != 0 {
+		t.Fatalf("raw local line reached the region door: %q", *lines)
 	}
 }
 

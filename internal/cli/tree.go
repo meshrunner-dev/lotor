@@ -638,18 +638,34 @@ func (s *session) treeSet(ctx context.Context, path []string, verb string, args 
 	return nil
 }
 
-// drawerSet is set standing in a drawer: refused everywhere except on
-// an item whose drawer offers one, under the same admin gate as the
-// drawer's other mutations.
+// drawerSet is set or unset standing in a drawer, or set standing on
+// one of its items. Each drawer declares those narrow doors explicitly.
 func (s *session) drawerSet(ctx context.Context, site *drawerSite, verb string, args []string) error {
-	if site.d.itemSet == nil || site.item == "" {
+	if s.deps.Privilege != Admin {
+		return fmt.Errorf("%s is an admin verb — use the local console socket", verb)
+	}
+	if site.item != "" {
+		return s.drawerItemSet(ctx, site, verb, args)
+	}
+	if site.d.mutate == nil {
+		return fmt.Errorf("nothing is settable in a %s", site.d.name)
+	}
+	set, unset, err := parseDrawerMutation(verb, args)
+	if err != nil {
+		return err
+	}
+	if err := validateDrawerAttrs(site.d, set, unset); err != nil {
+		return err
+	}
+	return site.d.mutate(s, ctx, site, set, unset)
+}
+
+func (s *session) drawerItemSet(ctx context.Context, site *drawerSite, verb string, args []string) error {
+	if site.d.itemSet == nil {
 		return fmt.Errorf("nothing is settable in a %s", site.d.name)
 	}
 	if verb == verbUnset {
 		return fmt.Errorf("nothing to unset here — %s removes the entry", cmdRevoke)
-	}
-	if s.deps.Privilege != Admin {
-		return fmt.Errorf("%s is an admin verb — use the local console socket", verb)
 	}
 	set := map[string]string{}
 	for _, a := range args {
@@ -663,6 +679,47 @@ func (s *session) drawerSet(ctx context.Context, site *drawerSite, verb string, 
 		return fmt.Errorf("usage: %s attr=value …", verbSet)
 	}
 	return site.d.itemSet(s, ctx, site, set)
+}
+
+func parseDrawerMutation(verb string, args []string) (map[string]string, []string, error) {
+	set := map[string]string{}
+	var unset []string
+	for _, a := range args {
+		name, value, has := strings.Cut(a, "=")
+		if verb == verbUnset {
+			if has {
+				return nil, nil, fmt.Errorf("unset takes attribute names, not %q", a)
+			}
+			unset = append(unset, name)
+			continue
+		}
+		if !has {
+			return nil, nil, fmt.Errorf("%q — set wants attr=value", a)
+		}
+		set[name] = value
+	}
+	if len(set) == 0 && len(unset) == 0 {
+		return nil, nil, fmt.Errorf("usage: %s attr=value … | unset attr …", verbSet)
+	}
+	return set, unset, nil
+}
+
+func validateDrawerAttrs(d *drawer, set map[string]string, unset []string) error {
+	known := map[string]bool{}
+	for _, a := range d.attrs {
+		known[a.Name] = true
+	}
+	for name := range set {
+		if !known[name] {
+			return fmt.Errorf("no attribute %q in this %s", name, d.name)
+		}
+	}
+	for _, name := range unset {
+		if !known[name] {
+			return fmt.Errorf("no attribute %q in this %s", name, d.name)
+		}
+	}
+	return nil
 }
 
 // treeExport prints configuration as the absolute lines that would
@@ -956,6 +1013,9 @@ const (
 	// nothing about what the view holds — only how often it is asked
 	// again.
 	argInterval = "interval"
+	// argMeshCore asks the regions drawer for the ecosystem's native
+	// tree rather than the console's structured table.
+	argMeshCore = "meshcore"
 )
 
 // intervalStop is what the status line under a repainting frame says.
@@ -1046,6 +1106,7 @@ func (s *session) treeStatus(ctx context.Context, path []string) error {
 type printArgs struct {
 	detail, secrets bool
 	every           time.Duration
+	format          string
 	// sel is the temporal slice, honoured only where a drawer says it
 	// is windowed.
 	sel frameSelectors
@@ -1060,23 +1121,26 @@ func (s *session) printArgsFrom(path, args []string) (printArgs, error) {
 	takesWindow := site != nil && site.d.windowed && site.item == ""
 	for _, a := range args {
 		key, value, valued := strings.Cut(a, "=")
+		if !valued && drawerFormatNamed(site, key) != nil {
+			want.format = key
+			continue
+		}
 		switch {
 		case key == argDetail && !valued:
 			want.detail = true
 		case key == argSecrets && !valued:
 			// Lifting the mask is the same capability as exporting it.
-			if err := s.canReveal(); err != nil {
+			if err := s.revealForPrint(&want); err != nil {
 				return want, err
 			}
-			want.secrets = true
 		case key == argInterval && !valued:
 			return want, fmt.Errorf("%s wants a value — %s=2s", argInterval, argInterval)
 		case key == argInterval:
-			d, err := time.ParseDuration(value)
-			if err != nil || d < time.Second {
-				return want, fmt.Errorf("%s wants a duration of a second or more, like 2s", argInterval)
+			every, err := printInterval(value)
+			if err != nil {
+				return want, err
 			}
-			want.every = d
+			want.every = every
 		case takesWindow && valued && isWindowWord(key):
 			windowed[key] = value
 		default:
@@ -1084,14 +1148,35 @@ func (s *session) printArgsFrom(path, args []string) (printArgs, error) {
 				verbPrint, humanList(names(s.printTerms(path))), key)
 		}
 	}
-	if len(windowed) > 0 {
-		sel, err := parseFrameSelectors(windowed, time.Now())
-		if err != nil {
-			return want, err
-		}
-		want.sel = sel
+	sel, err := printWindow(windowed)
+	if err != nil {
+		return want, err
 	}
+	want.sel = sel
 	return want, nil
+}
+
+func printWindow(values map[string]string) (frameSelectors, error) {
+	if len(values) == 0 {
+		return frameSelectors{}, nil
+	}
+	return parseFrameSelectors(values, time.Now())
+}
+
+func (s *session) revealForPrint(want *printArgs) error {
+	if err := s.canReveal(); err != nil {
+		return err
+	}
+	want.secrets = true
+	return nil
+}
+
+func printInterval(value string) (time.Duration, error) {
+	every, err := time.ParseDuration(value)
+	if err != nil || every < time.Second {
+		return 0, fmt.Errorf("%s wants a duration of a second or more, like 2s", argInterval)
+	}
+	return every, nil
 }
 
 // isWindowWord says whether a key is one of the temporal selectors —
@@ -1113,6 +1198,8 @@ func (s *session) treePrint(ctx context.Context, path []string, args []string) e
 	at := s.placeAt(path)
 	summarises := at == atCollection || at == atDrawer
 	switch {
+	case want.format != "" && detail:
+		return fmt.Errorf("%s and %s are two different renderings", want.format, argDetail)
 	case detail && !summarises:
 		// Only a summary can be unfolded, and a listing is the one
 		// view that summarises. Everywhere else print already shows
@@ -1180,6 +1267,9 @@ func (s *session) printOnce(ctx context.Context, path []string, want printArgs) 
 	}
 	switch s.placeAt(path) {
 	case atDrawer:
+		if want.format != "" {
+			return s.printDrawerFormat(ctx, path, want.format)
+		}
 		return s.printDrawer(ctx, path, detail, want.sel)
 	case atDrawerItem:
 		return s.printDrawerItem(ctx, path)
@@ -1394,6 +1484,9 @@ func (s *session) writeTerm(b *strings.Builder, t term) {
 // this one answer, so none of them can disagree about a word.
 func (s *session) attrsAt(path []string) []schema.Attr {
 	if site := s.drawerSiteAt(path); site != nil {
+		if site.item == "" && site.d.mutate != nil {
+			return site.d.attrs
+		}
 		if site.item != "" && site.d.itemSet != nil {
 			return site.d.itemAttrs
 		}
@@ -1647,7 +1740,11 @@ func drawerVerbNames(site *drawerSite) []string {
 		verbs = append(verbs, verbExport)
 	}
 	if site.item == "" {
-		return append(verbs, site.d.verbs...)
+		verbs = append(verbs, site.d.verbs...)
+		if site.d.mutate != nil {
+			verbs = append(verbs, verbSet, verbUnset)
+		}
+		return verbs
 	}
 	verbs = append(verbs, site.d.itemVerbs...)
 	if site.d.itemSet != nil {
@@ -1848,6 +1945,11 @@ func (s *session) printTerms(path []string) []term {
 					doc: "how far around, each side (default 1m)"},
 			)
 		}
+		if site := s.drawerSiteAt(path); site != nil {
+			for _, f := range site.d.formats {
+				out = append(out, term{name: f.name, class: cAttr, doc: f.doc})
+			}
+		}
 		return out
 	default:
 		return []term{again}
@@ -1877,6 +1979,11 @@ func (s *session) completeValue(path, rest []string, attr, val string) (string, 
 	for _, a := range s.attrsForLine(path, rest) {
 		if a.Name == attr && len(a.Enum) > 0 {
 			return s.finishPlain(val, a.Enum, cAttr)
+		}
+	}
+	if site := s.drawerSiteAt(path); site != nil && site.d.values != nil {
+		if words := site.d.values(s, site.instance, attr); len(words) > 0 {
+			return s.finishPlain(val, words, cAttr)
 		}
 	}
 	// The profile attribute completes from its kind's preset catalog,

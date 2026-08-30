@@ -496,6 +496,46 @@ func TestRegionMutationsPersistBeforeTheyInstall(t *testing.T) {
 	}
 }
 
+func TestRegionDesignationsComposeAndPersistAtomically(t *testing.T) {
+	e := regionRig(t)
+	store := &memRegionStore{}
+	if err := e.AttachRegions(store); err != nil {
+		t.Fatal(err)
+	}
+	def, home := "fresh", "fresh"
+	reply, err := e.setRegionDesignations("console", &def, &home)
+	if err != nil || reply != "updated — default=fresh home=fresh" {
+		t.Fatalf("set designations = %q, %v", reply, err)
+	}
+	if len(store.saved) != 1 {
+		t.Fatalf("one set wrote the region store %d times", len(store.saved))
+	}
+	if got := e.regions.m.Default(); got == nil || got.BareName() != "fresh" {
+		t.Fatalf("default = %+v", got)
+	}
+	if got := e.regions.m.Home(); got == nil || got.BareName() != "fresh" {
+		t.Fatalf("home = %+v", got)
+	}
+
+	// A bad second designation refuses the whole candidate: even the
+	// default that would otherwise have been auto-created stays out.
+	badDef, badHome := "partial", "missing"
+	if _, err := e.setRegionDesignations("console", &badDef, &badHome); err == nil {
+		t.Fatal("an unknown home was accepted")
+	}
+	if len(store.saved) != 1 || e.regions.m.FindByPrefix("partial") != nil {
+		t.Fatalf("a refused pair changed the table: saves=%d", len(store.saved))
+	}
+
+	emptyDesignation := ""
+	if _, err := e.setRegionDesignations("console", &emptyDesignation, &emptyDesignation); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.saved) != 2 || e.regions.m.Default() != nil || e.regions.m.Home().ID != 0 {
+		t.Fatalf("clear did not commit once: saves=%d", len(store.saved))
+	}
+}
+
 func TestAttachRegionsRestoresTheStoredMap(t *testing.T) {
 	stored := &PersistedRegions{
 		Entries: []meshcore.Region{
@@ -555,6 +595,11 @@ func TestRegionMutationWithoutBounce(t *testing.T) {
 	reply, handled, err := e.RegionCommand("admin", "region put lab")
 	if err != nil || !handled || reply != "OK - (flood allowed)" {
 		t.Fatalf("RegionCommand = %q/%v/%v", reply, handled, err)
+	}
+	lab := "lab"
+	if reply, err := e.SetRegionDesignations("console", &lab, &lab); err != nil ||
+		reply != "updated — default=lab home=lab" {
+		t.Fatalf("SetRegionDesignations = %q/%v", reply, err)
 	}
 	dev.frames <- scoped()
 	if sent := awaitSent(t, sub); sent.Kind != "relay-flood" {

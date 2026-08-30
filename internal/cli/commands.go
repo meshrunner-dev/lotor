@@ -775,32 +775,18 @@ func (s *session) regions(_ context.Context, in input) error {
 	}
 	def := info.Default
 	if def == "" {
-		def = "<null>"
+		def = nullRegionCLI
 	}
 	fmt.Fprintf(s.out, "default: %s  home: %s\r\n", def, info.Home)
 	return nil
 }
 
-// regionLine forwards one line of the region grammar to the relay and
-// prints the wire's own reply. The modal load is refused at this door:
-// the REPL strips leading spaces and swallows blank lines, so a load
-// armed from here is a transaction nothing can feed or commit — the
-// air has the modal, the console has def and the dump.
-func (s *session) regionLine(_ context.Context, in input) error {
-	line := cmdRegion
-	if len(in.pos) > 0 && in.pos[0] != "" {
-		line += " " + in.pos[0]
-	}
-	if verb := strings.Fields(strings.TrimPrefix(line, cmdRegion)); len(verb) > 0 && verb[0] == "load" {
-		return errors.New(`the modal load speaks over the air — here, build the tree with region "def …"`)
-	}
-	return s.runRegionLine(in, line)
-}
-
 // The structured region commands expose every useful mutation in the
 // tree while still speaking the ecosystem's one grammar at the relay
-// boundary. The raw `region "…"` escape remains for inspection and
-// exact interoperability work.
+// boundary. That raw grammar is intentionally kept behind this local
+// adapter and on the authenticated OTA protocol.
+const wireRegion = "region"
+
 func (s *session) regionPut(_ context.Context, in input) error {
 	if len(in.pos) == 0 || in.pos[0] == "" {
 		return errors.New("which name? put takes one region name")
@@ -809,7 +795,7 @@ func (s *session) regionPut(_ context.Context, in input) error {
 	if err := regionCLIWord("name", name); err != nil {
 		return err
 	}
-	line := cmdRegion + " put " + name
+	line := wireRegion + " put " + name
 	if parent := in.opts[optParent]; parent != "" {
 		if err := regionCLIWord(optParent, parent); err != nil {
 			return err
@@ -819,33 +805,65 @@ func (s *session) regionPut(_ context.Context, in input) error {
 	return s.runRegionLine(in, line)
 }
 
-func (s *session) regionDefault(_ context.Context, in input) error {
-	name := in.opts[optRegion]
-	if name == "" {
-		return fmt.Errorf("which one? %s=<name|<null>>", optRegion)
-	}
-	if err := regionCLIWord(optRegion, name); err != nil {
-		return err
-	}
-	return s.runRegionLine(in, cmdRegion+" default "+name)
-}
-
-func (s *session) regionHome(_ context.Context, in input) error {
-	name := in.opts[optRegion]
-	if name == "" {
-		return fmt.Errorf("which one? %s=<name>", optRegion)
-	}
-	if err := regionCLIWord(optRegion, name); err != nil {
-		return err
-	}
-	return s.runRegionLine(in, cmdRegion+" home "+name)
-}
-
 func (s *session) regionDef(_ context.Context, in input) error {
 	if len(in.pos) == 0 || in.pos[0] == "" {
 		return errors.New("which definition? quote the complete expression")
 	}
-	return s.runRegionLine(in, cmdRegion+" def "+in.pos[0])
+	return s.runRegionLine(in, wireRegion+" def "+in.pos[0])
+}
+
+// regionSet gives the runtime drawer the same attribute grammar as a
+// configured object: set designates a region, unset clears that
+// designation. The wire spellings stay an implementation detail.
+func (s *session) regionSet(_ context.Context, site *drawerSite,
+	set map[string]string, unset []string,
+) error {
+	r, err := s.oneRelay(site.instance)
+	if err != nil {
+		return err
+	}
+	if err := working(r); err != nil {
+		return err
+	}
+	if r.RegionDesignations == nil {
+		return fmt.Errorf("relay %q has no region designations to administer", r.Name)
+	}
+	var def, home *string
+	if name, ok := set[attrDefault]; ok {
+		if name == nullRegionCLI || name == wildcardRegionCLI {
+			return fmt.Errorf("%s clears with unset, not %q", attrDefault, name)
+		}
+		if err := regionCLIWord(attrDefault, name); err != nil {
+			return err
+		}
+		def = &name
+	}
+	if name, ok := set[attrHome]; ok {
+		if name == nullRegionCLI || name == wildcardRegionCLI {
+			return fmt.Errorf("%s clears with unset, not %q", attrHome, name)
+		}
+		if err := regionCLIWord(attrHome, name); err != nil {
+			return err
+		}
+		home = &name
+	}
+	if slices.Contains(unset, attrDefault) {
+		emptyDesignation := ""
+		def = &emptyDesignation
+	}
+	if slices.Contains(unset, attrHome) {
+		emptyDesignation := ""
+		home = &emptyDesignation
+	}
+	reply, err := r.RegionDesignations(s.regionOwner(), def, home)
+	if err != nil {
+		return err
+	}
+	if reply == "" {
+		reply = "updated — region designations"
+	}
+	fmt.Fprintf(s.out, "%s\r\n", reply)
+	return nil
 }
 
 // A structured field must remain one CommonCLI word when it crosses
@@ -859,9 +877,10 @@ func regionCLIWord(attr, value string) error {
 	return nil
 }
 
-// runRegionLine is the single local door to the live table. Besides
-// keeping replies uniform it verifies that the protocol claimed the
-// line, so a wiring regression cannot report a silent success.
+// runRegionLine is the structured table verbs' adapter to the wire
+// grammar. Besides keeping replies uniform it verifies that the
+// protocol claimed the line, so a wiring regression cannot report a
+// silent success. Designations use their atomic door above.
 func (s *session) runRegionLine(in input, line string) error {
 	r, err := s.oneRelay(in.opts[scopeRelay])
 	if err != nil {
@@ -911,7 +930,7 @@ func (s *session) regionItemVerb(_ context.Context, in input, verb string) error
 	if err := regionCLIWord(optRegion, name); err != nil {
 		return err
 	}
-	return s.runRegionLine(in, cmdRegion+" "+verb+" "+name)
+	return s.runRegionLine(in, wireRegion+" "+verb+" "+name)
 }
 
 // askScopes puts the question on the air. It reads nothing we already

@@ -308,30 +308,12 @@ func relayCommands() []*command {
 	}
 }
 
-// regionCommands administer the region table — the wire's own
-// grammar, spoken from the console.
+// regionCommands are the structured local administration doors. The
+// wire's raw region grammar remains an OTA protocol concern; the local
+// tree exposes its state and operations in the console's own grammar.
 func regionCommands() []*command {
 	return []*command{
-		regionPutCommand(), regionDefaultCommand(), regionHomeCommand(), regionDefCommand(),
-		{
-			name: cmdRegion,
-			on:   scopeRelay,
-			forms: []form{
-				{cmdRegion + ` ["<verb …>"]`, "administer the region table, the wire's own grammar"},
-			},
-			detail: []string{
-				cmdRegion + ` ["put <name> [parent]"]`,
-				"admin only. One line of the ecosystem's region grammar,",
-				"quoted when it holds spaces: put, remove, get, home,",
-				"default, allowf, denyf, list allowed|denied, def, save.",
-				"Bare " + cmdRegion + " prints the tree. Replies are the wire's,",
-				"and every change applies at once — no relay restart.",
-			},
-			flags: []flagSpec{{name: scopeRelay, valued: true, doc: docRelay}},
-			takes: &positional{name: "verb", doc: "the rest of the region line, quoted if spaced"},
-			admin: true,
-			run:   (*session).regionLine,
-		},
+		regionPutCommand(), regionDefCommand(),
 		{
 			name: cmdAskRegions,
 			forms: []form{
@@ -369,43 +351,6 @@ func regionPutCommand() *command {
 		takes: &positional{name: "name", doc: "the exact region name"},
 		admin: true,
 		run:   (*session).regionPut,
-	}
-}
-
-func regionDefaultCommand() *command {
-	return &command{
-		name:  cmdDefault,
-		forms: []form{{cmdDefault + " " + optRegion + "=<name|<null>>", "choose the region this relay speaks in"}},
-		detail: []string{
-			cmdDefault + " " + optRegion + "=<name|<null>>",
-			"admin only. Scopes traffic originated by this relay to",
-			"the selected region. <null> emits it without transport",
-			"codes. An unknown exact name is created, as upstream does.",
-		},
-		flags: []flagSpec{
-			{name: scopeRelay, valued: true, doc: docRelay},
-			{name: optRegion, valued: true, doc: "the speaking region, or <null>", values: regionDefaultValues},
-		},
-		admin: true,
-		run:   (*session).regionDefault,
-	}
-}
-
-func regionHomeCommand() *command {
-	return &command{
-		name:  cmdHome,
-		forms: []form{{cmdHome + " " + optRegion + "=<name>", "designate the home region"}},
-		detail: []string{
-			cmdHome + " " + optRegion + "=<name>",
-			"admin only. Marks the selected region as home. The",
-			"wildcard (*) clears the designation.",
-		},
-		flags: []flagSpec{
-			{name: scopeRelay, valued: true, doc: docRelay},
-			{name: optRegion, valued: true, doc: "the home region; * clears it", values: regionAllValues},
-		},
-		admin: true,
-		run:   (*session).regionHome,
 	}
 }
 
