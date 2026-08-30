@@ -119,6 +119,11 @@ may bind to it, while any number of compatible stations may share it;
 this preserves the driver's single-owner discipline without confusing
 physical ownership with logical consumers.
 
+The implementation-level walkthrough is in
+[`docs/internal-radio-architecture.md`](docs/internal-radio-architecture.md):
+assembly, bindings, waveform authority, RX fan-out, TX scheduling, shared
+airtime accounting, and failure recovery for both relays and stations.
+
 ```
 lotor daemon
 ├── radio controller "slot1" (driver: sx126x-spi)
