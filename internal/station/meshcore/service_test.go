@@ -163,6 +163,26 @@ func TestDeviceTimeUpdateAcknowledgesLikeTheReference(t *testing.T) {
 	}
 }
 
+func TestAutoAddFlagsAlonePreserveTheHopLimit(t *testing.T) {
+	built, err := build(testSpec(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	_ = svc.handle(t.Context(), companion.SetAutoAddConfig{
+		Flags: 2, MaxHops: 4, HasMaxHops: true,
+	})
+	responses := svc.handle(t.Context(), companion.SetAutoAddConfig{Flags: 4})
+	if len(responses) != 1 || responses[0] != companion.StatusResponse(companion.ResponseOK) ||
+		svc.autoFlags != 4 || svc.autoHops != 4 {
+		t.Fatalf("auto-add update = %#v flags=%d hops=%d", responses, svc.autoFlags, svc.autoHops)
+	}
+	_ = svc.handle(t.Context(), companion.SetAutoAddConfig{Flags: 8, HasMaxHops: true})
+	if svc.autoHops != 0 {
+		t.Fatalf("explicit zero max hops remained %d", svc.autoHops)
+	}
+}
+
 type memoryStationState struct {
 	state []byte
 	fail  bool

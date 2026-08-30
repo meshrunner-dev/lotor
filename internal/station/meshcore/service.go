@@ -733,7 +733,10 @@ func (s *service) handleConfigurationMutation(cmd companion.Command) ([]companio
 	case companion.SetChannel:
 		return s.setChannel(c), true
 	case companion.SetAutoAddConfig:
-		s.autoFlags, s.autoHops = c.Flags, c.MaxHops
+		s.autoFlags = c.Flags
+		if c.HasMaxHops {
+			s.autoHops = c.MaxHops
+		}
 		return okResponses(), true
 	case companion.SetPathHashMode:
 		if c.Mode > 2 {
