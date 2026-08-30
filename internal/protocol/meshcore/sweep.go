@@ -141,11 +141,10 @@ func (e *engine) drainSweepAsk(dev radio.Device, now time.Time) {
 		// typed: the wait above is short but it is not nothing.
 		s.until = now.Add(sweepWindow)
 		e.sweepUntil.Store(s.until.UnixNano())
-		// The loop only turns when the air says something; on a quiet
-		// channel nothing would close the window on time. Wake the
-		// receiver at the deadline so expiry does not wait for luck.
-		time.AfterFunc(time.Until(s.until)+time.Second,
-			func() { e.wakeReceiver("scan-deadline") })
+		// The receive scheduler owns this deadline: on a quiet channel
+		// nothing else would close the window, and a scan answered
+		// early discards it with pendingSweep rather than leaving a
+		// callback to wake a window that has nothing left to do.
 		e.pendingSweep = s
 		s.started.taken()
 		e.log.Info("scanning the neighbourhood",

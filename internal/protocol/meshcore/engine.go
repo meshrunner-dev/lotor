@@ -864,17 +864,23 @@ func (e *engine) emissionOrderReason() string {
 }
 
 // receiveWake is the next reason the pipeline must regain its turn.
-// Transmit duties come from txWake; an unanswered scopes question and
-// the earliest active client add their retirement deadlines. Keeping
-// those deadlines here means the receive context itself owns time,
-// instead of detached callbacks waking a later window for work that no
-// longer exists.
+// Transmit duties come from txWake; an unanswered scopes question, an
+// open neighbourhood scan and the earliest active client add their
+// retirement deadlines. Keeping those deadlines here means the receive
+// context itself owns time, instead of detached callbacks waking a
+// later window for work that no longer exists.
 func (e *engine) receiveWake(now time.Time) (time.Duration, string, bool) {
 	wait, reason, scheduled := e.txWake(now)
 	if q := e.pendingScope; q != nil && !q.until.IsZero() {
 		scopeWait := max(time.Duration(0), q.until.Sub(now))
 		if !scheduled || scopeWait < wait {
 			wait, reason, scheduled = scopeWait, "scope-deadline", true
+		}
+	}
+	if s := e.pendingSweep; s != nil && !s.until.IsZero() {
+		sweepWait := max(time.Duration(0), s.until.Sub(now))
+		if !scheduled || sweepWait < wait {
+			wait, reason, scheduled = sweepWait, "scan-deadline", true
 		}
 	}
 	if sessionWait, ok := e.clientSessionWake(now); ok && (!scheduled || sessionWait < wait) {
