@@ -433,6 +433,32 @@ func TestOriginatedEmissionIsAddressable(t *testing.T) {
 	}
 }
 
+func TestLifecycleHistoryIsReachable(t *testing.T) {
+	deps := testDeps(t)
+	at := time.Now()
+	deps.Sentinel.Process(context.Background(), bus.RelayState{
+		Relay: "meshcore-868", At: at, State: "error", Err: "radio gone",
+	})
+	deps.Sentinel.Process(context.Background(), bus.ObserverState{
+		Observer: "community", At: at.Add(time.Second), State: "lost", Cause: "EOF",
+	})
+
+	out := run(t, deps, "states")
+	for _, want := range []string{"relay", "meshcore-868", "radio gone", "observer", "community", "EOF"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("states omitted %q:\n%s", want, out)
+		}
+	}
+	latest := run(t, deps, "states last=1")
+	if !strings.Contains(latest, "community") || strings.Contains(latest, "radio gone") {
+		t.Errorf("last=1 did not keep only the newest transition:\n%s", latest)
+	}
+	jsonOut := run(t, deps, "states last=1 json")
+	if !strings.Contains(jsonOut, `"kind":"observer"`) || !strings.Contains(jsonOut, `"cause":"EOF"`) {
+		t.Errorf("states JSON = %s", jsonOut)
+	}
+}
+
 func TestWatchRefusesTheJournalSelectors(t *testing.T) {
 	// The live feed starts now: every word that names a slice of the
 	// past belongs to the journal, and each is refused by name.

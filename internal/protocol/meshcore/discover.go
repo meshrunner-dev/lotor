@@ -120,7 +120,8 @@ func (e *engine) respondDiscover(dev radio.Device, pkt *meshcore.Packet, origin 
 		PubKey:   e.id.PubKey[:],
 	}, req.PrefixOnly)
 	if err != nil {
-		e.log.Warn("discovery response build failed", zap.Error(err))
+		e.log.Warn("discovery response build failed",
+			zap.String("txn", origin.Short()), zap.Error(err))
 		return
 	}
 	e.enqueue(dev, resp, "discover-resp", origin, prioDirect, discoverDelayWiden*e.p.txDelayFactor())

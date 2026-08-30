@@ -4,6 +4,10 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/radio"
@@ -139,6 +143,30 @@ func TestRouteHomeIsLearnedAndTheNewestWins(t *testing.T) {
 	}
 	if c.out.pathLen != 1 || string(c.out.path) != string([]byte{0xCC}) {
 		t.Fatalf("route home = %+v, want the one it just taught us", c.out)
+	}
+}
+
+func TestRouteLearningLogKeepsTheFrameTransaction(t *testing.T) {
+	e, _, _, peer := txRig(t, "shadow")
+	c := guestIn(t, e, peer)
+	core, observed := observer.New(zapcore.DebugLevel)
+	e.log = zap.New(core)
+
+	f := teachPath(t, e.id, peer, 2, []byte{0xAA, 0xBB})
+	pkt, err := meshcore.ParsePacket(f.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rx := rxOf(e, pkt)
+	if c.out == nil {
+		t.Fatal("the path verdict did not learn the route")
+	}
+	entries := observed.FilterMessage("a client taught us its route home").All()
+	if len(entries) != 1 {
+		t.Fatalf("route logs = %+v", observed.All())
+	}
+	if got := entries[0].ContextMap()["txn"]; got != rx.id.Short() {
+		t.Errorf("txn field = %v, want %s", got, rx.id.Short())
 	}
 }
 

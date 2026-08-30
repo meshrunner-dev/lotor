@@ -57,6 +57,13 @@ func (e *engine) statusBody() []byte {
 // not measured, the answer statusBody already gives for the same
 // reason.
 func (e *engine) telemetryBody(permMask byte, budget int) []byte {
+	return e.telemetryBodyLogged(e.log, permMask, budget)
+}
+
+// telemetryBodyLogged is the production path's form: the caller hands
+// down the transaction-enriched logger of the request being answered.
+// The plain wrapper above keeps the codec independently testable.
+func (e *engine) telemetryBodyLogged(log *zap.Logger, permMask byte, budget int) []byte {
 	// Bounded to the route this answer will travel, before anything
 	// is encoded: the sensors hook was the one variable producer left
 	// composing blind, and a reading list that outgrew the packet was
@@ -80,7 +87,7 @@ func (e *engine) telemetryBody(permMask byte, budget int) []byte {
 	}); err != nil {
 		// A rejected reading leaves its header in the buffer, so the
 		// payload would decode as truncated rather than short.
-		e.log.Warn("telemetry voltage refused by the encoder", zap.Error(err))
+		log.Warn("telemetry voltage refused by the encoder", zap.Error(err))
 		return nil
 	}
 	// Then the sensors', under the permission mask — the reference
@@ -89,7 +96,7 @@ func (e *engine) telemetryBody(permMask byte, budget int) []byte {
 	// own judgement, not this file's.
 	if e.telemetry != nil {
 		if err := e.telemetry(permMask, enc); err != nil && !errors.Is(err, meshcore.ErrLPPFull) {
-			e.log.Warn("sensor telemetry refused", zap.Error(err))
+			log.Warn("sensor telemetry refused", zap.Error(err))
 			return nil
 		}
 	}
@@ -102,7 +109,7 @@ func (e *engine) telemetryBody(permMask byte, budget int) []byte {
 		if err := enc.Add(meshcore.LPPReading{
 			Channel: TelemChannelSelf, Type: meshcore.LPPTemperature, Value: c,
 		}); err != nil && !errors.Is(err, meshcore.ErrLPPFull) {
-			e.log.Warn("telemetry temperature refused by the encoder", zap.Error(err))
+			log.Warn("telemetry temperature refused by the encoder", zap.Error(err))
 			return nil
 		}
 	}

@@ -220,3 +220,58 @@ func TestConnectionLadderWalksTheWholeTimeline(t *testing.T) {
 		}
 	}
 }
+
+func TestConnectionLadderRestoresPahoCallbackOrder(t *testing.T) {
+	// Paho starts its reconnect goroutine before launching Lost, and
+	// Connected/Lost themselves run in independent goroutines. Feed the
+	// legal but causally reversed callback order deterministically: the
+	// archive must still tell session, loss, reconnect attempt, session.
+	var got []string
+	ladder := connectionLadder("tcp://b", func(state, cause string) {
+		got = append(got, state)
+	}, zap.NewNop())
+	for _, n := range []paho.ConnectionNotification{
+		paho.ConnectionNotificationConnecting{Attempt: 0},
+		paho.ConnectionNotificationConnecting{IsReconnect: true, Attempt: 0},
+		paho.ConnectionNotificationFailed{Reason: errors.New("refused")},
+		paho.ConnectionNotificationLost{Reason: errors.New("EOF")},
+		paho.ConnectionNotificationConnected{}, // delayed first session
+		paho.ConnectionNotificationConnected{}, // re-established session
+	} {
+		ladder(nil, n)
+	}
+	wantDelayed := []string{"connecting", "connected", "lost", "reconnecting", "failed", "reconnected"}
+	if len(got) != len(wantDelayed) {
+		t.Fatalf("timeline = %v, want %v", got, wantDelayed)
+	}
+	for i := range wantDelayed {
+		if got[i] != wantDelayed[i] {
+			t.Fatalf("timeline = %v, want %v", got, wantDelayed)
+		}
+	}
+
+	// The reconnected callback may also win the race and arrive before
+	// Lost. It waits behind the loss instead of being written above it.
+	got = nil
+	ladder = connectionLadder("tcp://b", func(state, cause string) {
+		got = append(got, state)
+	}, zap.NewNop())
+	for _, n := range []paho.ConnectionNotification{
+		paho.ConnectionNotificationConnecting{Attempt: 0},
+		paho.ConnectionNotificationConnected{},
+		paho.ConnectionNotificationConnecting{IsReconnect: true, Attempt: 0},
+		paho.ConnectionNotificationConnected{},
+		paho.ConnectionNotificationLost{Reason: errors.New("EOF")},
+	} {
+		ladder(nil, n)
+	}
+	want := []string{"connecting", "connected", "lost", "reconnecting", "reconnected"}
+	if len(got) != len(want) {
+		t.Fatalf("early reconnect timeline = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("early reconnect timeline = %v, want %v", got, want)
+		}
+	}
+}

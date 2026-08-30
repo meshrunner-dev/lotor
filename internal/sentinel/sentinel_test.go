@@ -115,6 +115,38 @@ func TestRelayStatesJournalled(t *testing.T) {
 	}
 }
 
+func TestStateHistoryInterleavesRelaysAndObservers(t *testing.T) {
+	s := testSentinel(t)
+	ctx := context.Background()
+	at := time.Now()
+	s.Process(ctx, bus.RelayState{
+		Relay: "meshcore-868", At: at, State: "error", Err: "radio gone",
+	})
+	s.Process(ctx, bus.ObserverState{
+		Observer: "community", At: at.Add(time.Second), State: "lost", Cause: "EOF",
+	})
+
+	states, err := s.StateHistory(ctx, time.Time{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 2 {
+		t.Fatalf("states = %+v", states)
+	}
+	if got := states[0]; got.Kind != "observer" || got.Name != "community" ||
+		got.State != "lost" || got.Cause != "EOF" || got.At.UnixMilli() != at.Add(time.Second).UnixMilli() {
+		t.Errorf("newest state = %+v", got)
+	}
+	if got := states[1]; got.Kind != "relay" || got.Name != "meshcore-868" ||
+		got.State != "error" || got.Cause != "radio gone" {
+		t.Errorf("oldest state = %+v", got)
+	}
+	states, err = s.StateHistory(ctx, at.Add(500*time.Millisecond), 10)
+	if err != nil || len(states) != 1 || states[0].Kind != "observer" {
+		t.Errorf("windowed states = %+v, %v", states, err)
+	}
+}
+
 func TestNoiseFloorKeepsOnlyTheLastMeasure(t *testing.T) {
 	s := testSentinel(t)
 	first := time.Now().Add(-time.Minute)
@@ -145,6 +177,35 @@ func TestNoiseFloorKeepsOnlyTheLastMeasure(t *testing.T) {
 	}
 	if spreadPoints != 2 {
 		t.Errorf("noise_spread raw points = %d, want 2", spreadPoints)
+	}
+}
+
+func TestNoiseFloorEventRollsBackAsAWhole(t *testing.T) {
+	s := testSentinel(t)
+	ctx := context.Background()
+	// Fail the third projection of the event. Without one transaction,
+	// the latest row and the floor series survived while spread did not.
+	if _, err := s.store.db.ExecContext(ctx, `
+		CREATE TRIGGER fail_noise_spread BEFORE INSERT ON metrics_raw
+		WHEN NEW.series = 'noise_spread'
+		BEGIN SELECT RAISE(FAIL, 'forced noise spread failure'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	s.Process(ctx, bus.NoiseFloor{
+		Relay: "meshcore-868", At: time.Now(), DBm: -101, SpreadDB: 7.5,
+	})
+
+	for table, query := range map[string]string{
+		"latest":  `SELECT COUNT(*) FROM noise_floor`,
+		"metrics": `SELECT COUNT(*) FROM metrics_raw`,
+	} {
+		var n int
+		if err := s.store.db.QueryRowContext(ctx, query).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Errorf("%s kept %d rows from a failed event", table, n)
+		}
 	}
 }
 
@@ -351,6 +412,84 @@ func TestTxLedgerAndDrops(t *testing.T) {
 	}
 	if airtime != 1.2 {
 		t.Fatalf("tx_airtime point = %v, want 1.2 s", airtime)
+	}
+}
+
+func TestSentEventAndAirtimeWindowCommitTogether(t *testing.T) {
+	s := testSentinel(t)
+	ctx := context.Background()
+	at := time.Now()
+	s.Process(ctx, bus.FrameSent{
+		Relay: "r", Txn: txn.New(), At: at, Kind: "first", Airtime: time.Second,
+	})
+	if _, err := s.store.db.ExecContext(ctx, `
+		CREATE TRIGGER fail_tx_airtime BEFORE INSERT ON metrics_raw
+		WHEN NEW.series = 'tx_airtime'
+		BEGIN SELECT RAISE(FAIL, 'forced airtime failure'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	s.Process(ctx, bus.FrameSent{
+		Relay: "r", Txn: txn.New(), At: at.Add(time.Second), Kind: "failed", Airtime: 2 * time.Second,
+	})
+	if len(s.txWindows["r"]) != 1 {
+		t.Fatalf("failed write advanced RAM window to %d emissions", len(s.txWindows["r"]))
+	}
+	if _, err := s.store.db.ExecContext(ctx, `DROP TRIGGER fail_tx_airtime`); err != nil {
+		t.Fatal(err)
+	}
+	s.Process(ctx, bus.FrameSent{
+		Relay: "r", Txn: txn.New(), At: at.Add(2 * time.Second), Kind: "third", Airtime: 4 * time.Second,
+	})
+
+	var txRows, metricRows int
+	if err := s.store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tx`).Scan(&txRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM metrics_raw WHERE series = 'tx_airtime'`).Scan(&metricRows); err != nil {
+		t.Fatal(err)
+	}
+	if txRows != 2 || metricRows != 2 {
+		t.Fatalf("ledger/metrics rows = %d/%d, want 2/2", txRows, metricRows)
+	}
+	var lastWindow float64
+	if err := s.store.db.QueryRowContext(ctx,
+		`SELECT value FROM metrics_raw WHERE series = 'tx_airtime' ORDER BY at_ms DESC LIMIT 1`,
+	).Scan(&lastWindow); err != nil {
+		t.Fatal(err)
+	}
+	if lastWindow != 5 {
+		t.Errorf("last window = %.1fs, want 5s: failed emission leaked into RAM", lastWindow)
+	}
+}
+
+func TestOpenPrunesBeforeItSubscribes(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir() + "/journal.db"
+	st, err := openStore(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.insertObserved(ctx, Frame{
+		Txn: txn.New().String(), Relay: "r", At: time.Now().Add(-2 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	b := bus.New()
+	s, err := Open(ctx, path, time.Hour, 0, 0, b, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.store.Close() }()
+	if n, err := s.FrameCount(ctx); err != nil || n != 0 {
+		t.Fatalf("frames immediately after Open = %d, %v; maintenance did not finish", n, err)
+	}
+	if dropped := s.sub.Dropped(); dropped != 0 {
+		t.Errorf("subscription lost %d events before Run", dropped)
 	}
 }
 

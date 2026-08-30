@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
@@ -63,6 +62,25 @@ type Options struct {
 	OnTransition func(state, cause string)
 }
 
+// connectionStory restores causality across Paho's callback goroutines.
+// Paho starts reconnecting before it launches Lost, and Connected/Lost
+// themselves run independently: a mutex alone serialises scheduler
+// order, not connection order.
+type connectionStory struct {
+	mu sync.Mutex
+
+	brokerURL string
+	notify    func(state, cause string)
+	log       *zap.Logger
+
+	sessions         uint32
+	connected        bool
+	reconnectPending bool
+	connectedPending int
+	staleConnected   int
+	failuresPending  []string
+}
+
 // connectionLadder tells the connection's life as it happens:
 // attempts and their failures in debug — the socket's abnormal life —
 // and the state changes an operator acts on in info: connected,
@@ -70,59 +88,123 @@ type Options struct {
 func connectionLadder(brokerURL string, notify func(state, cause string),
 	log *zap.Logger,
 ) paho.ConnectionNotificationHandler {
-	var sessions atomic.Uint32
-	tell := func(state, cause string) {
-		if notify != nil {
-			notify(state, cause)
-		}
+	story := &connectionStory{brokerURL: brokerURL, notify: notify, log: log}
+	return story.handle
+}
+
+func (s *connectionStory) tell(state, cause string) {
+	if s.notify != nil {
+		s.notify(state, cause)
 	}
-	// One mutex serialises the whole timeline: Paho's callbacks run
-	// concurrently, and two transitions racing each other would write
-	// history out of order.
-	var mu sync.Mutex
-	return func(_ paho.Client, n paho.ConnectionNotification) {
-		mu.Lock()
-		defer mu.Unlock()
-		url := zap.String("url", brokerURL)
-		switch e := n.(type) {
-		case paho.ConnectionNotificationConnecting:
-			log.Debug("observer broker dialing", url,
-				zap.Int("attempt", e.Attempt), zap.Bool("reconnect", e.IsReconnect))
-			if e.Attempt == 0 {
-				// Paho numbers a round's attempts from zero: the
-				// first is the transition, the retries within it are
-				// the socket's own noise.
-				state := "connecting"
-				if e.IsReconnect {
-					state = "reconnecting"
-				}
-				tell(state, "")
-			}
-		case paho.ConnectionNotificationBrokerFailed:
-			log.Debug("observer broker attempt failed", url, zap.Error(e.Reason))
-		case paho.ConnectionNotificationFailed:
-			log.Debug("observer broker round failed — backing off", url, zap.Error(e.Reason))
-			cause := ""
-			if e.Reason != nil {
-				cause = e.Reason.Error()
-			}
-			tell("failed", cause)
-		case paho.ConnectionNotificationConnected:
-			word, state := "observer broker connected", "connected"
-			if sessions.Add(1) > 1 {
-				word, state = "observer broker reconnected", "reconnected"
-			}
-			log.Info(word, url)
-			tell(state, "")
-		case paho.ConnectionNotificationLost:
-			log.Info("observer broker lost", url, zap.Error(e.Reason))
-			cause := ""
-			if e.Reason != nil {
-				cause = e.Reason.Error()
-			}
-			tell("lost", cause)
-		}
+}
+
+func (s *connectionStory) handle(_ paho.Client, n paho.ConnectionNotification) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	url := zap.String("url", s.brokerURL)
+	switch e := n.(type) {
+	case paho.ConnectionNotificationConnecting:
+		s.connecting(e, url)
+	case paho.ConnectionNotificationBrokerFailed:
+		s.log.Debug("observer broker attempt failed", url, zap.Error(e.Reason))
+	case paho.ConnectionNotificationFailed:
+		s.failed(e, url)
+	case paho.ConnectionNotificationConnected:
+		s.established()
+	case paho.ConnectionNotificationLost:
+		s.lost(e, url)
 	}
+}
+
+func (s *connectionStory) connecting(e paho.ConnectionNotificationConnecting, url zap.Field) {
+	s.log.Debug("observer broker dialing", url,
+		zap.Int("attempt", e.Attempt), zap.Bool("reconnect", e.IsReconnect))
+	// Paho numbers one round from zero. Retries within the round are
+	// socket noise rather than new lifecycle transitions.
+	if e.Attempt != 0 {
+		return
+	}
+	if !e.IsReconnect {
+		s.tell("connecting", "")
+		return
+	}
+	if s.connected || s.sessions == 0 {
+		// Lost has not run yet, or even the first Connected callback
+		// is still waiting for a scheduler. Hold the successor behind it.
+		s.reconnectPending = true
+		return
+	}
+	s.tell("reconnecting", "")
+}
+
+func (s *connectionStory) failed(e paho.ConnectionNotificationFailed, url zap.Field) {
+	s.log.Debug("observer broker round failed — backing off", url, zap.Error(e.Reason))
+	cause := errorText(e.Reason)
+	if s.reconnectPending {
+		s.failuresPending = append(s.failuresPending, cause)
+		return
+	}
+	s.tell("failed", cause)
+}
+
+func (s *connectionStory) established() {
+	if s.staleConnected > 0 {
+		// Lost reconstructed a session whose Connected callback had not
+		// run. This is that late callback, not another session.
+		s.staleConnected--
+		return
+	}
+	if s.reconnectPending && s.connected {
+		s.connectedPending++
+		return
+	}
+	if !s.connected {
+		s.emitConnected()
+	}
+}
+
+func (s *connectionStory) lost(e paho.ConnectionNotificationLost, url zap.Field) {
+	s.log.Info("observer broker lost", url, zap.Error(e.Reason))
+	if !s.connected && s.sessions == 0 {
+		// Lost proves the first session existed. Tell its beginning
+		// before its end and ignore its late callback when it arrives.
+		s.emitConnected()
+		s.staleConnected++
+	}
+	if s.connected {
+		s.tell("lost", errorText(e.Reason))
+		s.connected = false
+	}
+	if s.reconnectPending {
+		s.tell("reconnecting", "")
+		s.reconnectPending = false
+	}
+	for _, cause := range s.failuresPending {
+		s.tell("failed", cause)
+	}
+	s.failuresPending = nil
+	if s.connectedPending > 0 {
+		s.connectedPending--
+		s.emitConnected()
+	}
+}
+
+func (s *connectionStory) emitConnected() {
+	word, state := "observer broker connected", "connected"
+	if s.sessions > 0 {
+		word, state = "observer broker reconnected", "reconnected"
+	}
+	s.sessions++
+	s.connected = true
+	s.log.Info(word, zap.String("url", s.brokerURL))
+	s.tell(state, "")
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // Broker is the production Sink.

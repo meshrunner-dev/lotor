@@ -50,26 +50,26 @@ type txStamp struct {
 	air time.Duration
 }
 
-// txWindow records one emission and returns the relay's spent airtime
-// over the sliding hour ending at that instant.
-func (s *Sentinel) txWindow(relay string, at time.Time, air time.Duration) time.Duration {
-	if s.txWindows == nil {
-		s.txWindows = map[string][]txStamp{}
-	}
-	s.txWindows[relay] = append(s.txWindows[relay], txStamp{at: at, air: air})
-	w := s.txWindows[relay]
+// nextTxWindow computes the relay's spent airtime over the sliding
+// hour ending at this emission without changing RAM. The caller only
+// installs the returned window after the ledger and its metric commit;
+// a failed SQLite write must not leave memory one emission ahead.
+func (s *Sentinel) nextTxWindow(relay string, at time.Time, air time.Duration) (time.Duration, []txStamp) {
+	current := s.txWindows[relay]
+	w := make([]txStamp, len(current), len(current)+1)
+	copy(w, current)
+	w = append(w, txStamp{at: at, air: air})
 	cut := at.Add(-time.Hour)
 	i := 0
 	for i < len(w) && w[i].at.Before(cut) {
 		i++
 	}
 	w = w[i:]
-	s.txWindows[relay] = w
 	var sum time.Duration
 	for _, t := range w {
 		sum += t.air
 	}
-	return sum
+	return sum, w
 }
 
 // Open prepares the journal. The path may be MemoryJournal for hosts
@@ -91,11 +91,16 @@ func Open(ctx context.Context, journalPath string, retention, metricsRetention t
 		metricsRetention = metricDailyKeep
 	}
 	sen := &Sentinel{
-		store: st, bus: b, sub: b.Subscribe(256),
+		store: st, bus: b,
 		log: log, retention: retention, metricsRetention: metricsRetention,
 		maxFrames: maxFrames, journalPath: journalPath,
 	}
+	// Maintenance belongs before subscription: Open itself precedes
+	// every relay at assembly, whereas pruning at the head of Run left
+	// a subscribed-but-unread buffer for producers to overflow.
+	sen.pruneNow(ctx)
 	sen.seedTxWindows(ctx)
+	sen.sub = b.Subscribe(256)
 	return sen, nil
 }
 
@@ -221,6 +226,12 @@ func (s *Sentinel) DropsFor(ctx context.Context, txnPrefix string) ([]TxDropEven
 	return s.store.DropsFor(ctx, txnPrefix)
 }
 
+// StateHistory interleaves recent relay and observer lifecycle
+// transitions, newest first.
+func (s *Sentinel) StateHistory(ctx context.Context, since time.Time, limit int) ([]StateTransition, error) {
+	return s.store.StateHistory(ctx, since, limit)
+}
+
 // Journal reports where the archive lives and how long it reaches —
 // the detailed depth. The consolidated metric tiers reach further, by
 // design; MetricsRetention names that depth honestly.
@@ -240,9 +251,10 @@ func (s *Sentinel) Run(ctx context.Context) {
 	defer s.sub.Close()
 	defer func() { _ = s.store.Close() }()
 
-	s.pruneNow(ctx)
 	ticker := time.NewTicker(pruneEvery)
 	defer ticker.Stop()
+	healthTicker := time.NewTicker(healthLogEvery)
+	defer healthTicker.Stop()
 
 	for {
 		select {
@@ -263,6 +275,11 @@ func (s *Sentinel) Run(ctx context.Context) {
 			s.reportDrops()
 		case <-ticker.C:
 			s.pruneNow(ctx)
+			s.reportDrops()
+		case <-healthTicker.C:
+			// A completely quiet bus after an overload still closes
+			// the loss episode on time; recovery cannot depend on the
+			// next frame arriving or wait for the hourly prune.
 			s.reportDrops()
 		}
 	}
@@ -344,23 +361,17 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 	case bus.FrameCorrupt:
 		err = s.store.recordCorrupt(ctx, e.At, e.Relay, e.Err)
 	case bus.NoiseFloor:
-		// Three writes on purpose: the last value for O(1) status
-		// reads, and one raw point per series — the floor and the
-		// site's impulsiveness age through the tiers independently.
-		if err = s.store.upsertNoiseFloor(ctx, e.At, e.Relay, e.DBm, e.SpreadDB); err == nil {
-			if err = s.store.insertMetric(ctx, "noise_floor", e.Relay, e.At, e.DBm); err == nil {
-				err = s.store.insertMetric(ctx, "noise_spread", e.Relay, e.At, e.SpreadDB)
-			}
-		}
+		err = s.store.recordNoiseFloor(ctx, e.At, e.Relay, e.DBm, e.SpreadDB)
 	case bus.NoiseStarved:
 		err = s.store.insertMetric(ctx, "noise_starved", e.Relay, e.At, float64(e.Aborted))
 	case bus.FrameSent:
-		// The ledger row, then the derived series: the sliding hour's
-		// spent airtime in seconds, one point per emission.
-		if err = s.store.insertSent(ctx, e.At, e.Relay, e.Txn.String(), e.Kind,
-			e.Airtime, e.PowerDBm, e.Shadow); err == nil {
-			err = s.store.insertMetric(ctx, "tx_airtime", e.Relay, e.At,
-				s.txWindow(e.Relay, e.At, e.Airtime).Seconds())
+		window, next := s.nextTxWindow(e.Relay, e.At, e.Airtime)
+		if err = s.store.recordSent(ctx, e.At, e.Relay, e.Txn.String(), e.Kind,
+			e.Airtime, e.PowerDBm, e.Shadow, window); err == nil {
+			if s.txWindows == nil {
+				s.txWindows = map[string][]txStamp{}
+			}
+			s.txWindows[e.Relay] = next
 		}
 	case bus.TxDropped:
 		err = s.store.recordTxDrop(ctx, e.At, e.Relay, e.Txn.String(), e.Reason, e.Kind)

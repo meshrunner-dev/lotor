@@ -385,6 +385,20 @@ func journalCommands() []*command {
 			run:    (*session).nodes,
 		},
 		{
+			name:  "states",
+			forms: []form{{"states", "relay and observer lifecycle history"}},
+			detail: []string{
+				"states [last=<count|span>] [json]",
+				"interleaves relay and observer transitions on one timeline;",
+				"last defaults to the newest 20 and is capped at 1000",
+			},
+			flags: []flagSpec{
+				{name: optLast, valued: true, doc: "the newest count or a span such as 15m"},
+				{name: optJSON, doc: docJSON},
+			},
+			run: (*session).states,
+		},
+		{
 			name:   "tx",
 			forms:  []form{{"tx", "transmit-airtime history, consolidated"}},
 			detail: []string{"tx [relay=<name>] [last=24h|7d] [json]"},

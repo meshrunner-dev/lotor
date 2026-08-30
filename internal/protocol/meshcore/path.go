@@ -19,6 +19,8 @@ import (
 	"go.uber.org/zap"
 
 	"meshrunner.dev/pkg/meshcore"
+
+	"meshrunner.dev/lotor/internal/txn"
 )
 
 // pathVerdict judges a PATH addressed to us. It is ours to read only
@@ -47,7 +49,7 @@ func (e *engine) pathVerdict(rx *reception) (verdict, why string, handled bool) 
 			// consume; unreadable, so there is nothing to learn.
 			return verdictIgnored, "route home badly encoded", true
 		}
-		e.learnOutPath(c, pr)
+		e.learnOutPath(c, pr, rx.id)
 		return verdictClientPath, fmt.Sprintf("route home, %d hops",
 			pr.PathLen&pathHopCountMask), true
 	}
@@ -62,7 +64,7 @@ const pathHopCountMask = 63
 // newest one wins outright: a client that moved is the reason it sent
 // a second, and preferring the older would pin the answer to the route
 // it just left.
-func (e *engine) learnOutPath(c *client, pr *meshcore.PathReturn) {
+func (e *engine) learnOutPath(c *client, pr *meshcore.PathReturn, origin txn.ID) {
 	c.out = &outPath{
 		pathLen: pr.PathLen,
 		path:    append([]byte(nil), pr.Path...),
@@ -72,9 +74,11 @@ func (e *engine) learnOutPath(c *client, pr *meshcore.PathReturn) {
 	// Best effort, and the one place it is: a route lost to disk
 	// trouble costs the next answer a flood, never a replay.
 	if err := e.acl.save(c); err != nil {
-		e.log.Warn("the taught route did not reach the store", zap.Error(err))
+		e.log.Warn("the taught route did not reach the store",
+			zap.String("txn", origin.Short()), zap.Error(err))
 	}
 	e.log.Info("a client taught us its route home",
+		zap.String("txn", origin.Short()),
 		zap.String("pubkey", shortKey(c.pubKey[:])),
 		zap.Int("hops", int(pr.PathLen&pathHopCountMask)))
 }

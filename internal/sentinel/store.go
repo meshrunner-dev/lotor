@@ -8,6 +8,8 @@ import (
 	"os"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	// Pure-Go SQLite: the daemon cross-compiles with CGO disabled.
 	_ "modernc.org/sqlite"
 )
@@ -180,30 +182,45 @@ func tightenJournal(path string) error {
 }
 
 // tightenFile protects ONE regular file, creating it when asked to.
-// Lstat, never Stat, and nothing but a regular file is touched: a
-// symlink would carry the chmod to whatever it points at, and a
-// directory or device at the journal's path is a misconfiguration to
-// refuse intact, not an object to bend first and fail on later.
+// O_NOFOLLOW judges and chmods the same opened inode: Lstat followed by
+// Chmod still left a replacement window in which a regular path could
+// become a symlink and carry the chmod to an unrelated target.
 func tightenFile(path, what string, create bool) error {
-	st, err := os.Lstat(path)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		if !create {
-			return nil
+	flags := unix.O_RDWR | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK
+	// #nosec G304 -- the operator configures this journal path; O_NOFOLLOW and f.Stat guard its inode
+	fd, err := unix.Open(path, flags, 0)
+	if errors.Is(err, unix.ENOENT) && create {
+		// #nosec G304 -- as above, with exclusive creation
+		fd, err = unix.Open(path, flags|unix.O_CREAT|unix.O_EXCL, 0o600)
+	}
+	if errors.Is(err, unix.ENOENT) && !create {
+		return nil
+	}
+	if err != nil {
+		// Name a stable non-regular object when possible. This Lstat is
+		// diagnostic only: no path-based mutation follows it.
+		if st, statErr := os.Lstat(path); statErr == nil && !st.Mode().IsRegular() {
+			return fmt.Errorf("%s path %s is a %s, not a regular file",
+				what, path, fileKind(st.Mode()))
 		}
-		// #nosec G304 -- the journal's own path
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err != nil {
-			return fmt.Errorf("%s create: %w", what, err)
-		}
-		return f.Close()
-	case err != nil:
+		return fmt.Errorf("%s open safely: %w", what, err)
+	}
+	f := os.NewFile(uintptr(fd), path)
+	if f == nil {
+		_ = unix.Close(fd)
+		return fmt.Errorf("%s open safely: invalid file descriptor", what)
+	}
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
 		return fmt.Errorf("%s stat: %w", what, err)
-	case !st.Mode().IsRegular():
+	}
+	if !st.Mode().IsRegular() {
 		return fmt.Errorf("%s path %s is a %s, not a regular file",
 			what, path, fileKind(st.Mode()))
-	case st.Mode().Perm() != 0o600:
-		if err := os.Chmod(path, 0o600); err != nil {
+	}
+	if st.Mode().Perm() != 0o600 {
+		if err := f.Chmod(0o600); err != nil {
 			return fmt.Errorf("%s cannot be protected: %w", what, err)
 		}
 	}
@@ -375,17 +392,31 @@ func (s *store) recordCorrupt(ctx context.Context, at time.Time, relay, errText 
 	return err
 }
 
-// upsertNoiseFloor keeps each relay's latest measured floor — the last
-// value only, by design: the measurement is continuous, the archive's
-// job here is just to remember where the floor stood.
-func (s *store) upsertNoiseFloor(ctx context.Context, at time.Time, relay string, dbm, spreadDB float64) error {
-	_, err := s.db.ExecContext(ctx,
+// recordNoiseFloor keeps the latest measure and both history series in
+// one transaction. They are three projections of one bus event: a
+// partial write would make the live status and consolidated history
+// disagree about a measurement that only happened once.
+func (s *store) recordNoiseFloor(ctx context.Context, at time.Time, relay string, dbm, spreadDB float64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO noise_floor (relay, at_ms, dbm, spread_db) VALUES (?, ?, ?, ?)
 		 ON CONFLICT(relay) DO UPDATE SET
 		   at_ms = excluded.at_ms, dbm = excluded.dbm, spread_db = excluded.spread_db`,
 		relay, at.UnixMilli(), dbm, spreadDB,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+	if err := insertMetricWith(ctx, tx, "noise_floor", relay, at, dbm); err != nil {
+		return err
+	}
+	if err := insertMetricWith(ctx, tx, "noise_spread", relay, at, spreadDB); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // The metrics tiers, RRD-style but in SQL: raw points age into hourly
@@ -402,7 +433,18 @@ const (
 
 // insertMetric records one raw point of a series.
 func (s *store) insertMetric(ctx context.Context, series, relay string, at time.Time, value float64) error {
-	_, err := s.db.ExecContext(ctx,
+	return insertMetricWith(ctx, s.db, series, relay, at, value)
+}
+
+// sqlExecer is the common write face of *sql.DB and *sql.Tx.
+type sqlExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func insertMetricWith(ctx context.Context, db sqlExecer,
+	series, relay string, at time.Time, value float64,
+) error {
+	_, err := db.ExecContext(ctx,
 		`INSERT INTO metrics_raw (series, relay, at_ms, value) VALUES (?, ?, ?, ?)`,
 		series, relay, at.UnixMilli(), value)
 	return err
@@ -567,6 +609,49 @@ func (s *store) insertObserverState(ctx context.Context, at time.Time, observer,
 		at.UnixMilli(), observer, state, cause,
 	)
 	return err
+}
+
+// StateTransition is one lifecycle fact from either supervised world.
+// Kind says relay or observer; Name is the instance; Cause carries the
+// relay error or observer connection cause under one readable field.
+type StateTransition struct {
+	At    time.Time `json:"at"`
+	Kind  string    `json:"kind"`
+	Name  string    `json:"name"`
+	State string    `json:"state"`
+	Cause string    `json:"cause,omitempty"`
+}
+
+// StateHistory interleaves relay and observer transitions, newest
+// first. The tables are separate write models but one operator
+// timeline: a broker loss beside a relay bounce is the useful answer.
+func (s *store) StateHistory(ctx context.Context, since time.Time, limit int) ([]StateTransition, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT at_ms, kind, name, state, cause FROM (
+		  SELECT at_ms, 'relay' AS kind, relay AS name, state, err AS cause
+		    FROM relay_states WHERE at_ms >= ?
+		  UNION ALL
+		  SELECT at_ms, 'observer' AS kind, observer AS name, state, cause
+		    FROM observer_states WHERE at_ms >= ?
+		) ORDER BY at_ms DESC, kind, name LIMIT ?`, since.UnixMilli(), since.UnixMilli(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := make([]StateTransition, 0, limit)
+	for rows.Next() {
+		var st StateTransition
+		var atMS int64
+		if err := rows.Scan(&atMS, &st.Kind, &st.Name, &st.State, &st.Cause); err != nil {
+			return nil, err
+		}
+		st.At = time.UnixMilli(atMS)
+		out = append(out, st)
+	}
+	return out, rows.Err()
 }
 
 // prune drops everything older than the retention and, when maxFrames
@@ -949,16 +1034,28 @@ type Sent struct {
 	Shadow   bool
 }
 
-// insertSent journals one emission, shadow or real.
-func (s *store) insertSent(ctx context.Context, at time.Time, relay, txn, kind string,
-	airtime time.Duration, powerDBm int8, shadow bool,
+// recordSent journals one emission and the sliding-hour metric derived
+// from it in one transaction. A ledger row without its metric — or a
+// metric without the ledger row that proves it — is not a valid event.
+func (s *store) recordSent(ctx context.Context, at time.Time, relay, txn, kind string,
+	airtime time.Duration, powerDBm int8, shadow bool, window time.Duration,
 ) error {
-	_, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO tx (at_ms, relay, txn, kind, airtime_ms, power_dbm, shadow)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		at.UnixMilli(), relay, txn, kind,
-		float64(airtime)/float64(time.Millisecond), powerDBm, shadow)
-	return err
+		float64(airtime)/float64(time.Millisecond), powerDBm, shadow); err != nil {
+		return err
+	}
+	if err := insertMetricWith(ctx, tx, "tx_airtime", relay, at, window.Seconds()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SentFor lists the emissions of one transaction, oldest first. The

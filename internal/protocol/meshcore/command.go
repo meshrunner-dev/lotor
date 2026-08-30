@@ -181,7 +181,7 @@ func (e *engine) ackText(inbound *meshcore.Packet, c *client, plain []byte,
 	}
 	ack, err := meshcore.BuildTextAck(plain[:end], c.pubKey[:])
 	if err != nil {
-		e.log.Warn("command ack build failed", zap.Error(err))
+		e.log.Warn("command ack build failed", zap.String("txn", origin.Short()), zap.Error(err))
 		return
 	}
 	scope := e.replyScope(&reception{pkt: inbound})
@@ -207,7 +207,7 @@ func (e *engine) replyText(inbound *meshcore.Packet, c *client, plain []byte, or
 		c.pubKey[:meshcore.PathHashSize], e.id.PubKey[:meshcore.PathHashSize],
 		c.secret, plain)
 	if err != nil {
-		e.log.Warn("command reply build failed", zap.Error(err))
+		e.log.Warn("command reply build failed", zap.String("txn", origin.Short()), zap.Error(err))
 		return
 	}
 	scope := e.replyScope(&reception{pkt: inbound})

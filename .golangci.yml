@@ -81,6 +81,18 @@ linters:
               desc: "GPIO belongs to the driver module, not to this daemon"
             - pkg: periph.io
               desc: "GPIO and SPI belong to the driver module, not to this daemon"
+        # Raw OS calls follow the same boundary, with one deliberately
+        # narrow exception: the sentinel journal uses O_NOFOLLOW to
+        # protect an operator-configured database path without a
+        # symlink race. It touches no hardware; every other upper-layer
+        # file remains barred from unix.
+        unix-stops-at-the-driver:
+          files:
+            - "$all"
+            - "!**/internal/radio/sx126x/*.go"
+            - "!**/internal/sensor/i2c/*.go"
+            - "!**/internal/sentinel/store.go"
+          deny:
             - pkg: golang.org/x/sys/unix
               desc: "low-level OS calls belong to the driver module, not to this daemon"
         # And the driver package itself is part of that world: only the

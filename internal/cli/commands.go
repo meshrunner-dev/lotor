@@ -1136,6 +1136,49 @@ func (s *session) nodes(ctx context.Context, in input) error {
 	return tb.flush(s.out)
 }
 
+// states renders the lifecycle tables the sentinel already retains as
+// one interleaved timeline. Persisting transitions without a reader
+// made the broker and relay history an SQL-only promise.
+func (s *session) states(ctx context.Context, in input) error {
+	sen, err := s.needSentinel()
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	w := frameSelectors{}
+	if _, err := w.readLast(in.opts, now); err != nil {
+		return err
+	}
+	const stateHistoryCap = 1000
+	limit := 20
+	since := time.Time{}
+	switch {
+	case w.count > stateHistoryCap:
+		return fmt.Errorf("%s= wants 1..%d", optLast, stateHistoryCap)
+	case w.count > 0:
+		limit = w.count
+	case !w.since.IsZero():
+		limit, since = stateHistoryCap, w.since
+	}
+	states, err := sen.StateHistory(ctx, since, limit)
+	if err != nil {
+		return err
+	}
+	if in.opts[optJSON] == optOn {
+		return s.printJSON(states)
+	}
+	if len(states) == 0 {
+		fmt.Fprint(s.out, "no lifecycle transitions journalled yet\r\n")
+		return nil
+	}
+	tb := s.table()
+	tb.header("WHEN", "KIND", "NAME", "STATE", "CAUSE")
+	for _, st := range slices.Backward(states) {
+		tb.row(st.At.Format("02/01 15:04:05"), st.Kind, st.Name, st.State, st.Cause)
+	}
+	return tb.flush(s.out)
+}
+
 func (s *session) sentinelStatus(ctx context.Context, _ input) error {
 	sen, err := s.needSentinel()
 	if err != nil {

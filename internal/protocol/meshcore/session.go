@@ -121,7 +121,7 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	// from, and its retry refused as a replay.
 	body, err := loginReply(c)
 	if err != nil {
-		e.log.Warn("login reply abandoned", zap.Error(err))
+		e.log.Warn("login reply abandoned", zap.String("txn", origin.Short()), zap.Error(err))
 		return
 	}
 
@@ -306,7 +306,8 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 	// and discovering the route afterwards produced answers that
 	// could not be sealed — with the replay guard already spent, so
 	// the client's identical retry was refused as a replay.
-	body, answered := e.answerRequest(c, args, e.answerBudget(pkt))
+	log := e.log.With(zap.String("txn", origin.Short()))
+	body, answered := e.answerRequest(c, args, e.answerBudget(pkt), log)
 	if len(args) > 0 {
 		logging.Trace(e.log, "session request answered",
 			zap.String("txn", origin.Short()), zap.String("request", reqName(args[0])),
@@ -329,7 +330,9 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 // is false for a question this node does not serve — which is not the
 // same as an answer that happens to be empty: a node with no sensor
 // still owes the asker a reply saying so.
-func (e *engine) answerRequest(c *client, args []byte, budget int) (body []byte, answered bool) {
+func (e *engine) answerRequest(c *client, args []byte, budget int,
+	log *zap.Logger,
+) (body []byte, answered bool) {
 	switch args[0] {
 	case meshcore.ReqGetStatus:
 		return e.statusBody(), true
@@ -353,7 +356,7 @@ func (e *engine) answerRequest(c *client, args []byte, budget int) (body []byte,
 		if c.perms&permRoleMask == permGuest {
 			mask = 0
 		}
-		return e.telemetryBody(mask, budget), true
+		return e.telemetryBodyLogged(log, mask, budget), true
 	case meshcore.ReqGetNeighbours:
 		b := e.neighboursBody(args, budget)
 		return b, b != nil
