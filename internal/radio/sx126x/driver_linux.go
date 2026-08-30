@@ -403,7 +403,7 @@ func (d *device) sampleFloor() {
 	}
 	if d.floor.sample(rssi, time.Now()) {
 		nf, _ := d.floor.value()
-		d.log.Debug("noise floor measured", zap.Float64("floor_dbm", nf.DBm))
+		logging.Trace(d.log, "noise floor measured", zap.Float64("floor_dbm", nf.DBm))
 	}
 }
 
