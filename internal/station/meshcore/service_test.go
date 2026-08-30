@@ -326,7 +326,9 @@ func TestFactoryResetRestoresConfiguredStateAndPersistsIt(t *testing.T) {
 	svc.pending = pendingRequest{kind: pendingStatus, tag: 42}
 	svc.signData = []byte("partial")
 	svc.sendUnscoped = true
-	svc.outbound <- emission{kind: "queued-before-reset"}
+	if !svc.outbound.offer(emission{kind: "queued-before-reset"}) {
+		t.Fatal("could not seed outbound queue")
+	}
 	svc.mu.Unlock()
 
 	responses := svc.handle(t.Context(), companion.FactoryReset{})
@@ -338,7 +340,7 @@ func TestFactoryResetRestoresConfiguredStateAndPersistsIt(t *testing.T) {
 	}
 	if len(svc.channels) != 0 || len(svc.contacts) != 0 || len(svc.mailbox) != 0 ||
 		svc.defaultScope != "" || svc.stats.sent != 0 || svc.appVersion != 0 ||
-		svc.pending.kind != pendingNone || svc.signData != nil || svc.sendUnscoped || len(svc.outbound) != 0 {
+		svc.pending.kind != pendingNone || svc.signData != nil || svc.sendUnscoped || svc.outbound.len() != 0 {
 		t.Fatalf("factory reset left state behind: channels %d contacts %d mailbox %d scope %q stats %+v",
 			len(svc.channels), len(svc.contacts), len(svc.mailbox), svc.defaultScope, svc.stats)
 	}
@@ -574,4 +576,17 @@ func exchange(t *testing.T, conn net.Conn, command companion.Command) []byte {
 		t.Fatal(err)
 	}
 	return frame.Payload
+}
+
+func takeEmission(t *testing.T, svc *service) emission {
+	t.Helper()
+	item, ok := svc.outbound.takeUntil(t.Context(), time.Now().Add(time.Second))
+	if !ok {
+		t.Fatal("station outbound queue did not yield an emission")
+	}
+	return item
+}
+
+func pollEmission(svc *service) (emission, bool) {
+	return svc.outbound.takeUntil(context.Background(), time.Now())
 }

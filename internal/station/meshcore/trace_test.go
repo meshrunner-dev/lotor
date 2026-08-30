@@ -20,7 +20,7 @@ func TestTraceUsesPayloadRouteAndSNRPath(t *testing.T) {
 	if !ok || sent.Flood || sent.ExpectedACK != command.Tag || sent.TimeoutMillis != 3_050 {
 		t.Fatalf("trace sent = %#v", responses)
 	}
-	emission := <-svc.outbound
+	emission := takeEmission(t, svc)
 	if emission.packet.PayloadType() != mesh.PayloadTypeTrace || emission.packet.PathHashCount() != 0 ||
 		!bytes.Equal(emission.packet.Payload[9:], command.Path) {
 		t.Fatalf("trace emission = %#v", emission.packet)

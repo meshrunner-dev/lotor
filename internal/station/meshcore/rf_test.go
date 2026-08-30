@@ -133,7 +133,7 @@ func TestFloodedDirectTextQueuesACKPathReturn(t *testing.T) {
 	packet.Path = []byte{4, 5}
 	raw, _ := packet.MarshalBinary()
 	svc.processRF(t.Context(), radio.Frame{Payload: raw})
-	item := <-svc.outbound
+	item := takeEmission(t, svc)
 	if item.packet.PayloadType() != mesh.PayloadTypePath || !item.packet.IsRouteFlood() ||
 		item.notBefore.IsZero() {
 		t.Fatalf("path reply = %+v", item)
@@ -153,10 +153,8 @@ func TestFloodedDirectTextQueuesACKPathReturn(t *testing.T) {
 		t.Fatalf("returned path = %+v, %v", returned, err)
 	}
 	svc.processRF(t.Context(), radio.Frame{Payload: raw})
-	select {
-	case duplicate := <-svc.outbound:
+	if duplicate, ok := pollEmission(svc); ok {
 		t.Fatalf("duplicate text queued another reply: %+v", duplicate)
-	default:
 	}
 }
 
@@ -182,7 +180,7 @@ func TestACKPushConfirmsAnExpectedSend(t *testing.T) {
 	if !ok {
 		t.Fatalf("send = %#v", responses)
 	}
-	<-svc.outbound
+	_ = takeEmission(t, svc)
 
 	stationSide, appSide := net.Pipe()
 	defer stationSide.Close()
@@ -251,7 +249,7 @@ func TestReceivedPathPersistsAndQueuesReciprocal(t *testing.T) {
 	if contact.PathLen != 2 || contact.Path[0] != 9 || contact.Path[1] != 10 || contact.LastModifiedUnix == 0 {
 		t.Fatalf("stored contact path = %+v", contact)
 	}
-	item := <-svc.outbound
+	item := takeEmission(t, svc)
 	if item.kind != "station-path-reciprocal" || !item.packet.IsRouteDirect() ||
 		item.packet.PathLen != 2 || !bytes.Equal(item.packet.Path, []byte{9, 10}) {
 		t.Fatalf("reciprocal = %+v", item)
@@ -347,7 +345,7 @@ func TestShadowStationConsumesSharedLedgerWithoutKeying(t *testing.T) {
 	if len(responses) != 1 {
 		t.Fatalf("send = %#v", responses)
 	}
-	item := <-svc.outbound
+	item := takeEmission(t, svc)
 	svc.transmit(t.Context(), item)
 	if device.transmits != 0 || device.assesses != 1 || svc.duty.Usage(time.Now()) != 100*time.Millisecond {
 		t.Fatalf("shadow: transmits %d assesses %d usage %s",
@@ -424,7 +422,7 @@ func TestStationTextMatchesReferenceLimitsClockAndTimeout(t *testing.T) {
 	if !ok || sent.Flood || sent.TimeoutMillis != 3_050 || sent.ExpectedACK != 0 {
 		t.Fatalf("sent = %#v", responses)
 	}
-	item := <-svc.outbound
+	item := takeEmission(t, svc)
 	datagram, err := mesh.ParseDatagram(item.packet.Payload)
 	if err != nil {
 		t.Fatal(err)
@@ -482,7 +480,7 @@ func TestStationGroupTextTruncatesAtTheReferenceBoundary(t *testing.T) {
 	if got, _ := companion.MarshalResponse(responses[0]); !bytes.Equal(got, []byte{byte(companion.ResponseOK)}) {
 		t.Fatalf("send group = % X", got)
 	}
-	item := <-svc.outbound
+	item := takeEmission(t, svc)
 	datagram, err := mesh.ParseGroupDatagram(item.packet.Payload)
 	if err != nil {
 		t.Fatal(err)

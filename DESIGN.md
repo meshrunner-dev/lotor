@@ -151,7 +151,9 @@ owned by a relay.
 
 Physical operations are serialized by the controller. Relay operations
 have strict priority; station operations are served round-robin by
-station, preserving FIFO inside each station. A physical reception is
+station. Inside a station, the MeshCore dispatcher priority is honoured
+(the smaller numeric value wins) and equal priorities remain FIFO; an
+emission scheduled for the future never blocks one already due. A physical reception is
 broadcast to the relay and every active station binding. Station RX
 queues are bounded and lossy so a stalled companion can never stall the
 relay; the relay's receive door remains lossless. Every station uses the
@@ -233,6 +235,26 @@ TX gate admits only `dry`, `shadow` and `on-air`; the relay-specific
 `on-air-zero-hop` rung has no station meaning. A detached station keeps
 answering its application, and an attached-but-incompatible station
 reports RF `blocked` with the authoritative binding named.
+
+The station implements the current reference companion protocol on its
+dedicated TCP stream, with one application connected at a time. The
+application's announced protocol level selects the legacy or v3 mailbox
+layout at message reception, and the encoded mailbox entry is durable.
+Room contacts also persist their signed-message synchronisation cursor;
+login and keep-alive carry it exactly as the reference does. A request to
+an unknown anonymous peer creates the reference's capacity-counted,
+in-memory contact and a station restart discards it.
+
+`reboot` closes only that station's application session, clears its
+per-boot queues, counters, request/connection state and transient contacts,
+and does not restart Lotor or disturb another radio consumer. `factory
+reset` additionally replaces every companion-owned preference, identity,
+contact, channel and mailbox with the declarative station configuration
+that seeded it, and persists the replacement before disconnecting. An I/O
+failure rolls the reset back and leaves the session alive. A virtual
+station has no board battery, storage or target-specific sensor manager:
+those reference queries therefore report zero/empty values rather than
+borrowing physical data owned by another attachment.
 
 Defaults mirror the MeshCore reference firmware — the forced transmit
 after the CAD-fail budget elapses, the 160-entry count-bounded dedup

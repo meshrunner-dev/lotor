@@ -57,6 +57,7 @@ func (s *service) addUpdateContact(command companion.AddUpdateContact) []compani
 	}
 	if exists {
 		entry.info = info
+		entry.ephemeral = false
 	} else {
 		s.nextContact++
 		entry = contactEntry{info: info, order: s.nextContact}
@@ -182,6 +183,7 @@ func (s *service) storeAdvert(packet *mesh.Packet, enforceReplay bool) (stored, 
 	entry.info.PathLen = packet.PathLen
 	entry.info.Path = [mesh.MaxPathSize]byte{}
 	copy(entry.info.Path[:], packet.Path)
+	entry.ephemeral = false
 
 	// Export/share stores a plain, zero-path FLOOD advert exactly like the
 	// reference blob store, independent of the scope/path by which it arrived.

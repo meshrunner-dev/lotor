@@ -116,6 +116,9 @@ func (s *service) snapshotLocked() persistedState {
 	}
 	sort.Slice(state.Channels, func(i, j int) bool { return state.Channels[i].Index < state.Channels[j].Index })
 	for _, entry := range s.contacts {
+		if entry.ephemeral {
+			continue
+		}
 		info := entry.info
 		state.Contacts = append(state.Contacts, persistedContact{
 			PublicKey: info.PublicKey, Type: info.Type, Flags: info.Flags, PathLen: info.PathLen,

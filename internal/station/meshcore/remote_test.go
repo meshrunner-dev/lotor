@@ -98,7 +98,7 @@ func TestRemoteLoginAndStatusRequestRoundTrip(t *testing.T) {
 	if !ok || sent.Flood || sent.ExpectedACK != binary.LittleEndian.Uint32(peer.PubKey[:4]) {
 		t.Fatalf("login sent = %#v", responses)
 	}
-	loginEmission := <-svc.outbound
+	loginEmission := takeEmission(t, svc)
 	anonymous, err := mesh.ParseAnonDatagram(loginEmission.packet.Payload)
 	if err != nil {
 		t.Fatal(err)
@@ -143,7 +143,7 @@ func TestRemoteLoginAndStatusRequestRoundTrip(t *testing.T) {
 	svc.connections[peer.PubKey] = connection
 	svc.mu.Unlock()
 	svc.checkConnections()
-	keepAlive := <-svc.outbound
+	keepAlive := takeEmission(t, svc)
 	keepDatagram, err := mesh.ParseDatagram(keepAlive.packet.Payload)
 	if err != nil {
 		t.Fatal(err)
@@ -179,7 +179,7 @@ func TestRemoteLoginAndStatusRequestRoundTrip(t *testing.T) {
 	if !ok || sent.ExpectedACK == 0 {
 		t.Fatalf("status sent = %#v", responses)
 	}
-	statusEmission := <-svc.outbound
+	statusEmission := takeEmission(t, svc)
 	datagram, err := mesh.ParseDatagram(statusEmission.packet.Payload)
 	if err != nil {
 		t.Fatal(err)
@@ -253,7 +253,7 @@ func TestRoomLoginAndKeepAliveCarryPersistedSyncCursor(t *testing.T) {
 	if _, ok := responses[0].(companion.Sent); !ok {
 		t.Fatalf("room login = %#v", responses)
 	}
-	emission := <-svc.outbound
+	emission := takeEmission(t, svc)
 	anon, err := mesh.ParseAnonDatagram(emission.packet.Payload)
 	if err != nil {
 		t.Fatal(err)
@@ -272,7 +272,7 @@ func TestRoomLoginAndKeepAliveCarryPersistedSyncCursor(t *testing.T) {
 		keepAlive: time.Minute, activeAt: time.Now(), nextPing: time.Now().Add(-time.Second),
 	}
 	svc.checkConnections()
-	emission = <-svc.outbound
+	emission = takeEmission(t, svc)
 	datagram, err := mesh.ParseDatagram(emission.packet.Payload)
 	if err != nil {
 		t.Fatal(err)
@@ -288,7 +288,7 @@ func TestRoomLoginAndKeepAliveCarryPersistedSyncCursor(t *testing.T) {
 	}
 }
 
-func TestAnonymousRequestNeedsNoPersistentContact(t *testing.T) {
+func TestAnonymousRequestCreatesOnlyAReferenceCompatibleVolatileContact(t *testing.T) {
 	svc := testRFService(t)
 	peer := testPeer(t, 29)
 	responses := svc.handle(t.Context(), companion.ContactDataRequest{
@@ -296,12 +296,49 @@ func TestAnonymousRequestNeedsNoPersistentContact(t *testing.T) {
 		Data: []byte{mesh.AnonReqClock},
 	})
 	sent, ok := responses[0].(companion.Sent)
-	if !ok || sent.Flood || sent.ExpectedACK == 0 || len(svc.contacts) != 0 {
+	contact := svc.contacts[peer.PubKey]
+	if !ok || sent.Flood || sent.ExpectedACK == 0 || len(svc.contacts) != 1 || !contact.ephemeral ||
+		contact.info.Type != mesh.AdvTypeNone || contact.info.PathLen != 0 {
 		t.Fatalf("anonymous request = %#v contacts=%d", responses, len(svc.contacts))
 	}
-	emission := <-svc.outbound
+	emission := takeEmission(t, svc)
 	if emission.packet.PayloadType() != mesh.PayloadTypeAnonReq || emission.packet.PathHashCount() != 0 {
 		t.Fatalf("anonymous emission = %#v", emission.packet)
+	}
+	svc.mu.Lock()
+	_ = svc.resetRuntimeLocked()
+	svc.mu.Unlock()
+	if len(svc.contacts) != 0 {
+		t.Fatalf("volatile anonymous contact survived restart: %+v", svc.contacts)
+	}
+}
+
+func TestRawPacketCommandControlsStationQueuePriority(t *testing.T) {
+	svc := testRFService(t)
+	low, err := mesh.BuildRawCustom([]byte{1, 2, 3, 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	high, err := mesh.BuildRawCustom([]byte{5, 6, 7, 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lowRaw, _ := low.MarshalBinary()
+	highRaw, _ := high.MarshalBinary()
+	for _, command := range []companion.SendRawPacket{
+		{Priority: 5, Packet: lowRaw}, {Priority: 1, Packet: highRaw},
+	} {
+		responses := svc.handle(t.Context(), command)
+		if len(responses) != 1 || responses[0] != companion.StatusResponse(companion.ResponseOK) {
+			t.Fatalf("raw packet response = %#v", responses)
+		}
+	}
+	first := takeEmission(t, svc)
+	second := takeEmission(t, svc)
+	if first.priority != 1 || second.priority != 5 || first.packet.Hash() != high.Hash() ||
+		second.packet.Hash() != low.Hash() {
+		t.Fatalf("raw packet order = %d/%x then %d/%x",
+			first.priority, first.packet.Hash(), second.priority, second.packet.Hash())
 	}
 }
 
@@ -372,9 +409,7 @@ func TestPathDiscoveryPushDoesNotMutateTheContactPath(t *testing.T) {
 	if svc.contacts[peer.PubKey].info.PathLen != 0xff {
 		t.Fatalf("discovery persisted path %+v", svc.contacts[peer.PubKey].info)
 	}
-	select {
-	case emission := <-svc.outbound:
+	if emission, ok := pollEmission(svc); ok {
 		t.Fatalf("discovery queued reciprocal path: %+v", emission)
-	default:
 	}
 }

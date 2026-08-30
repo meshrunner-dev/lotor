@@ -202,7 +202,7 @@ func build(spec station.Spec) (station.Service, error) {
 	if queueDepth <= 0 {
 		queueDepth = 32
 	}
-	s.outbound = make(chan emission, queueDepth)
+	s.outbound = newEmissionQueue(queueDepth)
 	// The declarative station configuration is the virtual equivalent of the
 	// firmware image defaults restored after formatting its filesystem.
 	s.factoryState = s.snapshotLocked()
@@ -237,6 +237,7 @@ type contactEntry struct {
 	advert    []byte
 	order     uint64
 	syncSince uint32
+	ephemeral bool
 }
 
 type ackExpectation struct {
@@ -297,7 +298,7 @@ type service struct {
 	duty         *radio.AirtimeLedger
 	rfWake       chan struct{}
 	rfDevice     radio.Device
-	outbound     chan emission
+	outbound     *emissionQueue
 	startedAt    time.Time
 	stats        stationStats
 	signData     []byte
@@ -622,28 +623,26 @@ func (s *service) restoreFactoryLocked() []companion.Response {
 }
 
 func (s *service) resetRuntimeLocked() []emission {
-	dropped := make([]emission, 0, len(s.outbound))
-	for {
-		select {
-		case item := <-s.outbound:
-			dropped = append(dropped, item)
-		default:
-			s.lastUnique = 0
-			s.appVersion = 0
-			s.sendScope = [16]byte{}
-			s.sendUnscoped = false
-			s.seen = packetRing{}
-			s.expectedACKs = [8]ackExpectation{}
-			s.nextACK = 0
-			s.startedAt = time.Now()
-			s.stats = stationStats{}
-			s.signData = nil
-			s.pending = pendingRequest{}
-			s.connections = make(map[[mesh.PubKeySize]byte]remoteConnection)
-			s.advertPaths = [16]advertPath{}
-			return dropped
+	dropped := s.outbound.drain()
+	s.lastUnique = 0
+	s.appVersion = 0
+	s.sendScope = [16]byte{}
+	s.sendUnscoped = false
+	s.seen = packetRing{}
+	s.expectedACKs = [8]ackExpectation{}
+	s.nextACK = 0
+	s.startedAt = time.Now()
+	s.stats = stationStats{}
+	s.signData = nil
+	s.pending = pendingRequest{}
+	s.connections = make(map[[mesh.PubKeySize]byte]remoteConnection)
+	s.advertPaths = [16]advertPath{}
+	for key, entry := range s.contacts {
+		if entry.ephemeral {
+			delete(s.contacts, key)
 		}
 	}
+	return dropped
 }
 
 func (s *service) handlePreferenceMutation(cmd companion.Command) ([]companion.Response, bool) {
@@ -923,7 +922,7 @@ func (s *service) getStats(kind companion.StatsType) []companion.Response {
 		uptime := max(time.Duration(0), time.Since(s.startedAt)) / time.Second
 		return []companion.Response{companion.CoreStats{
 			UptimeSeconds: uint32(min(uptime, time.Duration(math.MaxUint32))),
-			QueueLength:   uint8(min(len(s.outbound), math.MaxUint8)),
+			QueueLength:   uint8(min(s.outbound.len(), math.MaxUint8)),
 		}}
 	case companion.StatsRadio:
 		noiseFloor := int16(0)

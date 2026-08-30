@@ -116,6 +116,20 @@ func (s *service) sendContactDataRequest(command companion.ContactDataRequest) [
 		return errorResponses(companion.ErrorUnsupportedCommand)
 	}
 	contact, known := s.contacts[command.PublicKey]
+	if !known {
+		if len(s.contacts) >= s.p.MaxContacts {
+			return errorResponses(companion.ErrorTableFull)
+		}
+		s.nextContact++
+		contact = contactEntry{
+			info: companion.Contact{
+				PublicKey: command.PublicKey, Type: mesh.AdvTypeNone, PathLen: 0,
+				LastModifiedUnix: uint32(time.Now().Add(s.clockDelta).Unix()),
+			},
+			order: s.nextContact, ephemeral: true,
+		}
+		s.contacts[command.PublicKey] = contact
+	}
 	secret, err := s.id.SharedSecret(command.PublicKey[:])
 	if err != nil {
 		return errorResponses(companion.ErrorIllegalArgument)
@@ -126,12 +140,7 @@ func (s *service) sendContactDataRequest(command companion.ContactDataRequest) [
 	if err != nil {
 		return errorResponses(companion.ErrorTableFull)
 	}
-	flood := false
-	if known {
-		flood = s.routeContact(packet, contact, false)
-	} else {
-		s.routeDirect(packet, 0, nil)
-	}
+	flood := s.routeContact(packet, contact, false)
 	if responses := s.submitLocked(packet, "station-anonymous-request"); responses != nil {
 		return responses
 	}
@@ -203,7 +212,7 @@ func (s *service) sendRawPacket(command companion.SendRawPacket) []companion.Res
 		return errorResponses(companion.ErrorIllegalArgument)
 	}
 	kind := fmt.Sprintf("station-raw-packet-p%d", command.Priority)
-	if responses := s.submitLocked(packet, kind); responses != nil {
+	if responses := s.submitAtPriorityLocked(packet, kind, time.Time{}, command.Priority); responses != nil {
 		return responses
 	}
 	return okResponses()

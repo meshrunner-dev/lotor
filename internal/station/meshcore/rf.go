@@ -36,6 +36,7 @@ type emission struct {
 	correlation correlation.ID
 	kind        string
 	notBefore   time.Time
+	priority    uint8
 }
 
 func (s *service) runRF(ctx context.Context) {
@@ -591,23 +592,22 @@ func (s *service) push(response companion.Response) {
 }
 
 func (s *service) runTX(ctx context.Context) {
-	connectionTicker := time.NewTicker(time.Second)
-	defer connectionTicker.Stop()
+	nextConnections := time.Now().Add(time.Second)
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-connectionTicker.C:
+		if !time.Now().Before(nextConnections) {
 			s.checkConnections()
-		case item := <-s.outbound:
-			if !item.notBefore.IsZero() {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(max(0, time.Until(item.notBefore))):
-				}
+			nextConnections = time.Now().Add(time.Second)
+		}
+		item, ok := s.outbound.takeUntil(ctx, nextConnections)
+		if !ok {
+			if ctx.Err() != nil {
+				return
 			}
-			s.transmit(ctx, item)
+			continue
+		}
+		s.transmit(ctx, item)
+		if ctx.Err() != nil {
+			return
 		}
 	}
 }
@@ -656,9 +656,11 @@ func (s *service) transmit(ctx context.Context, item emission) {
 			Airtime: actualAir, PowerDBm: actualPower, Kind: item.kind, Shadow: shadow, Raw: raw})
 	}
 	s.log.Debug("station frame sent", zap.String("corr", item.correlation.Short()),
-		zap.String("kind", item.kind), zap.Bool("shadow", shadow), zap.Error(txErr))
+		zap.String("kind", item.kind), zap.Uint8("priority", item.priority),
+		zap.Bool("shadow", shadow), zap.Error(txErr))
 	logging.Trace(s.log, "station tx emission accounted", zap.String("corr", item.correlation.Short()),
-		zap.Duration("airtime", actualAir), zap.Int8("power_dbm", actualPower), zap.Bool("shadow", shadow))
+		zap.Uint8("priority", item.priority), zap.Duration("airtime", actualAir),
+		zap.Int8("power_dbm", actualPower), zap.Bool("shadow", shadow))
 }
 
 func (s *service) recordTransmission(packet *mesh.Packet, airtime time.Duration) {
@@ -734,16 +736,14 @@ func (s *service) stationClearChannel(ctx context.Context, device radio.Device,
 }
 
 func (s *service) requeue(item emission) {
-	select {
-	case s.outbound <- item:
-	default:
+	if !s.outbound.offer(item) {
 		s.txDrop(item, "queue-full")
 	}
 }
 
 func (s *service) txDrop(item emission, reason string) {
 	s.log.Debug("station frame dropped", zap.String("corr", item.correlation.Short()),
-		zap.String("kind", item.kind), zap.String("reason", reason))
+		zap.String("kind", item.kind), zap.Uint8("priority", item.priority), zap.String("reason", reason))
 	if s.bus != nil {
 		s.bus.Publish(bus.TxDropped{SourceKind: bus.SourceStation, Source: s.name,
 			Correlation: item.correlation,

@@ -250,17 +250,44 @@ func (s *service) submitLocked(packet *mesh.Packet, kind string) []companion.Res
 }
 
 func (s *service) submitAtLocked(packet *mesh.Packet, kind string, notBefore time.Time) []companion.Response {
+	return s.submitAtPriorityLocked(packet, kind, notBefore, referencePriority(packet))
+}
+
+func (s *service) submitAtPriorityLocked(packet *mesh.Packet, kind string, notBefore time.Time,
+	priority uint8,
+) []companion.Response {
 	if s.txPolicy.Mode == "" || s.txPolicy.Mode == config.TXDry || s.rfDevice == nil || s.duty == nil {
 		return []companion.Response{companion.StatusResponse(companion.ResponseDisabled)}
 	}
-	item := emission{packet: packet, correlation: correlation.New(), kind: kind, notBefore: notBefore}
-	select {
-	case s.outbound <- item:
+	item := emission{
+		packet: packet, correlation: correlation.New(), kind: kind,
+		notBefore: notBefore, priority: priority,
+	}
+	if s.outbound.offer(item) {
 		s.seen.mark(packet.Hash())
 		return nil
-	default:
-		return errorResponses(companion.ErrorTableFull)
 	}
+	return errorResponses(companion.ErrorTableFull)
+}
+
+func referencePriority(packet *mesh.Packet) uint8 {
+	if packet.IsRouteFlood() {
+		switch packet.PayloadType() {
+		case mesh.PayloadTypePath:
+			return 2
+		case mesh.PayloadTypeAdvert:
+			return 3
+		default:
+			return 1
+		}
+	}
+	if packet.PayloadType() == mesh.PayloadTypeTrace {
+		return 5
+	}
+	if packet.PayloadType() == mesh.PayloadTypePath {
+		return 1
+	}
+	return 0
 }
 
 func (s *service) estimateTimeout(packet *mesh.Packet, flood bool) uint32 {
