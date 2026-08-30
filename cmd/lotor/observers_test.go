@@ -19,6 +19,7 @@ import (
 	"meshrunner.dev/lotor/internal/cli"
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/mqtt"
 )
 
 // observerFile builds a topology of n relays (each with its own
@@ -288,5 +289,44 @@ func TestLiveGateIsABarrierNotAFilter(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("timeline = %v, want %v", got, want)
 		}
+	}
+}
+
+func TestObserverIdentitiesSpeakTheBrokerCase(t *testing.T) {
+	// The engine renders its identity in lowercase hex; the brokers'
+	// vocabulary is uppercase. Every identity that leaves through
+	// MQTT — the topic's device level via OriginID, the pubkey-derived
+	// username, the neighbour pubkeys — must cross that boundary in
+	// the broker's case, or the same node appears under two spellings.
+	m := &manager{
+		file:  &config.File{Relays: map[string]config.Relay{"mc": {}}},
+		infos: map[string]cli.RelayInfo{},
+	}
+	m.infos["mc"] = cli.RelayInfo{
+		Name: "mc", NodeName: "lab", Identity: "882f6cdf022d",
+		TXMode: config.TXOnAir,
+		Neighbours: func() []cli.Neighbour {
+			return []cli.Neighbour{{PubKey: [32]byte{0xAB, 0xC1}}}
+		},
+	}
+	cfg, err := m.observerConfig("obs",
+		mqtt.Params{URL: "tcp://127.0.0.1:1", IATA: "TLS"}, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OriginID != "882F6CDF022D" {
+		t.Errorf("OriginID = %q — the topic device level would be lowercase", cfg.OriginID)
+	}
+	opts := observerDial(mqtt.Params{URL: "tcp://127.0.0.1:1", Username: "{pubkey}"},
+		"obs", m.infos["mc"], nil, nil, zap.NewNop())
+	if opts.Username != "882F6CDF022D" {
+		t.Errorf("pubkey username = %q", opts.Username)
+	}
+	entries, _, ran := m.neighboursRound("mc", zap.NewNop())(context.Background())
+	if !ran || len(entries) != 1 {
+		t.Fatalf("neighbours round: ran=%v entries=%d", ran, len(entries))
+	}
+	if want := "ABC1" + strings.Repeat("00", 30); entries[0].PubKey != want {
+		t.Errorf("neighbour pubkey = %q, want %q", entries[0].PubKey, want)
 	}
 }

@@ -162,7 +162,7 @@ func (m *manager) observerConfig(name string, p mqtt.Params, log *zap.Logger) (m
 		Types:    p.Types,
 		Retain:   p.Retain,
 		Origin:   info.NodeName,
-		OriginID: info.Identity,
+		OriginID: mqtt.DeviceID(info.Identity),
 		Model:    info.Driver,
 		Firmware: version,
 		Client:   product.Slug + "/" + version,
@@ -240,7 +240,7 @@ func observerDial(p mqtt.Params, name string, info cli.RelayInfo,
 			return mqtt.JWTUsername(info.Identity), token
 		}
 	case p.Username == "{pubkey}":
-		opts.Username, opts.Password = info.Identity, p.Password
+		opts.Username, opts.Password = mqtt.DeviceID(info.Identity), p.Password
 	default:
 		opts.Username, opts.Password = p.Username, p.Password
 	}
@@ -282,7 +282,7 @@ func (m *manager) neighboursRound(relayName string, log *zap.Logger,
 		queried := 0
 		for _, nb := range rows {
 			e := mqtt.NeighborEntry{
-				PubKey: hex.EncodeToString(nb.PubKey[:]),
+				PubKey: mqtt.DeviceID(hex.EncodeToString(nb.PubKey[:])),
 				SNR:    nb.SNR,
 			}
 			if nb.Heard.IsZero() {

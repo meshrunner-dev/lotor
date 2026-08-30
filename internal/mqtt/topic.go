@@ -20,6 +20,15 @@ const (
 	TopicNeighbors = "neighbors"
 )
 
+// DeviceID is a node identity as the shared brokers spell it: hex in
+// UPPERCASE. The topic's device level, the payloads' origin ids, the
+// neighbour pubkeys and the pubkey-derived usernames all speak this
+// one case — while frame bytes and path hops stay lowercase. One
+// function, so the two hex vocabularies cannot blur into each other.
+func DeviceID(pubKeyHex string) string {
+	return strings.ToUpper(pubKeyHex)
+}
+
 // BuildTopic expands the template for one message class. Unknown
 // placeholders pass through verbatim — the reference does the same —
 // but a topic that still carries braces, or came out empty, or names

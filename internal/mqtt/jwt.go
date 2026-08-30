@@ -48,7 +48,7 @@ func AuthToken(pubKeyHex, audience, owner string, ttl time.Duration, now time.Ti
 		Iat       int64  `json:"iat"`
 		Exp       int64  `json:"exp"`
 		Owner     string `json:"owner,omitempty"`
-	}{strings.ToUpper(pubKeyHex), audience, iat, iat + int64(ttl.Seconds()), owner})
+	}{DeviceID(pubKeyHex), audience, iat, iat + int64(ttl.Seconds()), owner})
 	if err != nil {
 		return "", err
 	}
@@ -64,5 +64,5 @@ func AuthToken(pubKeyHex, audience, owner string, ttl time.Duration, now time.Ti
 // JWTUsername is the fixed shape a JWT broker matches the token's key
 // against.
 func JWTUsername(pubKeyHex string) string {
-	return "v1_" + strings.ToUpper(pubKeyHex)
+	return "v1_" + DeviceID(pubKeyHex)
 }

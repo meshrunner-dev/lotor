@@ -277,3 +277,18 @@ func TestIATAFollowsTheEcosystemRule(t *testing.T) {
 		}
 	}
 }
+
+func TestNodeIdentityHexSpeaksUppercase(t *testing.T) {
+	// The shared brokers spell a node identity in UPPERCASE hex —
+	// topic device levels, origin ids, neighbour pubkeys and pubkey
+	// usernames — while frame bytes and path hops stay lowercase.
+	// DeviceID is that convention; everything identity-shaped must
+	// pass through it.
+	if got := DeviceID("882f6cdf022d"); got != "882F6CDF022D" {
+		t.Errorf("DeviceID = %q", got)
+	}
+	topic, err := BuildTopic(DefaultTopic, "TLS", DeviceID("abc1"), "", TopicStatus)
+	if err != nil || topic != "meshcore/TLS/ABC1/status" {
+		t.Errorf("topic = %q (%v), want the uppercase device level", topic, err)
+	}
+}
