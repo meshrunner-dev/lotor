@@ -436,12 +436,20 @@ func (s *service) replaceClient(conn net.Conn) uint64 {
 	s.client = conn
 	s.disconnect = 0
 	s.remote = conn.RemoteAddr().String()
+	channelCapacity := s.p.MaxChannels
+	channelUsed := 0
+	for _, channel := range s.channels {
+		if channelOccupied(channel.name, channel.secret) {
+			channelUsed++
+		}
+	}
 	s.mu.Unlock()
 	if old != nil {
 		_ = old.Close()
 	}
 	s.log.Debug("companion client connected", zap.String("remote", conn.RemoteAddr().String()),
-		zap.Bool("replaced", old != nil))
+		zap.Bool("replaced", old != nil), zap.Int("channel_capacity", channelCapacity),
+		zap.Int("channel_used", channelUsed))
 	return generation
 }
 
@@ -468,9 +476,7 @@ func (s *service) serveClient(ctx context.Context, conn net.Conn, generation uin
 			return
 		}
 		if cmd != nil {
-			logging.Trace(s.log, "companion command received",
-				zap.String("command", companionCommandName(cmd)),
-				zap.Uint8("code", uint8(cmd.Code())))
+			logging.Trace(s.log, "companion command received", s.companionCommandFields(cmd)...)
 			responses = s.handle(ctx, cmd)
 		}
 		if !s.writeResponses(conn, generation, responses) {
@@ -541,8 +547,18 @@ func (s *service) writeResponses(conn net.Conn, generation uint64, responses []c
 			return false
 		}
 		_ = conn.SetWriteDeadline(time.Time{})
-		logging.Trace(s.log, "companion response sent",
-			zap.Uint8("code", responseCode(payload)), zap.Int("bytes", len(payload)))
+		fields := []zap.Field{
+			zap.Uint8("code", responseCode(payload)), zap.Int("bytes", len(payload)),
+		}
+		switch response := response.(type) {
+		case companion.ChannelInfo:
+			fields = append(fields, zap.Uint8("channel", response.Index),
+				zap.Bool("occupied", channelOccupied(response.Name, response.Secret)))
+		case companion.ErrorResponse:
+			fields = append(fields, zap.Uint8("error_code", uint8(response.Code)),
+				zap.String("reason", response.Code.Error()))
+		}
+		logging.Trace(s.log, "companion response sent", fields...)
 	}
 	return true
 }

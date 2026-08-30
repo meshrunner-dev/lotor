@@ -143,6 +143,33 @@ func TestChannelEnumerationExposesEmptySlotsBeforeSet(t *testing.T) {
 	}
 }
 
+func TestChannelCommandTraceIncludesSlotAndCapacityWithoutSecret(t *testing.T) {
+	built, err := build(testSpec(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	secret := [16]byte{1, 2, 3}
+	fields := svc.companionCommandFields(companion.SetChannel{
+		Index: 1, Name: "#szer", Secret: secret,
+	})
+	core, observed := observer.New(logging.TraceLevel)
+	logging.Trace(zap.New(core), "command", fields...)
+	entries := observed.All()
+	if len(entries) != 1 {
+		t.Fatalf("command traces = %#v", entries)
+	}
+	got := entries[0].ContextMap()
+	if got["command"] != "SetChannel" || got["channel"] != uint8(1) ||
+		got["channel_capacity"] != int64(defaultChannels) {
+		t.Fatalf("command fields = %#v", got)
+	}
+	if rendered := fmt.Sprint(got); strings.Contains(rendered, "#szer") ||
+		strings.Contains(rendered, fmt.Sprint(secret)) {
+		t.Fatalf("command trace exposed channel material: %s", rendered)
+	}
+}
+
 func TestAttachedStationUsesPhysicalPowerEnvelopeWhileRadioIsDown(t *testing.T) {
 	built, err := build(testSpec(t))
 	if err != nil {

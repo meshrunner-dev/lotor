@@ -58,6 +58,30 @@ func companionCommandName(command companion.Command) string {
 	return fmt.Sprintf("command-%d", command.Code())
 }
 
+// companionCommandFields adds only protocol metadata, never command values:
+// SetChannel carries a secret and therefore must remain safe to trace. Channel
+// indices and the advertised table capacity are essential when diagnosing the
+// application's sentinel GetChannel request.
+func (s *service) companionCommandFields(command companion.Command) []zap.Field {
+	fields := []zap.Field{
+		zap.String("command", companionCommandName(command)),
+		zap.Uint8("code", uint8(command.Code())),
+	}
+	switch command := command.(type) {
+	case companion.GetChannel:
+		fields = append(fields, zap.Uint8("channel", command.Index),
+			zap.Int("channel_capacity", s.p.MaxChannels))
+	case companion.SetChannel:
+		fields = append(fields, zap.Uint8("channel", command.Index),
+			zap.Int("channel_capacity", s.p.MaxChannels))
+	}
+	return fields
+}
+
+func channelOccupied(name string, secret [16]byte) bool {
+	return name != "" || secret != ([16]byte{})
+}
+
 func responseCode(payload []byte) uint8 {
 	if len(payload) == 0 {
 		return 0
