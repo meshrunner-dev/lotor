@@ -176,6 +176,34 @@ func TestPaintClassifiesTokens(t *testing.T) {
 	}
 }
 
+func TestPaintAddUsesTheChoiceFromTheWholeLine(t *testing.T) {
+	deps := testDeps(t)
+	for i := range deps.Kinds {
+		if deps.Kinds[i].Name != "relay" {
+			continue
+		}
+		deps.Kinds[i].Attrs = []schema.Attr{
+			{Name: "protocol", Type: schema.String,
+				Enum: []string{"meshcore"}, Doc: "the protocol"},
+			{Name: "profile", Type: schema.String},
+			{Name: "tx.mode", Type: schema.String},
+			{Name: "radio", Type: schema.String},
+		}
+	}
+	s := &session{deps: deps, colors: true}
+	s.setPath([]string{"relay"})
+	line := `add mc protocol=meshcore profile=eu-868-narrow tx.mode=shadow radio=g3 identity=xxxxxx node_name="FR91 🦝 Wanadoo"`
+	painted := s.paintLine(line)
+	for _, attr := range []string{"identity", "node_name"} {
+		if !strings.Contains(painted, cAttr+attr+cReset) {
+			t.Errorf("%s was not resolved from protocol=meshcore: %q", attr, painted)
+		}
+	}
+	if stripped := stripSGR(painted); stripped != line {
+		t.Errorf("painting altered the line: %q vs %q", stripped, line)
+	}
+}
+
 // stripSGR removes the colour codes, leaving the characters as typed.
 func stripSGR(s string) string {
 	var b strings.Builder

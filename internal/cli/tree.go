@@ -2138,7 +2138,12 @@ func (s *session) paintLine(line string) string {
 	if !s.colors {
 		return line
 	}
-	w := &lineWalk{s: s, path: s.curPath()}
+	// Resolve the complete draft once as well as walking it token by token.
+	// An add line's choice may contribute attributes anywhere else on the
+	// line, including before the choice itself; the parser treats their order
+	// as irrelevant, so the painter must judge them against that same view.
+	_, fullRest := s.resolveTree(splitArgs(line))
+	w := &lineWalk{s: s, path: s.curPath(), fullRest: fullRest}
 	if strings.HasPrefix(line, "/") {
 		w.path = nil
 	}
@@ -2195,11 +2200,12 @@ func unquoted(s string) string {
 // lineWalk follows a line the way the grammar does, so the painter and
 // the parser agree about what each word is.
 type lineWalk struct {
-	s     *session
-	path  []string
-	phase int // 0 walking the path, 1 expecting the verb, 2 its arguments
-	verb  string
-	args  []string // what the verb accepts, whether switch or pair
+	s        *session
+	path     []string
+	fullRest []string // the whole verb and argument draft, for order-independent add
+	phase    int      // 0 walking the path, 1 expecting the verb, 2 its arguments
+	verb     string
+	args     []string // what the verb accepts, whether switch or pair
 	// takesValue says the verb reads a word of the operator's own
 	// choosing here — a new instance's name, a key prefix. Such a
 	// word is not one this console names, so it claims nothing.
@@ -2231,7 +2237,11 @@ func (w *lineWalk) paintRest(token string) string {
 		return painted + w.paintRest(leftover)
 	case 1:
 		w.phase, w.verb = 2, token
-		w.args = names(w.s.argTermsFor(w.path, []string{token}))
+		rest := []string{token}
+		if len(w.fullRest) > 0 && w.fullRest[0] == unquoted(token) {
+			rest = w.fullRest
+		}
+		w.args = names(w.s.argTermsFor(w.path, rest))
 		w.takesValue = takesValue(token)
 		cands := w.s.verbsAt(w.path)
 		if len(w.path) == 0 {
