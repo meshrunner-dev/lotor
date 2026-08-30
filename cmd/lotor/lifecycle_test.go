@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -45,11 +46,75 @@ func lifecycleManager(t *testing.T) *manager {
 		for name := range m.observers {
 			m.stopObserver(name)
 		}
+		for name := range m.stations {
+			m.stopStation(name)
+		}
 		m.mu.Unlock()
 		cancel()
 		m.wg.Wait()
 	})
 	return m
+}
+
+func freeTCPAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return addr
+}
+
+func TestCreateMutateAndRemoveDetachedStation(t *testing.T) {
+	m := lifecycleManager(t)
+	addr := freeTCPAddr(t)
+	msg, err := m.Create(context.Background(), confdb.KindStation, "alice",
+		map[string]string{
+			"protocol": "meshcore", "listen": addr, "profile": "eu-868-narrow",
+			"identity": "new", "node_name": "Alice", "tx_power_dbm": "14",
+		}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(msg, "listening") {
+		t.Fatalf("create = %q", msg)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		infos := m.StationInfos()
+		if len(infos) == 1 && infos[0].State == "running" {
+			if infos[0].RF != "detached" || infos[0].Listen != addr {
+				t.Fatalf("station info = %+v", infos[0])
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("station did not listen: %+v", infos)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if _, err := m.Mutate(context.Background(), confdb.KindStation, "alice",
+		map[string]string{"node_name": "Alice Two"}, nil, "test"); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := m.store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.Stations["alice"].Layered.Overrides["eu-868-narrow"]["node_name"]; got != "Alice Two" {
+		t.Fatalf("persisted node_name = %v", got)
+	}
+	if _, err := m.Remove(context.Background(), confdb.KindStation, "alice", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.StationInfos()) != 0 {
+		t.Fatal("removed station remains visible")
+	}
 }
 
 func TestApplyTypedPersistsAndBounces(t *testing.T) {

@@ -37,6 +37,7 @@ import (
 	"meshrunner.dev/lotor/internal/schema"
 	"meshrunner.dev/lotor/internal/sensor"
 	"meshrunner.dev/lotor/internal/sentinel"
+	"meshrunner.dev/lotor/internal/station"
 
 	"meshrunner.dev/pkg/meshcore"
 )
@@ -103,6 +104,7 @@ type manager struct {
 	file      *config.File
 	wg        sync.WaitGroup
 	running   map[string]*managedRelay
+	stations  map[string]*managedStation
 	observers map[string]*managedObserver
 	// obsCause remembers why each configured observer is not running —
 	// the truth the status line owes the operator, kept beside the
@@ -127,12 +129,20 @@ type managedRelay struct {
 	done   chan struct{}
 }
 
+type managedStation struct {
+	cancel  context.CancelFunc
+	done    chan struct{}
+	service station.Service
+	failure station.Info
+}
+
 func newManager(store *confdb.Store, f *config.File, b *bus.Bus,
 	sen *sentinel.Sentinel, kinds []schema.Kind, log *zap.Logger,
 ) *manager {
 	return &manager{
 		store: store, file: f, bus: b, sen: sen, kinds: kinds, log: log,
 		running:     map[string]*managedRelay{},
+		stations:    map[string]*managedStation{},
 		observers:   map[string]*managedObserver{},
 		obsCause:    map[string]string{},
 		samplers:    map[string]*managedSampler{},
@@ -153,6 +163,9 @@ func (m *manager) Start(ctx context.Context) {
 	m.wg.Go(func() { m.serveAir(ctx) })
 	for name := range m.file.Relays {
 		m.startRelay(ctx, name)
+	}
+	for name := range m.file.Stations {
+		m.startStation(ctx, name)
 	}
 	for name := range m.file.MQTT {
 		m.startObserver(ctx, name)
@@ -532,6 +545,76 @@ func (m *manager) stopRelay(name string) {
 	m.log.Info("relay stopped", zap.String("relay", name))
 }
 
+// startStation assembles the application-facing half independently of RF. A
+// configured but unavailable attachment therefore leaves a working TCP
+// companion endpoint whose RF status says down or detached.
+func (m *manager) startStation(ctx context.Context, name string) {
+	sc := m.file.Stations[name]
+	builder, err := station.Lookup(sc.Protocol)
+	var cfg map[string]any
+	var traces []config.Trace
+	if err == nil {
+		cfg, traces, err = sc.Layered.Resolve(builder.Presets)
+	}
+	if err == nil {
+		err = builder.Check(cfg)
+	}
+	if err != nil {
+		m.log.Error("station configuration failed", zap.String("station", name), zap.Error(err))
+		rf := station.RFDetached
+		if sc.Radio != "" {
+			rf = station.RFDown
+		}
+		m.stations[name] = &managedStation{failure: station.Info{
+			Name: name, Protocol: sc.Protocol, Listen: sc.Listen, Radio: sc.Radio,
+			State: station.StateError, Cause: err.Error(), RF: rf,
+		}}
+		return
+	}
+	svc, err := builder.Build(station.Spec{
+		Name: name, Protocol: sc.Protocol, Listen: sc.Listen, Radio: sc.Radio,
+		Config: cfg, Log: m.log.Named("station").With(zap.String("station", name)),
+		Build: buildInfo,
+	})
+	if err != nil {
+		m.log.Error("station assembly failed", zap.String("station", name), zap.Error(err))
+		rf := station.RFDetached
+		if sc.Radio != "" {
+			rf = station.RFDown
+		}
+		m.stations[name] = &managedStation{failure: station.Info{
+			Name: name, Protocol: sc.Protocol, Listen: sc.Listen, Radio: sc.Radio,
+			State: station.StateError, Cause: err.Error(), RF: rf,
+		}}
+		return
+	}
+	sctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	m.stations[name] = &managedStation{cancel: cancel, done: done, service: svc}
+	m.viewMu.Lock()
+	m.traces[confdb.KindStation+" "+name] = withStructural(traces, stationStructural(sc))
+	m.viewMu.Unlock()
+	m.wg.Go(func() {
+		defer close(done)
+		if err := svc.Run(sctx); err != nil && sctx.Err() == nil {
+			m.log.Error("station stopped", zap.String("station", name), zap.Error(err))
+		}
+	})
+}
+
+func (m *manager) stopStation(name string) {
+	h, ok := m.stations[name]
+	if !ok {
+		return
+	}
+	if h.cancel != nil {
+		h.cancel()
+		<-h.done
+	}
+	delete(m.stations, name)
+	m.log.Info("station stopped", zap.String("station", name))
+}
+
 // The live views the console reads. Each returns a copy: sessions
 // iterate while relays rebuild.
 
@@ -543,6 +626,34 @@ func (m *manager) RelayInfos() []cli.RelayInfo {
 	out := make([]cli.RelayInfo, 0, len(m.infos))
 	for _, i := range m.infos {
 		out = append(out, i)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+func (m *manager) StationInfos() []cli.StationInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]cli.StationInfo, 0, len(m.file.Stations))
+	for name, sc := range m.file.Stations {
+		info := station.Info{
+			Name: name, Protocol: sc.Protocol, Listen: sc.Listen, Radio: sc.Radio,
+			State: station.StateStopped, RF: station.RFDetached,
+		}
+		if h, ok := m.stations[name]; ok {
+			if h.service != nil {
+				info = h.service.Info()
+			} else {
+				info = h.failure
+			}
+		}
+		out = append(out, cli.StationInfo{
+			Name: info.Name, Protocol: info.Protocol, Listen: info.Listen, Radio: info.Radio,
+			State: string(info.State), Cause: info.Cause, RF: string(info.RF),
+			Connected: info.Connected, Remote: info.Remote,
+			Mailbox: info.Mailbox, MailboxCap: info.MailboxCap,
+			Waveform: info.Waveform, Identity: info.PublicKey,
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
@@ -604,6 +715,7 @@ func (m *manager) Traces() map[string][]config.Trace {
 	// the hardware is missing.
 	m.syntheticRadioTraces(out)
 	m.syntheticRelayTraces(out)
+	m.syntheticStationTraces(out)
 	addSensorTraces(out, m.file.Sensors)
 	// The singletons have no layering, so their "provenance" is the
 	// store itself — synthesised here so print works the same way
@@ -680,6 +792,21 @@ func (m *manager) syntheticRelayTraces(out map[string][]config.Trace) {
 			}
 		}
 		out["relay "+name] = rows
+	}
+}
+
+func (m *manager) syntheticStationTraces(out map[string][]config.Trace) {
+	for name, sc := range m.file.Stations {
+		if _, live := out[confdb.KindStation+" "+name]; live {
+			continue
+		}
+		rows := stationStructural(sc)
+		if b, err := station.Lookup(sc.Protocol); err == nil {
+			if _, traces, rerr := sc.Layered.Resolve(b.Presets); rerr == nil {
+				rows = withStructural(traces, rows)
+			}
+		}
+		out[confdb.KindStation+" "+name] = rows
 	}
 }
 
@@ -842,6 +969,29 @@ func relayStructural(rc config.Relay) []config.Trace {
 	return rows
 }
 
+func stationStructural(sc config.Station) []config.Trace {
+	rows := []config.Trace{
+		{Key: attrProtocol, Value: sc.Protocol, Source: sourceConfig},
+		{Key: attrListen, Value: sc.Listen, Source: sourceConfig},
+		{Key: attrProfile, Value: profileName(sc.Layered), Source: sourceConfig},
+	}
+	if sc.Radio != "" {
+		rows = append(rows, config.Trace{Key: attrRadio, Value: sc.Radio, Source: sourceConfig})
+	}
+	if sc.TX != nil {
+		rows = append(rows,
+			config.Trace{Key: attrTXMode, Value: sc.TX.Mode, Source: sourceConfig},
+			config.Trace{Key: attrTXExhausted, Value: sc.TX.LBTExhausted, Source: sourceConfig},
+			config.Trace{Key: attrTXQueueDepth, Value: sc.TX.QueueDepth, Source: sourceConfig},
+			config.Trace{Key: attrTXCAD, Value: sc.TX.CAD == nil || *sc.TX.CAD, Source: sourceConfig},
+		)
+		if sc.TX.LBTThresholdDB != 0 {
+			rows = append(rows, config.Trace{Key: attrTXThreshold, Value: sc.TX.LBTThresholdDB, Source: sourceConfig})
+		}
+	}
+	return rows
+}
+
 // addSensorTraces resolves every sensor's layers without hardware. A
 // sensor is never claimed, so it is always in this shape — there is no
 // assembled counterpart to prefer, as there is for a live radio.
@@ -904,7 +1054,7 @@ func (m *manager) Mutate(ctx context.Context, kind, name string,
 	// the mesh learns a new node and forgets the paths to the old —
 	// so the minted public key is returned for the console to show.
 	minted := ""
-	if kind == confdb.KindRelay && set[attrIdentity] == "new" {
+	if (kind == confdb.KindRelay || kind == confdb.KindStation) && set[attrIdentity] == "new" {
 		seed, pub, err := mintIdentity()
 		if err != nil {
 			return "", err
@@ -1059,6 +1209,10 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 
 	if relayName == "" {
 		switch kind {
+		case confdb.KindStation:
+			m.stopStation(name)
+			m.startStation(m.ctx, name) //nolint:contextcheck // deliberate: daemon lifetime
+			return "applied — station " + name + " restarting", nil
 		case confdb.KindSystem:
 			// Both attributes are read live.
 			m.applyLogLevel()
@@ -1108,6 +1262,8 @@ func deepCheck(next *config.File, kind, name, relayName string) error {
 		}
 	case kind == confdb.KindRadio:
 		return checkRadioAlone(next.Radios[name])
+	case kind == confdb.KindStation:
+		return checkStationAlone(next.Stations[name])
 	case kind == confdb.KindSensor:
 		return checkSensorAlone(next.Sensors[name])
 	case kind == confdb.KindMQTT:
@@ -1146,6 +1302,11 @@ func (m *manager) Create(ctx context.Context, kind, name string,
 			return "", fmt.Errorf("relay %q already exists", name)
 		}
 		minted, err = m.createRelay(next, name, attrs, change)
+	case confdb.KindStation:
+		if _, dup := next.Stations[name]; dup {
+			return "", fmt.Errorf("station %q already exists", name)
+		}
+		minted, err = m.createStation(next, name, attrs, change)
 	case confdb.KindRadio:
 		if _, dup := next.Radios[name]; dup {
 			return "", fmt.Errorf("radio %q already exists", name)
@@ -1190,6 +1351,10 @@ func (m *manager) commitCreate(ctx context.Context, next *config.File,
 		if err := preflight(name, rc, next.Radios[rc.Radio]); err != nil {
 			return "", err
 		}
+	case confdb.KindStation:
+		if err := checkStationAlone(next.Stations[name]); err != nil {
+			return "", err
+		}
 	case confdb.KindRadio:
 		if err := checkRadioAlone(next.Radios[name]); err != nil {
 			return "", err
@@ -1220,6 +1385,9 @@ func (m *manager) commitCreate(ctx context.Context, next *config.File,
 		// next restart.
 		m.reconcileObservers()
 		return fmt.Sprintf("added — relay %s starting", name), nil
+	case confdb.KindStation:
+		m.startStation(m.ctx, name) //nolint:contextcheck // deliberate: daemon lifetime
+		return fmt.Sprintf("added — station %s listening", name), nil
 	case confdb.KindMQTT:
 		m.startObserver(m.ctx, name) //nolint:contextcheck // deliberate: daemon lifetime
 		return fmt.Sprintf("added — observer %s connecting", name), nil
@@ -1276,6 +1444,54 @@ func (m *manager) createRelay(next *config.File, name string,
 		change[attr] = confdb.Change{New: v}
 	}
 	next.Relays[name] = rc
+	return minted, nil
+}
+
+func (m *manager) createStation(next *config.File, name string,
+	attrs map[string]string, change map[string]confdb.Change,
+) (minted string, err error) {
+	sc := config.Station{
+		Protocol: attrs[attrProtocol], Listen: attrs[attrListen], Radio: attrs[attrRadio],
+		Layered: config.Layered{Profile: attrs[attrProfile]},
+	}
+	if sc.Protocol == "" || sc.Listen == "" {
+		return "", errors.New("a new station needs protocol= and listen=")
+	}
+	for _, attr := range []string{attrProtocol, attrListen, attrRadio, attrProfile} {
+		if v, ok := attrs[attr]; ok {
+			change[attr] = confdb.Change{New: v}
+		}
+	}
+	rest := make(map[string]string, len(attrs))
+	for k, v := range attrs {
+		if k == attrProtocol || k == attrListen || k == attrRadio || k == attrProfile {
+			continue
+		}
+		rest[k] = v
+	}
+	if rest[attrIdentity] == "new" {
+		seed, pub, err := mintIdentity()
+		if err != nil {
+			return "", err
+		}
+		rest[attrIdentity], minted = seed, pub
+	}
+	if next.Stations == nil {
+		next.Stations = map[string]config.Station{}
+	}
+	next.Stations[name] = sc
+	typed, err := m.parseAgainst(confdb.KindStation, sc.Protocol, rest, nil)
+	if err != nil {
+		return "", err
+	}
+	sc = next.Stations[name]
+	for attr, value := range typed {
+		if _, err := setStationAttr(&sc, attr, value); err != nil {
+			return "", err
+		}
+		change[attr] = confdb.Change{New: value}
+	}
+	next.Stations[name] = sc
 	return minted, nil
 }
 
@@ -1590,6 +1806,12 @@ func (m *manager) Remove(ctx context.Context, kind, name, principal string) (str
 		return "", err
 	}
 	m.file = next
+	if kind == confdb.KindStation {
+		m.stopStation(name)
+		m.viewMu.Lock()
+		delete(m.traces, confdb.KindStation+" "+name)
+		m.viewMu.Unlock()
+	}
 	if kind == confdb.KindSensor {
 		m.stopSampler(name)
 	}
@@ -1625,6 +1847,12 @@ func removeFromFile(next *config.File, kind, name string) (string, error) {
 		}
 		delete(next.Relays, name)
 		return fmt.Sprintf("removed — relay %s stopped", name), nil
+	case confdb.KindStation:
+		if _, ok := next.Stations[name]; !ok {
+			return "", fmt.Errorf("no station %q", name)
+		}
+		delete(next.Stations, name)
+		return fmt.Sprintf("removed — station %s stopped", name), nil
 	case confdb.KindRadio:
 		if _, ok := next.Radios[name]; !ok {
 			return "", fmt.Errorf("no radio %q", name)
@@ -1632,6 +1860,11 @@ func removeFromFile(next *config.File, kind, name string) (string, error) {
 		for rn, rl := range next.Relays {
 			if rl.Radio == name {
 				return "", fmt.Errorf("relay %q claims this radio — remove it first", rn)
+			}
+		}
+		for stationName, st := range next.Stations {
+			if st.Radio == name {
+				return "", fmt.Errorf("station %q is attached to this radio — detach it first", stationName)
 			}
 		}
 		delete(next.Radios, name)
@@ -1755,6 +1988,10 @@ func (m *manager) orphanOverride(kind, name, attr string) bool {
 		if rc, ok := m.file.Relays[name]; ok {
 			l = &rc.Layered
 		}
+	case confdb.KindStation:
+		if sc, ok := m.file.Stations[name]; ok {
+			l = &sc.Layered
+		}
 	case confdb.KindRadio:
 		if rd, ok := m.file.Radios[name]; ok {
 			l = &rd.Layered
@@ -1816,6 +2053,12 @@ func (m *manager) kindAndChoiceIn(f *config.File, kind, name string) (*schema.Ki
 			return nil, "", fmt.Errorf("no relay %q", name)
 		}
 		return k, rc.Protocol, nil
+	case confdb.KindStation:
+		sc, ok := f.Stations[name]
+		if !ok {
+			return nil, "", fmt.Errorf("no station %q", name)
+		}
+		return k, sc.Protocol, nil
 	case confdb.KindRadio:
 		rd, ok := f.Radios[name]
 		if !ok {
@@ -1867,6 +2110,9 @@ func applyChanges(next *config.File, kind, name string,
 	case confdb.KindRelay:
 		change, err := applyRelayChanges(next, name, typed, unset)
 		return change, name, err
+	case confdb.KindStation:
+		change, err := applyStationChanges(next, name, typed, unset)
+		return change, "", err
 	case confdb.KindSensor:
 		// No relay restarts for a sensor: its sampler is the daemon's,
 		// and the relays that read its cache never held it.
@@ -1908,6 +2154,29 @@ func applyRelayChanges(next *config.File, name string,
 		change[attr] = confdb.Change{Old: old}
 	}
 	next.Relays[name] = rc
+	return change, nil
+}
+
+func applyStationChanges(next *config.File, name string,
+	typed map[string]any, unset []string,
+) (map[string]confdb.Change, error) {
+	change := map[string]confdb.Change{}
+	sc := next.Stations[name]
+	for _, attr := range orderedAttrs(typed) {
+		old, err := setStationAttr(&sc, attr, typed[attr])
+		if err != nil {
+			return nil, err
+		}
+		change[attr] = confdb.Change{Old: old, New: typed[attr]}
+	}
+	for _, attr := range unset {
+		old, err := unsetStationAttr(&sc, attr)
+		if err != nil {
+			return nil, err
+		}
+		change[attr] = confdb.Change{Old: old}
+	}
+	next.Stations[name] = sc
 	return change, nil
 }
 
@@ -1977,9 +2246,32 @@ func setRelayAttr(rc *config.Relay, attr string, v any) (old any, err error) {
 		rc.NoiseHistory = &b
 		return old, nil
 	case attrTXMode, attrTXThreshold, attrTXExhausted, attrTXQueueDepth, attrTXCAD:
-		return setTXAttr(rc, attr, v)
+		return setTXAttr(&rc.TX, attr, v)
 	default:
 		return setOverride(&rc.Layered, attr, v), nil
+	}
+}
+
+func setStationAttr(sc *config.Station, attr string, v any) (old any, err error) {
+	switch attr {
+	case attrProtocol:
+		return nil, errors.New("protocol says what the station IS — remove it and add it anew")
+	case attrListen:
+		old = sc.Listen
+		sc.Listen, err = asString(attr, v)
+		return old, err
+	case attrRadio:
+		old = sc.Radio
+		sc.Radio, err = asString(attr, v)
+		return old, err
+	case attrProfile:
+		old = sc.Layered.Profile
+		sc.Layered.Profile, err = asString(attr, v)
+		return old, err
+	case attrTXMode, attrTXThreshold, attrTXExhausted, attrTXQueueDepth, attrTXCAD:
+		return setTXAttr(&sc.TX, attr, v)
+	default:
+		return setOverride(&sc.Layered, attr, v), nil
 	}
 }
 
@@ -2004,6 +2296,26 @@ func unsetRelayAttr(rc *config.Relay, attr string) (old any, err error) {
 		return old, nil
 	default:
 		return unsetOverride(&rc.Layered, attr)
+	}
+}
+
+func unsetStationAttr(sc *config.Station, attr string) (old any, err error) {
+	switch attr {
+	case attrProtocol, attrListen, attrProfile,
+		attrTXMode, attrTXThreshold, attrTXExhausted, attrTXQueueDepth:
+		return nil, fmt.Errorf("%s cannot be unset — set it to what it should be", attr)
+	case attrRadio:
+		old = sc.Radio
+		sc.Radio = ""
+		return old, nil
+	case attrTXCAD:
+		if sc.TX != nil && sc.TX.CAD != nil {
+			old = *sc.TX.CAD
+			sc.TX.CAD = nil
+		}
+		return old, nil
+	default:
+		return unsetOverride(&sc.Layered, attr)
 	}
 }
 
@@ -2042,30 +2354,31 @@ func setRadioAttr(rd *config.Radio, attr string, v any) (old any, err error) {
 
 // setTXAttr writes into the transmit block, creating it the first
 // time — the dotted names are the flat console's reach into it.
-func setTXAttr(rc *config.Relay, attr string, v any) (old any, err error) {
-	if rc.TX == nil {
-		rc.TX = &config.TX{}
+func setTXAttr(tx **config.TX, attr string, v any) (old any, err error) {
+	if *tx == nil {
+		*tx = &config.TX{}
 	}
+	cfg := *tx
 	switch attr {
 	case attrTXMode:
-		old = rc.TX.Mode
-		rc.TX.Mode, err = asString(attr, v)
+		old = cfg.Mode
+		cfg.Mode, err = asString(attr, v)
 	case attrTXThreshold:
-		old = rc.TX.LBTThresholdDB
-		rc.TX.LBTThresholdDB, err = asFloat(attr, v)
+		old = cfg.LBTThresholdDB
+		cfg.LBTThresholdDB, err = asFloat(attr, v)
 	case attrTXExhausted:
-		old = rc.TX.LBTExhausted
-		rc.TX.LBTExhausted, err = asString(attr, v)
+		old = cfg.LBTExhausted
+		cfg.LBTExhausted, err = asString(attr, v)
 	case attrTXQueueDepth:
-		old = rc.TX.QueueDepth
-		rc.TX.QueueDepth, err = asInt(attr, v)
+		old = cfg.QueueDepth
+		cfg.QueueDepth, err = asInt(attr, v)
 	case attrTXCAD:
-		if rc.TX.CAD != nil {
-			old = *rc.TX.CAD
+		if cfg.CAD != nil {
+			old = *cfg.CAD
 		}
 		var b bool
 		if b, err = asBool(attr, v); err == nil {
-			rc.TX.CAD = &b
+			cfg.CAD = &b
 		}
 	}
 	return old, err
@@ -2369,6 +2682,8 @@ func objectSection(f *config.File, kind, name string) (any, error) {
 	switch kind {
 	case confdb.KindRelay:
 		return f.Relays[name], nil
+	case confdb.KindStation:
+		return f.Stations[name], nil
 	case confdb.KindRadio:
 		return f.Radios[name], nil
 	case confdb.KindSensor:
@@ -2429,6 +2744,21 @@ func checkRadioAlone(rd config.Radio) error {
 	return check(cfg)
 }
 
+func checkStationAlone(sc config.Station) error {
+	builder, err := station.Lookup(sc.Protocol)
+	if err != nil {
+		return err
+	}
+	if err := checkScopes(sc.Layered, builder.Presets, builder.Check); err != nil {
+		return err
+	}
+	cfg, _, err := sc.Layered.Resolve(builder.Presets)
+	if err != nil {
+		return err
+	}
+	return builder.Check(cfg)
+}
+
 // checkSensorAlone validates a sensor that no relay has to consult:
 // the driver's own dry run, over every override scope.
 func checkSensorAlone(sn config.Sensor) error {
@@ -2469,6 +2799,9 @@ func cloneFile(f *config.File) (*config.File, error) {
 	}
 	if out.Relays == nil {
 		out.Relays = map[string]config.Relay{}
+	}
+	if out.Stations == nil {
+		out.Stations = map[string]config.Station{}
 	}
 	if out.Sensors == nil {
 		out.Sensors = map[string]config.Sensor{}
@@ -2546,6 +2879,12 @@ func (m *manager) Layers(kind, name string) (string, map[string]map[string]any, 
 			return "", nil, false
 		}
 		l = rc.Layered
+	case confdb.KindStation:
+		sc, ok := m.file.Stations[name]
+		if !ok {
+			return "", nil, false
+		}
+		l = sc.Layered
 	case confdb.KindRadio:
 		rd, ok := m.file.Radios[name]
 		if !ok {

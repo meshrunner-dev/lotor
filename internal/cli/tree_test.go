@@ -64,6 +64,17 @@ func TestTreeInstancePrintMasksSecrets(t *testing.T) {
 	}
 }
 
+func TestStationCollectionAndStatusKeepTCPSeparateFromRF(t *testing.T) {
+	out := run(t, testDeps(t), "/station", "print", "alice", "status")
+	if !strings.Contains(out, "alice") || !strings.Contains(out, "127.0.0.1:5000") {
+		t.Fatalf("station listing lost its listener:\n%s", out)
+	}
+	if !strings.Contains(out, "detached") || !strings.Contains(out, "client") ||
+		!strings.Contains(out, "none") {
+		t.Fatalf("station status conflated TCP and RF:\n%s", out)
+	}
+}
+
 func TestTreeAbsoluteCommandFromInsideAContext(t *testing.T) {
 	out := run(t, testDeps(t), "/relay meshcore-868", "/status", "?")
 	if !strings.Contains(out, "daemon") {

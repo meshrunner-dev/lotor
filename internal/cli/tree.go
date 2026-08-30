@@ -129,6 +129,13 @@ func (s *session) relays() []RelayInfo {
 	return s.deps.Relays
 }
 
+func (s *session) stations() []StationInfo {
+	if s.deps.LiveStations != nil {
+		return s.deps.LiveStations()
+	}
+	return s.deps.Stations
+}
+
 // radios is the live view when the daemon serves one.
 func (s *session) radios() []RadioInfo {
 	if s.deps.LiveRadios != nil {
@@ -179,6 +186,10 @@ func (s *session) instances(kind string) map[string]string {
 	case scopeRelay:
 		for _, r := range s.relays() {
 			out[r.Name] = r.Protocol
+		}
+	case scopeStation:
+		for _, st := range s.stations() {
+			out[st.Name] = st.Protocol
 		}
 	case scopeRadio:
 		for _, r := range s.radios() {
@@ -1088,6 +1099,8 @@ func (s *session) treeStatus(ctx context.Context, path []string) error {
 	switch path[0] {
 	case scopeRelay:
 		return s.relayStatus(ctx, in)
+	case scopeStation:
+		return s.stationStatus(path[1])
 	case scopeMQTT:
 		return s.mqttStatus(path[1])
 	case scopeSensor:
@@ -1255,6 +1268,8 @@ func (s *session) printOnce(ctx context.Context, path []string, want printArgs) 
 		switch path[0] {
 		case scopeRelay:
 			return s.relayList()
+		case scopeStation:
+			return s.stationList()
 		case scopeMQTT:
 			return s.mqttList()
 		case scopeSensor:

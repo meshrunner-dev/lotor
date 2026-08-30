@@ -41,6 +41,7 @@ import (
 	"meshrunner.dev/lotor/internal/sensor"
 	"meshrunner.dev/lotor/internal/sentinel"
 	"meshrunner.dev/lotor/internal/single"
+	"meshrunner.dev/lotor/internal/station"
 	"meshrunner.dev/lotor/internal/update"
 	"meshrunner.dev/lotor/internal/web"
 
@@ -52,6 +53,7 @@ import (
 	"meshrunner.dev/lotor/internal/schema"
 	_ "meshrunner.dev/lotor/internal/sensor/bme280"
 	_ "meshrunner.dev/lotor/internal/sensor/ina219"
+	_ "meshrunner.dev/lotor/internal/station/meshcore"
 	lotorversion "meshrunner.dev/lotor/internal/version"
 )
 
@@ -567,10 +569,10 @@ func profileNames(choice string, choices []string,
 // package, the contributed ones from whichever protocol or driver an
 // instance chose, straight from their registries.
 func buildKinds() []schema.Kind {
-	kinds := make([]schema.Kind, 0, 8)
+	kinds := make([]schema.Kind, 0, 9)
 	kinds = append(kinds, []schema.Kind{
 		{
-			Name: confdb.KindRelay, Doc: "one protocol instance, owning one radio",
+			Name: confdb.KindRelay, Doc: "one protocol repeater attached to one radio",
 			Attrs:      choiceAttrs(config.RelayAttrs(), attrProtocol, protocol.Registered()),
 			ChoiceAttr: attrProtocol,
 			Contributed: func(choice string) []schema.Attr {
@@ -584,6 +586,28 @@ func buildKinds() []schema.Kind {
 				return profileNames(choice, protocol.Registered(),
 					func(name string) map[string]map[string]any {
 						b, err := protocol.Lookup(name)
+						if err != nil {
+							return nil
+						}
+						return b.Presets
+					})
+			},
+		},
+		{
+			Name: confdb.KindStation, Doc: "one virtual companion identity, with optional RF attachment",
+			Attrs:      choiceAttrs(config.StationAttrs(), attrProtocol, station.Registered()),
+			ChoiceAttr: attrProtocol,
+			Contributed: func(choice string) []schema.Attr {
+				b, err := station.Lookup(choice)
+				if err != nil {
+					return nil
+				}
+				return b.Schema
+			},
+			Profiles: func(choice string) []string {
+				return profileNames(choice, station.Registered(),
+					func(name string) map[string]map[string]any {
+						b, err := station.Lookup(name)
 						if err != nil {
 							return nil
 						}
@@ -715,26 +739,27 @@ func watchProbation(ctx context.Context, stateDir string, log *zap.Logger) {
 // live views and the mutation door, all of them the manager's.
 func consoleDeps(mgr *manager, b *bus.Bus, sen *sentinel.Sentinel) cli.Deps {
 	return cli.Deps{
-		Version:     version,
-		Revision:    buildInfo.ShortRevision(),
-		Started:     time.Now(),
-		Sessions:    cli.NewSessions(),
-		Bus:         b,
-		Sentinel:    sen,
-		Kinds:       mgr.kinds,
-		LiveRelays:  mgr.RelayInfos,
-		LiveRadios:  mgr.RadioInfos,
-		LiveSensors: mgr.SensorInfos,
-		LiveMQTTs:   mgr.MQTTInfos,
-		History:     mgr.History,
-		Log:         mgr.log.Named("cli"),
-		LiveTraces:  mgr.Traces,
-		Layers:      mgr.Layers,
-		Mutate:      mgr.Mutate,
-		Undo:        mgr.Undo,
-		Create:      mgr.Create,
-		Remove:      mgr.Remove,
-		SystemName:  mgr.SystemName,
+		Version:      version,
+		Revision:     buildInfo.ShortRevision(),
+		Started:      time.Now(),
+		Sessions:     cli.NewSessions(),
+		Bus:          b,
+		Sentinel:     sen,
+		Kinds:        mgr.kinds,
+		LiveRelays:   mgr.RelayInfos,
+		LiveStations: mgr.StationInfos,
+		LiveRadios:   mgr.RadioInfos,
+		LiveSensors:  mgr.SensorInfos,
+		LiveMQTTs:    mgr.MQTTInfos,
+		History:      mgr.History,
+		Log:          mgr.log.Named("cli"),
+		LiveTraces:   mgr.Traces,
+		Layers:       mgr.Layers,
+		Mutate:       mgr.Mutate,
+		Undo:         mgr.Undo,
+		Create:       mgr.Create,
+		Remove:       mgr.Remove,
+		SystemName:   mgr.SystemName,
 	}
 }
 

@@ -36,6 +36,7 @@ import (
 // Command vocabulary reused across parsers.
 const (
 	scopeRelay   = "relay"
+	scopeStation = "station"
 	scopeRadio   = "radio"
 	scopeSensor  = "sensor"
 	scopeMQTT    = "mqtt"
@@ -224,6 +225,19 @@ type RelayInfo struct {
 	Started time.Time
 }
 
+// StationInfo is one locally hosted companion identity. Its application
+// listener and RF state are separate by design: detached radio service must
+// not make the TCP endpoint disappear.
+type StationInfo struct {
+	Name, Protocol, Listen, Radio string
+	State, Cause, RF              string
+	Connected                     bool
+	Remote                        string
+	Mailbox, MailboxCap           int
+	Waveform                      radio.Waveform
+	Identity                      string
+}
+
 // HistoryQuery is one history print's answer to "which slice": the
 // same vocabulary frames speaks — a count, window edges, or a
 // revision to centre on.
@@ -320,6 +334,7 @@ type Deps struct {
 	Revision string
 	Started  time.Time
 	Relays   []RelayInfo
+	Stations []StationInfo
 	Radios   []RadioInfo
 	Sensors  []SensorInfo
 	Sentinel *sentinel.Sentinel
@@ -338,8 +353,9 @@ type Deps struct {
 	// under a running session: they always name the current engine,
 	// where the plain fields above froze at startup. Optional — tests
 	// and static deployments use the fields.
-	LiveRelays func() []RelayInfo
-	LiveRadios func() []RadioInfo
+	LiveRelays   func() []RelayInfo
+	LiveStations func() []StationInfo
+	LiveRadios   func() []RadioInfo
 	// LiveSensors lists the configured parts as the daemon holds them.
 	LiveSensors func() []SensorInfo
 	// History reads the configuration's revision journal, newest

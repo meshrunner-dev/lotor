@@ -91,6 +91,54 @@ func (s *session) relayList() error {
 	return tb.flush(s.out)
 }
 
+func (s *session) stationList() error {
+	if len(s.stations()) == 0 {
+		fmt.Fprint(s.out, "no stations configured\r\n")
+		return nil
+	}
+	tb := s.table()
+	tb.header("NAME", "PROTOCOL", "STATE", "RF", "LISTEN")
+	for _, st := range s.stations() {
+		tb.row(st.Name, st.Protocol, st.State, st.RF, st.Listen)
+	}
+	return tb.flush(s.out)
+}
+
+func (s *session) stationStatus(name string) error {
+	for _, st := range s.stations() {
+		if st.Name != name {
+			continue
+		}
+		tb := s.table()
+		tb.row("state", st.State)
+		if st.Cause != "" {
+			tb.row("cause", st.Cause)
+		}
+		tb.row("protocol", st.Protocol)
+		if st.Identity != "" {
+			tb.row("identity", st.Identity[:min(12, len(st.Identity))])
+		}
+		tb.row("listen", st.Listen)
+		client := "none"
+		if st.Connected {
+			client = st.Remote
+		}
+		tb.row("client", client)
+		rf := st.RF
+		if st.Radio != "" {
+			rf += " — " + st.Radio
+		}
+		tb.row("rf", rf)
+		tb.row("waveform", fmt.Sprintf("%.3f MHz  sf%d  bw %d  cr 4/%d  preamble %d  sync 0x%02x  crc %v",
+			float64(st.Waveform.FrequencyHz)/1e6, st.Waveform.SpreadingFactor,
+			st.Waveform.BandwidthHz, st.Waveform.CodingRate, st.Waveform.Preamble,
+			st.Waveform.SyncWord, st.Waveform.CRC))
+		tb.row("mailbox", fmt.Sprintf("%d / %d", st.Mailbox, st.MailboxCap))
+		return tb.flush(s.out)
+	}
+	return fmt.Errorf("no station %q", name)
+}
+
 // relayStatus is one relay as it is running — what print does not
 // show, because print answers about the configuration.
 func (s *session) relayStatus(ctx context.Context, in input) error {

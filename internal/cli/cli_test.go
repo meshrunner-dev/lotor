@@ -60,6 +60,15 @@ func testDeps(t *testing.T) Deps {
 				return radio.NoiseFloor{DBm: -104, At: time.Now().Add(-3 * time.Second)}, true
 			},
 		}},
+		Stations: []StationInfo{{
+			Name: "alice", Protocol: "meshcore", Listen: "127.0.0.1:5000",
+			State: "running", RF: "detached", MailboxCap: 16,
+			Waveform: radio.Waveform{
+				FrequencyHz: 869_618_000, SpreadingFactor: 8,
+				BandwidthHz: 62_500, CodingRate: 8, Preamble: 32,
+				SyncWord: 0x12, CRC: true,
+			},
+		}},
 		Sentinel: sen,
 		Radios: []RadioInfo{{
 			Name: "slot1", Driver: "sx126x-spi", Relay: "meshcore-868",
@@ -115,6 +124,13 @@ func testKinds() []schema.Kind {
 					return nil
 				}
 				return []schema.Attr{{Name: "spi", Type: schema.String, Doc: "the SPI device"}}
+			},
+		},
+		{
+			Name: "station", Doc: "one virtual companion", ChoiceAttr: "protocol",
+			Attrs: []schema.Attr{
+				{Name: "protocol", Type: schema.String, Enum: []string{"meshcore"}},
+				{Name: "listen", Type: schema.String},
 			},
 		},
 		{
