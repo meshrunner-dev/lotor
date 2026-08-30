@@ -234,12 +234,15 @@ func TestObserverDisableIsStructural(t *testing.T) {
 	}
 }
 
-func TestObserverParamsWantABuildableTopic(t *testing.T) {
+func TestObserverParamsRequireIATARegardlessOfTopic(t *testing.T) {
 	mq := config.MQTT{Layered: config.Layered{Overrides: map[string]map[string]any{
-		config.CustomProfile: {"url": "wss://broker.example:8084"},
+		config.CustomProfile: {
+			"url":   "wss://broker.example:8084",
+			"topic": "private/{device}/{type}",
+		},
 	}}}
 	if _, err := resolveMQTTParams(mq); err == nil ||
-		!strings.Contains(err.Error(), "empty level") {
+		!strings.Contains(err.Error(), "iata= is required") {
 		t.Errorf("iata hole accepted: %v", err)
 	}
 	mq.Layered.Overrides[config.CustomProfile]["iata"] = "PAR"

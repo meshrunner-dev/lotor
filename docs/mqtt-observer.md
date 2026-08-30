@@ -18,7 +18,10 @@ meshcore/{iata}/{device_id}/packets
 meshcore/{iata}/{device_id}/raw
 ```
 
-`iata` is the site's three-letter region code, operator-chosen.
+`iata` is the site's three-letter region code, operator-chosen and required
+for every observer. It remains required for custom topic templates which do
+not interpolate `{iata}`: it identifies the observation site, not merely a
+path segment.
 `device_id` is the node's public key, lowercase hex, in full. A second
 layout exists (`meshrank/uplink/{token}/{device_id}/{type}`, no raw)
 and custom templates with `{iata} {device} {token} {type}`
@@ -151,7 +154,7 @@ against, pinned to the schema by test:
 | `keepalive` | duration | 2m | presets say 55s behind balancers |
 | `ca` | string | system roots | PEM file pinning the broker chain |
 | `retain` | bool | false | STATUS and NEIGHBORS only |
-| `iata` | string | — | feeds the topic template |
+| `iata` | string | required | three-letter site code, independent of the topic template |
 | `token` | string | "" | for meshrank-style layouts |
 | `topic` | string | `meshcore/{iata}/{device}/{type}` | template |
 | `relay` | string | the only relay | whose identity and frames |

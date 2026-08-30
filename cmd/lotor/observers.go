@@ -48,15 +48,34 @@ type managedObserver struct {
 	live *liveGate
 }
 
-// resolveMQTTParams turns one observer's layers into its effective
-// parameter set, refusing shapes that could not observe — the same
-// deep check a mutation runs before anything is written.
-func resolveMQTTParams(mq config.MQTT) (mqtt.Params, error) {
+// decodeMQTTParams resolves the persisted shape shared by active and parked
+// observers. IATA identifies the observation site, not merely one topic
+// placeholder, so every observer carries it even when its template omits it.
+func decodeMQTTParams(mq config.MQTT) (mqtt.Params, error) {
 	effective, _, err := mq.Layered.Resolve(mqtt.Presets())
 	if err != nil {
 		return mqtt.Params{}, err
 	}
 	p, err := config.Decode[mqtt.Params](effective)
+	if err != nil {
+		return mqtt.Params{}, err
+	}
+	if p.IATA == "" {
+		return mqtt.Params{}, errors.New("iata= is required for every observer")
+	}
+	iata, err := mqtt.NormalizeIATA(p.IATA)
+	if err != nil {
+		return mqtt.Params{}, err
+	}
+	p.IATA = iata
+	return p, nil
+}
+
+// resolveMQTTParams turns one observer's layers into its effective
+// parameter set, refusing shapes that could not observe — the same
+// deep check a mutation runs before anything is written.
+func resolveMQTTParams(mq config.MQTT) (mqtt.Params, error) {
+	p, err := decodeMQTTParams(mq)
 	if err != nil {
 		return mqtt.Params{}, err
 	}
@@ -78,11 +97,6 @@ func resolveMQTTParams(mq config.MQTT) (mqtt.Params, error) {
 	if err := mqtt.ValidOwner(p.Owner); err != nil {
 		return mqtt.Params{}, err
 	}
-	iata, err := mqtt.NormalizeIATA(p.IATA)
-	if err != nil {
-		return mqtt.Params{}, err
-	}
-	p.IATA = iata
 	// The topic must already build with what is configured — finding a
 	// hole per published frame is a journal full of refusals, not an
 	// answer the operator can act on.

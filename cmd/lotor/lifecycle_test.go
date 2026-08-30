@@ -235,6 +235,29 @@ func TestCreateRadioRefusesAProfileUnknownToThisBinary(t *testing.T) {
 	}
 }
 
+func TestCreateObserverRequiresIATAEvenWithoutATopicPlaceholder(t *testing.T) {
+	m := lifecycleManager(t)
+	_, err := m.Create(context.Background(), confdb.KindMQTT, "paris",
+		map[string]string{
+			"url":   "wss://broker.example:8084",
+			"topic": "private/{device}/{type}",
+			"relay": "meshcore-868",
+		}, "test")
+	if err == nil || !strings.Contains(err.Error(), "iata= is required") {
+		t.Fatalf("observer without iata refusal = %v", err)
+	}
+	if _, exists := m.file.MQTT["paris"]; exists {
+		t.Fatal("the refused observer reached the manager's live file")
+	}
+	persisted, loadErr := m.store.Load(context.Background())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if _, exists := persisted.MQTT["paris"]; exists {
+		t.Fatal("the refused observer reached the configuration store")
+	}
+}
+
 func TestManagerStartBringsUpTheTree(t *testing.T) {
 	f := sampleFile()
 	f.MQTT = map[string]config.MQTT{

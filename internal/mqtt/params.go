@@ -42,10 +42,9 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 func (d Duration) Std() time.Duration { return time.Duration(d) }
 
 // NormalizeIATA holds the region code to the ecosystem's rule:
-// exactly three letters or digits, spoken uppercase — it lands
-// directly in topic paths, where anything else is a hole or a
-// separator. Empty passes through: whether a topic needs one is the
-// template's question, not this one's.
+// exactly three letters or digits, spoken uppercase. Empty passes through so
+// callers can distinguish a missing value from a malformed one; observer
+// configuration requires it independently of the chosen topic template.
 func NormalizeIATA(s string) (string, error) {
 	if s == "" {
 		return "", nil
@@ -155,7 +154,7 @@ func Schema() []schema.Attr {
 		{Name: keyRetain, Type: schema.Bool, Apply: schema.Hot,
 			Doc: "retain the heartbeat and neighbour snapshots where the broker allows"},
 		{Name: "iata", Type: schema.String,
-			Doc: "the site's region code, exactly three letters or digits (e.g. DEN)"},
+			Doc: "required site code, exactly three letters or digits (e.g. DEN)"},
 		{Name: "token", Type: schema.String,
 			Doc: "per-connection token some topic layouts carry"},
 		{Name: "topic", Type: schema.String,

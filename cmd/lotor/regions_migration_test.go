@@ -394,19 +394,28 @@ const goodRelay = "relays:\n  mc:\n    protocol: meshcore\n    radio: r\n" +
 
 func TestParkedObserversImportOnTheirShapeAlone(t *testing.T) {
 	// Disabled means the configuration is kept and nothing runs — an
-	// operator parks an observer precisely because it is not ready.
-	// Judging a parked one on whether it could connect refuses files
-	// the daemon boots happily, and makes its own export unimportable.
-	// The lab's store is exactly this shape.
+	// operator parks an observer precisely because it is not ready to
+	// connect. Its site identity is still part of the persisted shape:
+	// IATA is required independently of connection and topic choices.
 	dir := t.TempDir()
 	yaml := filepath.Join(dir, "parked.yaml")
 	if err := os.WriteFile(yaml, []byte(goodRadio+goodRelay+
-		"mqtt:\n  parked:\n    disabled: true\n    profile: analyzer-eu\n"), 0o600); err != nil {
+		"mqtt:\n  parked:\n    disabled: true\n    profile: analyzer-eu\n"+
+		"    overrides:\n      analyzer-eu:\n        iata: TLS\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	db := filepath.Join(dir, "config.db")
 	if err := (&configImportCmd{Path: yaml, DB: db, Force: true}).Run(); err != nil {
 		t.Fatalf("a parked observer was refused: %s", err)
+	}
+	missingIATA := filepath.Join(dir, "missing-iata.yaml")
+	if err := os.WriteFile(missingIATA, []byte(goodRadio+goodRelay+
+		"mqtt:\n  parked:\n    disabled: true\n    profile: analyzer-eu\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&configImportCmd{Path: missingIATA, DB: filepath.Join(dir, "missing-iata.db"),
+		Force: true}).Run(); err == nil || !strings.Contains(err.Error(), "iata= is required") {
+		t.Errorf("a parked observer without iata was not refused clearly: %v", err)
 	}
 	// Its shape is still judged: a parked observer may be incomplete,
 	// never incoherent.

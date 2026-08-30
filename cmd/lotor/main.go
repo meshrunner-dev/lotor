@@ -1708,7 +1708,7 @@ func validateWholeFile(f *config.File) error {
 // thing an export may not be.
 func checkObserverAlone(f *config.File, mq config.MQTT) error {
 	if mq.Disabled {
-		_, _, err := mq.Layered.Resolve(mqtt.Presets())
+		_, err := decodeMQTTParams(mq)
 		return err
 	}
 	p, err := resolveMQTTParams(mq)
