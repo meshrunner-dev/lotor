@@ -17,10 +17,12 @@ type controllerFakeDevice struct {
 	waveform Waveform
 	rx       chan receiveResult
 
-	mu        sync.Mutex
-	order     []string
-	hold      chan struct{}
-	holdStart chan struct{}
+	mu         sync.Mutex
+	order      []string
+	hold       chan struct{}
+	holdStart  chan struct{}
+	configured int
+	closed     int
 }
 
 func newControllerFakeDevice() *controllerFakeDevice {
@@ -30,8 +32,14 @@ func newControllerFakeDevice() *controllerFakeDevice {
 func (*controllerFakeDevice) Envelope() Envelope {
 	return Envelope{FreqRangeLowHz: 400_000_000, FreqRangeHiHz: 930_000_000}
 }
-func (d *controllerFakeDevice) Configure(w Waveform) error { d.waveform = w; return nil }
-func (*controllerFakeDevice) StartReceive() error          { return nil }
+func (d *controllerFakeDevice) Configure(w Waveform) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.waveform = w
+	d.configured++
+	return nil
+}
+func (*controllerFakeDevice) StartReceive() error { return nil }
 func (d *controllerFakeDevice) Receive(ctx context.Context) (Frame, error) {
 	select {
 	case result := <-d.rx:
@@ -61,7 +69,12 @@ func (d *controllerFakeDevice) Transmit(_ context.Context, payload []byte, power
 func (*controllerFakeDevice) AssessChannel(context.Context, float64) (bool, error) {
 	return false, nil
 }
-func (*controllerFakeDevice) Close() error { return nil }
+func (d *controllerFakeDevice) Close() error {
+	d.mu.Lock()
+	d.closed++
+	d.mu.Unlock()
+	return nil
+}
 
 func controllerRig(t *testing.T, dev *controllerFakeDevice) (*Controller, context.CancelFunc) {
 	t.Helper()
@@ -196,5 +209,64 @@ func TestControllerQueuesRelayFirstAndStationsRoundRobin(t *testing.T) {
 	dev.mu.Unlock()
 	if want := []string{"hold", "r1", "b1", "a2"}; !reflect.DeepEqual(order, want) {
 		t.Fatalf("physical order = %v, want %v", order, want)
+	}
+}
+
+func TestCompatibleStationDoesNotBounceRelayHardware(t *testing.T) {
+	dev := newControllerFakeDevice()
+	c, _ := controllerRig(t, dev)
+	relayWave := Waveform{
+		FrequencyHz: 869_618_000, SpreadingFactor: 8, BandwidthHz: 62_500, CodingRate: 8,
+	}
+	otherWave := relayWave
+	otherWave.FrequencyHz = 868_000_000
+	relayBinding, err := c.Bind("mc", RoleRelay, relayWave)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitController(t, c)
+	awaitBinding(t, relayBinding)
+
+	dev.mu.Lock()
+	configured, closed := dev.configured, dev.closed
+	dev.mu.Unlock()
+	stationBinding, err := c.Bind("alice", RoleStation, relayWave)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitBinding(t, stationBinding)
+	time.Sleep(10 * time.Millisecond)
+	dev.mu.Lock()
+	if dev.configured != configured || dev.closed != closed {
+		t.Fatalf("compatible bind bounced hardware: configure %d -> %d, close %d -> %d",
+			configured, dev.configured, closed, dev.closed)
+	}
+	dev.mu.Unlock()
+
+	if err := stationBinding.SetWaveform(otherWave); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := stationBinding.State(); state != BindingBlocked {
+		t.Fatalf("station changing away from relay = %s", state)
+	}
+	time.Sleep(10 * time.Millisecond)
+	dev.mu.Lock()
+	if dev.configured != configured || dev.closed != closed {
+		t.Fatalf("blocked station retuned hardware: configure %d, close %d",
+			dev.configured, dev.closed)
+	}
+	dev.mu.Unlock()
+
+	if err := stationBinding.SetWaveform(relayWave); err != nil {
+		t.Fatal(err)
+	}
+	awaitBinding(t, stationBinding)
+	stationBinding.Unbind()
+	time.Sleep(10 * time.Millisecond)
+	dev.mu.Lock()
+	defer dev.mu.Unlock()
+	if dev.configured != configured || dev.closed != closed {
+		t.Fatalf("compatible unbind bounced hardware: configure %d, close %d",
+			dev.configured, dev.closed)
 	}
 }

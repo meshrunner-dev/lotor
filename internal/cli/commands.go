@@ -23,6 +23,8 @@ import (
 	"meshrunner.dev/lotor/internal/update"
 )
 
+const noneText = "none"
+
 func (s *session) status(ctx context.Context, _ input) error {
 	tb := s.table()
 	build := product.Slug + " " + s.deps.Version
@@ -46,7 +48,7 @@ func (s *session) status(ctx context.Context, _ input) error {
 // both, because a log rotation must not erase the episode.
 func (s *session) sentinelRow(ctx context.Context, tb *table) {
 	if s.deps.Sentinel == nil {
-		tb.row("sentinel", "none")
+		tb.row("sentinel", noneText)
 		return
 	}
 	path, retention := s.deps.Sentinel.Journal()
@@ -119,7 +121,7 @@ func (s *session) stationStatus(name string) error {
 			tb.row("identity", st.Identity[:min(12, len(st.Identity))])
 		}
 		tb.row("listen", st.Listen)
-		client := "none"
+		client := noneText
 		if st.Connected {
 			client = st.Remote
 		}
@@ -129,6 +131,9 @@ func (s *session) stationStatus(name string) error {
 			rf += " — " + st.Radio
 		}
 		tb.row("rf", rf)
+		if st.RFCause != "" {
+			tb.row("rf cause", st.RFCause)
+		}
 		tb.row("waveform", fmt.Sprintf("%.3f MHz  sf%d  bw %d  cr 4/%d  preamble %d  sync 0x%02x  crc %v",
 			float64(st.Waveform.FrequencyHz)/1e6, st.Waveform.SpreadingFactor,
 			st.Waveform.BandwidthHz, st.Waveform.CodingRate, st.Waveform.Preamble,
@@ -251,13 +256,17 @@ func (s *session) radioList() error {
 		return nil
 	}
 	tb := s.table()
-	tb.header("NAME", "DRIVER", "ENVELOPE", "OWNER")
+	tb.header("NAME", "DRIVER", "ENVELOPE", "AUTHORITY", "STATIONS")
 	for _, r := range s.radios() {
-		owner := "unclaimed"
-		if r.Relay != "" {
-			owner = r.Relay
+		authority := r.Authority
+		if authority == "" {
+			authority = "unclaimed"
 		}
-		tb.row(r.Name, r.Driver, envelopeText(r.Envelope), owner)
+		stations := noneText
+		if len(r.Stations) > 0 {
+			stations = strings.Join(r.Stations, ", ")
+		}
+		tb.row(r.Name, r.Driver, envelopeText(r.Envelope), authority, stations)
 	}
 	return tb.flush(s.out)
 }
@@ -343,11 +352,20 @@ func (s *session) radioStatus(_ context.Context, in input) error {
 		tb := s.table()
 		tb.row("driver", r.Driver)
 		tb.row("envelope", envelopeText(r.Envelope))
-		owner := "unclaimed"
-		if r.Relay != "" {
-			owner = r.Relay
+		tb.row("state", r.State)
+		if r.Cause != "" {
+			tb.row("cause", r.Cause)
 		}
-		tb.row("owner", owner)
+		authority := r.Authority
+		if authority == "" {
+			authority = "unclaimed"
+		}
+		tb.row("authority", authority)
+		stations := noneText
+		if len(r.Stations) > 0 {
+			stations = strings.Join(r.Stations, ", ")
+		}
+		tb.row("stations", stations)
 		return tb.flush(s.out)
 	}
 	return fmt.Errorf("no radio %q", name)

@@ -230,7 +230,7 @@ type RelayInfo struct {
 // not make the TCP endpoint disappear.
 type StationInfo struct {
 	Name, Protocol, Listen, Radio string
-	State, Cause, RF              string
+	State, Cause, RF, RFCause     string
 	Connected                     bool
 	Remote                        string
 	Mailbox, MailboxCap           int
@@ -300,10 +300,13 @@ type MQTTInfo struct {
 
 // RadioInfo is what the CLI knows about one radio attachment.
 type RadioInfo struct {
-	Name     string
-	Driver   string
-	Envelope radio.Envelope
-	Relay    string
+	Name         string
+	Driver       string
+	Envelope     radio.Envelope
+	Relay        string
+	Stations     []string
+	Authority    string
+	State, Cause string
 }
 
 // SensorInfo is one configured part as the console shows it. No

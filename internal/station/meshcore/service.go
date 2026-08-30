@@ -230,6 +230,8 @@ type service struct {
 	sendScope    [16]byte
 	sendUnscoped bool
 	mailbox      []companion.Response
+	binding      *radio.Binding
+	rfCause      string
 }
 
 func (s *service) Run(ctx context.Context) error {
@@ -475,10 +477,17 @@ func (s *service) setRadioParams(c companion.SetRadioParams) []companion.Respons
 		c.BandwidthHz < 7_000 || c.BandwidthHz > 500_000 {
 		return errorResponses(companion.ErrorIllegalArgument)
 	}
-	s.p.FrequencyHz = c.FrequencyKHz * 1_000
-	s.p.BandwidthHz = int(c.BandwidthHz)
-	s.p.SpreadingFactor = int(c.Spreading)
-	s.p.CodingRate = int(c.CodingRate)
+	waveform := s.p.Waveform
+	waveform.FrequencyHz = c.FrequencyKHz * 1_000
+	waveform.BandwidthHz = int(c.BandwidthHz)
+	waveform.SpreadingFactor = int(c.Spreading)
+	waveform.CodingRate = int(c.CodingRate)
+	if s.binding != nil {
+		if err := s.binding.SetWaveform(waveform); err != nil {
+			return errorResponses(companion.ErrorIllegalArgument)
+		}
+	}
+	s.p.Waveform = waveform
 	return okResponses()
 }
 
@@ -582,11 +591,36 @@ func (s *service) selfInfo() companion.SelfInfo {
 func (s *service) Info() station.Info {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	rf, rfCause := s.rf, s.rfCause
+	if s.binding != nil {
+		state, cause := s.binding.State()
+		rfCause = cause
+		switch state {
+		case radio.BindingActive:
+			rf = station.RFActive
+		case radio.BindingBlocked:
+			rf = station.RFBlocked
+		case radio.BindingDown:
+			rf = station.RFDown
+		}
+	}
 	return station.Info{
 		Name: s.name, Protocol: protocolName, Listen: s.listen, Radio: s.radioName,
-		State: s.state, Cause: s.cause, RF: s.rf, Connected: s.client != nil,
+		State: s.state, Cause: s.cause, RF: rf, RFCause: rfCause, Connected: s.client != nil,
 		Remote: s.remote, Mailbox: len(s.mailbox), MailboxCap: s.p.MailboxCap,
 		Waveform: s.p.Waveform, PublicKey: hex.EncodeToString(s.id.PubKey[:]),
+	}
+}
+
+func (s *service) AttachRadio(name string, binding *radio.Binding, cause string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.radioName, s.binding, s.rfCause = name, binding, cause
+	if name == "" {
+		s.rf = station.RFDetached
+		s.rfCause = ""
+	} else {
+		s.rf = station.RFDown
 	}
 }
 

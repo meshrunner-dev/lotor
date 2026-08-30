@@ -846,7 +846,9 @@ func TestDeepCheckRefusesAStillbornGate(t *testing.T) {
 func TestStillbornReplacesTheWholeView(t *testing.T) {
 	// A successor that fails assembly must not inherit its
 	// predecessor's face: resolved config, provenance and the radio
-	// claim all describe a relay that no longer runs.
+	// claim all describe a relay that no longer runs. The radio object
+	// itself remains visible now that its controller has an independent
+	// lifecycle.
 	f := sampleFile()
 	f.Radios["slot1"] = config.Radio{Driver: "no-such-driver"}
 	m := &manager{
@@ -877,8 +879,8 @@ func TestStillbornReplacesTheWholeView(t *testing.T) {
 	if _, stale := m.cfgs["meshcore-868"]; stale {
 		t.Error("the predecessor's resolved config survived")
 	}
-	if _, stale := m.radios["slot1"]; stale {
-		t.Error("the predecessor's radio claim survived")
+	if radioInfo, visible := m.radios["slot1"]; !visible || radioInfo.Relay != "" {
+		t.Errorf("radio after stillbirth = %+v, visible %v", radioInfo, visible)
 	}
 	for _, key := range []string{"relay meshcore-868", "radio slot1"} {
 		if _, stale := m.traces[key]; stale {

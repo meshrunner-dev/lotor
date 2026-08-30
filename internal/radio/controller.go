@@ -55,7 +55,9 @@ var (
 	ErrControllerDown = errors.New("radio controller is down")
 	// ErrBindingBlocked reports a station incompatible with radio authority.
 	ErrBindingBlocked = errors.New("radio binding is blocked by the authoritative waveform")
-	errReconfigure    = errors.New("radio controller configuration changed")
+	// ErrBindingClosed reports a logical attachment removed from its controller.
+	ErrBindingClosed = errors.New("radio binding is detached")
+	errReconfigure   = errors.New("radio controller configuration changed")
 )
 
 // Controller owns one physical attachment. Bindings are logical consumers;
@@ -82,6 +84,7 @@ type Controller struct {
 	rrLast         string
 	receiveCancel  context.CancelFunc
 	wake           chan struct{}
+	changed        chan struct{}
 	backoffFirst   time.Duration
 	backoffCap     time.Duration
 }
@@ -104,6 +107,7 @@ func NewController(name string, driver Driver, cfg map[string]any, log *zap.Logg
 		log: log.With(zap.String("radio", name)), state: ControllerStarting,
 		bindings: map[string]*Binding{}, ports: map[*controllerPort]struct{}{},
 		stationQueues: map[string][]*radioOperation{}, wake: make(chan struct{}, 1),
+		changed:      make(chan struct{}),
 		backoffFirst: 5 * time.Second, backoffCap: time.Minute,
 	}, nil
 }
@@ -137,6 +141,7 @@ func (c *Controller) Bind(name string, role ConsumerRole, waveform Waveform) (*B
 	key := bindingKey(role, name)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	before, hadBefore := c.authoritativeWaveformLocked()
 	if _, exists := c.bindings[key]; exists {
 		return nil, fmt.Errorf("radio binding %q already exists", key)
 	}
@@ -152,7 +157,11 @@ func (c *Controller) Bind(name string, role ConsumerRole, waveform Waveform) (*B
 		controller: c, name: name, role: role, waveform: waveform, sequence: c.nextBinding,
 	}
 	c.bindings[key] = binding
-	c.configurationChangedLocked()
+	c.rebuildRROrderLocked()
+	after, hasAfter := c.authoritativeWaveformLocked()
+	if hadBefore != hasAfter || before != after {
+		c.configurationChangedLocked()
+	}
 	return binding, nil
 }
 
@@ -160,6 +169,7 @@ func (c *Controller) Bind(name string, role ConsumerRole, waveform Waveform) (*B
 func (b *Binding) Unbind() {
 	c := b.controller
 	c.mu.Lock()
+	before, hadBefore := c.authoritativeWaveformLocked()
 	key := bindingKey(b.role, b.name)
 	if c.bindings[key] != b {
 		c.mu.Unlock()
@@ -171,14 +181,69 @@ func (b *Binding) Unbind() {
 			c.closePortLocked(port, ErrControllerDown)
 		}
 	}
-	delete(c.stationQueues, key)
-	c.configurationChangedLocked()
+	c.dropBindingOperationsLocked(b, ErrControllerDown)
+	c.rebuildRROrderLocked()
+	after, hasAfter := c.authoritativeWaveformLocked()
+	if hadBefore != hasAfter || before != after {
+		c.configurationChangedLocked()
+	}
 	c.mu.Unlock()
+}
+
+func (c *Controller) dropBindingOperationsLocked(binding *Binding, err error) {
+	fail := func(queue []*radioOperation) []*radioOperation {
+		kept := queue[:0]
+		for _, operation := range queue {
+			if operation.port.binding != binding {
+				kept = append(kept, operation)
+				continue
+			}
+			select {
+			case operation.done <- operationResult{err: err}:
+			default:
+			}
+		}
+		return kept
+	}
+	c.relayQueue = fail(c.relayQueue)
+	for queueKey, queue := range c.stationQueues {
+		queue = fail(queue)
+		if len(queue) == 0 {
+			delete(c.stationQueues, queueKey)
+		} else {
+			c.stationQueues[queueKey] = queue
+		}
+	}
+}
+
+// SetWaveform changes one consumer's requested waveform. A station never
+// retunes a relay-owned radio: when its request differs it simply becomes
+// blocked. On a station-only radio, changing the authoritative station
+// reconfigures the physical device and all other stations are judged against
+// the new request.
+func (b *Binding) SetWaveform(waveform Waveform) error {
+	c := b.controller
+	if err := c.envelope.Allows(waveform); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.bindings[bindingKey(b.role, b.name)] != b {
+		return ErrControllerDown
+	}
+	before, hadBefore := c.authoritativeWaveformLocked()
+	b.waveform = waveform
+	after, hasAfter := c.authoritativeWaveformLocked()
+	if hadBefore != hasAfter || before != after {
+		c.configurationChangedLocked()
+	}
+	return nil
 }
 
 func (c *Controller) configurationChangedLocked() {
 	c.configVersion++
 	c.rebuildRROrderLocked()
+	c.notifyChangedLocked()
 	if c.receiveCancel != nil {
 		c.receiveCancel()
 	}
@@ -186,6 +251,11 @@ func (c *Controller) configurationChangedLocked() {
 	case c.wake <- struct{}{}:
 	default:
 	}
+}
+
+func (c *Controller) notifyChangedLocked() {
+	close(c.changed)
+	c.changed = make(chan struct{})
 }
 
 // authoritativeLocked chooses the relay when present. Without one, the first
@@ -203,8 +273,19 @@ func (c *Controller) authoritativeLocked() *Binding {
 	return station
 }
 
+func (c *Controller) authoritativeWaveformLocked() (Waveform, bool) {
+	binding := c.authoritativeLocked()
+	if binding == nil {
+		return Waveform{}, false
+	}
+	return binding.waveform, true
+}
+
 func (b *Binding) stateLocked() BindingState {
 	c := b.controller
+	if c.bindings[bindingKey(b.role, b.name)] != b {
+		return BindingDown
+	}
 	authority := c.authoritativeLocked()
 	if authority == nil || authority.waveform != b.waveform {
 		return BindingBlocked
@@ -230,6 +311,9 @@ func (b *Binding) State() (BindingState, string) {
 		return state, fmt.Sprintf("%s %q is authoritative on a different waveform",
 			authority.role, authority.name)
 	case BindingDown:
+		if c.bindings[bindingKey(b.role, b.name)] != b {
+			return state, ErrBindingClosed.Error()
+		}
 		return state, c.cause
 	default:
 		return state, ""
@@ -243,11 +327,60 @@ func (c *Controller) ControllerStatus() (ControllerState, string) {
 	return c.state, c.cause
 }
 
-// Open creates one logical Device session once the physical attachment is up.
+// Authority reports which binding selects the physical waveform. A relay is
+// always authoritative when present; otherwise the oldest station binding is.
+func (c *Controller) Authority() (ConsumerRole, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	binding := c.authoritativeLocked()
+	if binding == nil {
+		return "", ""
+	}
+	return binding.role, binding.name
+}
+
+// Envelope reports the immutable physical limits inspected at construction.
+func (c *Controller) Envelope() Envelope { return c.envelope }
+
+// Open creates one logical Device session when the physical attachment is
+// already up. Call OpenContext when startup should wait for the controller.
 func (b *Binding) Open() (Device, error) {
 	c := b.controller
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return b.openLocked()
+}
+
+// OpenContext waits through the controller's initial open/configure cycle.
+// A concrete hardware failure and a blocked binding are returned immediately;
+// cancellation ends the wait without introducing a retry delay in the relay.
+func (b *Binding) OpenContext(ctx context.Context) (Device, error) {
+	c := b.controller
+	for {
+		c.mu.Lock()
+		device, err := b.openLocked()
+		if err == nil || !errors.Is(err, ErrControllerDown) || c.cause != "" {
+			if errors.Is(err, ErrControllerDown) && c.cause != "" {
+				err = fmt.Errorf("%w: %s", err, c.cause)
+			}
+			c.mu.Unlock()
+			return device, err
+		}
+		changed := c.changed
+		c.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
+func (b *Binding) openLocked() (Device, error) {
+	c := b.controller
+	if c.bindings[bindingKey(b.role, b.name)] != b {
+		return nil, ErrBindingClosed
+	}
 	switch b.stateLocked() {
 	case BindingBlocked:
 		return nil, ErrBindingBlocked
@@ -321,6 +454,7 @@ func (c *Controller) Run(ctx context.Context) {
 	c.endPhysical(context.Canceled)
 	c.mu.Lock()
 	c.state, c.cause = ControllerStopped, ""
+	c.notifyChangedLocked()
 	c.mu.Unlock()
 }
 
@@ -341,6 +475,7 @@ func (c *Controller) setPhysicalState(state ControllerState, err error, dev Devi
 	if err != nil {
 		c.cause = err.Error()
 	}
+	c.notifyChangedLocked()
 }
 
 func (c *Controller) endPhysical(err error) {
@@ -361,6 +496,7 @@ func (c *Controller) endPhysical(err error) {
 		c.closePortLocked(port, err)
 	}
 	c.failPendingLocked(err)
+	c.notifyChangedLocked()
 }
 
 type receiveResult struct {

@@ -11,6 +11,7 @@ import (
 	"context"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,7 +20,47 @@ import (
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/radio"
+	"meshrunner.dev/lotor/internal/station"
+	"meshrunner.dev/pkg/meshcore/companion"
 )
+
+var lifecycleDriverOnce sync.Once
+
+type lifecycleRadio struct{}
+
+func (*lifecycleRadio) Envelope() radio.Envelope {
+	return radio.Envelope{FreqRangeLowHz: 400_000_000, FreqRangeHiHz: 930_000_000}
+}
+func (*lifecycleRadio) Configure(radio.Waveform) error { return nil }
+func (*lifecycleRadio) StartReceive() error            { return nil }
+func (*lifecycleRadio) Receive(ctx context.Context) (radio.Frame, error) {
+	<-ctx.Done()
+	return radio.Frame{}, ctx.Err()
+}
+func (*lifecycleRadio) NoiseFloor() (radio.NoiseFloor, bool) { return radio.NoiseFloor{}, false }
+func (*lifecycleRadio) NoiseStarved() uint64                 { return 0 }
+func (*lifecycleRadio) ChipStats() (radio.ChipStats, bool)   { return radio.ChipStats{}, false }
+func (*lifecycleRadio) Airtime(int) time.Duration            { return time.Millisecond }
+func (*lifecycleRadio) Transmit(context.Context, []byte, int8) (radio.TxReport, error) {
+	return radio.TxReport{}, nil
+}
+func (*lifecycleRadio) AssessChannel(context.Context, float64) (bool, error) { return false, nil }
+func (*lifecycleRadio) Close() error                                         { return nil }
+
+func registerLifecycleDriver() {
+	lifecycleDriverOnce.Do(func() {
+		radio.Register("lifecycle-radio", radio.Driver{
+			Presets: map[string]map[string]any{"lifecycle-board": {}},
+			Inspect: func(map[string]any) (radio.Envelope, error) {
+				return (&lifecycleRadio{}).Envelope(), nil
+			},
+			Open: func(map[string]any, *zap.Logger) (radio.Device, error) {
+				return &lifecycleRadio{}, nil
+			},
+		})
+	})
+}
 
 // lifecycleManager builds a manager over sampleFile and an in-memory
 // store seeded with it, ready to start relays for real.
@@ -114,6 +155,77 @@ func TestCreateMutateAndRemoveDetachedStation(t *testing.T) {
 	}
 	if len(m.StationInfos()) != 0 {
 		t.Fatal("removed station remains visible")
+	}
+}
+
+func TestStationRadioMutationKeepsCompanionConnection(t *testing.T) {
+	registerLifecycleDriver()
+	m := lifecycleManager(t)
+	if _, err := m.Create(context.Background(), confdb.KindRadio, "virtual-slot",
+		map[string]string{"driver": "lifecycle-radio", "profile": "lifecycle-board"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	addr := freeTCPAddr(t)
+	if _, err := m.Create(context.Background(), confdb.KindStation, "alice",
+		map[string]string{
+			"protocol": "meshcore", "listen": addr, "profile": "eu-868-narrow",
+			"identity": "new", "node_name": "Alice", "tx_power_dbm": "14",
+		}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	var (
+		conn net.Conn
+		err  error
+	)
+	deadline := time.Now().Add(time.Second)
+	for conn == nil && time.Now().Before(deadline) {
+		conn, err = (&net.Dialer{Timeout: 50 * time.Millisecond}).DialContext(t.Context(), "tcp", addr)
+		if err != nil {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if conn == nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	queryStation := func() {
+		t.Helper()
+		payload, marshalErr := companion.MarshalCommand(companion.DeviceQuery{TargetVersion: 3})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if writeErr := companion.WriteFrame(conn, companion.ToDevice, payload); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		if _, readErr := companion.ReadFrame(conn, companion.ToApplication); readErr != nil {
+			t.Fatal(readErr)
+		}
+	}
+	queryStation()
+	before := m.stations["alice"].service
+	if _, err := m.Mutate(context.Background(), confdb.KindStation, "alice",
+		map[string]string{"radio": "virtual-slot"}, nil, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if m.stations["alice"].service != before {
+		t.Fatal("radio attachment restarted the station service")
+	}
+	queryStation()
+	infos := m.StationInfos()
+	if len(infos) != 1 || !infos[0].Connected || infos[0].Radio != "virtual-slot" {
+		t.Fatalf("attached station = %+v", infos)
+	}
+	if _, err := m.Mutate(context.Background(), confdb.KindStation, "alice",
+		nil, []string{"radio"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if m.stations["alice"].service != before {
+		t.Fatal("radio detach restarted the station service")
+	}
+	queryStation()
+	infos = m.StationInfos()
+	if infos[0].RF != string(station.RFDetached) || !infos[0].Connected {
+		t.Fatalf("detached station = %+v", infos[0])
 	}
 }
 

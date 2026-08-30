@@ -55,6 +55,7 @@ type Info struct {
 	State      State
 	Cause      string
 	RF         RFState
+	RFCause    string
 	Connected  bool
 	Remote     string
 	Mailbox    int
@@ -67,6 +68,12 @@ type Info struct {
 type Service interface {
 	Run(ctx context.Context) error
 	Info() Info
+}
+
+// RadioAttacher is the optional live RF door. A manager may move a station
+// between radios without stopping its application listener or TCP client.
+type RadioAttacher interface {
+	AttachRadio(name string, binding *radio.Binding, cause string)
 }
 
 // Spec is the protocol-neutral structure resolved before a protocol builder

@@ -996,6 +996,7 @@ func resolveConfigs(rc config.Relay, radioSpec config.Radio) (*resolvedConfigs, 
 // gets to know about it.
 type assembled struct {
 	relay       *relay.Relay
+	binding     *radio.Binding
 	info        cli.RelayInfo
 	radio       cli.RadioInfo
 	radioTraces []config.Trace
@@ -1019,16 +1020,14 @@ type sensorFeed struct {
 
 func assemble(ctx context.Context, name string, rc config.Relay, radioSpec config.Radio,
 	b *bus.Bus, log *zap.Logger, sen *sentinel.Sentinel, access enginemc.SessionStore,
-	regions enginemc.RegionStore, commands otaRunner, parts sensorFeed,
+	regions enginemc.RegionStore, commands otaRunner, parts sensorFeed, controller *radio.Controller,
 ) (*assembled, error) {
 	rlog := log.With(zap.String("relay", name))
 	p, err := prepare(name, rc, radioSpec, spentAirtime(ctx, name, rc, sen), b, rlog)
 	if err != nil {
 		return nil, err
 	}
-	logTraces(rlog, "radio config", p.res.radioTraces, secretAttrs(p.res.drv.Schema))
-	logTraces(rlog, "relay config", p.res.relayTraces, secretAttrs(p.res.builder.Schema))
-	announceOverrides(rlog, p.res.radioTraces, p.res.relayTraces)
+	logResolvedConfigs(rlog, p)
 	// Non-guest access persists where the protocol keeps an ACL and a
 	// store was offered. Guests remain live sessions only.
 	if access != nil {
@@ -1082,9 +1081,13 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 	}); ok && parts.sensors != nil {
 		a.AttachTelemetry(parts.sensors)
 	}
-	r := relay.New(name, p.res.drv, p.res.radioCfg, p.eng, b, log, rc.NoiseHistory, p.policy.Mode)
+	r, binding, err := attachRelay(name, rc, p, controller, b, log)
+	if err != nil {
+		return nil, err
+	}
 	return &assembled{
 		relay:    r,
+		binding:  binding,
 		relayCfg: p.res.relayCfg,
 		info:     relayInfo(name, rc, radioSpec, r, p.eng),
 		radio: cli.RadioInfo{
@@ -1093,6 +1096,26 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 		radioTraces: p.res.radioTraces,
 		relayTraces: p.res.relayTraces,
 	}, nil
+}
+
+func logResolvedConfigs(log *zap.Logger, p *prepared) {
+	logTraces(log, "radio config", p.res.radioTraces, secretAttrs(p.res.drv.Schema))
+	logTraces(log, "relay config", p.res.relayTraces, secretAttrs(p.res.builder.Schema))
+	announceOverrides(log, p.res.radioTraces, p.res.relayTraces)
+}
+
+func attachRelay(name string, rc config.Relay, p *prepared, controller *radio.Controller,
+	b *bus.Bus, log *zap.Logger,
+) (*relay.Relay, *radio.Binding, error) {
+	if controller == nil {
+		return nil, nil, fmt.Errorf("radio %q: controller unavailable", rc.Radio)
+	}
+	binding, err := controller.Bind(name, radio.RoleRelay, p.eng.Waveform())
+	if err != nil {
+		return nil, nil, fmt.Errorf("radio %q: bind relay: %w", rc.Radio, err)
+	}
+	r := relay.NewAttached(name, binding.OpenContext, p.eng, b, log, rc.NoiseHistory, p.policy.Mode)
+	return r, binding, nil
 }
 
 // prepared is the pre-hardware half of one relay assembly: what a

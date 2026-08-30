@@ -34,9 +34,8 @@ const (
 type Relay struct {
 	Name string
 
-	driver   radio.Driver
-	radioCfg map[string]any
-	engine   protocol.Engine
+	open   func(context.Context) (radio.Device, error)
+	engine protocol.Engine
 
 	bus *bus.Bus
 	log *zap.Logger
@@ -79,10 +78,20 @@ type lifecycle struct {
 func New(name string, drv radio.Driver, radioCfg map[string]any,
 	eng protocol.Engine, b *bus.Bus, log *zap.Logger, noiseHistory *bool, txMode string,
 ) *Relay {
+	return NewAttached(name, func(context.Context) (radio.Device, error) {
+		return drv.Open(radioCfg, log.With(zap.String("relay", name)))
+	}, eng, b, log, noiseHistory, txMode)
+}
+
+// NewAttached assembles a relay whose physical radio is owned elsewhere. The
+// opener returns one logical session on that shared controller; relay retries
+// still restart its engine without reopening hardware independently.
+func NewAttached(name string, open func(context.Context) (radio.Device, error), eng protocol.Engine,
+	b *bus.Bus, log *zap.Logger, noiseHistory *bool, txMode string,
+) *Relay {
 	r := &Relay{
 		Name:         name,
-		driver:       drv,
-		radioCfg:     radioCfg,
+		open:         open,
 		engine:       eng,
 		bus:          b,
 		log:          log.With(zap.String("relay", name)),
@@ -187,7 +196,7 @@ func (r *Relay) Run(ctx context.Context) {
 func (r *Relay) session(ctx context.Context) (reached bool, err error) {
 	r.setState(StateStarting, nil)
 
-	dev, err := r.driver.Open(r.radioCfg, r.log)
+	dev, err := r.open(ctx)
 	if err != nil {
 		return false, err
 	}

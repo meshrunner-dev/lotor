@@ -99,14 +99,15 @@ type manager struct {
 	// closures the engine and the observers call (health, rounds,
 	// over-the-air gets) read under viewMu only, which is what makes
 	// them safe while a mutation holds mu and waits.
-	mu        sync.Mutex
-	viewMu    sync.RWMutex
-	ctx       context.Context //nolint:containedctx // the daemon's lifetime, set once at Start
-	file      *config.File
-	wg        sync.WaitGroup
-	running   map[string]*managedRelay
-	stations  map[string]*managedStation
-	observers map[string]*managedObserver
+	mu          sync.Mutex
+	viewMu      sync.RWMutex
+	ctx         context.Context //nolint:containedctx // the daemon's lifetime, set once at Start
+	file        *config.File
+	wg          sync.WaitGroup
+	controllers map[string]*managedRadio
+	running     map[string]*managedRelay
+	stations    map[string]*managedStation
+	observers   map[string]*managedObserver
 	// obsCause remembers why each configured observer is not running —
 	// the truth the status line owes the operator, kept beside the
 	// observer table under the same lock.
@@ -126,8 +127,9 @@ type manager struct {
 }
 
 type managedRelay struct {
-	cancel context.CancelFunc
-	done   chan struct{}
+	cancel  context.CancelFunc
+	done    chan struct{}
+	binding *radio.Binding
 }
 
 type managedStation struct {
@@ -135,6 +137,14 @@ type managedStation struct {
 	done    chan struct{}
 	service station.Service
 	failure station.Info
+	binding *radio.Binding
+}
+
+type managedRadio struct {
+	controller *radio.Controller
+	cancel     context.CancelFunc
+	done       chan struct{}
+	cause      string
 }
 
 func newManager(store *confdb.Store, f *config.File, b *bus.Bus,
@@ -142,6 +152,7 @@ func newManager(store *confdb.Store, f *config.File, b *bus.Bus,
 ) *manager {
 	return &manager{
 		store: store, file: f, bus: b, sen: sen, kinds: kinds, log: log,
+		controllers: map[string]*managedRadio{},
 		running:     map[string]*managedRelay{},
 		stations:    map[string]*managedStation{},
 		observers:   map[string]*managedObserver{},
@@ -162,10 +173,13 @@ func (m *manager) Start(ctx context.Context) {
 	m.ctx = ctx
 	m.air = make(chan airOrder, 16)
 	m.wg.Go(func() { m.serveAir(ctx) })
-	for name := range m.file.Relays {
+	for _, name := range sortedObjectNames(m.file.Radios) {
+		m.startRadio(ctx, name)
+	}
+	for _, name := range sortedObjectNames(m.file.Relays) {
 		m.startRelay(ctx, name)
 	}
-	for name := range m.file.Stations {
+	for _, name := range sortedObjectNames(m.file.Stations) {
 		m.startStation(ctx, name)
 	}
 	for name := range m.file.MQTT {
@@ -174,6 +188,15 @@ func (m *manager) Start(ctx context.Context) {
 	for name := range m.file.Sensors {
 		m.startSampler(ctx, name)
 	}
+}
+
+func sortedObjectNames[V any](objects map[string]V) []string {
+	names := make([]string, 0, len(objects))
+	for name := range objects {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // airOrder is one thing ordered from the air, waiting for a goroutine
@@ -354,16 +377,97 @@ func (m *manager) Wait() { m.wg.Wait() }
 // Close releases the store, after Wait.
 func (m *manager) Close() { _ = m.store.Close() }
 
+// startRadio creates the durable physical owner without opening the device
+// yet. The controller opens only after a relay or station supplies an
+// authoritative waveform. The caller holds mu.
+func (m *manager) startRadio(ctx context.Context, name string) {
+	if m.controllers == nil {
+		m.controllers = map[string]*managedRadio{}
+	}
+	if m.radios == nil {
+		m.radios = map[string]cli.RadioInfo{}
+	}
+	if m.traces == nil {
+		m.traces = map[string][]config.Trace{}
+	}
+	rd, exists := m.file.Radios[name]
+	if !exists {
+		return
+	}
+	drv, err := radio.Lookup(rd.Driver)
+	var cfg map[string]any
+	var traces []config.Trace
+	if err == nil {
+		cfg, traces, err = rd.Layered.Resolve(drv.Presets)
+	}
+	var controller *radio.Controller
+	if err == nil {
+		controller, err = radio.NewController(name, drv, cfg, m.log)
+	}
+	if err != nil {
+		m.controllers[name] = &managedRadio{cause: err.Error()}
+		m.viewMu.Lock()
+		m.radios[name] = cli.RadioInfo{Name: name, Driver: rd.Driver}
+		delete(m.traces, confdb.KindRadio+" "+name)
+		m.viewMu.Unlock()
+		m.log.Error("radio controller configuration failed",
+			zap.String("radio", name), zap.Error(err))
+		return
+	}
+	rctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	m.controllers[name] = &managedRadio{controller: controller, cancel: cancel, done: done}
+	m.viewMu.Lock()
+	m.radios[name] = cli.RadioInfo{Name: name, Driver: rd.Driver, Envelope: controller.Envelope()}
+	m.traces[confdb.KindRadio+" "+name] = withStructural(traces, radioStructural(rd))
+	m.viewMu.Unlock()
+	m.wg.Go(func() {
+		defer close(done)
+		controller.Run(rctx)
+	})
+}
+
+// stopRadio joins the physical controller. Consumers must have been unbound
+// first so their logical sessions see an ordinary controller-down boundary.
+// The caller holds mu.
+func (m *manager) stopRadio(name string) {
+	h, ok := m.controllers[name]
+	if !ok {
+		return
+	}
+	if h.cancel != nil {
+		h.cancel()
+		<-h.done
+	}
+	delete(m.controllers, name)
+	m.log.Info("radio controller stopped", zap.String("radio", name))
+}
+
+func (m *manager) radioController(name string) (*radio.Controller, string) {
+	h := m.controllers[name]
+	if h == nil {
+		return nil, "radio controller is unavailable"
+	}
+	return h.controller, h.cause
+}
+
 // startRelay assembles one relay from the current configuration and
 // launches it. A broken one is a visible casualty, never a dead
 // daemon: it exists, in the error state, with its cause. The caller
 // holds mu.
 func (m *manager) startRelay(ctx context.Context, name string) {
 	rc := m.file.Relays[name]
+	if _, exists := m.controllers[rc.Radio]; !exists {
+		m.startRadio(ctx, rc.Radio)
+	}
+	controller, controllerCause := m.radioController(rc.Radio)
 	var r *relay.Relay
 	asm, err := assemble(ctx, name, rc, m.file.Radios[rc.Radio], m.bus, m.log, m.sen,
 		m.accessStore(name), m.regionStore(name), m.otaCommands(name),
-		sensorFeed{supply: m.supplyVoltage, sensors: m.sensorTelemetry})
+		sensorFeed{supply: m.supplyVoltage, sensors: m.sensorTelemetry}, controller)
+	if err != nil && controller == nil && controllerCause != "" {
+		err = fmt.Errorf("radio %q: %s", rc.Radio, controllerCause)
+	}
 	if err != nil {
 		m.log.Error("relay configuration failed",
 			zap.String("relay", name), zap.Error(err))
@@ -377,8 +481,8 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 		delete(m.traces, "relay "+name)
 		for radioName, info := range m.radios {
 			if info.Relay == name {
-				delete(m.radios, radioName)
-				delete(m.traces, "radio "+radioName)
+				info.Relay = ""
+				m.radios[radioName] = info
 			}
 		}
 		m.infos[name] = cli.RelayInfo{
@@ -406,7 +510,11 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 	}
 	rctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	m.running[name] = &managedRelay{cancel: cancel, done: done}
+	h := &managedRelay{cancel: cancel, done: done}
+	if asm != nil {
+		h.binding = asm.binding
+	}
+	m.running[name] = h
 	m.wg.Go(func() {
 		defer close(done)
 		r.Run(rctx)
@@ -542,6 +650,9 @@ func (m *manager) stopRelay(name string) {
 	}
 	h.cancel()
 	<-h.done
+	if h.binding != nil {
+		h.binding.Unbind()
+	}
 	delete(m.running, name)
 	m.log.Info("relay stopped", zap.String("relay", name))
 }
@@ -591,7 +702,9 @@ func (m *manager) startStation(ctx context.Context, name string) {
 	}
 	sctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	m.stations[name] = &managedStation{cancel: cancel, done: done, service: svc}
+	h := &managedStation{cancel: cancel, done: done, service: svc}
+	m.stations[name] = h
+	m.attachStationRadio(name, h, builder, cfg)
 	m.viewMu.Lock()
 	m.traces[confdb.KindStation+" "+name] = withStructural(traces, stationStructural(sc))
 	m.viewMu.Unlock()
@@ -612,8 +725,76 @@ func (m *manager) stopStation(name string) {
 		h.cancel()
 		<-h.done
 	}
+	if h.binding != nil {
+		h.binding.Unbind()
+	}
 	delete(m.stations, name)
 	m.log.Info("station stopped", zap.String("station", name))
+}
+
+// attachStationRadio supplies or withdraws only the RF capability. The
+// application listener remains owned by the service and is never bounced by
+// this operation. The caller holds mu.
+func (m *manager) attachStationRadio(name string, h *managedStation,
+	builder station.Builder, cfg map[string]any,
+) {
+	attacher, ok := h.service.(station.RadioAttacher)
+	if !ok {
+		return
+	}
+	sc := m.file.Stations[name]
+	if sc.Radio == "" {
+		attacher.AttachRadio("", nil, "")
+		return
+	}
+	if _, exists := m.controllers[sc.Radio]; !exists && m.ctx != nil {
+		m.startRadio(m.ctx, sc.Radio)
+	}
+	controller, cause := m.radioController(sc.Radio)
+	if controller == nil {
+		attacher.AttachRadio(sc.Radio, nil, cause)
+		return
+	}
+	waveform, err := builder.Asks(cfg)
+	if err != nil {
+		attacher.AttachRadio(sc.Radio, nil, err.Error())
+		return
+	}
+	binding, err := controller.Bind(name, radio.RoleStation, waveform)
+	if err != nil {
+		attacher.AttachRadio(sc.Radio, nil, err.Error())
+		return
+	}
+	h.binding = binding
+	attacher.AttachRadio(sc.Radio, binding, "")
+}
+
+// rebindStation applies a radio= mutation without closing the station's TCP
+// listener or its current companion connection. The caller holds mu.
+func (m *manager) rebindStation(name string) {
+	h := m.stations[name]
+	if h == nil || h.service == nil {
+		return
+	}
+	if h.binding != nil {
+		h.binding.Unbind()
+		h.binding = nil
+	}
+	builder, err := station.Lookup(m.file.Stations[name].Protocol)
+	if err != nil {
+		if a, ok := h.service.(station.RadioAttacher); ok {
+			a.AttachRadio(m.file.Stations[name].Radio, nil, err.Error())
+		}
+		return
+	}
+	cfg, _, err := m.file.Stations[name].Layered.Resolve(builder.Presets)
+	if err != nil {
+		if a, ok := h.service.(station.RadioAttacher); ok {
+			a.AttachRadio(m.file.Stations[name].Radio, nil, err.Error())
+		}
+		return
+	}
+	m.attachStationRadio(name, h, builder, cfg)
 }
 
 // The live views the console reads. Each returns a copy: sessions
@@ -650,7 +831,7 @@ func (m *manager) StationInfos() []cli.StationInfo {
 		}
 		out = append(out, cli.StationInfo{
 			Name: info.Name, Protocol: info.Protocol, Listen: info.Listen, Radio: info.Radio,
-			State: string(info.State), Cause: info.Cause, RF: string(info.RF),
+			State: string(info.State), Cause: info.Cause, RF: string(info.RF), RFCause: info.RFCause,
 			Connected: info.Connected, Remote: info.Remote,
 			Mailbox: info.Mailbox, MailboxCap: info.MailboxCap,
 			Waveform: info.Waveform, Identity: info.PublicKey,
@@ -665,16 +846,37 @@ func (m *manager) RadioInfos() []cli.RadioInfo {
 	defer m.mu.Unlock()
 	m.viewMu.RLock()
 	defer m.viewMu.RUnlock()
-	out := make([]cli.RadioInfo, 0, len(m.radios))
-	for _, i := range m.radios {
-		out = append(out, i)
-	}
-	// The configured-but-unclaimed radios: real objects, no envelope
-	// to show yet.
+	out := make([]cli.RadioInfo, 0, len(m.file.Radios))
 	for name, rd := range m.file.Radios {
-		if _, live := m.radios[name]; !live {
-			out = append(out, cli.RadioInfo{Name: name, Driver: rd.Driver})
+		info, live := m.radios[name]
+		if !live {
+			info = cli.RadioInfo{Name: name, Driver: rd.Driver}
 		}
+		for relayName, rc := range m.file.Relays {
+			if rc.Radio == name {
+				info.Relay = relayName
+				break
+			}
+		}
+		for stationName, sc := range m.file.Stations {
+			if sc.Radio == name {
+				info.Stations = append(info.Stations, stationName)
+			}
+		}
+		sort.Strings(info.Stations)
+		if h := m.controllers[name]; h != nil {
+			if h.controller != nil {
+				state, cause := h.controller.ControllerStatus()
+				role, authority := h.controller.Authority()
+				info.State, info.Cause = string(state), cause
+				if authority != "" {
+					info.Authority = string(role) + " " + authority
+				}
+			} else {
+				info.State, info.Cause = string(radio.ControllerError), h.cause
+			}
+		}
+		out = append(out, info)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
@@ -1208,6 +1410,14 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 	}
 	m.file = next
 
+	if kind == confdb.KindRadio {
+		m.restartRadio(name)
+		return "applied — radio " + name + " restarting", nil
+	}
+	if kind == confdb.KindStation && stationRadioOnly(typed, unset) {
+		m.rebindStation(name)
+		return "applied — station " + name + " radio attachment updated", nil
+	}
 	if relayName == "" {
 		return m.applyWithoutRelay(kind, name, next), nil
 	}
@@ -1220,6 +1430,63 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 	// waveform — and must follow the successor.
 	m.bounceObserversOf(relayName)
 	return fmt.Sprintf("applied — relay %s restarting", relayName), nil
+}
+
+func stationRadioOnly(typed map[string]any, unset []string) bool {
+	if len(typed)+len(unset) != 1 {
+		return false
+	}
+	if _, ok := typed[attrRadio]; ok {
+		return true
+	}
+	return len(unset) == 1 && unset[0] == attrRadio
+}
+
+// restartRadio replaces the physical owner while keeping station application
+// services alive. Relays are rebound first and therefore establish authority
+// before stations join the new controller. The caller holds mu.
+func (m *manager) restartRadio(name string) {
+	var relayName string
+	for candidate, rc := range m.file.Relays {
+		if rc.Radio == name {
+			relayName = candidate
+			break
+		}
+	}
+	stationNames := make([]string, 0)
+	for candidate, sc := range m.file.Stations {
+		if sc.Radio == name {
+			stationNames = append(stationNames, candidate)
+		}
+	}
+	sort.Strings(stationNames)
+	if relayName != "" {
+		m.stopRelay(relayName)
+	}
+	for _, stationName := range stationNames {
+		h := m.stations[stationName]
+		if h == nil || h.service == nil {
+			continue
+		}
+		if h.binding != nil {
+			h.binding.Unbind()
+			h.binding = nil
+		}
+		if a, ok := h.service.(station.RadioAttacher); ok {
+			a.AttachRadio(name, nil, "radio controller restarting")
+		}
+	}
+	m.stopRadio(name)
+	m.startRadio(m.ctx, name)
+	if relayName != "" {
+		m.startRelay(m.ctx, relayName)
+	}
+	for _, stationName := range stationNames {
+		m.rebindStation(stationName)
+	}
+	if relayName != "" {
+		m.bounceObserversOf(relayName)
+	}
 }
 
 func (m *manager) applyWithoutRelay(kind, name string, next *config.File) string {
@@ -1393,6 +1660,9 @@ func (m *manager) startCreatedObject(kind, name string) string {
 	case confdb.KindStation:
 		m.startStation(m.ctx, name)
 		return fmt.Sprintf("added — station %s listening", name)
+	case confdb.KindRadio:
+		m.startRadio(m.ctx, name)
+		return fmt.Sprintf("added — radio %s ready", name)
 	case confdb.KindMQTT:
 		m.startObserver(m.ctx, name)
 		return fmt.Sprintf("added — observer %s connecting", name)
@@ -1812,10 +2082,24 @@ func (m *manager) Remove(ctx context.Context, kind, name, principal string) (str
 		return "", err
 	}
 	m.file = next
+	m.stopRemoved(kind, name)
+	return msg, nil
+}
+
+// stopRemoved applies the live half after the store no longer contains the
+// object. The caller holds mu.
+func (m *manager) stopRemoved(kind, name string) {
 	if kind == confdb.KindStation {
 		m.stopStation(name)
 		m.viewMu.Lock()
 		delete(m.traces, confdb.KindStation+" "+name)
+		m.viewMu.Unlock()
+	}
+	if kind == confdb.KindRadio {
+		m.stopRadio(name)
+		m.viewMu.Lock()
+		delete(m.radios, name)
+		delete(m.traces, confdb.KindRadio+" "+name)
 		m.viewMu.Unlock()
 	}
 	if kind == confdb.KindSensor {
@@ -1829,8 +2113,8 @@ func (m *manager) Remove(ctx context.Context, kind, name, principal string) (str
 		delete(m.traces, "relay "+name)
 		for radioName, info := range m.radios {
 			if info.Relay == name {
-				delete(m.radios, radioName)
-				delete(m.traces, "radio "+radioName)
+				info.Relay = ""
+				m.radios[radioName] = info
 			}
 		}
 		m.viewMu.Unlock()
@@ -1840,7 +2124,6 @@ func (m *manager) Remove(ctx context.Context, kind, name, principal string) (str
 		m.stopObserver(name)
 		delete(m.obsCause, name)
 	}
-	return msg, nil
 }
 
 // removeFromFile deletes one object from the copy, naming what that
