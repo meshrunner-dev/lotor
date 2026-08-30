@@ -146,10 +146,16 @@ func (s *service) processRF(ctx context.Context, frame radio.Frame) {
 		s.receiveAdvert(ctx, packet)
 	case mesh.PayloadTypePath:
 		s.receivePath(ctx, packet)
+	case mesh.PayloadTypeResponse:
+		s.receiveRemoteResponse(packet)
 	case mesh.PayloadTypeTxtMsg:
 		s.receiveDirectText(ctx, packet, frame)
 	case mesh.PayloadTypeGrpTxt, mesh.PayloadTypeGrpData:
 		s.receiveGroup(ctx, packet, frame)
+	case mesh.PayloadTypeRawCustom:
+		s.receiveRaw(packet, frame)
+	case mesh.PayloadTypeControl:
+		s.receiveControl(packet, frame)
 	default:
 		return
 	}
@@ -358,6 +364,18 @@ func (s *service) receiveACK(payload []byte) {
 			break
 		}
 	}
+	if !matched.used {
+		for key, connection := range s.connections {
+			if connection.expectedACK == crc && crc != 0 {
+				connection.expectedACK = 0
+				connection.activeAt = time.Now()
+				connection.nextPing = connection.activeAt.Add(connection.keepAlive)
+				s.connections[key] = connection
+				s.mu.Unlock()
+				return
+			}
+		}
+	}
 	s.mu.Unlock()
 	if !matched.used {
 		return
@@ -391,6 +409,10 @@ func (s *service) receivePath(ctx context.Context, packet *mesh.Packet) {
 		}
 		path, err := mesh.DecodePathReturn(plain)
 		if err != nil {
+			return
+		}
+		if path.ExtraType == uint8(mesh.PayloadTypeResponse) &&
+			s.receivePathDiscovery(candidate, packet, path) {
 			return
 		}
 		if !s.storeContactPath(ctx, candidate.info.PublicKey, path) {
@@ -535,10 +557,14 @@ func (s *service) push(response companion.Response) {
 }
 
 func (s *service) runTX(ctx context.Context) {
+	connectionTicker := time.NewTicker(time.Second)
+	defer connectionTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-connectionTicker.C:
+			s.checkConnections()
 		case item := <-s.outbound:
 			if !item.notBefore.IsZero() {
 				select {

@@ -38,6 +38,7 @@ const (
 	maxMailboxSlots  = 4096
 	maxConnectionPIN = math.MaxUint32
 	maxSignData      = 8 * 1024
+	maxConnections   = 16
 )
 
 func init() {
@@ -195,6 +196,7 @@ func build(spec station.Spec) (station.Service, error) {
 		channels: make(map[uint8]channel), contacts: make(map[[mesh.PubKeySize]byte]contactEntry),
 		state: station.StateStarting, stateStore: spec.State, txPolicy: spec.TX, bus: spec.Bus,
 		rfWake: make(chan struct{}, 1), startedAt: time.Now(),
+		connections: make(map[[mesh.PubKeySize]byte]remoteConnection),
 	}
 	queueDepth := spec.TX.QueueDepth
 	if queueDepth <= 0 {
@@ -294,6 +296,8 @@ type service struct {
 	startedAt    time.Time
 	stats        stationStats
 	signData     []byte
+	pending      pendingRequest
+	connections  map[[mesh.PubKeySize]byte]remoteConnection
 }
 
 func (s *service) Run(ctx context.Context) error {
@@ -489,6 +493,20 @@ func (s *service) handleQuery(cmd companion.Command) ([]companion.Response, bool
 		return s.getStats(c.Type), true
 	case companion.SignData:
 		return s.appendSignData(c.Data), true
+	case companion.ContactRequest:
+		switch c.Kind {
+		case companion.CommandHasConnection:
+			s.pruneConnectionsLocked(time.Now())
+			if _, exists := s.connections[c.PublicKey]; exists {
+				return okResponses(), true
+			}
+			return errorResponses(companion.ErrorNotFound), true
+		case companion.CommandLogout:
+			delete(s.connections, c.PublicKey)
+			return okResponses(), true
+		default:
+			return nil, false
+		}
 	case companion.SimpleCommand:
 		if responses, handled := s.handleIdentityQuery(c.Kind); handled {
 			return responses, true
@@ -561,6 +579,8 @@ func (s *service) handlePreferenceMutation(cmd companion.Command) ([]companion.R
 		}
 		s.id = identity
 		clear(s.expectedACKs[:])
+		s.pending = pendingRequest{}
+		clear(s.connections)
 		return okResponses(), true
 	default:
 		return nil, false

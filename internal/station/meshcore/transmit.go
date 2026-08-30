@@ -29,6 +29,24 @@ func (s *service) handleTransmission(command companion.Command) ([]companion.Res
 		return s.sendChannelText(cmd), true
 	case companion.SendChannelData:
 		return s.sendChannelData(cmd), true
+	case companion.SendRawData:
+		return s.sendRawData(cmd), true
+	case companion.SendLogin:
+		return s.sendLogin(cmd), true
+	case companion.ContactRequest:
+		if cmd.Kind == companion.CommandSendStatusRequest {
+			return s.sendStatusRequest(cmd.PublicKey), true
+		}
+	case companion.SendTelemetryRequest:
+		return s.sendTelemetryRequest(cmd), true
+	case companion.ContactDataRequest:
+		return s.sendContactDataRequest(cmd), true
+	case companion.SendPathDiscovery:
+		return s.sendPathDiscovery(cmd.PublicKey), true
+	case companion.SendControlData:
+		return s.sendControlData(cmd.Data), true
+	case companion.SendRawPacket:
+		return s.sendRawPacket(cmd), true
 	case companion.ContactKey:
 		if cmd.Kind == companion.CommandShareContact {
 			return s.shareContact(cmd.PublicKey), true
