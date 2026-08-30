@@ -164,7 +164,9 @@ func (o *Observer) Run(ctx context.Context, sub *bus.Subscription) {
 			return
 		case <-o.cfg.Connects:
 			logging.Trace(o.log, "observer broker session ready")
-			o.publishStatus(time.Now())
+			if o.cfg.Status {
+				o.publishStatus(time.Now())
+			}
 			if first {
 				first = false
 				o.startNeighbors(ctx, &nbBusy, nbDone)

@@ -1,210 +1,292 @@
-# MQTT observer — plan and wire contract
+# MQTT observer — wire contract and architecture
 
-Publishing what the relay hears (and sends) to MQTT brokers turns it
-into an observer of the mesh: analyzers, maps and dashboards consume a
-de-facto JSON contract established by the observer firmware ecosystem.
-This document pins that contract as measured from the reference
-implementation, then the design for lotor. Interop is the point: a
-consumer that already ingests observer nodes must ingest lotor without
-noticing a difference.
+Publishing what a relay hears and sends to MQTT turns it into an observer of
+the mesh. Analyzers, maps and dashboards consume a de-facto JSON contract
+established by the observer firmware ecosystem. Lotor preserves that contract
+where interoperability requires it and documents its extensions explicitly.
 
-## The wire contract (measured, not guessed)
+## Wire contract
 
-### Topics
+### Topics and identifiers
 
-```
-meshcore/{iata}/{device_id}/status
-meshcore/{iata}/{device_id}/packets
-meshcore/{iata}/{device_id}/raw
+The default topic template is:
+
+```text
+meshcore/{iata}/{device}/{type}
 ```
 
-`iata` is the site's three-letter region code, operator-chosen and required
-for every observer. It remains required for custom topic templates which do
-not interpolate `{iata}`: it identifies the observation site, not merely a
-path segment.
-`device_id` is the node's public key, lowercase hex, in full. A second
-layout exists (`meshrank/uplink/{token}/{device_id}/{type}`, no raw)
-and custom templates with `{iata} {device} {token} {type}`
-placeholders; lotor's topic attribute is such a template, so all three
-layouts are one mechanism.
+It expands to these message classes:
 
-### PACKET (QoS 0, not retained)
+```text
+meshcore/{iata}/{device}/status
+meshcore/{iata}/{device}/packets
+meshcore/{iata}/{device}/raw
+meshcore/{iata}/{device}/neighbors
+```
 
-One message per frame heard (and optionally per frame sent). The
-schema's quirks are part of the contract — several numbers travel as
-JSON strings, and field presence varies by direction:
+`iata` is the observation site's three-character ASCII alphanumeric code. It is
+operator-chosen, normalized to uppercase and required for every observer, even
+when a custom topic template does not interpolate `{iata}`. It identifies the
+site; it is unrelated to MeshCore regions.
+
+`device` is the watched relay's complete public key in uppercase hexadecimal.
+The same convention applies to payload `origin_id` values, neighbour public
+keys, JWT public keys and pubkey-derived usernames. Whole wire frames and path
+tokens remain lowercase hexadecimal.
+
+Custom topic templates may use `{iata}`, `{device}`, `{token}` and `{type}`.
+Lotor refuses templates that leave a placeholder unresolved, expand to an
+empty topic level, begin or end with `/`, or contain MQTT wildcards. The
+Meshrank layout is the same mechanism:
+`meshrank/uplink/{token}/{device}/{type}`. Its preset leaves the high-volume
+RAW feed disabled.
+
+### PACKET — QoS 0, never retained
+
+One message is published per selected frame. Received frames are enabled by
+default; transmitted frames follow the `tx` policy described below. Several
+numbers deliberately travel as JSON strings because that is the ecosystem
+contract.
 
 ```json
 {
-  "timestamp":  "2026-08-28T02:32:16.123456+00:00",
-  "hash":       "16 hex chars — the packet hash, 8 bytes",
-  "origin":     "the node's display name",
-  "origin_id":  "64 hex chars — the node public key",
-  "type":       "PACKET",
-  "direction":  "rx | tx",
-  "time":       "HH:MM:SS (UTC)",
-  "date":       "DD/MM/YYYY (UTC)",
-  "len":        "wire length, decimal AS STRING",
-  "packet_type": "payload type, decimal AS STRING",
-  "route":      "F | D",
-  "payload_len": "decimal AS STRING",
-  "raw":        "the whole wire frame, lowercase hex",
-  "SNR":        "rx only — %.1f AS STRING",
-  "RSSI":       "rx only — integer AS STRING",
-  "score":      "rx only, optional — int(score*1000) AS STRING",
-  "path":       ["per-hop hex tokens — direct packets with hops only"]
+  "timestamp": "2026-08-28T02:32:16.123456+00:00",
+  "hash": "16 lowercase hex characters — the 8-byte packet hash",
+  "origin": "the configured display name",
+  "origin_id": "64 uppercase hex characters — the relay public key",
+  "type": "PACKET",
+  "direction": "rx | tx",
+  "time": "HH:MM:SS (UTC)",
+  "date": "DD/MM/YYYY (UTC)",
+  "len": "wire length, decimal string",
+  "packet_type": "payload type, decimal string",
+  "route": "F | D",
+  "payload_len": "decimal string",
+  "raw": "the whole wire frame, lowercase hex",
+  "SNR": "RX only — one-decimal string",
+  "RSSI": "RX only — integer string",
+  "path": ["per-hop lowercase hex tokens — direct packets with hops only"]
 }
 ```
 
-`route` is two-valued in the reference (`isRouteDirect()` collapses
-transport variants). `score` is the firmware's rebroadcast score;
-lotor has no equivalent and omits it, which the schema allows.
+`route` is two-valued: transport variants collapse into their direct or flood
+direction. The reference may publish a rebroadcast `score`; Lotor has no
+equivalent and omits this optional field.
 
-### STATUS (QoS 1, retain where the broker allows)
+### STATUS — QoS 1, optionally retained
 
-Published every `status_interval` (reference default 5 min), value
-`"online"`; there is no LWT in the reference — consumers infer offline
-from silence.
+STATUS is published immediately after every established or re-established
+broker session, then every `status_interval`. The default interval is five
+minutes. An explicit `status_interval=0` disables STATUS completely, including
+the connection-time publication. There is no last will; consumers infer an
+offline observer from silence.
 
 ```json
 {
-  "status": "online", "timestamp": "…",
-  "origin": "name", "origin_id": "pubkey hex",
-  "model": "hardware string", "firmware_version": "…",
-  "radio": "869.618000,62.5,8,8   — %.6f MHz,%.1f kHz,sf,cr",
-  "client_version": "…",
-  "repeat": "on | off   — whether the node forwards",
-  "stats": { "uptime_secs": 1, "packets_sent": 1, "packets_received": 1,
-             "errors": 1, "noise_floor": -104, "tx_air_secs": 1,
-             "rx_air_secs": 1, "recv_errors": 1 }
+  "status": "online",
+  "timestamp": "2026-08-28T02:32:16.123456+00:00",
+  "origin": "name",
+  "origin_id": "UPPERCASE_PUBKEY",
+  "model": "radio driver",
+  "firmware_version": "Lotor version",
+  "radio": "869.618000,62.5,8,8",
+  "client_version": "lotor/version",
+  "repeat": "on | off",
+  "stats": {
+    "uptime_secs": 1,
+    "packets_sent": 1,
+    "packets_received": 1,
+    "errors": 1,
+    "noise_floor": -104,
+    "tx_air_secs": 1,
+    "rx_air_secs": 1,
+    "recv_errors": 1,
+    "journal_degraded": false,
+    "journal_failures": 0,
+    "journal_last_error": "optional last error",
+    "journal_last_fail_at": "optional UTC timestamp"
+  }
 }
 ```
 
-Every stat is optional (omitted when unknown); the reference also
-sends `battery_mv`, `queue_len`, `internal_heap`, which lotor omits.
+The radio string is `MHz to six decimals,kHz to one decimal,SF,CR`. Every stat
+is optional and omitted when unknown. Journal fields are Lotor extensions: they
+appear after a journal failure and preserve the latest failure even after
+recovery. The reference also publishes fields such as `battery_mv`,
+`queue_len` and `internal_heap`; Lotor currently omits them.
 
-### RAW (QoS 0, default off)
+The retain flag is sent only when the observer's `retain` setting or selected
+preset enables it.
 
-`{"origin", "origin_id", "timestamp", "type": "RAW", "data": "hex"}` —
-the same frame as `packets.raw` without the analysis; highest volume,
-off unless a consumer asks.
-
-### NEIGHBORS (QoS 0, retain where the broker allows, default off)
+### RAW — QoS 0, never retained, disabled by default
 
 ```json
-{"timestamp", "origin", "origin_id",
- "total_neighbors", "queried_neighbors", "truncated",
- "self": {"scopes": "a,b,c", "default_scope": "a"},
- "neighbors": [{"pubkey", "snr",
-                "heard_secs_ago": 42 | null,
-                "scopes": "a,b",
-                "status": "responded" | "timeout" | "send_failed"}]}
+{
+  "origin": "name",
+  "origin_id": "UPPERCASE_PUBKEY",
+  "timestamp": "2026-08-28T02:32:16.123456+00:00",
+  "type": "RAW",
+  "data": "lowercase wire-frame hex"
+}
 ```
 
-The cycle is two-staged, as the ecosystem publishes it: a zero-hop
-discover first refreshes the neighbour table and its one-minute
-window is waited out, then each neighbour is asked its scopes over
-the air, one at a time — the snapshot is rebuilt every cycle, never
-trusted to age well. Each outcome is reported honestly — `responded`
-with its list, `timeout` when the question left and nothing came
-back, `send_failed` when it could not be asked at all (dry gate, no
-identity); a relay that cannot scan degrades to the table as it
-stands. An unknown age travels as `null`, never as zero. Enabling
-`neighbours_interval=` is therefore operator consent to those
-emissions — setting the cadence is the switch — with a 30-minute
-floor for the same reason, and a round also runs once when the
-broker session first lands. Rounds run
-off the observer's loop — frames keep flowing while a slow neighbour
-is being waited out.
+RAW is the same selected frame carried by `PACKET.raw`, without the analysis.
+The observer still requires the frame to parse successfully before publishing
+either representation.
 
-### Device authentication (JWT-shaped)
+### NEIGHBORS — QoS 0, optionally retained, disabled by default
 
-Most community brokers authenticate the device by its own identity: a
-JWT-shaped token as the password, the fixed username
-`v1_{UPPERCASE_PUBKEY}`. Shaped, not standard — the third segment is
-the ed25519 signature over `header.payload` in **uppercase hex**, not
-base64url. Claims: `publicKey` (uppercase hex), `aud`, `iat`, `exp`, and
-`owner` when the operator set one — the claim the platforms use to
-tie a feed to an account.
-Setting `audience=` switches a connection to this mode; tokens are
-minted fresh at every (re)connect by the paho credentials provider,
-signed by the watched relay's node identity, `token_lifetime`
-claiming 24h unless the broker wants less.
+```json
+{
+  "timestamp": "2026-08-28T02:32:16.123456+00:00",
+  "origin": "name",
+  "origin_id": "UPPERCASE_PUBKEY",
+  "total_neighbors": 1,
+  "queried_neighbors": 1,
+  "truncated": false,
+  "self": {
+    "regions": "a,b,c",
+    "default_region": "a",
+    "scopes": "a,b,c",
+    "default_scope": "a"
+  },
+  "neighbors": [{
+    "pubkey": "UPPERCASE_PUBKEY",
+    "snr": 7.5,
+    "heard_secs_ago": 42,
+    "regions": "a,b",
+    "scopes": "a,b",
+    "status": "responded | timeout | send_failed"
+  }]
+}
+```
 
-## Design in lotor
+`regions` and `default_region` are the current vocabulary. `scopes` and
+`default_scope` are deprecated compatibility aliases carrying the same values;
+consumers should migrate to the region names. An unknown neighbour age is JSON
+`null`, never zero.
 
-### A layered kind: `/mqtt`
+Setting `neighbours_interval` is explicit consent to real RF emissions and has
+a 30-minute floor. A round first runs a zero-hop discovery and waits for its
+one-minute collection window, then asks each neighbour for its regions, one at
+a time. A round also runs when the first broker session is established; later
+reconnections do not start an extra round.
 
-Each instance is one broker connection, layered exactly like a radio
-or a relay: a `profile` names a community-broker preset (the
-ecosystem's public table — url, auth style, keepalive, retain),
-overrides patch it per profile, provenance says which said what. The
-parameter set lives in `internal/mqtt` beside the catalog it resolves
-against, pinned to the schema by test:
+The transmit gate must be `on-air` or `on-air-zero-hop`. If it cannot key the
+radio, the round does not run and no stale or all-failed snapshot is published.
+If discovery itself is unavailable after admission, the observer continues
+with the current neighbour table. Per-neighbour results mean:
 
-| attr | type | default | note |
-|---|---|---|---|
-| `profile` | string | custom | community preset; `custom` starts empty |
-| `disabled` | bool | false | parked: configuration kept, nothing runs |
-| `url` | string | — | `tcp://host:1883`, `ssl://`, `ws(s)://` |
-| `username` | string | "" | `{pubkey}` sends the node key |
-| `password` | string, Secret | "" | |
-| `audience` | string | "" | non-empty switches to device auth |
-| `token_lifetime` | duration | 24h | what a minted token claims |
-| `keepalive` | duration | 2m | presets say 55s behind balancers |
-| `ca` | string | system roots | PEM file pinning the broker chain |
-| `retain` | bool | false | STATUS and NEIGHBORS only |
-| `iata` | string | required | three-letter site code, independent of the topic template |
-| `token` | string | "" | for meshrank-style layouts |
-| `topic` | string | `meshcore/{iata}/{device}/{type}` | template |
-| `relay` | string | the only relay | whose identity and frames |
-| `packets` | bool | true | publish PACKET |
-| `raw` | bool | false | publish RAW |
-| `rx` | bool | true | received frames |
-| `tx` | enum off/self-adverts/all | self-adverts | sent frames (reference default) |
-| `types` | words | all | payload-type filter, by name |
-| `status_interval` | duration | 5m | the heartbeat's whole switch; 0 silences it |
-| `neighbours_interval` | duration | off | setting it IS the RF consent; floor 30m |
-| `origin` | string | the relay's name | publish under another banner |
-| `owner` | string | "" | operator key (64 hex), claimed in the device token |
+- `responded`: the region reply arrived;
+- `timeout`: the question was sent but no reply arrived;
+- `send_failed`: that particular question could not be sent.
 
-### Data path
+The round runs outside the frame-consumer loop, so waiting for neighbours does
+not stop packet observation. A tick that lands while a round is already active
+is skipped rather than queued.
 
-The bus is the seam, as it is for the sentinel: `FrameHeard` and
-`FrameSent` gain the raw wire bytes, and the observer is one more
-subscriber — the engine changes by two struct fields and nothing else.
-The observer parses frames with the wire library, builds the JSON
-above, and publishes; a slow broker loses messages (bounded queue,
-drops counted and reported by status) rather than slowing the relay.
+### Device authentication
 
-Client: eclipse/paho.mqtt.golang — reconnect, keepalive and TLS are
-exactly the wheels not worth reinventing. What stays ours is policy:
-bounded publishes and writes, offline refusals counted rather than
-queued without end, and a connect signal the observer answers with a
-fresh STATUS — first session and re-established ones alike — instead
-of a blind first beat racing the dial. Auth is chosen by the resolved
-parameters: an `audience` mints device tokens, a `username` rides
-as-is (`{pubkey}` resolved to the node key), silence connects
+Most community brokers authenticate the device with a JWT-shaped password and
+the fixed username `v1_{UPPERCASE_PUBKEY}`. The first two token segments are
+base64url JSON; the third is the Ed25519 signature over `header.payload` in
+uppercase hexadecimal rather than base64url. Claims are `publicKey`, `aud`,
+`iat`, `exp`, and optional `owner`.
+
+Setting `audience` selects this mode. Lotor mints credentials from the watched
+relay's identity for every connection attempt, including reconnects. The
+default token lifetime is 24 hours; broker presets may shorten it. Without an
+audience, a configured username and password are used as-is, with `{pubkey}` in
+the username expanding to the uppercase relay key. Empty credentials connect
 anonymously.
 
-### Lifecycle
+## Lotor configuration
 
-The manager owns observers the way it owns relays: assembled from
-config at start, bounced when their instance mutates — never bouncing
-the relay, whose frames they merely watch. The console gets `/mqtt`
-through the existing kind machinery (add/set/print/export), plus
-`status` on an instance: connected or not, what was published,
-dropped, filtered. `disable <name>` / `enable <name>` park and unpark
-a connection — sugar over `set disabled=` — and the listing marks
-parked ones with an `X` under a `Flags:` legend.
+Each `/mqtt` instance is one broker connection. Like radios and relays, it is
+layered: a community-broker `profile` supplies defaults and per-profile
+overrides patch them without destroying settings saved for another profile.
 
-## Order of work
+| Attribute | Type | Default | Meaning |
+|---|---|---|---|
+| `profile` | string | `custom` | Community preset; `custom` starts empty |
+| `disabled` | bool | false | Keep the configuration but run no connection |
+| `url` | string | required | `tcp://`, `ssl://`, `ws://` or `wss://` broker |
+| `username` | string | empty | Static credential; `{pubkey}` expands to the relay key |
+| `password` | secret string | empty | Static credential |
+| `audience` | string | empty | Non-empty selects device-token authentication |
+| `token_lifetime` | duration | 24h | Lifetime claimed by a minted token |
+| `keepalive` | duration | 2m | Presets behind balancers normally use 55s |
+| `ca` | string | system roots | PEM file replacing the broker trust roots |
+| `retain` | bool | false | Retain STATUS and NEIGHBORS only |
+| `iata` | string | required | Three-character site code, independent of the topic |
+| `token` | string | empty | Per-connection token used by some topic layouts |
+| `topic` | string | `meshcore/{iata}/{device}/{type}` | Topic template |
+| `relay` | string | the only relay | Relay whose identity and traffic are observed |
+| `packets` | bool | true | Publish analyzed PACKET messages |
+| `raw` | bool | false | Publish RAW messages too |
+| `rx` | bool | true | Publish received frames |
+| `tx` | `off`, `self-adverts`, `all` | `self-adverts` | Which relay emissions are published |
+| `types` | words | all | Payload-type names admitted by the filter |
+| `status_interval` | duration | 5m | STATUS cadence; zero disables it completely |
+| `neighbours_interval` | duration | off | Neighbour round cadence and RF consent; floor 30m |
+| `origin` | string | relay node name | Override the published display name |
+| `owner` | 64 hex characters | empty | Optional operator key in device tokens |
 
-1. this document;
-2. bus: `Raw` on both frame events;
-3. `internal/mqtt`: payloads and topics, pure and golden-tested
-   against the contract above;
-4. client and observer lifecycle (paho);
-5. kind `mqtt` end to end (schema → store → manager → console);
-6. lab: a local mosquitto, real frames observed, then a real
-   community broker when the operator provides one.
+IATA remains mandatory for disabled observers so that parking and unparking
+cannot turn a previously accepted configuration into an invalid one.
+
+## Data path and visibility
+
+The internal bus is the observer seam. Each observer subscribes with a bounded
+256-event buffer and selects events belonging to its configured relay:
+
+- `FrameHeard` provides the relay's RF receptions, with SNR, RSSI, raw bytes and
+  a correlation identifier;
+- `FrameSent` provides actual relay emissions;
+- station-originated emissions are not relay emissions and are excluded;
+- shadow emissions are excluded because they never went on the air;
+- dropped or refused transmissions are not presented as sent frames.
+
+Consequently `tx=all` means all actual emissions from the watched relay, not
+all producers sharing its radio. `tx=self-adverts` publishes only adverts whose
+embedded identity is the watched relay's own key.
+
+The observer parses selected frames with `meshrunner.dev/pkg/meshcore`, applies
+the payload-type filter, builds JSON and publishes synchronously with a bounded
+wait. A slow or disconnected broker cannot block the relay indefinitely: once
+the subscription buffer fills, later bus events are dropped and counted.
+There is no unbounded offline MQTT queue.
+
+Traffic selection and filtering are logged at debug level. Payload encoding,
+broker completion and lifecycle plumbing are trace logs. The
+frame correlation identifier is carried through these logs but is deliberately
+absent from the ecosystem JSON contract.
+
+Observer counters — published messages, publish errors, bus drops, configured
+filter drops and last publication time — are available through
+`/mqtt/<name> status`. They are operational counters, not fields in the MQTT
+STATUS payload, whose `stats` describe the watched relay and journal.
+
+## Broker and lifecycle
+
+The client uses `eclipse/paho.mqtt.golang` for TCP, TLS, WebSocket transport,
+keepalive and reconnection. Initial connection happens in the background so an
+unavailable broker cannot block daemon assembly. Reconnect attempts back off to
+two minutes. Individual publishes wait at most five seconds and fail immediately
+when no broker session is open. Custom `ca` files create a dedicated root pool
+with TLS 1.2 as the minimum version.
+
+The manager starts observers from configuration, reconnects an observer when
+its effective configuration changes, and rebinds it when the watched relay is
+rebuilt or topology changes alter the meaning of an omitted `relay`. An observer
+never restarts the relay it watches.
+
+`/mqtt/<name> status` reports `connected`, `connecting`, `disabled` or `down`,
+including a startup refusal cause and the counters above. `disable` and `enable`
+park and unpark a connection without discarding its configuration; collection
+listings mark parked observers with `X`. `export` emits the complete layered
+configuration, including inactive profile overrides and masked secrets.
+
+The JSON payloads and topic behavior are pinned by golden tests in
+`internal/mqtt`; connection behavior is covered with an in-process MQTT peer and
+observer-loop tests.

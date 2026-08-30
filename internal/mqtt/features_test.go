@@ -264,6 +264,40 @@ func TestObserverSpeaksOnConnectAndWalksNeighbours(t *testing.T) {
 	}
 }
 
+func TestStatusIntervalZeroSilencesTheConnectHeartbeat(t *testing.T) {
+	sink := &retainRecorder{}
+	connects := make(chan struct{}, 1)
+	roundStarted := make(chan struct{})
+	cfg := Config{
+		Instance: "t", Relay: "r", IATA: "PAR", OriginID: "feed", Origin: "n",
+		Topic: DefaultTopic, Status: false, StatusInterval: 0, Connects: connects,
+		NeighborsInterval: time.Hour,
+		Neighbors: func(context.Context) ([]NeighborEntry, int, bool) {
+			close(roundStarted)
+			return nil, 0, false
+		},
+	}
+	o := New(cfg, sink, zap.NewNop())
+	b := bus.New()
+	sub := b.Subscribe(4)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); o.Run(ctx, sub) }()
+
+	connects <- struct{}{}
+	select {
+	case <-roundStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("connect signal was not served")
+	}
+	cancel()
+	sub.Close()
+	<-done
+	if got := sink.count(); got != 0 {
+		t.Fatalf("disabled status published %d messages on connect", got)
+	}
+}
+
 func TestIATAFollowsTheEcosystemRule(t *testing.T) {
 	for in, want := range map[string]string{"": "", "par": "PAR", "DEN": "DEN", "9h1": "9H1"} {
 		got, err := NormalizeIATA(in)
