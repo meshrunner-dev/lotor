@@ -1145,6 +1145,7 @@ func relayInfo(name string, rc config.Relay, radioSpec config.Radio,
 		Neighbours:       neighboursOf(eng),
 		RemoveNeighbours: removeNeighboursOf(eng),
 		AirSessions:      airSessionsOf(eng),
+		CloseSession:     closeSessionOf(eng),
 		Access:           accessOf(eng),
 		Grant:            grantOf(eng),
 		GrantRole:        grantRoleOf(eng),
@@ -1316,6 +1317,16 @@ func airSessionsOf(eng protocol.Engine) func() ([]cli.AirSession, error) {
 		}
 		return out, nil
 	}
+}
+
+// closeSessionOf exposes the protocol's explicit session boundary
+// without coupling the CLI to engines that do not keep clients.
+func closeSessionOf(eng protocol.Engine) func([]byte) error {
+	c, ok := eng.(interface{ CloseSession(pubKey []byte) error })
+	if !ok {
+		return nil
+	}
+	return c.CloseSession
 }
 
 // advertTrigger exposes an engine's operator-advert order when it has

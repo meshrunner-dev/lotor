@@ -222,6 +222,10 @@ func (e *engine) admitLogin(senderPub, secret []byte, password string,
 	if password != "" || flood {
 		c.out = nil
 	}
+	// A successful login is the only operation that reopens an
+	// operator-closed durable session. Refused attempts were composed
+	// on this candidate and leave the live marker untouched.
+	c.closed = false
 	return &c
 }
 

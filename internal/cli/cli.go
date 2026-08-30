@@ -67,6 +67,7 @@ const (
 	optRegion     = "region"
 	cmdGrant      = "grant"
 	cmdRevoke     = "revoke"
+	cmdClose      = "close"
 	optKey        = "key"
 	optRole       = "role"
 	// The role words the console speaks — the boundary's RoleByte is
@@ -185,6 +186,9 @@ type RelayInfo struct {
 	// AirSessions lists the companions logged in over the air; nil
 	// when the protocol keeps no sessions.
 	AirSessions func() ([]AirSession, error)
+	// CloseSession ends one live conversation without taking back a
+	// durable ACL role; nil when the protocol cannot close sessions.
+	CloseSession func(pubKey []byte) error
 	// Access lists durable authorisations; live guests belong to
 	// AirSessions instead. Nil when the protocol keeps no access list.
 	Access func() ([]Access, error)

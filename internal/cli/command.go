@@ -105,7 +105,9 @@ func init() {
 	commands = append(commands, accessCommands()...)
 }
 
-// accessCommands manage a relay's durable access list.
+// accessCommands manage a relay's durable access list and its live
+// over-the-air sessions. The tree mounts each verb on the drawer whose
+// state it changes.
 func accessCommands() []*command {
 	return []*command{
 		{
@@ -143,6 +145,23 @@ func accessCommands() []*command {
 			},
 			admin: true,
 			run:   (*session).revokeAccess,
+		},
+		{
+			name:  cmdClose,
+			forms: []form{{cmdClose, "close this live session without revoking access"}},
+			detail: []string{
+				cmdClose,
+				"admin only. It ends the over-the-air session you stand",
+				"on. A guest disappears; a durable ACL role remains and",
+				"may open a fresh session by logging in again. Named by key",
+				"prefix from the sessions drawer.",
+			},
+			flags: []flagSpec{
+				{name: scopeRelay, valued: true, doc: docRelay},
+				{name: optKey, valued: true, doc: "which live session, by key prefix"},
+			},
+			admin: true,
+			run:   (*session).closeAirSession,
 		},
 	}
 }

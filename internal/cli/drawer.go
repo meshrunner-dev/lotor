@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -14,9 +15,10 @@ import (
 )
 
 // A drawer is a runtime collection an instance holds: what the mesh is
-// doing rather than what it was told to do. It is somewhere to stand
-// and read, and nothing more — no attribute to set, nothing to export,
-// because none of it was ever configured.
+// doing rather than what it was told to do. Most are somewhere only
+// to stand and read. A durable runtime collection may expose the
+// narrow mutations and export needed to administer that state; those
+// doors are declared explicitly below rather than inferred.
 type drawer struct {
 	name string
 	doc  string
@@ -42,6 +44,10 @@ type drawer struct {
 	// view reads the drawer for printing; sel is the window the line
 	// asked for, meaningful only where windowed says so.
 	view func(s *session, ctx context.Context, instance string, sel frameSelectors) (drawerView, error)
+	// export, when present, emits replayable commands for this durable
+	// runtime collection. site.item is empty for the whole drawer and
+	// holds a key prefix when exporting one entry.
+	export func(s *session, site *drawerSite) error
 	// itemSet, when present, is the one mutation an item answers: set
 	// attr=value while standing on it, the item itself naming the
 	// subject. Everything else about a drawer stays read-only.
@@ -144,12 +150,14 @@ var drawers = []drawer{{
 	keys:  (*session).sessionKeys,
 	view:  (*session).sessionView,
 }, {
-	name:  drawerSessions,
-	doc:   "companions logged in over the air",
-	on:    scopeRelay,
-	empty: "nobody logged in",
-	keys:  (*session).airSessionKeys,
-	view:  (*session).airSessionView,
+	name:      drawerSessions,
+	doc:       "companions logged in over the air",
+	on:        scopeRelay,
+	itemVerbs: []string{cmdClose},
+	itemFlag:  optKey,
+	empty:     "nobody logged in",
+	keys:      (*session).airSessionKeys,
+	view:      (*session).airSessionView,
 }, {
 	name:      drawerACL,
 	doc:       "who has durable access to this relay",
@@ -160,6 +168,7 @@ var drawers = []drawer{{
 	empty:     "nobody authorised",
 	keys:      (*session).accessKeys,
 	view:      (*session).accessView,
+	export:    (*session).accessExport,
 	itemSet:   (*session).accessSet,
 	itemAttrs: []schema.Attr{{Name: optRole, Type: schema.String,
 		Enum: []string{roleAdmin, roleReadWrite, roleReadOnly},
@@ -407,6 +416,55 @@ func (s *session) access(instance string) ([]Access, error) {
 		return nil, fmt.Errorf("relay %q keeps no access list", r.Name)
 	}
 	return r.Access()
+}
+
+// accessExport emits durable authorisations as explicit grants. The
+// origin of a role (password promotion or operator grant) is history,
+// not state needed to recreate the ACL, so every replay line names the
+// current role and complete key. Sorting by the whole key makes two
+// exports byte-for-byte alike.
+func (s *session) accessExport(site *drawerSite) error {
+	rows, err := s.access(site.instance)
+	if err != nil {
+		return err
+	}
+	rows = append([]Access(nil), rows...)
+	if site.item != "" {
+		prefix, err := hex.DecodeString(site.item)
+		if err != nil {
+			return fmt.Errorf("%q is not a hex key prefix", site.item)
+		}
+		full, err := matchAccess(rows, prefix)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if row.PubKey == full {
+				rows = []Access{row}
+				break
+			}
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		return bytes.Compare(rows[i].PubKey[:], rows[j].PubKey[:]) < 0
+	})
+	for _, row := range rows {
+		switch row.Role {
+		case roleAdmin, roleReadWrite, roleReadOnly:
+		default:
+			return fmt.Errorf("cannot export ACL role %q for %x", row.Role, row.PubKey[:6])
+		}
+	}
+	for _, row := range rows {
+		fmt.Fprintf(s.out, "%s %s %s %s %s%s%s %s%s%s\r\n",
+			s.color(cPath, "/"+scopeRelay),
+			s.color(cPath, site.instance),
+			s.color(cPath, drawerACL),
+			s.color(cVerb, cmdGrant),
+			s.color(cAttr, optKey), s.color(cPunct, "="), hex.EncodeToString(row.PubKey[:]),
+			s.color(cAttr, optRole), s.color(cPunct, "="), row.Role)
+	}
+	return nil
 }
 
 // accessKeys answers the walker and completion, bounded.

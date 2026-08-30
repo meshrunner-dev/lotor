@@ -1624,19 +1624,7 @@ func (s *session) verbNamesAt(path []string) []string {
 		return verbs
 	default:
 		if site := s.drawerSiteAt(path); site != nil {
-			// A drawer holds what the mesh is doing. There is nothing
-			// to set and nothing to export, so reading is all it
-			// answers to — that, and the commands whose subject is
-			// what it holds, or the one thing being stood on.
-			verbs := []string{verbPrint}
-			if site.item == "" {
-				return append(verbs, site.d.verbs...)
-			}
-			verbs = append(verbs, site.d.itemVerbs...)
-			if site.d.itemSet != nil {
-				verbs = append(verbs, verbSet)
-			}
-			return verbs
+			return drawerVerbNames(site)
 		}
 		verbs := []string{verbPrint, verbStatus, verbSet, verbSet64, verbUnset, verbExport}
 		if disableable(path[0]) {
@@ -1649,6 +1637,23 @@ func (s *session) verbNamesAt(path []string) []string {
 		}
 		return verbs
 	}
+}
+
+// drawerVerbNames returns only the narrow mutations and durable
+// export a runtime drawer explicitly declares.
+func drawerVerbNames(site *drawerSite) []string {
+	verbs := []string{verbPrint}
+	if site.d.export != nil {
+		verbs = append(verbs, verbExport)
+	}
+	if site.item == "" {
+		return append(verbs, site.d.verbs...)
+	}
+	verbs = append(verbs, site.d.itemVerbs...)
+	if site.d.itemSet != nil {
+		verbs = append(verbs, verbSet)
+	}
+	return verbs
 }
 
 // verbsAt is kept for the places that only need the names.
@@ -2327,11 +2332,17 @@ func resolves(cands []string, word string) bool {
 	return slices.Contains(cands, word)
 }
 
-// treeExportGated is export behind the reveal capability: it
-// withholds nothing, secrets included, so it is the admin's alone —
-// the read-only listener is unauthenticated, and an export there
-// handed the node's identity to whoever could open a socket.
+// treeExportGated keeps every export behind the admin boundary. A
+// configuration export carries secrets; a durable runtime export does
+// not, but its complete principals still belong with the mutations
+// that administer them rather than on the public listener.
 func (s *session) treeExportGated(path []string) error {
+	if site := s.drawerSiteAt(path); site != nil && site.d.export != nil {
+		if s.deps.Privilege != Admin {
+			return fmt.Errorf("%s is an admin verb — use the local console socket", verbExport)
+		}
+		return site.d.export(s, site)
+	}
 	if err := s.canReveal(); err != nil {
 		return fmt.Errorf("%s recreates everything, secrets included — %w", verbExport, err)
 	}

@@ -160,6 +160,97 @@ func TestGuestSessionIsMemoryOnly(t *testing.T) {
 	}
 }
 
+func TestClosingASessionPreservesOnlyDurableAccess(t *testing.T) {
+	store := newMemStore()
+	a := newACL(store)
+	now := time.Now()
+
+	guest := &client{pubKey: aclKey(0x11), perms: permGuest, active: true, lastActive: now}
+	if err := a.put(guest); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.closeSession(guest.pubKey); err != nil {
+		t.Fatal(err)
+	}
+	if a.get(guest.pubKey[:]) != nil {
+		t.Fatal("closing a guest left its memory-only session behind")
+	}
+
+	granted := &client{
+		pubKey: aclKey(0x22), secret: []byte("shared"), perms: permReadOnly,
+		granted: true, active: true, lastTimestamp: 42, lastActive: now,
+	}
+	granted.out = &outPath{pathLen: 1, path: []byte{0xaa}, learned: now}
+	if err := a.put(granted); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.closeSession(granted.pubKey); err != nil {
+		t.Fatal(err)
+	}
+	kept := a.get(granted.pubKey[:])
+	if kept == nil || !kept.hasAccess() || kept.active || !kept.closed {
+		t.Fatalf("close damaged the durable role or left it live: %+v", kept)
+	}
+	if kept.out != nil {
+		t.Fatal("close kept a route belonging to the old conversation")
+	}
+	if kept.lastTimestamp != 42 {
+		t.Fatalf("close reset replay guard to %d", kept.lastTimestamp)
+	}
+	if len(a.entries()) != 1 || len(a.sessions(now)) != 0 {
+		t.Fatalf("views after close: access=%+v sessions=%+v", a.entries(), a.sessions(now))
+	}
+	if len(a.matching(granted.pubKey[0])) != 0 {
+		t.Fatal("ordinary authenticated traffic reopened an explicitly closed session")
+	}
+	persisted := store.rows[granted.pubKey]
+	if !persisted.Granted || persisted.Perms != permReadOnly || persisted.HasOut {
+		t.Fatalf("persisted ACL after close = %+v", persisted)
+	}
+	if err := a.closeSession(granted.pubKey); !errors.Is(err, ErrNoSuchSession) {
+		t.Fatalf("closing an already closed session = %v", err)
+	}
+}
+
+func TestAClosedACLSessionReopensOnlyByLogin(t *testing.T) {
+	e, dev, sub, peer := txRig(t, "on-air")
+	if err := e.AttachSessions(newMemStore()); err != nil {
+		t.Fatal(err)
+	}
+	runEngine(t, e, dev)
+	if err := e.Grant(peer.PubKey[:], permReadOnly); err != nil {
+		t.Fatal(err)
+	}
+
+	frame, _ := login(t, e.id, peer, nowTS(200), "", false)
+	dev.frames <- frame
+	if sent := awaitSent(t, sub); sent.Kind != "login-resp" {
+		t.Fatalf("first login = %+v", sent)
+	}
+	<-dev.sent
+	if err := e.CloseSession(peer.PubKey[:]); err != nil {
+		t.Fatal(err)
+	}
+	if sessions, err := e.ClientSessions(); err != nil || len(sessions) != 0 {
+		t.Fatalf("closed session still visible: %+v, %v", sessions, err)
+	}
+	if access, err := e.AccessList(); err != nil || len(access) != 1 || access[0].Perms != permReadOnly {
+		t.Fatalf("close revoked durable access: %+v, %v", access, err)
+	}
+
+	// The durable role makes the blank-password recheck possible, and
+	// that explicit login is what opens a new conversation.
+	frame, _ = login(t, e.id, peer, nowTS(201), "", false)
+	dev.frames <- frame
+	if sent := awaitSent(t, sub); sent.Kind != "login-resp" {
+		t.Fatalf("relogin = %+v", sent)
+	}
+	<-dev.sent
+	if sessions, err := e.ClientSessions(); err != nil || len(sessions) != 1 {
+		t.Fatalf("fresh login did not reopen the session: %+v, %v", sessions, err)
+	}
+}
+
 func TestAGrantOutlivesIdleAndIsReachable(t *testing.T) {
 	// setperm's contract: a granted admin stays one whether or not it
 	// is talking, and can be reached before it ever logs in — the
@@ -198,7 +289,12 @@ func TestAGrantOutlivesIdleAndIsReachable(t *testing.T) {
 	}
 
 	// Revoke removes it, from table and store: a guest role is the
-	// reference's word for removal.
+	// reference's word for removal. Make the grant an active session
+	// first so this also proves the live half is closed.
+	c.active, c.lastActive = true, time.Now()
+	if sessions, err := e.ClientSessions(); err != nil || len(sessions) != 1 {
+		t.Fatalf("revoke precondition has no live session: %+v, %v", sessions, err)
+	}
 	if err := e.Grant(peer.PubKey[:], permGuest); err != nil {
 		t.Fatal(err)
 	}
@@ -207,6 +303,9 @@ func TestAGrantOutlivesIdleAndIsReachable(t *testing.T) {
 	}
 	if _, held := store.rows[peer.PubKey]; held {
 		t.Error("the revoke left the grant in the store")
+	}
+	if sessions, err := e.ClientSessions(); err != nil || len(sessions) != 0 {
+		t.Fatalf("the revoke left a live session: %+v, %v", sessions, err)
 	}
 }
 

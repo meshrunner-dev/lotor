@@ -74,6 +74,12 @@ type client struct {
 	// process lifetime. A restored or newly granted access entry is
 	// authorised, but it is not a live session until it speaks.
 	active bool
+	// closed is the operator's explicit session boundary. Unlike an
+	// idle session, a closed durable principal stays in the ACL, but
+	// its ordinary authenticated traffic is ignored until a fresh
+	// login opens it again. It is deliberately not persisted: closing
+	// a session is not revoking the authorisation behind it.
+	closed bool
 	// granted marks a permission set explicitly, by an admin, distinct
 	// from an access entry that the admin password created. Both are
 	// durable; the bit explains how the role was earned.
@@ -297,6 +303,32 @@ func (a *acl) remove(k [meshcore.PubKeySize]byte) error {
 	return nil
 }
 
+// closeSession ends the live conversation under k. A guest owns no
+// durable state, so closing it removes it outright. An ACL principal
+// keeps its role and replay guard, while its route is cleared and the
+// explicit closed marker makes it log in again before ordinary
+// authenticated traffic is accepted. The route change reaches the
+// store before the live table moves, so a failed close is no close.
+func (a *acl) closeSession(k [meshcore.PubKeySize]byte) error {
+	c := a.live(k)
+	if c == nil || !c.active {
+		return ErrNoSuchSession
+	}
+	if !c.hasAccess() {
+		delete(a.by, k)
+		return nil
+	}
+	candidate := *c
+	candidate.active = false
+	candidate.closed = true
+	candidate.out = nil
+	if err := a.save(&candidate); err != nil {
+		return err
+	}
+	a.by[k] = &candidate
+	return nil
+}
+
 // entries is the durable access list as the console reads it. Guests
 // are sessions only and therefore absent by construction.
 func (a *acl) entries() []ACLEntry {
@@ -345,7 +377,7 @@ func (a *acl) matching(hash byte) []*client {
 		if k[0] != hash {
 			continue
 		}
-		if c := a.live(k); c != nil {
+		if c := a.live(k); c != nil && !c.closed {
 			out = append(out, c)
 		}
 	}

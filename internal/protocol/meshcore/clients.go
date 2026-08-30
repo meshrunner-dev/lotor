@@ -42,6 +42,13 @@ type sessionsOrder struct {
 	reply chan []ClientSession
 }
 
+// sessionCloseOrder asks the pipeline to end one live conversation
+// without necessarily taking back the durable role behind it.
+type sessionCloseOrder struct {
+	pubKey [meshcore.PubKeySize]byte
+	done   *ack
+}
+
 // aclOrder carries a permission change into the pipeline's goroutine,
 // which owns the table. The perms byte is the reference's own: the
 // role in the low two bits, a guest role meaning removal — setperm's
@@ -59,6 +66,9 @@ type aclOrder struct {
 
 // ErrNoSuchEntry says a removal named nobody the table holds.
 var ErrNoSuchEntry = errors.New("no such entry")
+
+// ErrNoSuchSession says a close named no currently active session.
+var ErrNoSuchSession = errors.New("no such active session")
 
 // Grant records a permission byte for a public key — the role in its
 // low bits, zero taking the entry away. Granting requires the whole
@@ -287,8 +297,45 @@ func (e *engine) ClientSessions() ([]ClientSession, error) {
 	}
 }
 
-// drainSessionsAsk serves a pending snapshot, on the pipeline's turn.
+// CloseSession ends one live over-the-air conversation. A durable ACL
+// entry remains authorised and may log in again; a guest disappears
+// entirely. The whole key is required because closing the wrong live
+// principal is no more recoverable than granting the wrong one.
+func (e *engine) CloseSession(pubKey []byte) error {
+	if len(pubKey) != meshcore.PubKeySize {
+		return fmt.Errorf("a session close needs the whole %d-byte key", meshcore.PubKeySize)
+	}
+	o := &sessionCloseOrder{done: newAck()}
+	copy(o.pubKey[:], pubKey)
+	select {
+	case e.sessionCloseAsk <- o:
+	default:
+		return errors.New("a session close is already pending")
+	}
+	e.wakeReceiver("operator-order")
+	return o.done.wait("session close")
+}
+
+// drainSessionsAsk serves a pending close and snapshot, on the
+// pipeline's turn. Close goes first so a snapshot queued beside it
+// cannot report the session after the operator was told it is gone.
 func (e *engine) drainSessionsAsk(now time.Time) {
+	select {
+	case o := <-e.sessionCloseAsk:
+		if !o.done.claim() {
+			break
+		}
+		if err := e.acl.closeSession(o.pubKey); err != nil {
+			if !errors.Is(err, ErrNoSuchSession) {
+				err = fmt.Errorf("the session close would not persist: %w", err)
+			}
+			o.done.refused(err)
+		} else {
+			e.log.Info("session closed", zap.String("pubkey", shortKey(o.pubKey[:])))
+			o.done.taken()
+		}
+	default:
+	}
 	select {
 	case o := <-e.sessionsAsk:
 		o.reply <- e.acl.sessions(now)

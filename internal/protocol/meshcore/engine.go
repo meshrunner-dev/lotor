@@ -258,12 +258,14 @@ type engine struct {
 	// regionStore persists the region map; nil keeps it in memory.
 	regionStore RegionStore
 	// sessionsAsk carries the console's request for a snapshot of the
-	// client table. It asks for no emission, so unlike the others it
-	// is served whatever the gate's mode.
-	sessionsAsk chan *sessionsOrder
-	wakeMu      sync.Mutex
-	wakeRx      context.CancelFunc
-	wakeReason  string
+	// client table, sessionCloseAsk an explicit close. Neither asks for
+	// an emission, so unlike the others they are served whatever the
+	// gate's mode.
+	sessionsAsk     chan *sessionsOrder
+	sessionCloseAsk chan *sessionCloseOrder
+	wakeMu          sync.Mutex
+	wakeRx          context.CancelFunc
+	wakeReason      string
 	// busySince starts a continuous busy spell and is cleared by the
 	// first clear channel — Dispatcher::cad_busy_start's clock, not
 	// the age of any one frame.
@@ -527,22 +529,23 @@ func newEngine(relayName string, p params, id *meshcore.LocalIdentity,
 ) *engine {
 	p = p.withDefaults()
 	return &engine{
-		relay:         relayName,
-		p:             p,
-		firmware:      version.Current().Version,
-		id:            id,
-		bus:           b,
-		log:           log,
-		seen:          newSeenTable(p.DedupTTL, p.DedupEntries),
-		neighbours:    newNeighbourTable(),
-		acl:           newACL(nil),
-		sessionsAsk:   make(chan *sessionsOrder, 1),
-		aclAsk:        make(chan *aclOrder, 1),
-		aclListAsk:    make(chan *aclListOrder, 1),
-		regionAsk:     make(chan *regionOrder, 1),
-		regionSnapAsk: make(chan *regionSnapOrder, 1),
-		limits:        newLimits(),
-		regions:       newRegionTable(meshcore.NewRegionMap()),
+		relay:           relayName,
+		p:               p,
+		firmware:        version.Current().Version,
+		id:              id,
+		bus:             b,
+		log:             log,
+		seen:            newSeenTable(p.DedupTTL, p.DedupEntries),
+		neighbours:      newNeighbourTable(),
+		acl:             newACL(nil),
+		sessionsAsk:     make(chan *sessionsOrder, 1),
+		sessionCloseAsk: make(chan *sessionCloseOrder, 1),
+		aclAsk:          make(chan *aclOrder, 1),
+		aclListAsk:      make(chan *aclListOrder, 1),
+		regionAsk:       make(chan *regionOrder, 1),
+		regionSnapAsk:   make(chan *regionSnapOrder, 1),
+		limits:          newLimits(),
+		regions:         newRegionTable(meshcore.NewRegionMap()),
 	}
 }
 
@@ -780,7 +783,8 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 	now := time.Now()
 	var reason string
 	switch {
-	case len(e.sessionsAsk) > 0 || len(e.aclAsk) > 0 || len(e.aclListAsk) > 0 ||
+	case len(e.sessionsAsk) > 0 || len(e.sessionCloseAsk) > 0 ||
+		len(e.aclAsk) > 0 || len(e.aclListAsk) > 0 ||
 		len(e.regionAsk) > 0 || len(e.regionSnapAsk) > 0:
 		reason = "operator-order"
 		rctx, cancel = context.WithDeadline(ctx, now)

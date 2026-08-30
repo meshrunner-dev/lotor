@@ -891,25 +891,15 @@ func (s *session) grantAccess(_ context.Context, in input) error {
 	return nil
 }
 
-// revokeAccess takes back a grant or drops a session, by key prefix.
+// revokeAccess takes back a durable role and drops any live session
+// under the same key, named by key prefix from the ACL drawer.
 func (s *session) revokeAccess(_ context.Context, in input) error {
-	r, err := s.oneRelay(in.opts[scopeRelay])
+	r, prefix, err := s.relayAndKeyPrefix(in)
 	if err != nil {
-		return err
-	}
-	if err := working(r); err != nil {
 		return err
 	}
 	if r.Revoke == nil || r.Access == nil {
 		return fmt.Errorf("relay %q keeps no access list", r.Name)
-	}
-	key := in.opts[optKey]
-	if key == "" {
-		return fmt.Errorf("which one? %s=<key prefix>", optKey)
-	}
-	prefix, err := hex.DecodeString(key)
-	if err != nil {
-		return fmt.Errorf("%q is not a hex key prefix", key)
 	}
 	// A revoke needs the whole key the engine holds; the prefix names
 	// which entry, the access list supplies the rest.
@@ -926,6 +916,62 @@ func (s *session) revokeAccess(_ context.Context, in input) error {
 	}
 	fmt.Fprintf(s.out, "revoked %s\r\n", hex.EncodeToString(full[:6]))
 	return nil
+}
+
+// closeAirSession ends the live conversation named by a key prefix.
+// Unlike revoke it resolves against the session drawer and leaves any
+// durable access-list entry under the same key alone.
+func (s *session) closeAirSession(_ context.Context, in input) error {
+	r, prefix, err := s.relayAndKeyPrefix(in)
+	if err != nil {
+		return err
+	}
+	if r.CloseSession == nil || r.AirSessions == nil {
+		return fmt.Errorf("relay %q cannot close over-the-air sessions", r.Name)
+	}
+	rows, err := r.AirSessions()
+	if err != nil {
+		return err
+	}
+	full, err := matchAirSession(rows, prefix)
+	if err != nil {
+		return err
+	}
+	if err := r.CloseSession(full[:]); err != nil {
+		return err
+	}
+	fmt.Fprintf(s.out, "closed %s\r\n", hex.EncodeToString(full[:6]))
+	return nil
+}
+
+// relayAndKeyPrefix resolves the subject shared by ACL and session
+// item verbs: a working relay and one hex public-key prefix.
+func (s *session) relayAndKeyPrefix(in input) (RelayInfo, []byte, error) {
+	r, err := s.oneRelay(in.opts[scopeRelay])
+	if err != nil {
+		return RelayInfo{}, nil, err
+	}
+	if err := working(r); err != nil {
+		return RelayInfo{}, nil, err
+	}
+	key := in.opts[optKey]
+	if key == "" {
+		return RelayInfo{}, nil, fmt.Errorf("which one? %s=<key prefix>", optKey)
+	}
+	prefix, err := hex.DecodeString(key)
+	if err != nil {
+		return RelayInfo{}, nil, fmt.Errorf("%q is not a hex key prefix", key)
+	}
+	return r, prefix, nil
+}
+
+// matchAirSession finds the one live session a prefix names.
+func matchAirSession(rows []AirSession, prefix []byte) ([32]byte, error) {
+	keys := make([][32]byte, len(rows))
+	for i := range rows {
+		keys[i] = rows[i].PubKey
+	}
+	return matchKeyPrefix(keys, prefix, "session")
 }
 
 // accessSet changes the role of the entry being stood on — set
@@ -971,16 +1017,26 @@ func (s *session) accessSet(_ context.Context, site *drawerSite, set map[string]
 // matchAccess finds the one entry a prefix names, refusing a prefix
 // that names none or several.
 func matchAccess(rows []Access, prefix []byte) ([32]byte, error) {
+	keys := make([][32]byte, len(rows))
+	for i := range rows {
+		keys[i] = rows[i].PubKey
+	}
+	return matchKeyPrefix(keys, prefix, "entry")
+}
+
+// matchKeyPrefix resolves one full public key from a displayed
+// prefix, refusing absence and ambiguity with the subject's word.
+func matchKeyPrefix(keys [][32]byte, prefix []byte, subject string) ([32]byte, error) {
 	var found [32]byte
 	hits := 0
-	for _, a := range rows {
-		if len(prefix) <= len(a.PubKey) && bytesHasPrefix(a.PubKey[:], prefix) {
-			found, hits = a.PubKey, hits+1
+	for _, key := range keys {
+		if bytesHasPrefix(key[:], prefix) {
+			found, hits = key, hits+1
 		}
 	}
 	switch hits {
 	case 0:
-		return found, fmt.Errorf("no entry starts with %x", prefix)
+		return found, fmt.Errorf("no %s starts with %x", subject, prefix)
 	case 1:
 		return found, nil
 	default:

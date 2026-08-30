@@ -32,6 +32,27 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{saved: map[[meshcore.PubKeySize]byte]PersistedSession{}}
 }
 
+func TestAFailedSessionCloseLeavesTheConversationIntact(t *testing.T) {
+	store := newFakeStore()
+	a := newACL(store)
+	c := &client{
+		pubKey: aclKey(0x91), perms: permReadOnly, granted: true,
+		active: true, lastActive: time.Now(),
+	}
+	c.out = &outPath{pathLen: 1, path: []byte{0xaa}, learned: time.Now()}
+	if err := a.put(c); err != nil {
+		t.Fatal(err)
+	}
+	store.saveErr = errors.New("disk gone")
+	if err := a.closeSession(c.pubKey); err == nil {
+		t.Fatal("close succeeded without persisting the cleared route")
+	}
+	kept := a.get(c.pubKey[:])
+	if kept == nil || !kept.active || kept.closed || kept.out == nil {
+		t.Fatalf("failed close partially changed the live session: %+v", kept)
+	}
+}
+
 func (s *fakeStore) LoadSessions() ([]PersistedSession, error) {
 	s.loads++
 	if s.loadErr != nil {

@@ -260,6 +260,13 @@ grants the complete public key `read-only`; that key can then perform
 the protocol's blank-password recheck. Demoting an ACL principal with
 the guest credential removes the durable entry before the guest
 session is admitted, so a restart cannot resurrect the old role.
+Closing a session from the console removes a guest outright; for an
+ACL principal it clears the live route and requires a fresh login while
+leaving the durable role in place. Revoking an ACL entry takes back the
+role and closes the live session atomically. The ACL drawer exports
+replayable `grant` commands with complete keys and explicit roles; how
+each role was originally earned remains audit history, not recreated
+state.
 
 ## Build profiles
 

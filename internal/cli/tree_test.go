@@ -1679,6 +1679,11 @@ func TestAirSessionsAreADrawerOnTheRelay(t *testing.T) {
 			{PubKey: lost, Role: roleAdmin, LastActive: time.Now()},
 		}, nil
 	}
+	var closed []byte
+	deps.Relays[0].CloseSession = func(pub []byte) error {
+		closed = append([]byte(nil), pub...)
+		return nil
+	}
 	out := run(t, deps, "/relay/meshcore-868/sessions/print")
 	for _, want := range []string{"4f→a2 (2 hops)", "adjacent (0 hops)", "none yet — answers flood",
 		"direct", "flood", "guest", "read-only", "admin"} {
@@ -1691,9 +1696,16 @@ func TestAirSessionsAreADrawerOnTheRelay(t *testing.T) {
 	if !strings.Contains(one, "4f→a2") {
 		t.Errorf("standing on a session showed nothing of it:\n%s", one)
 	}
-	// Runtime through and through: print answers, nothing else does.
+	// Runtime sessions cannot be exported, but an item can be closed.
 	if refused := run(t, deps, "/relay/meshcore-868/sessions/export"); !strings.Contains(refused, `no "export" here`) {
 		t.Errorf("the drawer answered to export:\n%s", refused)
+	}
+	deps.Privilege = Admin
+	if out := run(t, deps, "/relay/meshcore-868/sessions/bb0000000000/close"); !strings.Contains(out, "closed bb0000000000") {
+		t.Errorf("session close was not acknowledged:\n%s", out)
+	}
+	if len(closed) != 32 || closed[0] != 0xbb {
+		t.Fatalf("close door saw %x", closed)
 	}
 	// A protocol without sessions says so.
 	deps.Relays[0].AirSessions = nil
@@ -1952,6 +1964,53 @@ func TestACLDrawerGrantsAndRevokes(t *testing.T) {
 	if len(granted) != 3 || granted[2][1] != "revoke" ||
 		granted[2][0] != "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" {
 		t.Fatalf("revoke door saw %v", granted)
+	}
+}
+
+func TestACLExportIsDeterministicAndReplayable(t *testing.T) {
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	rows := []Access{{Role: roleReadOnly}, {Role: roleAdmin}}
+	for i := range rows[0].PubKey {
+		rows[0].PubKey[i] = 0xbb
+		rows[1].PubKey[i] = 0x11
+	}
+	deps.Relays[0].Access = func() ([]Access, error) {
+		return append([]Access(nil), rows...), nil
+	}
+
+	out := run(t, deps, "/relay/meshcore-868/acl/export")
+	first := "/relay meshcore-868 acl grant key=" + strings.Repeat("11", 32) + " role=admin"
+	second := "/relay meshcore-868 acl grant key=" + strings.Repeat("bb", 32) + " role=read-only"
+	if !strings.Contains(out, first) || !strings.Contains(out, second) ||
+		strings.Index(out, first) > strings.Index(out, second) {
+		t.Fatalf("ACL export is incomplete or unstable:\n%s", out)
+	}
+
+	var replayed [][2]string
+	replay := testDeps(t)
+	replay.Privilege = Admin
+	replay.Relays[0].GrantRole = func(pub []byte, role string) error {
+		replayed = append(replayed, [2]string{hex.EncodeToString(pub), role})
+		return nil
+	}
+	for _, line := range []string{first, second} {
+		if got := run(t, replay, line); strings.Contains(got, "error:") {
+			t.Fatalf("exported line did not replay: %s\n%s", line, got)
+		}
+	}
+	if len(replayed) != 2 || replayed[0][1] != roleAdmin || replayed[1][1] != roleReadOnly {
+		t.Fatalf("replayed grants = %v", replayed)
+	}
+
+	// Standing on one ACL entry exports only that complete grant.
+	one := run(t, deps, "/relay/meshcore-868/acl/bbbbbbbbbbbb/export")
+	if !strings.Contains(one, second) || strings.Contains(one, first) {
+		t.Fatalf("entry export escaped its selection:\n%s", one)
+	}
+	deps.Privilege = ReadOnly
+	if denied := run(t, deps, "/relay/meshcore-868/acl/export"); !strings.Contains(denied, "admin") || strings.Contains(denied, strings.Repeat("11", 32)) {
+		t.Fatalf("public console disclosed the ACL export:\n%s", denied)
 	}
 }
 
