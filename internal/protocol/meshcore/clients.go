@@ -94,7 +94,7 @@ func (e *engine) Grant(pubKey []byte, perms byte) error {
 	default:
 		return errors.New("a permission change is already pending")
 	}
-	e.wakeReceiver("operator-order")
+	e.wakeReceiver("acl-change")
 	return o.done.wait("permission change")
 }
 
@@ -119,7 +119,7 @@ func (e *engine) AccessList() ([]ACLEntry, error) {
 	default:
 		return nil, errors.New("an access-list snapshot is already pending")
 	}
-	e.wakeReceiver("operator-order")
+	e.wakeReceiver("acl-snapshot")
 	select {
 	case rows := <-o.reply:
 		return rows, nil
@@ -287,7 +287,7 @@ func (e *engine) ClientSessions() ([]ClientSession, error) {
 	default:
 		return nil, errors.New("a session snapshot is already pending")
 	}
-	e.wakeReceiver("operator-order")
+	e.wakeReceiver("session-snapshot")
 	select {
 	case rows := <-o.reply:
 		return rows, nil
@@ -312,7 +312,7 @@ func (e *engine) CloseSession(pubKey []byte) error {
 	default:
 		return errors.New("a session close is already pending")
 	}
-	e.wakeReceiver("operator-order")
+	e.wakeReceiver("session-close")
 	return o.done.wait("session close")
 }
 

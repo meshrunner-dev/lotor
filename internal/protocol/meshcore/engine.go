@@ -201,12 +201,17 @@ type engine struct {
 	lastAskedAdvert time.Time
 	limits          limits
 	regions         *regionTable
-	discoverySince  time.Time
-	clockWarned     bool
-	acl             *acl
-	neighbours      *neighbourTable
-	stats           Stats
-	started         time.Time
+	// regionView is the immutable outside view of regions. The map
+	// remains owned by the pipeline goroutine; publishing a complete
+	// replacement lets console painting and observers read it without
+	// turning a display lookup into a radio-loop order.
+	regionView     atomic.Pointer[RegionSnapshot]
+	discoverySince time.Time
+	clockWarned    bool
+	acl            *acl
+	neighbours     *neighbourTable
+	stats          Stats
+	started        time.Time
 	// floor reads the radio's measured noise floor for the status
 	// reply; wired at Run, nil until then.
 	floor func() (radio.NoiseFloor, bool)
@@ -247,12 +252,10 @@ type engine struct {
 	// whole access list, both served on the pipeline's own turn.
 	aclAsk     chan *aclOrder
 	aclListAsk chan *aclListOrder
-	// regionAsk carries one region command line, regionSnapAsk the
-	// outside readers' snapshot; regionStaging is the armed modal
-	// load, engine-goroutine only, mirrored into regionLoadState for
-	// the dispatcher's cheap pre-check.
+	// regionAsk carries one region command line; regionStaging is the
+	// armed modal load, engine-goroutine only, mirrored into
+	// regionLoadState for the dispatcher's cheap pre-check.
 	regionAsk       chan *regionOrder
-	regionSnapAsk   chan *regionSnapOrder
 	regionStaging   *regionLoad
 	regionLoadState atomic.Value
 	// regionStore persists the region map; nil keeps it in memory.
@@ -528,7 +531,7 @@ func newEngine(relayName string, p params, id *meshcore.LocalIdentity,
 	b *bus.Bus, log *zap.Logger,
 ) *engine {
 	p = p.withDefaults()
-	return &engine{
+	e := &engine{
 		relay:           relayName,
 		p:               p,
 		firmware:        version.Current().Version,
@@ -543,10 +546,11 @@ func newEngine(relayName string, p params, id *meshcore.LocalIdentity,
 		aclAsk:          make(chan *aclOrder, 1),
 		aclListAsk:      make(chan *aclListOrder, 1),
 		regionAsk:       make(chan *regionOrder, 1),
-		regionSnapAsk:   make(chan *regionSnapOrder, 1),
 		limits:          newLimits(),
 		regions:         newRegionTable(meshcore.NewRegionMap()),
 	}
+	e.publishRegionView()
+	return e
 }
 
 func (e *engine) Waveform() radio.Waveform { return e.p.Waveform }
@@ -714,7 +718,6 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 		e.drainSessionsAsk(time.Now())
 		e.drainACLAsk()
 		e.drainRegionAsk()
-		e.drainRegionSnapAsk()
 		e.drainHeld(dev, time.Now())
 		// Reception blocks until the pipeline next needs the radio —
 		// the queue's earliest schedule or an advert clock. Nothing
@@ -782,11 +785,11 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 	var cancel context.CancelFunc
 	now := time.Now()
 	var reason string
+	stateOrder := e.stateOrderReason()
+	emissionOrder := e.emissionOrderReason()
 	switch {
-	case len(e.sessionsAsk) > 0 || len(e.sessionCloseAsk) > 0 ||
-		len(e.aclAsk) > 0 || len(e.aclListAsk) > 0 ||
-		len(e.regionAsk) > 0 || len(e.regionSnapAsk) > 0:
-		reason = "operator-order"
+	case stateOrder != "":
+		reason = stateOrder
 		rctx, cancel = context.WithDeadline(ctx, now)
 	case !e.txEnabled():
 		// A dry gate schedules no emission, but a held flood is still
@@ -799,11 +802,11 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 			reason = "external-wake"
 			rctx, cancel = context.WithCancel(ctx)
 		}
-	case len(e.advertAsk) > 0 || len(e.scopeAsk) > 0 || len(e.sweepAsk) > 0:
-		reason = "operator-order"
+	case emissionOrder != "":
+		reason = emissionOrder
 		rctx, cancel = context.WithDeadline(ctx, now)
 	default:
-		if wait, scheduledReason, scheduled := e.txWake(now); scheduled {
+		if wait, scheduledReason, scheduled := e.receiveWake(now); scheduled {
 			reason = scheduledReason
 			rctx, cancel = context.WithDeadline(ctx, now.Add(wait))
 		} else {
@@ -814,6 +817,53 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 	e.wakeRx = cancel
 	e.wakeReason = reason
 	return rctx, cancel
+}
+
+func (e *engine) stateOrderReason() string {
+	switch {
+	case len(e.sessionCloseAsk) > 0:
+		return "session-close"
+	case len(e.sessionsAsk) > 0:
+		return "session-snapshot"
+	case len(e.aclAsk) > 0:
+		return "acl-change"
+	case len(e.aclListAsk) > 0:
+		return "acl-snapshot"
+	case len(e.regionAsk) > 0:
+		return "region-command"
+	default:
+		return ""
+	}
+}
+
+func (e *engine) emissionOrderReason() string {
+	switch {
+	case len(e.advertAsk) > 0:
+		return "advert-request"
+	case len(e.scopeAsk) > 0:
+		return "scope-query"
+	case len(e.sweepAsk) > 0:
+		return "scan-request"
+	default:
+		return ""
+	}
+}
+
+// receiveWake is the next reason the pipeline must regain its turn.
+// Transmit duties come from txWake; an unanswered scopes question adds
+// its own retirement deadline. Keeping that deadline here means the
+// receive context itself owns the timer, so a received answer discards
+// it with the old context instead of leaving a callback to wake a later
+// window for work that no longer exists.
+func (e *engine) receiveWake(now time.Time) (time.Duration, string, bool) {
+	wait, reason, scheduled := e.txWake(now)
+	if q := e.pendingScope; q != nil && !q.until.IsZero() {
+		scopeWait := max(time.Duration(0), q.until.Sub(now))
+		if !scheduled || scopeWait < wait {
+			wait, reason, scheduled = scopeWait, "scope-deadline", true
+		}
+	}
+	return wait, reason, scheduled
 }
 
 // wakeReceiver closes the current receive window so a pending order

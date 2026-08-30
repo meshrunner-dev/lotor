@@ -510,7 +510,7 @@ func (e *engine) RequestAdvert(flood bool) error {
 	default:
 		return errors.New("an advert is already pending")
 	}
-	e.wakeReceiver("operator-order")
+	e.wakeReceiver("advert-request")
 	return o.started.wait("advert")
 }
 

@@ -70,7 +70,7 @@ func (e *engine) Discover() (<-chan Neighbour, time.Time, error) {
 	default:
 		return nil, time.Time{}, errors.New("a scan is already listening")
 	}
-	e.wakeReceiver("operator-order") // close the receive window: ask now
+	e.wakeReceiver("scan-request") // close the receive window: ask now
 
 	// Wait to hear that it went out. The window returned is the one
 	// the pipeline stamped when it did, not the one guessed here.

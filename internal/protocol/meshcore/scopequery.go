@@ -37,7 +37,10 @@ type scopeQuery struct {
 	secret []byte
 	tag    uint32
 	answer chan []string
-	asked  time.Time
+	// until starts when the pipeline really queues the question, not
+	// when its caller first asks. The receive scheduler owns this
+	// deadline; a successful answer removes it with pendingScope.
+	until time.Time
 	// started says whether the pipeline took the question at all, and
 	// why not when it did not. Without it every refusal read as the
 	// silence of a neighbour that never answered: the caller waited
@@ -96,7 +99,6 @@ func (e *engine) AskScopes(peer []byte) ([]string, error) {
 		secret:  secret,
 		tag:     uint32(time.Now().Unix()),
 		answer:  make(chan []string, 1),
-		asked:   time.Now(),
 		started: newAck(),
 	}
 	copy(q.peer[:], peer)
@@ -106,7 +108,7 @@ func (e *engine) AskScopes(peer []byte) ([]string, error) {
 	default:
 		return nil, errors.New("a scopes question is already in flight — they are asked one at a time")
 	}
-	e.wakeReceiver("operator-order")
+	e.wakeReceiver("scope-query")
 	// Whether the question left at all comes back first, and only
 	// then does the window mean anything: ErrNoAnswer is the word for
 	// a neighbour that stayed quiet, never for a question this node
@@ -125,7 +127,7 @@ func (e *engine) AskScopes(peer []byte) ([]string, error) {
 // drainScopeAsk sends a question the operator asked for, and retires
 // one whose answer never came.
 func (e *engine) drainScopeAsk(dev radio.Device, now time.Time) {
-	if e.pendingScope != nil && now.Sub(e.pendingScope.asked) > scopeQueryWait {
+	if e.pendingScope != nil && !now.Before(e.pendingScope.until) {
 		e.pendingScope = nil
 	}
 	select {
@@ -157,12 +159,8 @@ func (e *engine) drainScopeAsk(dev radio.Device, now time.Time) {
 				"the outbound queue is full — the question never left"))
 			return
 		}
+		q.until = now.Add(scopeQueryWait)
 		e.pendingScope = q
-		// Same quiet-channel clause as the sweep: the slot must free
-		// on time even if nothing is heard, or the next question hits
-		// "already in flight" until luck turns the loop.
-		time.AfterFunc(scopeQueryWait+time.Second,
-			func() { e.wakeReceiver("scope-deadline") })
 		q.started.taken()
 		e.log.Info("asking a neighbour for its scopes",
 			zap.String("corr", id.Short()), zap.String("peer", shortKey(q.peer[:])))

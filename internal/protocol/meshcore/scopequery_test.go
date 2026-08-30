@@ -102,7 +102,7 @@ func TestAStrangersAnswerIsNotOurs(t *testing.T) {
 	}
 	e.pendingScope = &scopeQuery{
 		peer: peer.PubKey, secret: secret, tag: 42,
-		answer: make(chan []string, 1), asked: time.Now(),
+		answer: make(chan []string, 1), until: time.Now().Add(scopeQueryWait),
 	}
 	resp, err := meshcore.BuildResponse(e.id.PubKey[:meshcore.PathHashSize],
 		peer.PubKey[:meshcore.PathHashSize], secret, 999, []byte{0, 0, 0, 0})
@@ -128,11 +128,12 @@ func TestASecondQuestionIsRefusedNotSwallowed(t *testing.T) {
 	e.queue.depth = 8
 	// A question already in flight, as a first AskScopes would leave.
 	e.pendingScope = &scopeQuery{
-		peer: peer.PubKey, tag: 1, answer: make(chan []string, 1), asked: time.Now(),
+		peer: peer.PubKey, tag: 1, answer: make(chan []string, 1),
+		until: time.Now().Add(scopeQueryWait),
 	}
 	q := &scopeQuery{
 		peer: peer.PubKey, tag: 2, answer: make(chan []string, 1),
-		asked: time.Now(), started: newAck(),
+		started: newAck(),
 	}
 	e.scopeAsk <- q
 	e.drainScopeAsk(dev, time.Now())
@@ -149,6 +150,48 @@ func TestASecondQuestionIsRefusedNotSwallowed(t *testing.T) {
 	}
 }
 
+func TestScopeAnswerRetiresItsReceiveDeadline(t *testing.T) {
+	// The question's deadline belongs to the receive window. Once an
+	// answer lands, the next window must not inherit a timer for work
+	// which has already completed — that produced one phantom yield per
+	// successful neighbour query.
+	e, _, _, peer := txRig(t, "shadow")
+	secret, err := e.id.SharedSecret(peer.PubKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	q := &scopeQuery{
+		peer: peer.PubKey, secret: secret, tag: 42,
+		answer: make(chan []string, 1), until: now.Add(scopeQueryWait),
+	}
+	e.pendingScope = q
+	wait, reason, scheduled := e.receiveWake(now)
+	if !scheduled || reason != "scope-deadline" || wait != scopeQueryWait {
+		t.Fatalf("receive wake = %s/%s/%v, want %s/scope-deadline/true",
+			wait, reason, scheduled, scopeQueryWait)
+	}
+
+	body := append([]byte{0, 0, 0, 0}, []byte("*,fr")...)
+	resp, err := meshcore.BuildResponse(e.id.PubKey[:meshcore.PathHashSize],
+		peer.PubKey[:meshcore.PathHashSize], secret, q.tag, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Header = meshcore.MakeHeader(meshcore.RouteDirect,
+		meshcore.PayloadTypeResponse, meshcore.PayloadVer1)
+	rx := &reception{pkt: resp, id: correlation.New()}
+	if verdict, _, handled := e.scopeAnswer(rx); !handled || verdict != verdictScopeAnswer {
+		t.Fatalf("answer = %q/%v", verdict, handled)
+	}
+	if e.pendingScope != nil {
+		t.Fatal("the answered question still owns the receive deadline")
+	}
+	if wait, reason, scheduled = e.receiveWake(now); scheduled {
+		t.Fatalf("answered question still scheduled %s in %s", reason, wait)
+	}
+}
+
 func TestAQuestionTheQueueRefusesSaysSo(t *testing.T) {
 	e, dev, _, peer := txRig(t, "on-air")
 	e.queue.depth = 0 // nothing may be scheduled
@@ -158,7 +201,7 @@ func TestAQuestionTheQueueRefusesSaysSo(t *testing.T) {
 	}
 	q := &scopeQuery{
 		peer: peer.PubKey, secret: secret, tag: 3, answer: make(chan []string, 1),
-		asked: time.Now(), started: newAck(),
+		started: newAck(),
 	}
 	e.scopeAsk <- q
 	e.drainScopeAsk(dev, time.Now())

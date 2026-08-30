@@ -22,8 +22,8 @@ const wildcardRegion = "*"
 // regionTable is the resolved agreement: the map itself, plus the key
 // this relay stamps on what it originates — re-derived whenever the
 // default designation moves, so origination never derives per packet.
-// The map belongs to the pipeline's goroutine; every other reader
-// goes through the snapshot order.
+// The map belongs to the pipeline's goroutine; every other reader gets
+// the complete immutable view published after each install.
 type regionTable struct {
 	m *meshcore.RegionMap
 	// speak is the default region's transport key; zero speaks

@@ -328,6 +328,43 @@ func regionRig(t *testing.T) *engine {
 	return e
 }
 
+func TestRegionViewDoesNotWakeReceiveAndCannotBeMutated(t *testing.T) {
+	// Region names participate in live CLI completion and painting.
+	// Reading them is a display operation: it must neither take the
+	// pipeline's turn nor let a caller alter the edition others see.
+	e := regionRig(t)
+	if reply, _ := e.serveRegionLine("admin", "region put lab"); reply != "OK - (flood allowed)" {
+		t.Fatalf("put = %q", reply)
+	}
+	woke := false
+	e.wakeMu.Lock()
+	e.wakeRx = func() { woke = true }
+	e.wakeReason = "external-wake"
+	e.wakeMu.Unlock()
+
+	first, err := e.Regions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if woke {
+		t.Fatal("reading the region view interrupted the receive window")
+	}
+	first.Served[0] = "damaged"
+	first.Entries[0].Name = "damaged"
+	second, err := e.Regions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Served[0] == "damaged" || second.Entries[0].Name != "lab" {
+		t.Fatalf("caller mutated the published view: %+v", second)
+	}
+
+	e.wakeMu.Lock()
+	e.wakeRx = nil
+	e.wakeReason = ""
+	e.wakeMu.Unlock()
+}
+
 func TestRegionCommandSpeaksTheReferenceReplies(t *testing.T) {
 	e := regionRig(t)
 	steps := []struct{ line, want string }{

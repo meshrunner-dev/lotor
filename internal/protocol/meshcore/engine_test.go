@@ -1,6 +1,7 @@
 package meshcore
 
 import (
+	"context"
 	"math"
 	"testing"
 	"time"
@@ -11,6 +12,60 @@ import (
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/radio"
 )
+
+func TestPendingOrdersNameWhyReceiveYields(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+		put  func(*engine)
+	}{
+		{"session close", "session-close", func(e *engine) {
+			e.sessionCloseAsk <- &sessionCloseOrder{}
+		}},
+		{"session snapshot", "session-snapshot", func(e *engine) {
+			e.sessionsAsk <- &sessionsOrder{}
+		}},
+		{"acl change", "acl-change", func(e *engine) {
+			e.aclAsk <- &aclOrder{}
+		}},
+		{"acl snapshot", "acl-snapshot", func(e *engine) {
+			e.aclListAsk <- &aclListOrder{}
+		}},
+		{"region command", "region-command", func(e *engine) {
+			e.regionAsk <- &regionOrder{}
+		}},
+		{"advert request", "advert-request", func(e *engine) {
+			e.policy.Mode = "shadow"
+			e.advertAsk = make(chan *advertOrder, 1)
+			e.advertAsk <- &advertOrder{}
+		}},
+		{"scope query", "scope-query", func(e *engine) {
+			e.policy.Mode = "shadow"
+			e.scopeAsk = make(chan *scopeQuery, 1)
+			e.scopeAsk <- &scopeQuery{}
+		}},
+		{"scan request", "scan-request", func(e *engine) {
+			e.policy.Mode = "shadow"
+			e.sweepAsk = make(chan *sweep, 1)
+			e.sweepAsk <- &sweep{}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e, _ := testEngine(t)
+			tt.put(e)
+			ctx, stop := context.WithCancel(t.Context())
+			window, cancel := e.receiveWindow(ctx)
+			<-window.Done()
+			got := e.finishReceiveWindow()
+			cancel()
+			stop()
+			if got != tt.want {
+				t.Fatalf("reason = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
 func testEngine(t *testing.T) (*engine, *bus.Subscription) {
 	t.Helper()

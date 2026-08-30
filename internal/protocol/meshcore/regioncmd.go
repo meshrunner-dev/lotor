@@ -59,6 +59,7 @@ func (e *engine) AttachRegions(store RegionStore) error {
 		return fmt.Errorf("regions: stored table: %w", err)
 	}
 	e.regions = newRegionTable(m)
+	e.publishRegionView()
 	if n := m.Count(); n > 0 {
 		e.log.Info("regions restored", zap.Int("count", n))
 	}
@@ -137,7 +138,7 @@ func (e *engine) RegionCommand(owner, line string) (reply string, handled bool, 
 	default:
 		return "", true, errors.New("a region command is already pending")
 	}
-	e.wakeReceiver("operator-order")
+	e.wakeReceiver("region-command")
 	if err := o.done.wait("region command"); err != nil {
 		return "", true, err
 	}
@@ -158,7 +159,7 @@ func (e *engine) SetRegionDesignations(owner string, defaultRegion, homeRegion *
 	default:
 		return "", errors.New("a region command is already pending")
 	}
-	e.wakeReceiver("operator-order")
+	e.wakeReceiver("region-command")
 	if err := o.done.wait("region designations"); err != nil {
 		return "", err
 	}
@@ -369,6 +370,7 @@ func (e *engine) installRegions(m *meshcore.RegionMap) error {
 	}
 	e.regions.m = m
 	e.regions.rederive()
+	e.publishRegionView()
 	return nil
 }
 
@@ -680,35 +682,30 @@ type RegionSnapshot struct {
 	Unscoped bool // whether plain floods are carried
 }
 
-// regionSnapOrder asks the pipeline for a snapshot.
-type regionSnapOrder struct {
-	reply chan RegionSnapshot
-}
-
-// Regions reports the region state — any goroutine.
+// Regions reports the last complete region state published by the
+// pipeline. It is intentionally a read, not an order: terminal painting
+// and observer rendering must not interrupt a receive wait. The slices
+// are cloned so callers cannot mutate the shared immutable edition.
 func (e *engine) Regions() (RegionSnapshot, error) {
-	o := &regionSnapOrder{reply: make(chan RegionSnapshot, 1)}
-	select {
-	case e.regionSnapAsk <- o:
-	default:
-		return RegionSnapshot{}, errors.New("a region snapshot is already pending")
+	view := e.regionView.Load()
+	if view == nil {
+		return RegionSnapshot{}, errors.New("the relay has not published its region state")
 	}
-	e.wakeReceiver("operator-order")
-	select {
-	case snap := <-o.reply:
-		return snap, nil
-	case <-time.After(askWait):
-		return RegionSnapshot{}, errors.New("the relay never picked the region snapshot up")
-	}
+	return cloneRegionSnapshot(*view), nil
 }
 
-// drainRegionSnapAsk serves a pending snapshot on the pipeline's turn.
-func (e *engine) drainRegionSnapAsk() {
-	select {
-	case o := <-e.regionSnapAsk:
-		o.reply <- e.regionSnapshot()
-	default:
-	}
+func cloneRegionSnapshot(s RegionSnapshot) RegionSnapshot {
+	s.Served = append([]string(nil), s.Served...)
+	s.Entries = append([]meshcore.Region(nil), s.Entries...)
+	return s
+}
+
+// publishRegionView installs one complete immutable edition after the
+// live map changes. It runs on the pipeline goroutine, plus assembly
+// before that goroutine starts.
+func (e *engine) publishRegionView() {
+	snap := e.regionSnapshot()
+	e.regionView.Store(&snap)
 }
 
 // regionSnapshot composes the outside view from the live table.
