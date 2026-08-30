@@ -202,6 +202,14 @@ func TestPaintAddUsesTheChoiceFromTheWholeLine(t *testing.T) {
 	if stripped := stripSGR(painted); stripped != line {
 		t.Errorf("painting altered the line: %q vs %q", stripped, line)
 	}
+
+	s = &session{deps: testDeps(t), colors: true}
+	s.setPath([]string{"radio"})
+	line = `add g3 profile=lyra-zerow-station-g3 driver=sx126x-spi spi=/dev/spidev0.0`
+	painted = s.paintLine(line)
+	if !strings.Contains(painted, cAttr+"spi"+cReset) {
+		t.Errorf("spi was not resolved from driver=sx126x-spi: %q", painted)
+	}
 }
 
 // stripSGR removes the colour codes, leaving the characters as typed.

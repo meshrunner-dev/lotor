@@ -110,6 +110,12 @@ func testKinds() []schema.Kind {
 				}
 				return nil
 			},
+			Contributed: func(choice string) []schema.Attr {
+				if choice != "sx126x-spi" {
+					return nil
+				}
+				return []schema.Attr{{Name: "spi", Type: schema.String, Doc: "the SPI device"}}
+			},
 		},
 		{
 			Name: "mqtt", Doc: "observer connections",
