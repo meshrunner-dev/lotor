@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The title and header are filled from /api/status: the identity
+     lives in internal/product, and static bytes do not restate it. -->
+<title>…</title>
+<link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="system">…</h1>
+    <p id="build" class="muted"></p>
+  </header>
+
+  <section class="vitals">
+    <div class="vital"><span id="uptime">—</span><label>uptime</label></div>
+    <div class="vital"><span id="heard">—</span><label>frames heard</label></div>
+    <div class="vital"><span id="sent">—</span><label>frames sent</label></div>
+    <div class="vital"><span id="mode">—</span><label>feed</label></div>
+  </section>
+
+  <section>
+    <h2>Relays</h2>
+    <table id="relays">
+      <thead><tr><th>name</th><th>state</th><th>radio</th><th>waveform</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Observers</h2>
+    <table id="observers">
+      <thead><tr><th>name</th><th>state</th><th>broker</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <footer id="journal" class="muted"></footer>
+</main>
+<script src="/assets/app.js"></script>
+</body>
+</html>

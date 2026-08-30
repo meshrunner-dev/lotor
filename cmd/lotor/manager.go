@@ -628,7 +628,7 @@ func (m *manager) Traces() map[string][]config.Trace {
 	}
 	out[confdb.KindSystem] = m.systemTraces()
 	if c := m.file.CLI; c != nil {
-		rows := []config.Trace{{Key: "listen", Value: c.Listen, Source: sourceConfig}}
+		rows := []config.Trace{{Key: attrListen, Value: c.Listen, Source: sourceConfig}}
 		if c.Socket != nil {
 			rows = append(rows, config.Trace{Key: "socket", Value: *c.Socket, Source: sourceConfig})
 		}
@@ -636,7 +636,7 @@ func (m *manager) Traces() map[string][]config.Trace {
 	}
 	if w := m.file.Web; w != nil {
 		out[confdb.KindWeb] = []config.Trace{
-			{Key: "listen", Value: w.Listen, Source: sourceConfig},
+			{Key: attrListen, Value: w.Listen, Source: sourceConfig},
 		}
 	}
 	m.mqttTraces(out)
@@ -1654,13 +1654,13 @@ func removeFromFile(next *config.File, kind, name string) (string, error) {
 		return "removed — sensor " + name, nil
 	case confdb.KindSentinel:
 		next.Sentinel = nil
-		return "removed — takes effect when the daemon restarts", nil
+		return removedAtRestart, nil
 	case confdb.KindCLI:
 		next.CLI = nil
-		return "removed — takes effect when the daemon restarts", nil
+		return removedAtRestart, nil
 	case confdb.KindWeb:
 		next.Web = nil
-		return "removed — takes effect when the daemon restarts", nil
+		return removedAtRestart, nil
 	case confdb.KindMQTT:
 		if _, ok := next.MQTT[name]; !ok {
 			return "", fmt.Errorf("no observer %q", name)
@@ -2162,7 +2162,7 @@ func applyCLIChanges(next *config.File,
 	for attr, v := range typed {
 		var err error
 		switch attr {
-		case "listen":
+		case attrListen:
 			change[attr] = confdb.Change{Old: orNil(c.Listen), New: v}
 			c.Listen, err = asString(attr, v)
 		case attrSocket:
@@ -2208,7 +2208,7 @@ func applyWebChanges(next *config.File,
 		w = *next.Web
 	}
 	for attr, v := range typed {
-		if attr != "listen" {
+		if attr != attrListen {
 			return nil, fmt.Errorf("no attribute %q here", attr)
 		}
 		change[attr] = confdb.Change{Old: orNil(w.Listen), New: v}
@@ -2269,6 +2269,12 @@ func applySystemChanges(next *config.File,
 
 // attrLogLevel is the system knob an investigation turns live.
 const attrLogLevel = "log_level"
+
+// attrListen is the address attribute the listener singletons share.
+const attrListen = "listen"
+
+// removedAtRestart is what removing a restart-scoped singleton says.
+const removedAtRestart = "removed — takes effect when the daemon restarts"
 
 // adoptLevelKnob hands the manager the logger's live level and where
 // the boot flag left it, then lets the stored override speak.

@@ -1,0 +1,47 @@
+/* The scaffold's whole look: legible on a phone held next to the
+   antenna, dark because a shack is. No framework, no build step. */
+:root {
+  --bg: #16181d;
+  --card: #1e2128;
+  --text: #d6d9de;
+  --muted: #8a8f98;
+  --good: #7fbf7f;
+  --bad: #e08080;
+  --line: #2c3038;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, sans-serif;
+}
+main { max-width: 44rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+header h1 { margin: 0; font-size: 1.4rem; }
+.muted { color: var(--muted); }
+.good { color: var(--good); }
+.bad { color: var(--bad); }
+
+.vitals {
+  display: flex;
+  gap: .75rem;
+  margin: 1rem 0 1.5rem;
+  flex-wrap: wrap;
+}
+.vital {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: .5rem;
+  padding: .6rem .9rem;
+  min-width: 7rem;
+}
+.vital span { display: block; font-size: 1.2rem; font-variant-numeric: tabular-nums; }
+.vital label { color: var(--muted); font-size: .8rem; }
+
+section h2 { font-size: 1rem; margin: 1.2rem 0 .4rem; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: normal; font-size: .8rem; }
+tbody tr:last-child td { border-bottom: none; }
+
+footer { margin-top: 2rem; font-size: .85rem; }

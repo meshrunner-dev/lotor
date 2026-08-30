@@ -42,6 +42,7 @@ import (
 	"meshrunner.dev/lotor/internal/sentinel"
 	"meshrunner.dev/lotor/internal/single"
 	"meshrunner.dev/lotor/internal/update"
+	"meshrunner.dev/lotor/internal/web"
 
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/logging"
@@ -733,7 +734,39 @@ func startListeners(ctx context.Context, f *config.File, deps *cli.Deps,
 			}
 		})
 	}
+	if f.Web != nil {
+		addr := f.Web.Listen
+		wd := webDeps(deps)
+		producers.Go(func() {
+			if err := web.ListenAndServe(ctx, addr, wd); err != nil {
+				log.Error("web listener failed", zap.Error(err))
+			}
+		})
+	}
 	return startConsole(ctx, f, deps, producers, log)
+}
+
+// webDeps carves the web UI's read-only view out of the console's
+// seam: the same live views, the same bus, nothing that mutates. The
+// third caller of the one seam, honest about being the least trusted.
+func webDeps(deps *cli.Deps) web.Deps {
+	wd := web.Deps{
+		Log:        deps.Log,
+		Version:    deps.Version,
+		Revision:   deps.Revision,
+		Started:    deps.Started,
+		SystemName: deps.SystemName,
+		LiveRelays: deps.LiveRelays,
+		LiveMQTTs:  deps.LiveMQTTs,
+		Bus:        deps.Bus,
+	}
+	if wd.Log != nil {
+		wd.Log = wd.Log.Named("web")
+	}
+	if deps.Sentinel != nil {
+		wd.Health = deps.Sentinel.Health
+	}
+	return wd
 }
 
 // startConsole opens the local admin console socket: the OS's file

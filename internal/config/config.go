@@ -480,16 +480,22 @@ func (f *File) Validate(requireRelays bool) error {
 	if err := validateSensors(f.Sensors); err != nil {
 		return err
 	}
+	f.defaultListeners()
+	if f.Sentinel != nil {
+		return f.Sentinel.validate()
+	}
+	return nil
+}
+
+// defaultListeners fills the listener addresses a present-but-silent
+// block implies — on every load path, the YAML door and the store's.
+func (f *File) defaultListeners() {
 	if f.CLI != nil && f.CLI.Listen == "" {
 		f.CLI.Listen = DefaultCLIListen
 	}
 	if f.Web != nil && f.Web.Listen == "" {
 		f.Web.Listen = DefaultWebListen
 	}
-	if f.Sentinel != nil {
-		return f.Sentinel.validate()
-	}
-	return nil
 }
 
 func (s *Sentinel) validate() error {
