@@ -22,6 +22,7 @@ const (
 	verdictDropLoop       = "would-drop-flood-loop"      // our hash already rides the path: we relayed this already
 	verdictDropScoped     = "would-drop-flood-scoped"    // transport-scoped flood into a scope this relay denies
 	verdictSelfAdvert     = "self-advert"                // our own advert echoing back
+	verdictSameRadio      = "heard-on-our-own-radio"     // a binding sharing this antenna: relaying reaches nobody new
 	verdictCommand        = "administration"             // a logged-in admin's command line
 	verdictZeroHop        = "heard-zero-hop"             // direct, empty path: addressed to whoever hears it
 	verdictNotAddressed   = "direct-not-addressed"       // the path's next hop is not us (or no identity exists)
@@ -227,6 +228,16 @@ func (e *engine) verdict(rx *reception) (string, string) {
 
 func (e *engine) floodVerdict(rx *reception, advertOK bool) (string, string) {
 	pkt := rx.pkt
+	// This flood already left through our antenna: a binding on this
+	// controller emitted it, so every node that would hear the relay
+	// heard the original, and re-flooding spends the shared duty
+	// ledger twice to reach nobody new. Only floods are judged here.
+	// A direct packet still travels: a path naming us asks this node
+	// to carry it, whoever sent it. No reference gate says any of
+	// this, the reference never having two identities on one radio.
+	if rx.frame.Binding != "" {
+		return verdictSameRadio, rx.frame.Binding + " shares our antenna"
+	}
 	// A plain flood is governed by the wildcard. A transport flood is
 	// carried only when one flood-allowed named region verifies its
 	// code: the wildcard is the absence of a region, never a fallback

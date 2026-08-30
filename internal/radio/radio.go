@@ -113,8 +113,17 @@ type Frame struct {
 	// FreqErrHz is the sender's carrier offset as the demodulator saw
 	// it: a node drifting here frame after frame has a failing crystal.
 	FreqErrHz float64
-	Airtime   time.Duration
-	At        time.Time
+	// Binding names the consumer on this controller that emitted this
+	// frame — "relay:meshcore-868", "station:alice" — and is empty for
+	// everything that came off the air. A half-duplex chip cannot hear
+	// itself, so the controller carries an emission to the peers that
+	// were transmitting with it and heard nothing. Such a frame was
+	// never demodulated: its measurements are the zero value and say
+	// nothing about any link, so a reader that wants one asks here
+	// first.
+	Binding string
+	Airtime time.Duration
+	At      time.Time
 }
 
 // ChipStats are the transceiver's own reception counters — an

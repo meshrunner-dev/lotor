@@ -159,7 +159,19 @@ have strict priority; station operations are served round-robin by
 station. Inside a station, the MeshCore dispatcher priority is honoured
 (the smaller numeric value wins) and equal priorities remain FIFO; an
 emission scheduled for the future never blocks one already due. A physical reception is
-broadcast to the relay and every active station binding. Station RX
+broadcast to the relay and every active station binding, and so is one
+binding's emission to its peers: a half-duplex chip cannot hear itself,
+so bindings on one controller would otherwise be the only nodes in the
+mesh deaf to each other, and a station could not log into the relay
+sharing its antenna. Such a frame names its emitting binding and
+carries no measurements — nothing demodulated it, and a fabricated
+signal would travel on into relay scores and neighbour tables. The
+relay reads what is addressed to it as always and refuses to re-flood
+what a peer sent: the original left through the same antenna, so
+relaying would spend the shared duty ledger twice to reach nobody new.
+A direct packet is untouched — a path naming us is a request, not a
+shout. The reference has no such case, having never two identities on
+one radio. Station RX
 queues are bounded and lossy so a stalled companion can never stall the
 relay; the relay's receive door remains lossless. Every station uses the
 same physical duty ledger as the relay and its peers. `shadow` is

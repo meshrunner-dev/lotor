@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"meshrunner.dev/lotor/internal/correlation"
 )
 
 // ConsumerRole is the authority class of one logical user of a physical
@@ -587,10 +589,36 @@ func (c *Controller) configurationVersion() uint64 {
 	return c.configVersion
 }
 
+// handOver delivers one binding's emission to its peers on this
+// controller: a half-duplex chip cannot hear itself, and two bindings
+// on one radio are two nodes at no distance, which hear each other
+// everywhere else in the mesh. The frame names its emitter and carries
+// no measurements — nothing demodulated it, and a fabricated signal
+// would travel on into relay scores and neighbour tables.
+func (c *Controller) handOver(ctx context.Context, from *controllerPort, payload []byte) {
+	b := from.binding
+	c.broadcastExcept(ctx, from, receiveResult{frame: Frame{
+		// Its own correlation, as any reception gets at the device
+		// seam: the peers judging it are not the goroutine that sent
+		// it, and the journal must be able to follow their side.
+		Correlation: correlation.New(),
+		Payload:     append([]byte(nil), payload...),
+		Binding:     bindingKey(b.role, b.name),
+		At:          time.Now(),
+	}})
+}
+
 func (c *Controller) broadcast(ctx context.Context, result receiveResult) {
+	c.broadcastExcept(ctx, nil, result)
+}
+
+func (c *Controller) broadcastExcept(ctx context.Context, skip *controllerPort, result receiveResult) {
 	c.mu.Lock()
 	ports := make([]*controllerPort, 0, len(c.ports))
 	for port := range c.ports {
+		if port == skip {
+			continue
+		}
 		if !port.closed && port.binding.stateLocked() == BindingActive {
 			ports = append(ports, port)
 		}
@@ -933,6 +961,14 @@ func (p *controllerPort) Transmit(ctx context.Context, payload []byte, powerDBm 
 		report, err := dev.Transmit(ctx, raw, powerDBm)
 		return operationResult{report: report, err: err}
 	}})
+	if err == nil {
+		// The peers were transmitting with us and heard nothing. Not
+		// under the caller's context: a transmit whose context died
+		// while the chip was already keying still went out and still
+		// paid the duty ledger, and the peers must hear what the mesh
+		// heard. Nothing here blocks, so detaching costs no lifetime.
+		p.binding.controller.handOver(context.WithoutCancel(ctx), p, raw)
+	}
 	return result.report, err
 }
 
