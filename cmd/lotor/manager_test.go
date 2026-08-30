@@ -870,6 +870,48 @@ func TestDeepCheckRefusesAStillbornGate(t *testing.T) {
 	}
 }
 
+func TestDeepCheckPreflightsAttachedStationsAndSharedDuty(t *testing.T) {
+	stationConfig := func(duty float64, bandwidth int) config.Station {
+		return config.Station{
+			Protocol: "meshcore", Listen: "127.0.0.1:5001", Radio: "slot1",
+			Layered: config.Layered{Profile: "eu-868-narrow", Overrides: map[string]map[string]any{
+				"eu-868-narrow": {
+					"identity": strings.Repeat("22", 32), "node_name": "Alice",
+					"tx_power_dbm": 0, "duty_cycle_pct": duty, "bandwidth_hz": bandwidth,
+				},
+			}},
+		}
+	}
+
+	f := sampleFile()
+	f.Stations = map[string]config.Station{"alice": stationConfig(1, 100_000)}
+	if err := deepCheck(f, confdb.KindStation, "alice", ""); err == nil ||
+		!strings.Contains(err.Error(), "bandwidth") {
+		t.Fatalf("unsupported attached station waveform = %v", err)
+	}
+
+	f = sampleFile()
+	relayConfig := f.Relays["meshcore-868"]
+	relayConfig.TX = &config.TX{Mode: config.TXShadow}
+	relayConfig.Layered.Overrides["eu-868-narrow"]["identity"] = strings.Repeat("11", 32)
+	relayConfig.Layered.Overrides["eu-868-narrow"]["duty_cycle_pct"] = 1.0
+	f.Relays["meshcore-868"] = relayConfig
+	station := stationConfig(10, 62_500)
+	station.TX = &config.TX{Mode: config.TXShadow}
+	f.Stations = map[string]config.Station{"alice": station}
+	err := deepCheck(f, confdb.KindStation, "alice", "")
+	if err == nil || !strings.Contains(err.Error(), "duty budget") ||
+		!strings.Contains(err.Error(), "station:alice") || !strings.Contains(err.Error(), "relay:meshcore-868") {
+		t.Fatalf("incompatible shared duty = %v", err)
+	}
+
+	station.Layered.Overrides["eu-868-narrow"]["duty_cycle_pct"] = 1.0
+	f.Stations["alice"] = station
+	if err := deepCheck(f, confdb.KindStation, "alice", ""); err != nil {
+		t.Fatalf("compatible attached station refused: %v", err)
+	}
+}
+
 func TestStillbornReplacesTheWholeView(t *testing.T) {
 	// A successor that fails assembly must not inherit its
 	// predecessor's face: resolved config, provenance and the radio

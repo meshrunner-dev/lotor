@@ -461,10 +461,7 @@ func (m *manager) radioController(name string) (*radio.Controller, string) {
 // holds mu.
 func (m *manager) startRelay(ctx context.Context, name string) {
 	rc := m.file.Relays[name]
-	if _, exists := m.controllers[rc.Radio]; !exists {
-		m.startRadio(ctx, rc.Radio)
-	}
-	controller, controllerCause := m.radioController(rc.Radio)
+	controller, controllerCause := m.controllerForRelayStart(ctx, name, rc)
 	var r *relay.Relay
 	spent := m.spentAirtimeForRadio(ctx, rc.Radio)
 	asm, err := assemble(name, rc, m.file.Radios[rc.Radio], spent, m.bus, m.log,
@@ -529,6 +526,16 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 	})
 }
 
+func (m *manager) controllerForRelayStart(ctx context.Context, name string,
+	rc config.Relay,
+) (*radio.Controller, string) {
+	m.releaseAirtimeConsumer(confdb.KindRelay + ":" + name)
+	if _, exists := m.controllers[rc.Radio]; !exists {
+		m.startRadio(ctx, rc.Radio)
+	}
+	return m.radioController(rc.Radio)
+}
+
 // spentAirtimeForRadio restores the whole physical transmitter's sliding
 // hour, not one producer's slice. Best effort by design: a sick optional
 // journal degrades history, never daemon startup.
@@ -551,6 +558,8 @@ func (m *manager) spentAirtimeForRadio(ctx context.Context, radioName string) []
 	for owner := range ownerSet {
 		rows, err := m.sen.SpentAirtime(ctx, owner)
 		if err != nil {
+			m.log.Error("radio airtime history restoration failed",
+				zap.String("radio", radioName), zap.String("source", owner), zap.Error(err))
 			return nil
 		}
 		for _, row := range rows {
@@ -782,6 +791,7 @@ func (m *manager) stopRelay(name string) {
 		h.binding.Unbind()
 	}
 	delete(m.running, name)
+	m.releaseAirtimeConsumer(confdb.KindRelay + ":" + name)
 	m.log.Info("relay stopped", zap.String("relay", name))
 }
 
@@ -858,6 +868,7 @@ func (m *manager) stopStation(name string) {
 		h.binding.Unbind()
 	}
 	delete(m.stations, name)
+	m.releaseAirtimeConsumer(confdb.KindStation + ":" + name)
 	m.log.Info("station stopped", zap.String("station", name))
 }
 
@@ -1688,18 +1699,16 @@ func (m *manager) applyWithoutRelay(kind, name string, next *config.File) string
 func deepCheck(next *config.File, kind, name, relayName string) error {
 	switch {
 	case relayName != "":
-		// The whole pre-hardware preparation, not just resolution: a
-		// transmit gate the assembly would refuse — no identity, no
-		// node name, no duty ceiling — must be refused here, while the
-		// running relay is still untouched and nothing has persisted.
 		rc := next.Relays[relayName]
-		if err := preflight(relayName, rc, next.Radios[rc.Radio]); err != nil {
-			return err
-		}
+		return checkRadioTopology(next, rc.Radio)
 	case kind == confdb.KindRadio:
-		return checkRadioAlone(next.Radios[name])
+		return checkRadioTopology(next, name)
 	case kind == confdb.KindStation:
-		return checkStationAlone(next.Stations[name])
+		sc := next.Stations[name]
+		if sc.Radio == "" {
+			return checkStationAlone(sc)
+		}
+		return checkRadioTopology(next, sc.Radio)
 	case kind == confdb.KindSensor:
 		return checkSensorAlone(next.Sensors[name])
 	case kind == confdb.KindMQTT:
@@ -1803,9 +1812,13 @@ func checkCreatedObject(next *config.File, kind, name string) error {
 	switch kind {
 	case confdb.KindRelay:
 		rc := next.Relays[name]
-		return preflight(name, rc, next.Radios[rc.Radio])
+		return checkRadioTopology(next, rc.Radio)
 	case confdb.KindStation:
-		return checkStationAlone(next.Stations[name])
+		sc := next.Stations[name]
+		if sc.Radio == "" {
+			return checkStationAlone(sc)
+		}
+		return checkRadioTopology(next, sc.Radio)
 	case confdb.KindRadio:
 		return checkRadioAlone(next.Radios[name])
 	case confdb.KindSensor:
@@ -3242,6 +3255,155 @@ func checkStationAlone(sc config.Station) error {
 		return err
 	}
 	return builder.Check(cfg)
+}
+
+type configuredDuty struct {
+	consumer string
+	budget   time.Duration
+}
+
+// checkRadioTopology preflights every consumer of one physical attachment as
+// one unit. This is the configuration-side equivalent of controller binding:
+// a mutation may not persist if it would make any relay or station stillborn,
+// nor if two transmitters would ask one shared ledger to enforce two ceilings.
+func checkRadioTopology(next *config.File, radioName string) error {
+	rd, exists := next.Radios[radioName]
+	if !exists {
+		return fmt.Errorf("radio %q is not configured", radioName)
+	}
+	if err := checkRadioAlone(rd); err != nil {
+		return err
+	}
+	driver, err := radio.Lookup(rd.Driver)
+	if err != nil {
+		return err
+	}
+	radioCfg, _, err := rd.Layered.Resolve(driver.Presets)
+	if err != nil {
+		return err
+	}
+	envelope, err := driver.Inspect(radioCfg)
+	if err != nil {
+		return err
+	}
+
+	duties, err := configuredRelayDuties(next, radioName, rd)
+	if err != nil {
+		return err
+	}
+	stationDuties, err := configuredStationDuties(next, radioName, driver, radioCfg, envelope)
+	if err != nil {
+		return err
+	}
+	duties = append(duties, stationDuties...)
+	sort.Slice(duties, func(i, j int) bool { return duties[i].consumer < duties[j].consumer })
+	if len(duties) > 1 {
+		want := duties[0]
+		for _, candidate := range duties[1:] {
+			if candidate.budget != want.budget {
+				return fmt.Errorf("radio %q: duty budget for %s is %s, %s requests %s",
+					radioName, want.consumer, want.budget, candidate.consumer, candidate.budget)
+			}
+		}
+	}
+	return nil
+}
+
+func configuredRelayDuties(next *config.File, radioName string,
+	rd config.Radio,
+) ([]configuredDuty, error) {
+	var duties []configuredDuty
+	for relayName, rc := range next.Relays {
+		if rc.Radio != radioName {
+			continue
+		}
+		prepared, err := prepare(relayName, rc, rd, nil, bus.New(), zap.NewNop())
+		if err != nil {
+			return nil, err
+		}
+		duty, ok := prepared.eng.(interface {
+			Duty() (used, budget time.Duration, enabled bool)
+		})
+		if !ok {
+			continue
+		}
+		_, budget, enabled := duty.Duty()
+		if enabled {
+			duties = append(duties, configuredDuty{
+				consumer: confdb.KindRelay + ":" + relayName,
+				budget:   budget,
+			})
+		}
+	}
+	return duties, nil
+}
+
+func configuredStationDuties(next *config.File, radioName string, driver radio.Driver,
+	radioCfg map[string]any, envelope radio.Envelope,
+) ([]configuredDuty, error) {
+	var duties []configuredDuty
+	for stationName, sc := range next.Stations {
+		if sc.Radio != radioName {
+			continue
+		}
+		budget, enabled, err := checkConfiguredStationAttachment(sc, driver, radioCfg, envelope)
+		if err != nil {
+			return nil, fmt.Errorf("station %q: %w", stationName, err)
+		}
+		if enabled {
+			duties = append(duties, configuredDuty{
+				consumer: confdb.KindStation + ":" + stationName,
+				budget:   budget,
+			})
+		}
+	}
+	return duties, nil
+}
+
+func checkConfiguredStationAttachment(sc config.Station, driver radio.Driver,
+	radioCfg map[string]any, envelope radio.Envelope,
+) (budget time.Duration, enabled bool, err error) {
+	if err := checkStationAlone(sc); err != nil {
+		return 0, false, err
+	}
+	builder, err := station.Lookup(sc.Protocol)
+	if err != nil {
+		return 0, false, err
+	}
+	cfg, _, err := sc.Layered.Resolve(builder.Presets)
+	if err != nil {
+		return 0, false, err
+	}
+	if builder.Asks == nil {
+		return 0, false, fmt.Errorf("protocol %q cannot describe a radio demand", sc.Protocol)
+	}
+	demand, err := builder.Asks(cfg)
+	if err != nil {
+		return 0, false, err
+	}
+	if err := envelope.Allows(demand.Waveform); err != nil {
+		return 0, false, err
+	}
+	if driver.CheckWaveform != nil {
+		if err := driver.CheckWaveform(demand.Waveform); err != nil {
+			return 0, false, err
+		}
+	}
+	if sc.TXMode() == config.TXDry {
+		return 0, false, nil
+	}
+	if driver.CheckTransmit != nil {
+		if err := driver.CheckTransmit(radioCfg); err != nil {
+			return 0, false, fmt.Errorf("tx: mode %s: %w", sc.TXMode(), err)
+		}
+	}
+	if err := envelope.Permits(demand.Waveform, demand.PowerDBm, true); err != nil {
+		return 0, false, err
+	}
+	if sc.TXMode() == config.TXOnAir && !envelope.MaxTxPowerSet {
+		return 0, false, errors.New("tx: on-air requires the radio's max_tx_power_dbm declared")
+	}
+	return time.Duration(float64(time.Hour) * demand.DutyCyclePct / 100), true, nil
 }
 
 // checkSensorAlone validates a sensor that no relay has to consult:

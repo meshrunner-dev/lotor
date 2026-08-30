@@ -290,6 +290,25 @@ func TestApplyTypedPersistsAndBounces(t *testing.T) {
 	}
 }
 
+func TestRelayStopReleasesItsSharedAirtimeClaim(t *testing.T) {
+	m := lifecycleManager(t)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rc := m.file.Relays["meshcore-868"]
+	rc.TX = &config.TX{Mode: config.TXShadow}
+	rc.Layered.Overrides["eu-868-narrow"]["identity"] = strings.Repeat("11", 32)
+	m.file.Relays["meshcore-868"] = rc
+	m.startRelay(m.ctx, "meshcore-868")
+	users := m.airtimeUsers["slot1"]
+	if _, exists := users["relay:meshcore-868"]; !exists {
+		t.Fatalf("started relay duty users = %#v", users)
+	}
+	m.stopRelay("meshcore-868")
+	if _, exists := users["relay:meshcore-868"]; exists {
+		t.Fatalf("stopped relay retained duty claim = %#v", users)
+	}
+}
+
 func TestApplyTypedRefusalLeavesEverythingIntact(t *testing.T) {
 	m := lifecycleManager(t)
 	m.mu.Lock()
