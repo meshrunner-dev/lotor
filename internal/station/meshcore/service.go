@@ -203,6 +203,9 @@ func build(spec station.Spec) (station.Service, error) {
 		queueDepth = 32
 	}
 	s.outbound = make(chan emission, queueDepth)
+	// The declarative station configuration is the virtual equivalent of the
+	// firmware image defaults restored after formatting its filesystem.
+	s.factoryState = s.snapshotLocked()
 	loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := s.loadState(loadCtx); err != nil {
@@ -267,6 +270,7 @@ type service struct {
 	listener     net.Listener
 	client       net.Conn
 	generation   uint64
+	disconnect   uint64
 	remote       string
 	clockDelta   time.Duration
 	lastUnique   uint32
@@ -299,6 +303,7 @@ type service struct {
 	pending      pendingRequest
 	connections  map[[mesh.PubKeySize]byte]remoteConnection
 	advertPaths  [16]advertPath
+	factoryState persistedState
 }
 
 func (s *service) Run(ctx context.Context) error {
@@ -364,6 +369,7 @@ func (s *service) replaceClient(conn net.Conn) uint64 {
 	s.generation++
 	generation := s.generation
 	s.client = conn
+	s.disconnect = 0
 	s.remote = conn.RemoteAddr().String()
 	s.mu.Unlock()
 	if old != nil {
@@ -401,7 +407,20 @@ func (s *service) serveClient(ctx context.Context, conn net.Conn, generation uin
 		if !s.writeResponses(conn, generation, responses) {
 			return
 		}
+		if s.consumeDisconnect(generation) {
+			return
+		}
 	}
+}
+
+func (s *service) consumeDisconnect(generation uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.disconnect != generation {
+		return false
+	}
+	s.disconnect = 0
+	return true
 }
 
 func (s *service) readCommand(conn net.Conn) (companion.Command, []companion.Response, bool) {
@@ -454,20 +473,42 @@ func (s *service) currentClient(conn net.Conn, generation uint64) bool {
 
 func (s *service) handle(ctx context.Context, cmd companion.Command) []companion.Response {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if responses, handled := s.handleQuery(cmd); handled {
+		s.mu.Unlock()
 		return responses
 	}
 	if responses, handled := s.handleTransmission(cmd); handled {
+		s.mu.Unlock()
 		return responses
 	}
 	before := s.snapshotLocked()
 	responses := s.handleMutation(cmd)
 	if err := s.persistLocked(ctx, before); err != nil {
 		s.log.Error("companion state persistence failed", zap.Error(err))
+		s.mu.Unlock()
 		return errorResponses(companion.ErrorFileIO)
 	}
+	dropped := []emission(nil)
+	if lifecycleSucceeded(cmd, responses) {
+		dropped = s.resetRuntimeLocked()
+		s.disconnect = s.generation
+	}
+	s.mu.Unlock()
+	for _, item := range dropped {
+		s.txDrop(item, "station-restart")
+	}
 	return responses
+}
+
+func lifecycleSucceeded(cmd companion.Command, responses []companion.Response) bool {
+	switch cmd.(type) {
+	case companion.Reboot:
+		return len(responses) == 0
+	case companion.FactoryReset:
+		return len(responses) == 1 && responses[0] == companion.StatusResponse(companion.ResponseOK)
+	default:
+		return false
+	}
 }
 
 func (s *service) handleQuery(cmd companion.Command) ([]companion.Response, bool) {
@@ -558,8 +599,49 @@ func (s *service) handleMutation(cmd companion.Command) []companion.Response {
 		return s.setRadioParams(c)
 	case companion.SetRadioTXPower:
 		return s.setRadioPower(c.PowerDBm)
+	case companion.Reboot:
+		// The reference immediately reboots and writes no response.
+		return nil
+	case companion.FactoryReset:
+		return s.restoreFactoryLocked()
 	default:
 		return errorResponses(companion.ErrorUnsupportedCommand)
+	}
+}
+
+func (s *service) restoreFactoryLocked() []companion.Response {
+	waveform := s.factoryState.Waveform.radio()
+	if s.binding != nil && waveform != s.p.Waveform {
+		if err := s.binding.SetWaveform(waveform); err != nil {
+			return errorResponses(companion.ErrorIllegalArgument)
+		}
+	}
+	s.restoreLocked(s.factoryState)
+	return okResponses()
+}
+
+func (s *service) resetRuntimeLocked() []emission {
+	dropped := make([]emission, 0, len(s.outbound))
+	for {
+		select {
+		case item := <-s.outbound:
+			dropped = append(dropped, item)
+		default:
+			s.lastUnique = 0
+			s.appVersion = 0
+			s.sendScope = [16]byte{}
+			s.sendUnscoped = false
+			s.seen = packetRing{}
+			s.expectedACKs = [8]ackExpectation{}
+			s.nextACK = 0
+			s.startedAt = time.Now()
+			s.stats = stationStats{}
+			s.signData = nil
+			s.pending = pendingRequest{}
+			s.connections = make(map[[mesh.PubKeySize]byte]remoteConnection)
+			s.advertPaths = [16]advertPath{}
+			return dropped
+		}
 	}
 }
 

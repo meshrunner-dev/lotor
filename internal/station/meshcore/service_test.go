@@ -240,6 +240,132 @@ func TestPreferenceWriteFailureRollsBackAndReportsFileIO(t *testing.T) {
 	}
 }
 
+func TestRebootDisconnectsTheCompanionWithoutLosingDurableState(t *testing.T) {
+	store := &memoryStationState{}
+	spec := testSpec(t)
+	spec.State = store
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	if got := svc.handle(t.Context(), companion.SetAdvertName{Name: "Persisted"}); len(got) != 1 || got[0] != companion.StatusResponse(companion.ResponseOK) {
+		t.Fatalf("set name responses = %#v", got)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() { _ = svc.Run(ctx) }()
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", awaitListener(t, svc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	payload, err := companion.MarshalCommand(companion.Reboot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := companion.WriteFrame(conn, companion.ToDevice, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := companion.ReadFrame(conn, companion.ToApplication); err == nil {
+		t.Fatal("reboot returned a response or kept the companion session open")
+	}
+	if svc.p.NodeName != "Persisted" {
+		t.Fatalf("reboot reset durable name to %q", svc.p.NodeName)
+	}
+}
+
+func TestFactoryResetRestoresConfiguredStateAndPersistsIt(t *testing.T) {
+	store := &memoryStationState{}
+	spec := testSpec(t)
+	spec.State = store
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	configuredKey := svc.id.PubKey
+	configuredWaveform := svc.p.Waveform
+
+	_ = svc.handle(t.Context(), companion.SetAdvertName{Name: "Changed"})
+	_ = svc.handle(t.Context(), companion.SetRadioParams{
+		FrequencyKHz: 869_525, BandwidthHz: 125_000, Spreading: 9, CodingRate: 5,
+	})
+	_ = svc.handle(t.Context(), companion.SetChannel{Index: 2, Name: "ops", Secret: [16]byte{1}})
+	_ = svc.handle(t.Context(), companion.SetDefaultFloodScope{Name: "fr", Key: [16]byte{2}})
+	imported, err := mesh.LocalIdentityFromSeed(bytes.Repeat([]byte{17}, mesh.SeedSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := companion.ImportPrivateKey{}
+	copy(command.PrivateKey[:], imported.PrvKey())
+	_ = svc.handle(t.Context(), command)
+	svc.enqueueMailbox(t.Context(), companion.MessagesWaiting{})
+
+	svc.mu.Lock()
+	svc.stats.sent = 7
+	svc.appVersion = protocolVersion
+	svc.pending = pendingRequest{kind: pendingStatus, tag: 42}
+	svc.signData = []byte("partial")
+	svc.sendUnscoped = true
+	svc.outbound <- emission{kind: "queued-before-reset"}
+	svc.mu.Unlock()
+
+	responses := svc.handle(t.Context(), companion.FactoryReset{})
+	if len(responses) != 1 || responses[0] != companion.StatusResponse(companion.ResponseOK) {
+		t.Fatalf("factory reset responses = %#v", responses)
+	}
+	if svc.p.NodeName != "Alice" || svc.p.Waveform != configuredWaveform || svc.id.PubKey != configuredKey {
+		t.Fatalf("factory state = name %q waveform %+v key %x", svc.p.NodeName, svc.p.Waveform, svc.id.PubKey[:6])
+	}
+	if len(svc.channels) != 0 || len(svc.contacts) != 0 || len(svc.mailbox) != 0 ||
+		svc.defaultScope != "" || svc.stats.sent != 0 || svc.appVersion != 0 ||
+		svc.pending.kind != pendingNone || svc.signData != nil || svc.sendUnscoped || len(svc.outbound) != 0 {
+		t.Fatalf("factory reset left state behind: channels %d contacts %d mailbox %d scope %q stats %+v",
+			len(svc.channels), len(svc.contacts), len(svc.mailbox), svc.defaultScope, svc.stats)
+	}
+
+	built, err = build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := requireService(t, built)
+	if restored.p.NodeName != "Alice" || restored.p.Waveform != configuredWaveform ||
+		restored.id.PubKey != configuredKey || len(restored.channels) != 0 || len(restored.mailbox) != 0 {
+		t.Fatalf("persisted factory state = name %q waveform %+v key %x channels %d mailbox %d",
+			restored.p.NodeName, restored.p.Waveform, restored.id.PubKey[:6],
+			len(restored.channels), len(restored.mailbox))
+	}
+}
+
+func TestFactoryResetWriteFailureRollsBackWithoutRestartingSession(t *testing.T) {
+	store := &memoryStationState{}
+	spec := testSpec(t)
+	spec.State = store
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	_ = svc.handle(t.Context(), companion.SetAdvertName{Name: "Persisted"})
+	svc.stats.sent = 4
+	svc.generation = 7
+	store.fail = true
+
+	responses := svc.handle(t.Context(), companion.FactoryReset{})
+	if len(responses) != 1 || responses[0] != (companion.ErrorResponse{Code: companion.ErrorFileIO}) {
+		t.Fatalf("factory reset failure responses = %#v", responses)
+	}
+	if svc.p.NodeName != "Persisted" || svc.stats.sent != 4 || svc.disconnect != 0 {
+		t.Fatalf("failed reset left name %q stats %d disconnect generation %d",
+			svc.p.NodeName, svc.stats.sent, svc.disconnect)
+	}
+}
+
 func TestCompanionIdentityImportExportAndSigningSurviveRestart(t *testing.T) {
 	store := &memoryStationState{}
 	spec := testSpec(t)
