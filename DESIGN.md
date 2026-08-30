@@ -26,6 +26,13 @@ endorsed by the MeshCore project.
   semantics, which are the protocol's business. In protocol-specific UX
   the native term may surface (a MeshCore relay presents itself as a
   repeater on that network); code, config and logs say relay.
+- **station** — a virtual companion endpoint: one protocol identity,
+  its durable preferences, contacts and mailbox, exposed to exactly one
+  application connection on a dedicated TCP port. *Station* names the
+  architectural role without leaking MeshCore's companion vocabulary.
+  A station originates and receives traffic; it never forwards it. It
+  exists while detached from RF and may move between radios without
+  losing its TCP connection or state.
 - **radio** — a physical transceiver attachment: a bus, pins, and the
   board's physical envelope. Radios carry no waveform *choice*; they
   declare what choices are possible.
@@ -106,17 +113,20 @@ endorsed by the MeshCore project.
 
 ## Architecture
 
-One process. N relays, each a supervised task tree. Each radio is owned
-exclusively by one relay — the single-owner discipline of the driver
-layer, one level up. Config may later allow one relay to own several
-radios; it will never allow one radio to serve several relays.
+One process. N relays and N stations, each a supervised task tree. One
+radio controller owns each physical driver session. At most one relay
+may bind to it, while any number of compatible stations may share it;
+this preserves the driver's single-owner discipline without confusing
+physical ownership with logical consumers.
 
 ```
 lotor daemon
-├── relay "meshcore-868"   (protocol: meshcore)
-│     └── radio "slot1"    (driver: sx126x-spi)
-├── relay "meshcore-433"   (protocol: meshcore)
-│     └── radio "hat2"
+├── radio controller "slot1" (driver: sx126x-spi)
+│     ├── relay "meshcore-868" (protocol: meshcore; authority)
+│     ├── station "alice"     (TCP :5001)
+│     └── station "bob"       (TCP :5002)
+├── relay "meshcore-433"       (radio: hat2)
+├── station "carol"            (detached; TCP :5003 stays available)
 ├── internal event bus  ── journal, metrics, SSE, CLI
 └── web UI + telnet CLI
 ```
@@ -130,6 +140,27 @@ the radio bounds them. This seam is the library seam: radio config
 feeds the driver's chip `Config`, relay config feeds the channel
 `Params`, and the cap semantics mirror the driver's: it refuses excess
 power, it never clamps.
+
+The relay is authoritative whenever it is present: its waveform tunes
+the physical radio, and a station requesting another waveform is
+`blocked` rather than retuning the relay. On a station-only radio, the
+oldest attached station is the stable authority; other waveforms are
+likewise blocked. There is no time slicing. Changing a station's radio
+parameters may therefore change a station-only radio, but never one
+owned by a relay.
+
+Physical operations are serialized by the controller. Relay operations
+have strict priority; station operations are served round-robin by
+station, preserving FIFO inside each station. A physical reception is
+broadcast to the relay and every active station binding. Station RX
+queues are bounded and lossy so a stalled companion can never stall the
+relay; the relay's receive door remains lossless. Every station uses the
+same physical duty ledger as the relay and its peers. `shadow` is
+deliberately capacity-realistic: it does not key the chip, but reserves
+and commits the airtime it would have consumed. Admission is reserved
+atomically across producers before LBT and committed with measured
+airtime, so two logical consumers cannot spend the same remaining
+budget.
 
 A pin the radio owns is written `offset` or `chip:offset`: the bare
 form is a line on the radio's `gpiochip`, which is what a board on a
@@ -196,6 +227,13 @@ they live on the radio without stealing the relay's authority:
 - an **explicit** `tx_power_dbm` above the radio's cap is refused,
   never clamped — defaults may be prudent, explicit choices never lie.
 
+Stations reuse band profiles for their initial waveform and persist
+companion-side changes separately from declarative configuration. Their
+TX gate admits only `dry`, `shadow` and `on-air`; the relay-specific
+`on-air-zero-hop` rung has no station meaning. A detached station keeps
+answering its application, and an attached-but-incompatible station
+reports RF `blocked` with the authoritative binding named.
+
 Defaults mirror the MeshCore reference firmware — the forced transmit
 after the CAD-fail budget elapses, the 160-entry count-bounded dedup
 ring. Advanced knobs exist for
@@ -205,7 +243,7 @@ says so at startup — traceability includes configuration.
 ## Traceability
 
 - **Zap**, structured logging everywhere, context enriched as frames
-  cross layers: `relay=… radio=… corr=…`.
+  cross layers: `relay=…` or `station=…`, `radio=… corr=…`.
 - **Every frame heard gets a correlation ID** carried by every log line
   that concerns it. IDs are generated OpenTelemetry-compatible
   (128-bit trace id) but displayed truncated (8–12 hex chars) and
