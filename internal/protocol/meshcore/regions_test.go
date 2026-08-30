@@ -82,36 +82,54 @@ func TestRegionTableMatchesWhatItCarries(t *testing.T) {
 		t.Fatalf("scoped flood = %q/%v, want be carried", name, carried)
 	}
 
-	// A scope nobody here named rides the wildcard, like a plain
-	// flood: a relay carries the mesh's traffic, and the table is
-	// where carriage is RESTRICTED, never where it is granted. It
-	// carries no name of ours and no key to answer under.
+	// A scope nobody here named is not carried. The wildcard is the
+	// absence of a transport code, not a catch-all region.
 	foreign := &meshcore.Packet{
 		Header:  meshcore.MakeHeader(meshcore.RouteFlood, meshcore.PayloadTypeTxtMsg, meshcore.PayloadVer1),
 		Payload: []byte("hello"),
 	}
 	meshcore.TransportKeyForName("de").Scope(foreign)
-	name, key, carried := table.match(foreign)
-	if !carried {
-		t.Fatal("an unnamed scope was refused — the wildcard carries floods")
+	if name, key, carried := table.match(foreign); carried || name != "" || !key.IsZero() {
+		t.Errorf("an unknown scope was carried as %q / key %v", name, key)
 	}
-	if name != "" || !key.IsZero() {
-		t.Errorf("an unnamed scope claimed name %q / key %v", name, key)
-	}
-	// Shutting the wildcard shuts them with it: one switch for every
-	// flood this relay was never told anything about.
+	// The wildcard controls plain traffic alone. Its state does not
+	// change the unknown-code decision.
 	table.m.Wildcard().Flags = meshcore.RegionDenyFlood
 	if _, _, carried := table.match(foreign); carried {
-		t.Error("a shut wildcard still carried an unnamed scope")
+		t.Error("a shut wildcard carried an unknown scope")
+	}
+	// Conversely a named, allowed scope still moves when plain floods
+	// are denied.
+	if _, _, carried := table.match(scoped); !carried {
+		t.Error("a named allowed scope followed the wildcard denial")
 	}
 	table.m.Wildcard().Flags = 0
 
-	// Naming a region is how an operator speaks about that scope, and
-	// denying it is heard even though the wildcard is open.
+	// A named denial stops its own scope even while plain floods move.
 	denied := table.m.FindByName("be")
 	denied.Flags = meshcore.RegionDenyFlood
 	if _, _, carried := table.match(scoped); carried {
 		t.Fatal("a denied region still carried its flood")
+	}
+}
+
+func TestFactoryRegionPolicyCarriesPlainTrafficAlone(t *testing.T) {
+	table := newRegionTable(meshcore.NewRegionMap())
+	plain := &meshcore.Packet{
+		Header:  meshcore.MakeHeader(meshcore.RouteFlood, meshcore.PayloadTypeTxtMsg, meshcore.PayloadVer1),
+		Payload: []byte("plain"),
+	}
+	if name, _, carried := table.match(plain); !carried || name != wildcardRegion {
+		t.Fatalf("factory plain flood = %q/%v, want wildcard carried", name, carried)
+	}
+
+	coded := &meshcore.Packet{
+		Header:  meshcore.MakeHeader(meshcore.RouteTransportFlood, meshcore.PayloadTypeTxtMsg, meshcore.PayloadVer1),
+		Payload: []byte("coded"),
+	}
+	meshcore.TransportKeyForName("unknown").Scope(coded)
+	if name, _, carried := table.match(coded); carried || name != "" {
+		t.Fatalf("factory transport flood = %q/%v, want unknown and dropped", name, carried)
 	}
 }
 

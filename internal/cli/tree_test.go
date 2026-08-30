@@ -1446,6 +1446,93 @@ func TestADrawerIsOfferedAndItsKeysAre(t *testing.T) {
 	}
 }
 
+// withRegions gives the test relay a live region drawer and records
+// every CommonCLI line sent through its mutation door.
+func withRegions(t *testing.T) (Deps, *[]string) {
+	t.Helper()
+	deps := testDeps(t)
+	deps.Privilege = Admin
+	lines := &[]string{}
+	deps.Relays[0].Regions = func() (RegionInfo, error) {
+		return RegionInfo{
+			Tree: "*^ F\n eu F\n  fr F\n", Served: []string{"*", "eu", "fr"},
+			Default: "eu", Home: "fr", Unscoped: true,
+			Entries: []RegionEntry{
+				{Name: "eu", Parent: "*", Flood: true, Default: true},
+				{Name: "fr", Parent: "eu", Flood: true, Home: true},
+			},
+		}, nil
+	}
+	deps.Relays[0].RegionLine = func(_ string, line string) (string, bool, error) {
+		*lines = append(*lines, line)
+		return "OK", true, nil
+	}
+	return deps, lines
+}
+
+func TestRegionDrawerExposesStructuredAdministration(t *testing.T) {
+	deps, lines := withRegions(t)
+	out := run(t, deps,
+		"/relay/meshcore-868/regions put be parent=eu",
+		"/relay/meshcore-868/regions default region=be",
+		"/relay/meshcore-868/regions/fr home",
+		"/relay/meshcore-868/regions/fr denyf",
+		"/relay/meshcore-868/regions/* allowf",
+		`/relay/meshcore-868/regions def "eu be|eu fr"`,
+		"/relay/meshcore-868/regions default region=<null>",
+	)
+	want := []string{
+		"region put be eu",
+		"region default be",
+		"region home fr",
+		"region denyf fr",
+		"region allowf *",
+		"region def eu be|eu fr",
+		"region default <null>",
+	}
+	if !slices.Equal(*lines, want) {
+		t.Fatalf("region door saw %q, want %q\n%s", *lines, want, out)
+	}
+	if strings.Contains(out, "error:") {
+		t.Fatalf("structured administration failed:\n%s", out)
+	}
+}
+
+func TestRegionAdministrationIsDiscoverableAndCompletesLiveNames(t *testing.T) {
+	deps, _ := withRegions(t)
+	s := &session{deps: deps}
+	s.setPath([]string{scopeRelay, "meshcore-868", drawerRegions})
+	verbs := s.verbsAt(s.curPath())
+	for _, want := range []string{cmdPut, cmdDefault, cmdHome, cmdDef, cmdRegion} {
+		if !slices.Contains(verbs, want) {
+			t.Errorf("%q missing from region drawer: %v", want, verbs)
+		}
+	}
+	if add, _ := s.complete("put parent=f"); add != "r " {
+		t.Errorf("parent did not complete from the live table: %q", add)
+	}
+	if add, _ := s.complete("default region=<n"); add != "ull> " {
+		t.Errorf("the unscoped default did not complete: %q", add)
+	}
+	s.setPath([]string{scopeRelay, "meshcore-868", drawerRegions, "fr"})
+	for _, want := range []string{cmdDefault, cmdHome, cmdAllowF, cmdDenyF, cmdDrop} {
+		if !slices.Contains(s.verbsAt(s.curPath()), want) {
+			t.Errorf("%q missing from a region item", want)
+		}
+	}
+}
+
+func TestStructuredRegionNamesCannotChangeGrammarShape(t *testing.T) {
+	deps, lines := withRegions(t)
+	out := run(t, deps, `/relay/meshcore-868/regions put "fr idf"`)
+	if !strings.Contains(out, "name must be one word") {
+		t.Fatalf("a spaced name was not explained:\n%s", out)
+	}
+	if len(*lines) != 0 {
+		t.Fatalf("the malformed name reached the region door: %q", *lines)
+	}
+}
+
 func TestANameOffTheAirIsQuotedOnce(t *testing.T) {
 	deps := testDeps(t)
 	var key [32]byte

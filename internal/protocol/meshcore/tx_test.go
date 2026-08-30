@@ -890,12 +890,10 @@ func traceMustParse(t *testing.T, e *engine) *meshcore.Packet {
 	return pkt
 }
 
-func TestScopedFloodMovesUntilItIsDenied(t *testing.T) {
-	// A relay carries the mesh's traffic: with no region map, a
-	// scoped flood moves like any other, because nothing here was
-	// told to refuse it. Naming its scope and denying it is what
-	// stops it — and shutting the wildcard stops the ones nobody
-	// named.
+func TestScopedFloodMovesOnlyInAnAllowedRegion(t *testing.T) {
+	// With no named region, every transport code is unknown and the
+	// reference refuses it. The wildcard cannot authorise it because
+	// the wildcard means no code at all.
 	e, _, _, peer := txRig(t, "shadow")
 	pkt, err := meshcore.BuildAdvert(peer, time.Now(), &meshcore.AdvertData{Name: "p"})
 	if err != nil {
@@ -904,26 +902,29 @@ func TestScopedFloodMovesUntilItIsDenied(t *testing.T) {
 	pkt.Header = meshcore.MakeHeader(meshcore.RouteTransportFlood,
 		meshcore.PayloadTypeAdvert, meshcore.PayloadVer1)
 	meshcore.TransportKeyForName("be").Scope(pkt)
-	if v, why := e.floodVerdict(rxOf(e, pkt), true); v != verdictRelayFlood {
-		t.Fatalf("verdict = %q (%s), want %q", v, why, verdictRelayFlood)
+	if v, why := e.floodVerdict(rxOf(e, pkt), true); v != verdictDropScoped {
+		t.Fatalf("unknown scope = %q (%s), want %q", v, why, verdictDropScoped)
 	}
 
-	if _, err := e.regions.m.Put("be", 0); err != nil {
+	be, err := e.regions.m.Put("be", 0)
+	if err != nil {
 		t.Fatal(err)
 	}
-	e.regions.m.FindByName("be").Flags = meshcore.RegionDenyFlood
+	be.Flags = 0
+	if v, why := e.floodVerdict(rxOf(e, pkt), true); v != verdictRelayFlood {
+		t.Fatalf("allowed scope = %q (%s), want %q", v, why, verdictRelayFlood)
+	}
+
+	be.Flags = meshcore.RegionDenyFlood
 	if v, _ := e.floodVerdict(rxOf(e, pkt), true); v != verdictDropScoped {
 		t.Fatalf("a denied scope moved: verdict = %q", v)
 	}
 
-	e.regions.m.Wildcard().Flags = meshcore.RegionDenyFlood
-	unnamed := &meshcore.Packet{
-		Header:  meshcore.MakeHeader(meshcore.RouteTransportFlood, meshcore.PayloadTypeTxtMsg, meshcore.PayloadVer1),
-		Payload: []byte("hello"),
-	}
-	meshcore.TransportKeyForName("de").Scope(unnamed)
-	if v, _ := e.floodVerdict(rxOf(e, unnamed), true); v != verdictDropScoped {
-		t.Fatalf("a shut wildcard let an unnamed scope through: verdict = %q", v)
+	// Opening or shutting plain traffic cannot change the transport
+	// decision.
+	e.regions.m.Wildcard().Flags = 0
+	if v, _ := e.floodVerdict(rxOf(e, pkt), true); v != verdictDropScoped {
+		t.Fatalf("the wildcard overrode a named denial: verdict = %q", v)
 	}
 }
 

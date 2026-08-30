@@ -1799,7 +1799,7 @@ func (s *session) argTermsFor(path, rest []string) []term {
 			if f.name == scopeRelay && len(path) >= 2 {
 				continue
 			}
-			if site := s.drawerSiteAt(path); site != nil && f.name == site.d.itemFlag {
+			if site := s.drawerSiteAt(path); site != nil && site.item != "" && f.name == site.d.itemFlag {
 				continue
 			}
 			out = append(out, term{
@@ -1897,7 +1897,7 @@ func (s *session) completeValue(path, rest []string, attr, val string) (string, 
 	// beside the flag rather than in a second list.
 	if c := lookup(rest[0]); c != nil {
 		if f := c.flag(attr); f != nil && f.values != nil {
-			return s.finishPlain(val, f.values(s), cAttr)
+			return s.finishPlain(val, f.values(s, path), cAttr)
 		}
 	}
 	// A flag named after a kind takes that kind's names — relay= wants

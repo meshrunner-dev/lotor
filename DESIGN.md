@@ -47,18 +47,21 @@ endorsed by the MeshCore project.
   root, each with a place in a display hierarchy (the matching stays
   flat), a deny-flood flag, and two designations — the *default*
   region a node's own traffic is scoped to, and its *home*. This
-  daemon keeps the same table, in the config store, mutated over the
-  air by the `region` command without a relay restart.
+  daemon keeps the same table in the config store. Locally, the
+  `/relay/<name>/regions` drawer exposes structured `put`, `default`,
+  `home`, `def`, `allowf`, `denyf` and `drop` commands; its raw
+  `region` escape remains available for the ecosystem grammar. Over
+  the air, an authenticated admin carries that grammar in the binary
+  `CLI_COMMAND` text subtype and receives `CLI_DATA`, without a relay
+  restart.
 
-  Carriage is open by default, and the table is where it is
-  **restricted**. A relay is a relay: floods move, scoped or not,
-  whether or not anything here names their scope. Naming a region is
-  how an operator says something about that scope — allowed is the
-  default, `denyf` is the statement — and shutting the wildcard is
-  the one switch for every flood nobody named. A relay that carried
-  only the scopes it had been handed would go silent for its
-  neighbourhood the day it was installed, which is not what a mesh
-  asks of a repeater.
+  The wildcard is unfortunately named: it is not a catch-all region,
+  but the absence of a region and therefore of transport codes. Its
+  flood flag governs plain floods alone. A coded flood moves only when
+  its code verifies against a named, flood-allowed entry; an unknown
+  code and a named `denyf` entry are both refused. Thus a factory-empty
+  repeater relays plain traffic and no transport-coded traffic until
+  regions are configured, matching the reference.
 
   A region is a mesh agreement, independent of the radio band, and
   the two words must not be conflated: a *band* is what the radio is

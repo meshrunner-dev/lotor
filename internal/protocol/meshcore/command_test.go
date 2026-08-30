@@ -1,7 +1,6 @@
 package meshcore
 
 import (
-	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +19,7 @@ func commandFrame(t *testing.T, self, peer *meshcore.LocalIdentity,
 	if err != nil {
 		t.Fatal(err)
 	}
-	plain := meshcore.BuildTextPlaintext(at, meshcore.TxtTypeCLIData, line)
+	plain := meshcore.BuildTextPlaintext(at, meshcore.TxtTypeCLICommand, line)
 	pkt, err := meshcore.BuildDatagram(meshcore.PayloadTypeTxtMsg,
 		self.PubKey[:meshcore.PathHashSize], peer.PubKey[:meshcore.PathHashSize],
 		secret, plain)
@@ -370,7 +369,7 @@ func TestOwnerInfoAnswersThreeLines(t *testing.T) {
 // as the companion's app would.
 func typedCommandPacket(t *testing.T, self, peer *meshcore.LocalIdentity,
 	at time.Time, txtType uint8, line string,
-) (*meshcore.Packet, []byte) {
+) *meshcore.Packet {
 	t.Helper()
 	secret, err := peer.SharedSecret(self.PubKey[:])
 	if err != nil {
@@ -385,11 +384,11 @@ func typedCommandPacket(t *testing.T, self, peer *meshcore.LocalIdentity,
 	}
 	pkt.Header = meshcore.MakeHeader(meshcore.RouteDirect,
 		meshcore.PayloadTypeTxtMsg, meshcore.PayloadVer1)
-	return pkt, plain
+	return pkt
 }
 
 // adminSession installs a granted admin for peer on e.
-func adminSession(t *testing.T, e *engine, peer *meshcore.LocalIdentity, ts uint32) *client {
+func adminSession(t *testing.T, e *engine, peer *meshcore.LocalIdentity, ts uint32) {
 	t.Helper()
 	secret, err := e.id.SharedSecret(peer.PubKey[:])
 	if err != nil {
@@ -403,21 +402,21 @@ func adminSession(t *testing.T, e *engine, peer *meshcore.LocalIdentity, ts uint
 	if err := e.acl.put(c); err != nil {
 		t.Fatal(err)
 	}
-	return c
 }
 
 func TestOnlyCommandSubtypesReachTheMutationDoor(t *testing.T) {
 	// The MAC says who is speaking; the flags byte says what they
-	// meant. A signed conversation carrying command-shaped words is
-	// not an order, and the reference runs exactly two subtypes.
+	// meant. Only an explicit command is an order; neither ordinary
+	// conversation nor CLI output is executable input.
 	cases := []struct {
 		name    string
 		txtType uint8
 		command bool
 	}{
-		{"plain", meshcore.TxtTypePlain, true},
-		{"cli data", meshcore.TxtTypeCLIData, true},
+		{"plain", meshcore.TxtTypePlain, false},
+		{"cli data", meshcore.TxtTypeCLIData, false},
 		{"signed plain", meshcore.TxtTypeSignedPlain, false},
+		{"cli command", meshcore.TxtTypeCLICommand, true},
 		{"unknown subtype", 9, false},
 	}
 	for i, c := range cases {
@@ -425,7 +424,7 @@ func TestOnlyCommandSubtypesReachTheMutationDoor(t *testing.T) {
 		ran := 0
 		e.AttachCommands(func(string, []byte) string { ran++; return "OK" })
 		adminSession(t, e, peer, nowTS(0))
-		pkt, _ := typedCommandPacket(t, e.id, peer,
+		pkt := typedCommandPacket(t, e.id, peer,
 			time.Unix(int64(nowTS(uint32(10+i))), 0), c.txtType, "set repeat off")
 
 		rx := rxOf(e, pkt)
@@ -451,80 +450,45 @@ func TestOnlyCommandSubtypesReachTheMutationDoor(t *testing.T) {
 	}
 }
 
-func TestLegacyPlainCommandsAreAcknowledged(t *testing.T) {
-	// A PLAIN sender waits on the ack, not on the reply: without one
-	// a command whose answer is empty reads as a timeout and is sent
-	// again forever.
+func TestExplicitOTACommandCarriesRegionAdministration(t *testing.T) {
 	e, _, _, peer := txRig(t, "on-air")
-	e.queue.depth = 8
-	e.AttachCommands(func(string, []byte) string { return "OK" })
-	c := adminSession(t, e, peer, nowTS(0))
-	c.out = &outPath{pathLen: 1, path: []byte{0x21}, learned: time.Now()}
-
-	pkt, plain := typedCommandPacket(t, e.id, peer,
-		time.Unix(int64(nowTS(20)), 0), meshcore.TxtTypePlain, "set repeat off")
+	e.queue.depth = 4
+	var got string
+	e.AttachCommands(func(line string, _ []byte) string {
+		got = line
+		return "OK - (flood allowed)"
+	})
+	adminSession(t, e, peer, nowTS(0))
+	pkt := typedCommandPacket(t, e.id, peer,
+		time.Unix(int64(nowTS(20)), 0), meshcore.TxtTypeCLICommand, "region put fr eu")
 	rx := rxOf(e, pkt)
+	if rx.opened == nil || rx.opened.text == nil {
+		t.Fatal("the explicit CLI command was not admitted")
+	}
 	e.runCommand(rx, rx.id)
-
-	kinds := map[string]int{}
-	var ack *meshcore.Packet
-	for _, entry := range e.queue.entries {
-		kinds[entry.kind]++
-		if entry.kind == "cmd-ack" {
-			ack = entry.pkt
-		}
+	if got != "region put fr eu" {
+		t.Fatalf("region door received %q", got)
 	}
-	if kinds["cmd-ack"] != 1 || kinds["cmd-resp"] != 1 {
-		t.Fatalf("queued %v, want one ack and one reply", kinds)
-	}
-	// The ack proves the words arrived: the truncated hash over the
-	// timestamp, flags and text, keyed on the sender's own key — the
-	// padding the cipher added is not part of it.
-	text, err := meshcore.ParseTextPlaintext(plain)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, err := meshcore.BuildTextAck(plain[:5+len(text.Text)], peer.PubKey[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(ack.Payload, want.Payload) {
-		t.Errorf("ack carries %x, want %x", ack.Payload, want.Payload)
-	}
-
-	// A retry is acknowledged again and the line is not re-run: the
-	// ack is exactly what the sender is missing.
-	e.queue.entries = e.queue.entries[:0]
-	ran := 0
-	e.AttachCommands(func(string, []byte) string { ran++; return "" })
-	e.runCommand(rxOf(e, pkt), rx.id)
-	if ran != 0 {
-		t.Errorf("the retry re-ran the command %d times", ran)
-	}
-	kinds = map[string]int{}
-	for _, entry := range e.queue.entries {
-		kinds[entry.kind]++
-	}
-	if kinds["cmd-ack"] != 1 || kinds["cmd-resp"] != 0 {
-		t.Errorf("retry queued %v, want the ack alone", kinds)
+	if len(e.queue.entries) != 1 || e.queue.entries[0].kind != "cmd-resp" {
+		t.Fatalf("queued %+v, want one CLI_DATA response", e.queue.entries)
 	}
 }
 
-func TestCLIDataCommandsCarryNoAck(t *testing.T) {
-	// Its answer is the reply; an ack besides would be airtime for
-	// nothing, and the reference sends none.
+func TestCLICommandsCarryNoAck(t *testing.T) {
+	// Its CLI_DATA answer is the reply; an ACK besides would be
+	// airtime for nothing.
 	e, _, _, peer := txRig(t, "on-air")
 	e.queue.depth = 8
 	e.AttachCommands(func(string, []byte) string { return "OK" })
 	adminSession(t, e, peer, nowTS(0))
-	pkt, _ := typedCommandPacket(t, e.id, peer,
-		time.Unix(int64(nowTS(30)), 0), meshcore.TxtTypeCLIData, "get name")
+	pkt := typedCommandPacket(t, e.id, peer,
+		time.Unix(int64(nowTS(30)), 0), meshcore.TxtTypeCLICommand, "get name")
 	rx := rxOf(e, pkt)
 	e.runCommand(rx, rx.id)
 
 	for _, entry := range e.queue.entries {
 		if entry.kind == "cmd-ack" {
-			t.Fatal("a CLI_DATA command was acknowledged")
+			t.Fatal("a CLI_COMMAND was acknowledged")
 		}
 	}
 }

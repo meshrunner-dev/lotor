@@ -787,6 +787,82 @@ func (s *session) regions(_ context.Context, in input) error {
 // armed from here is a transaction nothing can feed or commit — the
 // air has the modal, the console has def and the dump.
 func (s *session) regionLine(_ context.Context, in input) error {
+	line := cmdRegion
+	if len(in.pos) > 0 && in.pos[0] != "" {
+		line += " " + in.pos[0]
+	}
+	if verb := strings.Fields(strings.TrimPrefix(line, cmdRegion)); len(verb) > 0 && verb[0] == "load" {
+		return errors.New(`the modal load speaks over the air — here, build the tree with region "def …"`)
+	}
+	return s.runRegionLine(in, line)
+}
+
+// The structured region commands expose every useful mutation in the
+// tree while still speaking the ecosystem's one grammar at the relay
+// boundary. The raw `region "…"` escape remains for inspection and
+// exact interoperability work.
+func (s *session) regionPut(_ context.Context, in input) error {
+	if len(in.pos) == 0 || in.pos[0] == "" {
+		return errors.New("which name? put takes one region name")
+	}
+	name := in.pos[0]
+	if err := regionCLIWord("name", name); err != nil {
+		return err
+	}
+	line := cmdRegion + " put " + name
+	if parent := in.opts[optParent]; parent != "" {
+		if err := regionCLIWord(optParent, parent); err != nil {
+			return err
+		}
+		line += " " + parent
+	}
+	return s.runRegionLine(in, line)
+}
+
+func (s *session) regionDefault(_ context.Context, in input) error {
+	name := in.opts[optRegion]
+	if name == "" {
+		return fmt.Errorf("which one? %s=<name|<null>>", optRegion)
+	}
+	if err := regionCLIWord(optRegion, name); err != nil {
+		return err
+	}
+	return s.runRegionLine(in, cmdRegion+" default "+name)
+}
+
+func (s *session) regionHome(_ context.Context, in input) error {
+	name := in.opts[optRegion]
+	if name == "" {
+		return fmt.Errorf("which one? %s=<name>", optRegion)
+	}
+	if err := regionCLIWord(optRegion, name); err != nil {
+		return err
+	}
+	return s.runRegionLine(in, cmdRegion+" home "+name)
+}
+
+func (s *session) regionDef(_ context.Context, in input) error {
+	if len(in.pos) == 0 || in.pos[0] == "" {
+		return errors.New("which definition? quote the complete expression")
+	}
+	return s.runRegionLine(in, cmdRegion+" def "+in.pos[0])
+}
+
+// A structured field must remain one CommonCLI word when it crosses
+// the protocol boundary. Otherwise `name="fr idf"` would silently
+// become region fr with parent idf — a different mutation.
+func regionCLIWord(attr, value string) error {
+	fields := strings.Fields(value)
+	if len(fields) != 1 || fields[0] != value {
+		return fmt.Errorf("%s must be one word", attr)
+	}
+	return nil
+}
+
+// runRegionLine is the single local door to the live table. Besides
+// keeping replies uniform it verifies that the protocol claimed the
+// line, so a wiring regression cannot report a silent success.
+func (s *session) runRegionLine(in input, line string) error {
 	r, err := s.oneRelay(in.opts[scopeRelay])
 	if err != nil {
 		return err
@@ -796,13 +872,6 @@ func (s *session) regionLine(_ context.Context, in input) error {
 	}
 	if r.RegionLine == nil {
 		return fmt.Errorf("relay %q has no regions to administer", r.Name)
-	}
-	line := cmdRegion
-	if len(in.pos) > 0 && in.pos[0] != "" {
-		line += " " + in.pos[0]
-	}
-	if verb := strings.Fields(strings.TrimPrefix(line, cmdRegion)); len(verb) > 0 && verb[0] == "load" {
-		return errors.New(`the modal load speaks over the air — here, build the tree with region "def …"`)
 	}
 	reply, handled, err := r.RegionLine(s.regionOwner(), line)
 	if err != nil {
@@ -835,26 +904,14 @@ func (s *session) regionDrop(ctx context.Context, in input) error {
 }
 
 func (s *session) regionItemVerb(_ context.Context, in input, verb string) error {
-	r, err := s.oneRelay(in.opts[scopeRelay])
-	if err != nil {
-		return err
-	}
-	if err := working(r); err != nil {
-		return err
-	}
-	if r.RegionLine == nil {
-		return fmt.Errorf("relay %q has no regions to administer", r.Name)
-	}
 	name := in.opts[optRegion]
 	if name == "" {
 		return fmt.Errorf("which one? %s=<name>", optRegion)
 	}
-	reply, _, err := r.RegionLine(s.regionOwner(), cmdRegion+" "+verb+" "+name)
-	if err != nil {
+	if err := regionCLIWord(optRegion, name); err != nil {
 		return err
 	}
-	fmt.Fprintf(s.out, "%s\r\n", reply)
-	return nil
+	return s.runRegionLine(in, cmdRegion+" "+verb+" "+name)
 }
 
 // askScopes puts the question on the air. It reads nothing we already

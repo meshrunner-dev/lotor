@@ -375,7 +375,7 @@ func TestACommandIsNotRunWhenItsGuardCannotPersist(t *testing.T) {
 	e.AttachCommands(func(string, []byte) string { ran++; return "OK" })
 
 	store.saveErr = errors.New("disk stalled")
-	plain := meshcore.BuildTextPlaintext(time.Unix(int64(nowTS(10)), 0), meshcore.TxtTypePlain, "set tx 6")
+	plain := meshcore.BuildTextPlaintext(time.Unix(int64(nowTS(10)), 0), meshcore.TxtTypeCLICommand, "set tx 6")
 	pkt, err := meshcore.BuildDatagram(meshcore.PayloadTypeTxtMsg,
 		e.id.PubKey[:meshcore.PathHashSize], peer.PubKey[:meshcore.PathHashSize], secret, plain)
 	if err != nil {

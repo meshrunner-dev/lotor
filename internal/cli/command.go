@@ -43,7 +43,7 @@ type flagSpec struct {
 	// values answers what this flag accepts, for the completion that
 	// offers them. A closed set says so here rather than in a second
 	// list somewhere else.
-	values func(*session) []string
+	values func(*session, []string) []string
 }
 
 // command declares one shell command completely: grammar, help and
@@ -125,7 +125,7 @@ func accessCommands() []*command {
 				{name: scopeRelay, valued: true, doc: docRelay},
 				{name: optKey, valued: true, doc: "the whole public key, 64 hex characters"},
 				{name: optRole, valued: true, doc: "admin, read-write or read-only (default admin)",
-					values: func(*session) []string { return []string{roleAdmin, roleReadWrite, roleReadOnly} }},
+					values: func(*session, []string) []string { return []string{roleAdmin, roleReadWrite, roleReadOnly} }},
 			},
 			admin: true,
 			run:   (*session).grantAccess,
@@ -230,7 +230,7 @@ func regionFlagCommands() []*command {
 			},
 			flags: []flagSpec{
 				{name: scopeRelay, valued: true, doc: docRelay},
-				{name: optRegion, valued: true, doc: "which region, by name or prefix"},
+				{name: optRegion, valued: true, doc: "which region, by name or prefix", values: regionAllValues},
 			},
 			admin: true,
 			run:   (*session).regionAllow,
@@ -245,7 +245,7 @@ func regionFlagCommands() []*command {
 			},
 			flags: []flagSpec{
 				{name: scopeRelay, valued: true, doc: docRelay},
-				{name: optRegion, valued: true, doc: "which region, by name or prefix"},
+				{name: optRegion, valued: true, doc: "which region, by name or prefix", values: regionAllValues},
 			},
 			admin: true,
 			run:   (*session).regionDeny,
@@ -260,7 +260,7 @@ func regionFlagCommands() []*command {
 			},
 			flags: []flagSpec{
 				{name: scopeRelay, valued: true, doc: docRelay},
-				{name: optRegion, valued: true, doc: "which region, by its exact name"},
+				{name: optRegion, valued: true, doc: "which region, by its exact name", values: regionNamedValues},
 			},
 			admin: true,
 			run:   (*session).regionDrop,
@@ -312,6 +312,7 @@ func relayCommands() []*command {
 // grammar, spoken from the console.
 func regionCommands() []*command {
 	return []*command{
+		regionPutCommand(), regionDefaultCommand(), regionHomeCommand(), regionDefCommand(),
 		{
 			name: cmdRegion,
 			on:   scopeRelay,
@@ -351,6 +352,79 @@ func regionCommands() []*command {
 	}
 }
 
+func regionPutCommand() *command {
+	return &command{
+		name:  cmdPut,
+		forms: []form{{cmdPut + " <name> [" + optParent + "=<region>]", "create or re-parent a region"}},
+		detail: []string{
+			cmdPut + " <name> [" + optParent + "=<region>]",
+			"admin only. Creates a flood-allowed region, or moves an",
+			"existing one under the named parent. Without a parent it",
+			"stands directly under the wildcard root.",
+		},
+		flags: []flagSpec{
+			{name: scopeRelay, valued: true, doc: docRelay},
+			{name: optParent, valued: true, doc: "its parent; * means the root", values: regionAllValues},
+		},
+		takes: &positional{name: "name", doc: "the exact region name"},
+		admin: true,
+		run:   (*session).regionPut,
+	}
+}
+
+func regionDefaultCommand() *command {
+	return &command{
+		name:  cmdDefault,
+		forms: []form{{cmdDefault + " " + optRegion + "=<name|<null>>", "choose the region this relay speaks in"}},
+		detail: []string{
+			cmdDefault + " " + optRegion + "=<name|<null>>",
+			"admin only. Scopes traffic originated by this relay to",
+			"the selected region. <null> emits it without transport",
+			"codes. An unknown exact name is created, as upstream does.",
+		},
+		flags: []flagSpec{
+			{name: scopeRelay, valued: true, doc: docRelay},
+			{name: optRegion, valued: true, doc: "the speaking region, or <null>", values: regionDefaultValues},
+		},
+		admin: true,
+		run:   (*session).regionDefault,
+	}
+}
+
+func regionHomeCommand() *command {
+	return &command{
+		name:  cmdHome,
+		forms: []form{{cmdHome + " " + optRegion + "=<name>", "designate the home region"}},
+		detail: []string{
+			cmdHome + " " + optRegion + "=<name>",
+			"admin only. Marks the selected region as home. The",
+			"wildcard (*) clears the designation.",
+		},
+		flags: []flagSpec{
+			{name: scopeRelay, valued: true, doc: docRelay},
+			{name: optRegion, valued: true, doc: "the home region; * clears it", values: regionAllValues},
+		},
+		admin: true,
+		run:   (*session).regionHome,
+	}
+}
+
+func regionDefCommand() *command {
+	return &command{
+		name:  cmdDef,
+		forms: []form{{cmdDef + ` "<definition>"`, "apply the compact region definition grammar"}},
+		detail: []string{
+			cmdDef + ` "<definition>"`,
+			"admin only. Applies the ecosystem's region def grammar",
+			"as one atomic change. Quote definitions containing spaces.",
+		},
+		takes: &positional{name: "definition", doc: "the complete region def expression"},
+		flags: []flagSpec{{name: scopeRelay, valued: true, doc: docRelay}},
+		admin: true,
+		run:   (*session).regionDef,
+	}
+}
+
 // framesCommand is the journal reader, declared apart because its
 // grammar — filters, three window selectors and the live feed — is a
 // command's worth on its own.
@@ -373,9 +447,9 @@ func framesCommand() *command {
 			{name: optLast, valued: true, doc: "the newest slice — a count (50) or a span (15m)"},
 			{name: scopeRelay, valued: true, doc: docRelay},
 			{name: optFrameType, valued: true, doc: "keep one payload type",
-				values: (*session).frameTypes},
+				values: func(s *session, _ []string) []string { return s.frameTypes() }},
 			{name: optVerdict, valued: true, doc: "keep one judgement",
-				values: (*session).frameVerdicts},
+				values: func(s *session, _ []string) []string { return s.frameVerdicts() }},
 			{name: optSince, valued: true, doc: "from this moment on"},
 			{name: optUntil, valued: true, doc: "up to this moment"},
 			{name: optAround, valued: true, doc: "the window around one correlation, by id prefix"},

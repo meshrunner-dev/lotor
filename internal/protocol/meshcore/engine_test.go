@@ -94,12 +94,9 @@ func TestVerdicts(t *testing.T) {
 	e.judge(newFakeDevice(), frame([]byte{0x01})) // truncated
 
 	judged := drainJudged(t, sub)
-	// The transport flood walks PAST the region gate — a relay carries
-	// what it was never told to refuse — and is judged on its own
-	// merits: two bytes are not a group message's envelope.
 	want := []string{
 		"would-drop-invalid-advert", "heard-zero-hop", "direct-not-addressed",
-		"would-drop-flood-truncated", "direct-not-addressed", "malformed",
+		"would-drop-flood-scoped", "direct-not-addressed", "malformed",
 	}
 	if len(judged) != len(want) {
 		t.Fatalf("judged %d frames, want %d", len(judged), len(want))

@@ -32,11 +32,10 @@ const commandMaxReply = 150
 // simply not a command, and routes on like any other traffic this
 // node is not the destination of.
 //
-// The subtype is the second half of the authentication, and the half
-// that was missing: the MAC says who is speaking, the flags byte says
-// what they meant. A signed conversation addressed to an admin that
-// happens to contain the words "set repeat off" is not an order, and
-// the reference runs exactly two subtypes for that reason.
+// The subtype is the second half of the authentication: the MAC says
+// who is speaking, the flags byte says what they meant. Only the
+// explicit command subtype is executable. Plain conversation and
+// CLI_DATA replies are never reinterpreted as orders.
 func (e *engine) cmdVerdict(rx *reception) (verdict, why string, handled bool) {
 	c, plain := e.openText(rx.pkt)
 	if c == nil {
@@ -49,7 +48,7 @@ func (e *engine) cmdVerdict(rx *reception) (verdict, why string, handled bool) {
 	if err != nil {
 		return "", "", false
 	}
-	if text.Type != meshcore.TxtTypePlain && text.Type != meshcore.TxtTypeCLIData {
+	if text.Type != meshcore.TxtTypeCLICommand {
 		// Authenticated, addressed here, and not a command: it is the
 		// admin's own traffic, judged like anyone else's.
 		return "", "", false
@@ -84,7 +83,7 @@ func (e *engine) runCommand(rx *reception, origin correlation.ID) {
 	if rx.opened == nil || rx.opened.session == nil || rx.opened.text == nil || e.commands == nil {
 		return
 	}
-	pkt, c, plain, text := rx.pkt, rx.opened.session, rx.opened.plain, rx.opened.text
+	pkt, c, text := rx.pkt, rx.opened.session, rx.opened.text
 	ts := uint32(text.Timestamp.Unix())
 	if ts < c.lastTimestamp {
 		e.log.Debug("command replay refused", zap.String("corr", origin.Short()))
@@ -124,14 +123,6 @@ func (e *engine) runCommand(rx *reception, origin correlation.ID) {
 		e.storeRefused(origin, "command", err)
 		return
 	}
-	// A legacy PLAIN command is acknowledged, retry included: the ack
-	// is the whole answer its sender waits on, and without one a
-	// command whose reply is empty reads as a timeout and is sent
-	// again forever. CLI_DATA carries none — there, the reply is the
-	// answer, and an ack besides would be airtime for nothing.
-	if text.Type == meshcore.TxtTypePlain {
-		e.ackText(pkt, c, plain, text, origin)
-	}
 	var out string
 	if retry {
 		// The reference answers a retry with an empty reply rather
@@ -162,44 +153,6 @@ func (e *engine) runCommand(rx *reception, origin correlation.ID) {
 		replyAt = replyAt.Add(time.Second)
 	}
 	e.replyText(pkt, c, meshcore.BuildTextPlaintext(replyAt, meshcore.TxtTypeCLIData, out), origin)
-}
-
-// txtAckDelay is the reference's pause before a legacy text ack.
-const txtAckDelay = 200 * time.Millisecond
-
-// ackText acknowledges a legacy PLAIN command: the truncated hash of
-// what was said, keyed on the sender's own public key, which is how
-// the asker proves to itself that the words arrived. The hash covers
-// the timestamp, the flags and the text exactly — never the cipher's
-// padding, which the sender never hashed either.
-func (e *engine) ackText(inbound *meshcore.Packet, c *client, plain []byte,
-	text *meshcore.TextPlaintext, origin correlation.ID,
-) {
-	end := 5 + len(text.Text)
-	if end > len(plain) {
-		return
-	}
-	ack, err := meshcore.BuildTextAck(plain[:end], c.pubKey[:])
-	if err != nil {
-		e.log.Warn("command ack build failed", zap.String("corr", origin.Short()), zap.Error(err))
-		return
-	}
-	scope := e.replyScope(&reception{pkt: inbound})
-	if c.out != nil {
-		ack.Header = meshcore.MakeHeader(meshcore.RouteDirect,
-			meshcore.PayloadTypeAck, meshcore.PayloadVer1)
-		ack.Path, ack.PathLen = c.out.path, c.out.pathLen
-		scope.Scope(ack)
-		e.logReplyRoute(ack, origin, "cmd-ack", "learned", prioDirect)
-		e.enqueueAfter(ack, "cmd-ack", origin, prioDirect, txtAckDelay)
-		return
-	}
-	ack.Header = meshcore.MakeHeader(meshcore.RouteFlood,
-		meshcore.PayloadTypeAck, meshcore.PayloadVer1)
-	ack.SetPathHashSizeAndCount(inbound.PathHashSize(), 0)
-	scope.Scope(ack)
-	e.logReplyRoute(ack, origin, "cmd-ack", "flood", prioFloodReply)
-	e.enqueueAfter(ack, "cmd-ack", origin, prioFloodReply, txtAckDelay)
 }
 
 // replyText sends one command's output back as a text message, down

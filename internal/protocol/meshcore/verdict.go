@@ -227,13 +227,12 @@ func (e *engine) verdict(rx *reception) (string, string) {
 
 func (e *engine) floodVerdict(rx *reception, advertOK bool) (string, string) {
 	pkt := rx.pkt
-	// Whose flood is this, and are we told not to carry it? Floods
-	// move by default, scoped or not: a relay carries the mesh's
-	// traffic, and the region table is where an operator RESTRICTS
-	// that — the wildcard shut for plain floods, a named region
-	// denied for its own scope.
+	// A plain flood is governed by the wildcard. A transport flood is
+	// carried only when one flood-allowed named region verifies its
+	// code: the wildcard is the absence of a region, never a fallback
+	// for an unknown one.
 	if _, carried := e.regionOf(rx); !carried {
-		return verdictDropScoped, "a scope this relay is told not to carry"
+		return verdictDropScoped, "unknown transport code or flood denied"
 	}
 	t := pkt.PayloadType()
 	if !floodRoutable[t] {

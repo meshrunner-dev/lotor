@@ -56,27 +56,21 @@ func (t *regionTable) rederive() {
 // table holds but denies reads exactly like one it never heard of,
 // as the reference's findMatch mask does.
 func (t *regionTable) match(pkt *meshcore.Packet) (name string, key meshcore.TransportKey, carried bool) {
-	floods := t.m.Wildcard().Flags&meshcore.RegionDenyFlood == 0
 	if !pkt.HasTransportCodes() {
-		return wildcardRegion, meshcore.TransportKey{}, floods
+		allowed := t.m.Wildcard().Flags&meshcore.RegionDenyFlood == 0
+		return wildcardRegion, meshcore.TransportKey{}, allowed
 	}
-	// A scope this relay names is judged by ITS flag: naming a region
-	// is how an operator says something about that scope, allow or
-	// deny. Everything else — a scope nobody here named — rides the
-	// wildcard, like a plain flood: a relay carries the mesh's traffic
-	// by default, and a region table is where carriage is RESTRICTED,
-	// never where it is granted. The whole table is scanned, not just
-	// its flood-allowed half, or a denied scope would fall through to
-	// the wildcard and be carried anyway.
-	if r := t.m.FindMatch(pkt, 0); r != nil {
-		if r.Flags&meshcore.RegionDenyFlood != 0 {
-			return r.BareName(), meshcore.TransportKey{}, false
-		}
+	// The wildcard is not a catch-all region: it is the absence of a
+	// transport code and therefore cannot authorise an unknown code.
+	// FindMatch applies the deny mask while checking the named table,
+	// making a denied region and an unknown one equally unrelayable —
+	// exactly the reference's allowPacketForward contract.
+	if r := t.m.FindMatch(pkt, meshcore.RegionDenyFlood); r != nil {
 		if ks := t.m.KeysFor(r); len(ks) == 1 {
 			return r.BareName(), ks[0], true
 		}
 	}
-	return "", meshcore.TransportKey{}, floods
+	return "", meshcore.TransportKey{}, false
 }
 
 // served lists the regions this relay carries, the reference's own
@@ -114,7 +108,7 @@ func (e *engine) regionOf(rx *reception) (name string, carried bool) {
 // region we do not carry — is answered in the region this relay
 // speaks, which is nothing when it speaks unscoped.
 func (e *engine) replyScope(rx *reception) meshcore.TransportKey {
-	if _, carried := e.regionOf(rx); carried && !rx.regionKey.IsZero() {
+	if _, carried := e.regionOf(rx); carried && rx.pkt.HasTransportCodes() {
 		return rx.regionKey
 	}
 	if rx.pkt.IsRouteFlood() && !rx.pkt.HasTransportCodes() {

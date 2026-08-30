@@ -177,8 +177,8 @@ var drawers = []drawer{{
 	name:      drawerRegions,
 	doc:       "the regions this relay carries and speaks — its flood policy",
 	on:        scopeRelay,
-	verbs:     []string{cmdRegion},
-	itemVerbs: []string{cmdAllowF, cmdDenyF, cmdDrop},
+	verbs:     []string{cmdPut, cmdDefault, cmdHome, cmdDef, cmdRegion},
+	itemVerbs: []string{cmdDefault, cmdHome, cmdAllowF, cmdDenyF, cmdDrop},
 	itemFlag:  optRegion,
 	empty:     "only the wildcard — every plain flood, no named region",
 	keys:      (*session).regionKeys,
@@ -790,6 +790,42 @@ func (s *session) regionKeys(instance string) map[string]string {
 		out[e.Name] = doc
 	}
 	return out
+}
+
+// regionValuesAt is the completion vocabulary for structured region
+// commands. It resolves the relay from the line's path rather than the
+// session's current path, so an absolute command remains correct in a
+// multi-relay console.
+func (s *session) regionValuesAt(path []string, wildcard bool) []string {
+	instance := ""
+	if site := s.drawerSiteAt(path); site != nil && site.d.name == drawerRegions {
+		instance = site.instance
+	} else if len(path) >= 2 && path[0] == scopeRelay {
+		instance = path[1]
+	}
+	keys := s.regionKeys(instance)
+	out := make([]string, 0, len(keys))
+	for name := range keys {
+		if name != wildcardRegionCLI || wildcard {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+const wildcardRegionCLI = "*"
+
+func regionAllValues(s *session, path []string) []string {
+	return s.regionValuesAt(path, true)
+}
+
+func regionNamedValues(s *session, path []string) []string {
+	return s.regionValuesAt(path, false)
+}
+
+func regionDefaultValues(s *session, path []string) []string {
+	return append([]string{"<null>"}, s.regionValuesAt(path, false)...)
 }
 
 // regionView reads the table for printing: one row per region, the
