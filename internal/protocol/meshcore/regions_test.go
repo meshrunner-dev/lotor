@@ -82,17 +82,32 @@ func TestRegionTableMatchesWhatItCarries(t *testing.T) {
 		t.Fatalf("scoped flood = %q/%v, want be carried", name, carried)
 	}
 
-	// A flood in a region we do not carry is somebody else's business —
-	// and so is one whose region the table holds but denies: the mask
-	// makes them indistinguishable, exactly as the reference does.
+	// A scope nobody here named rides the wildcard, like a plain
+	// flood: a relay carries the mesh's traffic, and the table is
+	// where carriage is RESTRICTED, never where it is granted. It
+	// carries no name of ours and no key to answer under.
 	foreign := &meshcore.Packet{
 		Header:  meshcore.MakeHeader(meshcore.RouteFlood, meshcore.PayloadTypeTxtMsg, meshcore.PayloadVer1),
 		Payload: []byte("hello"),
 	}
 	meshcore.TransportKeyForName("de").Scope(foreign)
-	if name, _, carried := table.match(foreign); carried {
-		t.Fatalf("a foreign region was carried as %q", name)
+	name, key, carried := table.match(foreign)
+	if !carried {
+		t.Fatal("an unnamed scope was refused — the wildcard carries floods")
 	}
+	if name != "" || !key.IsZero() {
+		t.Errorf("an unnamed scope claimed name %q / key %v", name, key)
+	}
+	// Shutting the wildcard shuts them with it: one switch for every
+	// flood this relay was never told anything about.
+	table.m.Wildcard().Flags = meshcore.RegionDenyFlood
+	if _, _, carried := table.match(foreign); carried {
+		t.Error("a shut wildcard still carried an unnamed scope")
+	}
+	table.m.Wildcard().Flags = 0
+
+	// Naming a region is how an operator speaks about that scope, and
+	// denying it is heard even though the wildcard is open.
 	denied := table.m.FindByName("be")
 	denied.Flags = meshcore.RegionDenyFlood
 	if _, _, carried := table.match(scoped); carried {

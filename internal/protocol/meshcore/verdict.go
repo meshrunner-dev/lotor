@@ -20,7 +20,7 @@ const (
 	verdictDropPathFull   = "would-drop-flood-path-full" // appending our hash would exceed the path
 	verdictDropFloodHops  = "would-drop-flood-hops"      // the flood travelled past its hop limit
 	verdictDropLoop       = "would-drop-flood-loop"      // our hash already rides the path: we relayed this already
-	verdictDropScoped     = "would-drop-flood-scoped"    // transport-scoped flood, and no scoping exists here
+	verdictDropScoped     = "would-drop-flood-scoped"    // transport-scoped flood into a scope this relay denies
 	verdictSelfAdvert     = "self-advert"                // our own advert echoing back
 	verdictCommand        = "administration"             // a logged-in admin's command line
 	verdictZeroHop        = "heard-zero-hop"             // direct, empty path: addressed to whoever hears it
@@ -227,12 +227,13 @@ func (e *engine) verdict(rx *reception) (string, string) {
 
 func (e *engine) floodVerdict(rx *reception, advertOK bool) (string, string) {
 	pkt := rx.pkt
-	// Whose flood is this, and do we carry it? A plain flood belongs
-	// to the wildcard and moves unless the operator shut it; a scoped
-	// one moves only when one of our keys recomputes its code. The
-	// reference refuses the rest as an unknown transport code.
+	// Whose flood is this, and are we told not to carry it? Floods
+	// move by default, scoped or not: a relay carries the mesh's
+	// traffic, and the region table is where an operator RESTRICTS
+	// that — the wildcard shut for plain floods, a named region
+	// denied for its own scope.
 	if _, carried := e.regionOf(rx); !carried {
-		return verdictDropScoped, "a scope this relay does not carry"
+		return verdictDropScoped, "a scope this relay is told not to carry"
 	}
 	t := pkt.PayloadType()
 	if !floodRoutable[t] {
