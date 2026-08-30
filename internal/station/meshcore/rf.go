@@ -204,28 +204,35 @@ func (s *service) pushRawReception(frame radio.Frame) {
 func (s *service) receiveAdvert(ctx context.Context, packet *mesh.Packet) {
 	s.mu.Lock()
 	before := s.snapshotLocked()
-	stored, created, err := s.storeAdvert(packet, true)
-	if err == nil && stored {
+	result, err := s.storeAdvert(packet, true)
+	if err == nil && result.stored {
 		err = s.persistLocked(ctx, before)
 	}
-	var response companion.Response
-	if err == nil && stored {
+	responses := make([]companion.Response, 0, 2)
+	if err == nil && result.hadEviction {
+		responses = append(responses, companion.Push{
+			Code: companion.PushContactDeleted, Body: result.evicted[:],
+		})
+	}
+	if err == nil && result.stored {
 		advert, _ := mesh.ParseAdvert(packet.Payload)
 		entry := s.contacts[advert.Identity.PubKey]
 		s.cacheAdvertPathLocked(entry.info.PublicKey, packet)
-		if created {
+		if result.created {
 			wire, _ := companion.MarshalResponse(companion.ContactResponse{Contact: entry.info})
-			response = companion.Push{Code: companion.PushNewAdvert, Body: wire[1:]}
+			responses = append(responses, companion.Push{Code: companion.PushNewAdvert, Body: wire[1:]})
 		} else {
-			response = companion.Push{Code: companion.PushAdvert, Body: entry.info.PublicKey[:]}
+			responses = append(responses, companion.Push{Code: companion.PushAdvert, Body: entry.info.PublicKey[:]})
 		}
+	} else if err == nil && result.full {
+		responses = append(responses, companion.Push{Code: companion.PushContactsFull})
 	}
 	s.mu.Unlock()
 	if err != nil {
 		s.log.Error("station advert state failed", zap.Error(err))
 		return
 	}
-	if response != nil {
+	for _, response := range responses {
 		s.push(response)
 	}
 }

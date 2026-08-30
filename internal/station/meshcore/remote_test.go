@@ -82,6 +82,28 @@ func readPushAfter(t *testing.T, app net.Conn, action func()) []byte {
 	return frame.Payload
 }
 
+func readPushesAfter(t *testing.T, app net.Conn, count int, action func()) [][]byte {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		action()
+		close(done)
+	}()
+	frames := make([][]byte, 0, count)
+	for range count {
+		if err := app.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		frame, err := companion.ReadFrame(app, companion.ToApplication)
+		if err != nil {
+			t.Fatal(err)
+		}
+		frames = append(frames, frame.Payload)
+	}
+	<-done
+	return frames
+}
+
 func TestRemoteLoginAndStatusRequestRoundTrip(t *testing.T) {
 	svc := testRFService(t)
 	peer := testPeer(t, 23)
@@ -304,6 +326,28 @@ func TestAnonymousRequestCreatesOnlyAReferenceCompatibleVolatileContact(t *testi
 	emission := takeEmission(t, svc)
 	if emission.packet.PayloadType() != mesh.PayloadTypeAnonReq || emission.packet.PathHashCount() != 0 {
 		t.Fatalf("anonymous emission = %#v", emission.packet)
+	}
+	listed := svc.handle(t.Context(), companion.GetContacts{})
+	if start, ok := listed[0].(companion.ContactsStart); !ok || start.Count != 0 {
+		t.Fatalf("anonymous contact leaked into contact list: %#v", listed)
+	}
+	oldest := peer.PubKey
+	for value := byte(30); value < 38; value++ {
+		candidate := testPeer(t, value)
+		responses = svc.handle(t.Context(), companion.ContactDataRequest{
+			Kind: companion.CommandSendAnonymousRequest, PublicKey: candidate.PubKey,
+			Data: []byte{mesh.AnonReqClock},
+		})
+		if _, ok := responses[0].(companion.Sent); !ok {
+			t.Fatalf("anonymous slot %d = %#v", value, responses)
+		}
+		_ = takeEmission(t, svc)
+	}
+	if len(svc.contacts) != maxAnonContacts {
+		t.Fatalf("anonymous contact slots = %d, want %d", len(svc.contacts), maxAnonContacts)
+	}
+	if _, exists := svc.contacts[oldest]; exists {
+		t.Fatalf("oldest anonymous contact %x was not replaced", oldest[:6])
 	}
 	svc.mu.Lock()
 	_ = svc.resetRuntimeLocked()

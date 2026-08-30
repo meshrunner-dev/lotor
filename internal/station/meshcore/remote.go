@@ -117,9 +117,7 @@ func (s *service) sendContactDataRequest(command companion.ContactDataRequest) [
 	}
 	contact, known := s.contacts[command.PublicKey]
 	if !known {
-		if len(s.contacts) >= s.p.MaxContacts {
-			return errorResponses(companion.ErrorTableFull)
-		}
+		s.expireAnonymousContactLocked()
 		s.nextContact++
 		contact = contactEntry{
 			info: companion.Contact{
@@ -148,6 +146,26 @@ func (s *service) sendContactDataRequest(command companion.ContactDataRequest) [
 	return []companion.Response{companion.Sent{
 		Flood: flood, ExpectedACK: tag, TimeoutMillis: s.estimateTimeout(packet, flood),
 	}}
+}
+
+func (s *service) expireAnonymousContactLocked() {
+	count := 0
+	var oldestKey [mesh.PubKeySize]byte
+	var oldest contactEntry
+	found := false
+	for key, entry := range s.contacts {
+		if !entry.ephemeral {
+			continue
+		}
+		count++
+		if !found || entry.info.LastModifiedUnix < oldest.info.LastModifiedUnix ||
+			(entry.info.LastModifiedUnix == oldest.info.LastModifiedUnix && entry.order < oldest.order) {
+			oldestKey, oldest, found = key, entry, true
+		}
+	}
+	if count >= maxAnonContacts && found {
+		delete(s.contacts, oldestKey)
+	}
 }
 
 func (s *service) sendKnownRequest(publicKey [mesh.PubKeySize]byte, body []byte,

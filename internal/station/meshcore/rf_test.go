@@ -102,6 +102,69 @@ func TestRFGroupMailboxSurvivesRestartAndSync(t *testing.T) {
 	}
 }
 
+func TestAdvertCapacityNotifiesTheCompanion(t *testing.T) {
+	buildService := func(t *testing.T) *service {
+		t.Helper()
+		spec := testSpec(t)
+		spec.Config["max_contacts"] = 2
+		built, err := build(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return requireService(t, built)
+	}
+	advert := func(t *testing.T, value byte, timestamp int64) (*mesh.Packet, [mesh.PubKeySize]byte) {
+		t.Helper()
+		peer := testPeer(t, value)
+		packet, err := mesh.BuildAdvert(peer, time.Unix(timestamp, 0), &mesh.AdvertData{
+			Type: mesh.AdvTypeChat, Name: "peer",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		packet.SetPathHashSizeAndCount(1, 1)
+		packet.Path = []byte{value}
+		return packet, peer.PubKey
+	}
+
+	t.Run("full", func(t *testing.T) {
+		svc := buildService(t)
+		for value := byte(1); value <= 2; value++ {
+			packet, _ := advert(t, value, 1_800_000_000+int64(value))
+			svc.receiveAdvert(t.Context(), packet)
+		}
+		app := attachApplication(t, svc)
+		packet, _ := advert(t, 3, 1_800_000_003)
+		got := readPushAfter(t, app, func() { svc.receiveAdvert(t.Context(), packet) })
+		if !bytes.Equal(got, []byte{byte(companion.PushContactsFull)}) {
+			t.Fatalf("contacts-full push = % X", got)
+		}
+	})
+
+	t.Run("overwrite", func(t *testing.T) {
+		svc := buildService(t)
+		var oldest [mesh.PubKeySize]byte
+		for value := byte(1); value <= 2; value++ {
+			packet, publicKey := advert(t, value, 1_800_000_000+int64(value))
+			if value == 1 {
+				oldest = publicKey
+			}
+			svc.receiveAdvert(t.Context(), packet)
+		}
+		_ = svc.handle(t.Context(), companion.SetAutoAddConfig{Flags: 1})
+		app := attachApplication(t, svc)
+		packet, newest := advert(t, 3, 1_800_000_003)
+		got := readPushesAfter(t, app, 2, func() { svc.receiveAdvert(t.Context(), packet) })
+		if got[0][0] != byte(companion.PushContactDeleted) || !bytes.Equal(got[0][1:], oldest[:]) {
+			t.Fatalf("contact-deleted push = % X", got[0])
+		}
+		if got[1][0] != byte(companion.PushNewAdvert) || len(got[1]) < 33 ||
+			!bytes.Equal(got[1][1:33], newest[:]) {
+			t.Fatalf("new-advert push = % X", got[1])
+		}
+	})
+}
+
 func TestFloodedDirectTextQueuesACKPathReturn(t *testing.T) {
 	spec := testSpec(t)
 	spec.TX = station.TXPolicy{Mode: config.TXShadow, QueueDepth: 4}

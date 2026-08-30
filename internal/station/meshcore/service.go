@@ -39,6 +39,7 @@ const (
 	maxConnectionPIN = math.MaxUint32
 	maxSignData      = 8 * 1024
 	maxConnections   = 16
+	maxAnonContacts  = 8
 )
 
 func init() {

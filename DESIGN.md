@@ -241,9 +241,10 @@ dedicated TCP stream, with one application connected at a time. The
 application's announced protocol level selects the legacy or v3 mailbox
 layout at message reception, and the encoded mailbox entry is durable.
 Room contacts also persist their signed-message synchronisation cursor;
-login and keep-alive carry it exactly as the reference does. A request to
-an unknown anonymous peer creates the reference's capacity-counted,
-in-memory contact and a station restart discards it.
+login and keep-alive carry it exactly as the reference does. Requests to
+unknown anonymous peers use the reference's eight reserved, in-memory
+slots: they stay out of the advertised contact count, the oldest slot is
+reused when all eight are occupied, and a station restart discards them.
 
 `reboot` closes only that station's application session, clears its
 per-boot queues, counters, request/connection state and transient contacts,

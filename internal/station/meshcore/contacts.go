@@ -19,10 +19,13 @@ func (s *service) orderedContacts() []contactEntry {
 }
 
 func (s *service) getContacts(command companion.GetContacts) []companion.Response {
-	responses := make([]companion.Response, 0, len(s.contacts)+2)
-	responses = append(responses, companion.ContactsStart{Count: uint32(len(s.contacts))})
+	responses := make([]companion.Response, 0, s.durableContactCount()+2)
+	responses = append(responses, companion.ContactsStart{Count: uint32(s.durableContactCount())})
 	var mostRecent uint32
 	for _, entry := range s.orderedContacts() {
+		if entry.ephemeral {
+			continue
+		}
 		if command.HasSince && entry.info.LastModifiedUnix <= command.Since {
 			continue
 		}
@@ -43,7 +46,7 @@ func (s *service) getContact(publicKey [mesh.PubKeySize]byte) []companion.Respon
 
 func (s *service) addUpdateContact(command companion.AddUpdateContact) []companion.Response {
 	entry, exists := s.contacts[command.PublicKey]
-	if !exists && len(s.contacts) >= s.p.MaxContacts {
+	if !exists && s.durableContactCount() >= s.p.MaxContacts {
 		return errorResponses(companion.ErrorTableFull)
 	}
 	lastModified := uint32(time.Now().Add(s.clockDelta).Unix())
@@ -57,7 +60,6 @@ func (s *service) addUpdateContact(command companion.AddUpdateContact) []compani
 	}
 	if exists {
 		entry.info = info
-		entry.ephemeral = false
 	} else {
 		s.nextContact++
 		entry = contactEntry{info: info, order: s.nextContact}
@@ -109,7 +111,7 @@ func (s *service) importContact(raw []byte) []companion.Response {
 	if err != nil || packet.PayloadType() != mesh.PayloadTypeAdvert {
 		return errorResponses(companion.ErrorIllegalArgument)
 	}
-	if _, _, err := s.storeAdvert(packet, false); err != nil {
+	if _, err := s.storeAdvert(packet, false); err != nil {
 		return errorResponses(companion.ErrorIllegalArgument)
 	}
 	return okResponses()
@@ -125,12 +127,12 @@ func (s *service) shouldAutoAdd(advertType uint8) bool {
 	return s.autoFlags&(1<<advertType) != 0
 }
 
-func (s *service) evictOldestContact() bool {
+func (s *service) evictOldestContact() ([mesh.PubKeySize]byte, bool) {
 	var oldestKey [mesh.PubKeySize]byte
 	var oldest contactEntry
 	found := false
 	for key, entry := range s.contacts {
-		if entry.info.Flags&1 != 0 {
+		if entry.ephemeral || entry.info.Flags&1 != 0 {
 			continue
 		}
 		if !found || entry.info.LastModifiedUnix < oldest.info.LastModifiedUnix ||
@@ -141,33 +143,48 @@ func (s *service) evictOldestContact() bool {
 	if found {
 		delete(s.contacts, oldestKey)
 	}
-	return found
+	return oldestKey, found
+}
+
+func (s *service) durableContactCount() int {
+	count := 0
+	for _, entry := range s.contacts {
+		if !entry.ephemeral {
+			count++
+		}
+	}
+	return count
+}
+
+type advertStoreResult struct {
+	stored, created bool
+	full            bool
+	evicted         [mesh.PubKeySize]byte
+	hadEviction     bool
 }
 
 // storeAdvert verifies and updates a contact from an advert. enforceReplay is
 // true for actual RF reception and false for the reference's explicit import
 // loopback, which removes the packet from its duplicate table first.
-func (s *service) storeAdvert(packet *mesh.Packet, enforceReplay bool) (stored, created bool, err error) {
+func (s *service) storeAdvert(packet *mesh.Packet, enforceReplay bool) (advertStoreResult, error) {
 	advert, err := mesh.ParseAdvert(packet.Payload)
 	if err != nil {
-		return false, false, err
+		return advertStoreResult{}, err
 	}
 	if advert.Data.Name == "" {
-		return false, false, errors.New("advert has no name")
+		return advertStoreResult{}, errors.New("advert has no name")
 	}
 	key := advert.Identity.PubKey
 	entry, exists := s.contacts[key]
 	if exists && enforceReplay && uint32(advert.Timestamp.Unix()) <= entry.info.LastAdvertUnix {
-		return false, false, nil
+		return advertStoreResult{}, nil
 	}
+	result := advertStoreResult{created: !exists}
 	if !exists {
-		if !s.shouldAutoAdd(advert.Data.Type) ||
-			(s.autoHops > 0 && packet.PathHashCount() >= int(s.autoHops)) {
-			return false, false, nil
-		}
-		if len(s.contacts) >= s.p.MaxContacts &&
-			(s.autoFlags&1 == 0 || !s.evictOldestContact()) {
-			return false, false, nil
+		var admitted bool
+		result, admitted = s.admitNewContact(advert.Data.Type, packet.PathHashCount())
+		if !admitted {
+			return result, nil
 		}
 		s.nextContact++
 		entry.order = s.nextContact
@@ -183,7 +200,6 @@ func (s *service) storeAdvert(packet *mesh.Packet, enforceReplay bool) (stored, 
 	entry.info.PathLen = packet.PathLen
 	entry.info.Path = [mesh.MaxPathSize]byte{}
 	copy(entry.info.Path[:], packet.Path)
-	entry.ephemeral = false
 
 	// Export/share stores a plain, zero-path FLOOD advert exactly like the
 	// reference blob store, independent of the scope/path by which it arrived.
@@ -195,10 +211,29 @@ func (s *service) storeAdvert(packet *mesh.Packet, enforceReplay bool) (stored, 
 	copyPacket.SetPathHashSizeAndCount(packet.PathHashSize(), 0)
 	entry.advert, err = copyPacket.MarshalBinary()
 	if err != nil {
-		return false, false, err
+		return advertStoreResult{}, err
 	}
 	s.contacts[key] = entry
-	return true, !exists, nil
+	result.stored = true
+	return result, nil
+}
+
+func (s *service) admitNewContact(advertType uint8, hops int) (advertStoreResult, bool) {
+	result := advertStoreResult{created: true}
+	if !s.shouldAutoAdd(advertType) || s.autoHops > 0 && hops >= int(s.autoHops) {
+		return advertStoreResult{}, false
+	}
+	if s.durableContactCount() < s.p.MaxContacts {
+		return result, true
+	}
+	if s.autoFlags&1 != 0 {
+		result.evicted, result.hadEviction = s.evictOldestContact()
+		if result.hadEviction {
+			return result, true
+		}
+	}
+	result.full = true
+	return result, false
 }
 
 func (s *service) selfAdvert(at time.Time) (*mesh.Packet, error) {
