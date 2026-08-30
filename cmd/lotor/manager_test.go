@@ -540,6 +540,33 @@ func TestViewsAnswerWhileTheLifecycleLockIsHeld(t *testing.T) {
 	}
 }
 
+func TestRadioAirtimeLedgerSurvivesConsumerBounce(t *testing.T) {
+	now := time.Now()
+	m := &manager{
+		airtime:      map[string]*radio.AirtimeLedger{},
+		airtimeUsers: map[string]map[string]time.Duration{},
+	}
+	seed := []protocol.Spent{{At: now.Add(-10 * time.Minute), Airtime: 2 * time.Second}}
+	first, err := m.sharedAirtimeLedger("slot1", "relay:mc", 10*time.Second, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Record(now, time.Second) // real and shadow both enter through Record
+	second, err := m.sharedAirtimeLedger("slot1", "relay:mc", 10*time.Second, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatal("relay bounce replaced the radio ledger")
+	}
+	if got := second.Usage(now); got != 3*time.Second {
+		t.Fatalf("usage after bounce = %s, want seed plus one emission", got)
+	}
+	if _, err := m.sharedAirtimeLedger("slot1", "station:alice", time.Second, nil); err == nil {
+		t.Fatal("one radio accepted conflicting regulatory budgets")
+	}
+}
+
 func TestOTASetIsHonestAboutGarbage(t *testing.T) {
 	m := &manager{kinds: buildKinds(), file: &config.File{},
 		infos: map[string]cli.RelayInfo{}, radios: map[string]cli.RadioInfo{},

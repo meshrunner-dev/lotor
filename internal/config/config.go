@@ -161,6 +161,14 @@ func (r *Relay) TXMode() string {
 	return r.TX.Mode
 }
 
+// TXMode resolves the station's independent transmit gate.
+func (s *Station) TXMode() string {
+	if s.TX == nil {
+		return TXDry
+	}
+	return s.TX.Mode
+}
+
 // Sentinel configures the observation and archival instantiation.
 // Its absence is meaningful: no sentinel block, no journal, no
 // storage — the mode for hosts with tight RAM and CPU.

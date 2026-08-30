@@ -1018,16 +1018,17 @@ type sensorFeed struct {
 	sensors enginemc.TelemetrySensors
 }
 
-func assemble(ctx context.Context, name string, rc config.Relay, radioSpec config.Radio,
-	b *bus.Bus, log *zap.Logger, sen *sentinel.Sentinel, access enginemc.SessionStore,
+type airtimeLedgerFactory func(budget time.Duration, spent []protocol.Spent) (*radio.AirtimeLedger, error)
+
+func assemble(name string, rc config.Relay, radioSpec config.Radio, spent []protocol.Spent,
+	b *bus.Bus, log *zap.Logger, access enginemc.SessionStore,
 	regions enginemc.RegionStore, commands otaRunner, parts sensorFeed, controller *radio.Controller,
+	sharedAirtime airtimeLedgerFactory,
 ) (*assembled, error) {
-	rlog := log.With(zap.String("relay", name))
-	p, err := prepare(name, rc, radioSpec, spentAirtime(ctx, name, rc, sen), b, rlog)
+	p, err := prepareAssembly(name, rc, radioSpec, spent, b, log)
 	if err != nil {
 		return nil, err
 	}
-	logResolvedConfigs(rlog, p)
 	// Non-guest access persists where the protocol keeps an ACL and a
 	// store was offered. Guests remain live sessions only.
 	if access != nil {
@@ -1081,7 +1082,7 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 	}); ok && parts.sensors != nil {
 		a.AttachTelemetry(parts.sensors)
 	}
-	r, binding, err := attachRelay(name, rc, p, controller, b, log)
+	r, binding, err := attachRelay(name, rc, p, controller, sharedAirtime, b, log)
 	if err != nil {
 		return nil, err
 	}
@@ -1098,6 +1099,40 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 	}, nil
 }
 
+func attachSharedAirtime(eng protocol.Engine, spent []protocol.Spent, factory airtimeLedgerFactory) error {
+	if factory == nil {
+		return nil
+	}
+	duty, ok := eng.(interface {
+		Duty() (used, budget time.Duration, ok bool)
+		AttachDutyLedger(ledger *radio.AirtimeLedger) error
+	})
+	if !ok {
+		return nil
+	}
+	_, budget, enabled := duty.Duty()
+	if !enabled {
+		return nil
+	}
+	ledger, err := factory(budget, spent)
+	if err != nil {
+		return err
+	}
+	return duty.AttachDutyLedger(ledger)
+}
+
+func prepareAssembly(name string, rc config.Relay, radioSpec config.Radio,
+	spent []protocol.Spent, b *bus.Bus, log *zap.Logger,
+) (*prepared, error) {
+	rlog := log.With(zap.String("relay", name))
+	p, err := prepare(name, rc, radioSpec, spent, b, rlog)
+	if err != nil {
+		return nil, err
+	}
+	logResolvedConfigs(rlog, p)
+	return p, nil
+}
+
 func logResolvedConfigs(log *zap.Logger, p *prepared) {
 	logTraces(log, "radio config", p.res.radioTraces, secretAttrs(p.res.drv.Schema))
 	logTraces(log, "relay config", p.res.relayTraces, secretAttrs(p.res.builder.Schema))
@@ -1105,10 +1140,13 @@ func logResolvedConfigs(log *zap.Logger, p *prepared) {
 }
 
 func attachRelay(name string, rc config.Relay, p *prepared, controller *radio.Controller,
-	b *bus.Bus, log *zap.Logger,
+	sharedAirtime airtimeLedgerFactory, b *bus.Bus, log *zap.Logger,
 ) (*relay.Relay, *radio.Binding, error) {
 	if controller == nil {
 		return nil, nil, fmt.Errorf("radio %q: controller unavailable", rc.Radio)
+	}
+	if err := attachSharedAirtime(p.eng, p.policy.Spent, sharedAirtime); err != nil {
+		return nil, nil, err
 	}
 	binding, err := controller.Bind(name, radio.RoleRelay, p.eng.Waveform())
 	if err != nil {
@@ -1516,26 +1554,6 @@ func dutyOf(eng protocol.Engine) func() (time.Duration, time.Duration, bool) {
 		return nil
 	}
 	return d.Duty
-}
-
-// spentAirtime reads the journal's memory of the sliding hour, when a
-// journal runs at all: the budget must not restart with the process,
-// or a crash-loop would launder it. Best effort — a sick journal
-// degrades to an empty hour, never to a dead relay. Dry spends
-// nothing and reads nothing.
-func spentAirtime(ctx context.Context, relay string, rc config.Relay, sen *sentinel.Sentinel) []protocol.Spent {
-	if rc.TXMode() == config.TXDry || sen == nil {
-		return nil
-	}
-	rows, err := sen.SpentAirtime(ctx, relay)
-	if err != nil {
-		return nil
-	}
-	spent := make([]protocol.Spent, 0, len(rows))
-	for _, r := range rows {
-		spent = append(spent, protocol.Spent{At: r.At, Airtime: r.Airtime})
-	}
-	return spent
 }
 
 // armEngine hands a non-dry policy to the engine's pipeline; an

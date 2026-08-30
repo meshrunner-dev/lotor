@@ -99,15 +99,17 @@ type manager struct {
 	// closures the engine and the observers call (health, rounds,
 	// over-the-air gets) read under viewMu only, which is what makes
 	// them safe while a mutation holds mu and waits.
-	mu          sync.Mutex
-	viewMu      sync.RWMutex
-	ctx         context.Context //nolint:containedctx // the daemon's lifetime, set once at Start
-	file        *config.File
-	wg          sync.WaitGroup
-	controllers map[string]*managedRadio
-	running     map[string]*managedRelay
-	stations    map[string]*managedStation
-	observers   map[string]*managedObserver
+	mu           sync.Mutex
+	viewMu       sync.RWMutex
+	ctx          context.Context //nolint:containedctx // the daemon's lifetime, set once at Start
+	file         *config.File
+	wg           sync.WaitGroup
+	controllers  map[string]*managedRadio
+	airtime      map[string]*radio.AirtimeLedger
+	airtimeUsers map[string]map[string]time.Duration
+	running      map[string]*managedRelay
+	stations     map[string]*managedStation
+	observers    map[string]*managedObserver
 	// obsCause remembers why each configured observer is not running —
 	// the truth the status line owes the operator, kept beside the
 	// observer table under the same lock.
@@ -152,16 +154,18 @@ func newManager(store *confdb.Store, f *config.File, b *bus.Bus,
 ) *manager {
 	return &manager{
 		store: store, file: f, bus: b, sen: sen, kinds: kinds, log: log,
-		controllers: map[string]*managedRadio{},
-		running:     map[string]*managedRelay{},
-		stations:    map[string]*managedStation{},
-		observers:   map[string]*managedObserver{},
-		obsCause:    map[string]string{},
-		samplers:    map[string]*managedSampler{},
-		sensorViews: map[string]*sensor.Sampler{},
-		infos:       map[string]cli.RelayInfo{},
-		radios:      map[string]cli.RadioInfo{},
-		traces:      map[string][]config.Trace{},
+		controllers:  map[string]*managedRadio{},
+		airtime:      map[string]*radio.AirtimeLedger{},
+		airtimeUsers: map[string]map[string]time.Duration{},
+		running:      map[string]*managedRelay{},
+		stations:     map[string]*managedStation{},
+		observers:    map[string]*managedObserver{},
+		obsCause:     map[string]string{},
+		samplers:     map[string]*managedSampler{},
+		sensorViews:  map[string]*sensor.Sampler{},
+		infos:        map[string]cli.RelayInfo{},
+		radios:       map[string]cli.RadioInfo{},
+		traces:       map[string][]config.Trace{},
 	}
 }
 
@@ -462,9 +466,13 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 	}
 	controller, controllerCause := m.radioController(rc.Radio)
 	var r *relay.Relay
-	asm, err := assemble(ctx, name, rc, m.file.Radios[rc.Radio], m.bus, m.log, m.sen,
+	spent := m.spentAirtimeForRadio(ctx, rc.Radio)
+	asm, err := assemble(name, rc, m.file.Radios[rc.Radio], spent, m.bus, m.log,
 		m.accessStore(name), m.regionStore(name), m.otaCommands(name),
-		sensorFeed{supply: m.supplyVoltage, sensors: m.sensorTelemetry}, controller)
+		sensorFeed{supply: m.supplyVoltage, sensors: m.sensorTelemetry}, controller,
+		func(budget time.Duration, spent []protocol.Spent) (*radio.AirtimeLedger, error) {
+			return m.sharedAirtimeLedger(rc.Radio, confdb.KindRelay+":"+name, budget, spent)
+		})
 	if err != nil && controller == nil && controllerCause != "" {
 		err = fmt.Errorf("radio %q: %s", rc.Radio, controllerCause)
 	}
@@ -519,6 +527,72 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 		defer close(done)
 		r.Run(rctx)
 	})
+}
+
+// spentAirtimeForRadio restores the whole physical transmitter's sliding
+// hour, not one producer's slice. Best effort by design: a sick optional
+// journal degrades history, never daemon startup.
+func (m *manager) spentAirtimeForRadio(ctx context.Context, radioName string) []protocol.Spent {
+	if m.sen == nil {
+		return nil
+	}
+	ownerSet := map[string]bool{}
+	for name, rc := range m.file.Relays {
+		if rc.Radio == radioName && rc.TXMode() != config.TXDry {
+			ownerSet[name] = true
+		}
+	}
+	for name, sc := range m.file.Stations {
+		if sc.Radio == radioName && sc.TXMode() != config.TXDry {
+			ownerSet[name] = true
+		}
+	}
+	var spent []protocol.Spent
+	for owner := range ownerSet {
+		rows, err := m.sen.SpentAirtime(ctx, owner)
+		if err != nil {
+			return nil
+		}
+		for _, row := range rows {
+			spent = append(spent, protocol.Spent{At: row.At, Airtime: row.Airtime})
+		}
+	}
+	return spent
+}
+
+func (m *manager) sharedAirtimeLedger(radioName, consumer string, budget time.Duration,
+	spent []protocol.Spent,
+) (*radio.AirtimeLedger, error) {
+	if m.airtime == nil {
+		m.airtime = map[string]*radio.AirtimeLedger{}
+	}
+	if m.airtimeUsers == nil {
+		m.airtimeUsers = map[string]map[string]time.Duration{}
+	}
+	users := m.airtimeUsers[radioName]
+	if users == nil {
+		users = map[string]time.Duration{}
+		m.airtimeUsers[radioName] = users
+	}
+	for name, existing := range users {
+		if name != consumer && existing != budget {
+			return nil, fmt.Errorf("radio %q: duty budget for %s is %s, %s requests %s",
+				radioName, name, existing, consumer, budget)
+		}
+	}
+	ledger := m.airtime[radioName]
+	if ledger == nil {
+		stamps := make([]radio.AirtimeStamp, 0, len(spent))
+		for _, stamp := range spent {
+			stamps = append(stamps, radio.AirtimeStamp{At: stamp.At, Airtime: stamp.Airtime})
+		}
+		ledger = radio.NewAirtimeLedger(budget, stamps)
+		m.airtime[radioName] = ledger
+	} else {
+		ledger.SetBudget(budget)
+	}
+	users[consumer] = budget
+	return ledger, nil
 }
 
 // accessStore hands a relay a persistence door onto the acl table,
@@ -2081,9 +2155,29 @@ func (m *manager) Remove(ctx context.Context, kind, name, principal string) (str
 	if err := m.store.Remove(ctx, kind, name, principal); err != nil {
 		return "", err
 	}
+	m.releaseRemovedAirtime(kind, name)
 	m.file = next
 	m.stopRemoved(kind, name)
 	return msg, nil
+}
+
+func (m *manager) releaseRemovedAirtime(kind, name string) {
+	var radioName, consumer string
+	switch kind {
+	case confdb.KindRelay:
+		radioName, consumer = m.file.Relays[name].Radio, confdb.KindRelay+":"+name
+	case confdb.KindStation:
+		radioName, consumer = m.file.Stations[name].Radio, confdb.KindStation+":"+name
+	case confdb.KindRadio:
+		delete(m.airtime, name)
+		delete(m.airtimeUsers, name)
+		return
+	default:
+		return
+	}
+	if users := m.airtimeUsers[radioName]; users != nil {
+		delete(users, consumer)
+	}
 }
 
 // stopRemoved applies the live half after the store no longer contains the

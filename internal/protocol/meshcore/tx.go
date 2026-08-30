@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
-	"slices"
-	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -176,15 +174,11 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 	// The sliding hour did not restart with the process: what the
 	// journal remembers being spent is spent, or a crash-loop could
 	// launder the budget.
-	dl := &dutyLedger{budget: budget}
-	// The window prunes as a time-ordered prefix: feed it in order,
-	// whatever order the journal rows arrived in.
-	spent := slices.Clone(p.Spent)
-	slices.SortFunc(spent, func(a, b protocol.Spent) int { return a.At.Compare(b.At) })
-	for _, sp := range spent {
-		dl.record(sp.At, sp.Airtime)
+	spent := make([]radio.AirtimeStamp, 0, len(p.Spent))
+	for _, stamp := range p.Spent {
+		spent = append(spent, radio.AirtimeStamp{At: stamp.At, Airtime: stamp.Airtime})
 	}
-	e.duty = dl
+	e.duty = radio.NewAirtimeLedger(budget, spent)
 	e.started = time.Now()
 	e.advertAsk = make(chan *advertOrder, 1)
 	e.scopeAsk = make(chan *scopeQuery, 1)
@@ -192,6 +186,20 @@ func (e *engine) Arm(p protocol.TXPolicy) error {
 	// What "changed since" means for us: this process's pipeline came
 	// up — the durable equivalent of the reference's mod timestamp.
 	e.discoverySince = time.Now()
+	return nil
+}
+
+// AttachDutyLedger replaces the assembly-local account with the physical
+// radio's shared one. It runs before Run; a budget mismatch is a configuration
+// conflict, never a value silently tightened or loosened.
+func (e *engine) AttachDutyLedger(ledger *radio.AirtimeLedger) error {
+	if ledger == nil || e.duty == nil {
+		return errors.New("tx: shared radio duty ledger is unavailable")
+	}
+	if err := ledger.RequireBudget(e.duty.Budget()); err != nil {
+		return fmt.Errorf("tx: %w", err)
+	}
+	e.duty = ledger
 	return nil
 }
 
@@ -779,7 +787,7 @@ func (e *engine) recordEmission(entry txEntry, sent bus.FrameSent, log *zap.Logg
 	if !sent.Shadow {
 		e.seen.witness(entry.pkt.Hash(), entry.origin, time.Now())
 	}
-	e.duty.record(sent.At, sent.Airtime)
+	e.duty.Record(sent.At, sent.Airtime)
 	if !sent.Shadow {
 		// The radio's own tally: paper never counts here.
 		e.stats.countSent(entry.pkt.IsRouteFlood(), sent.Airtime)
@@ -969,104 +977,26 @@ func (e *engine) dropQueued(reason string) {
 // to free before it is dropped: past this, the frame is stale news.
 const dutyMaxWait = 10 * time.Minute
 
-// dutyStamp is one emission the sliding window remembers.
-type dutyStamp struct {
-	at  time.Time
-	air time.Duration
-}
-
-// dutyLedger enforces the band's airtime budget over a sliding hour.
-// Shadow emissions are recorded like real ones — the audit must show
-// what on-air would have cost. The engine's goroutine writes it and
-// operator sessions read it, so the window is held under a mutex:
-// a mirror refreshed only on the write path would report a burst's
-// usage long after the hour that held it had passed.
-type dutyLedger struct {
-	mu     sync.Mutex
-	budget time.Duration // per sliding hour; zero = unbudgeted
-	window []dutyStamp
-}
-
-// prune drops stamps older than the window; the caller holds mu.
-func (d *dutyLedger) prune(now time.Time) time.Duration {
-	cut := now.Add(-time.Hour)
-	i := 0
-	for i < len(d.window) && d.window[i].at.Before(cut) {
-		i++
-	}
-	d.window = d.window[i:]
-	var sum time.Duration
-	for _, s := range d.window {
-		sum += s.air
-	}
-	return sum
-}
-
-// usage is the sliding hour's spent airtime as of now, pruned first
-// so an idle relay reports what it is actually using: nothing.
-func (d *dutyLedger) usage(now time.Time) time.Duration {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.prune(now)
-}
-
-// admit answers whether an emission of the given airtime fits the
-// budget now; when it does not, freeAt is the earliest instant enough
-// window expires — and never reports an airtime no budget ever fits.
-func (d *dutyLedger) admit(now time.Time, air time.Duration) (ok bool, freeAt time.Time, never bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.budget <= 0 {
-		return true, time.Time{}, false
-	}
-	if air > d.budget {
-		return false, time.Time{}, true
-	}
-	used := d.prune(now)
-	if used+air <= d.budget {
-		return true, time.Time{}, false
-	}
-	// Walk the oldest stamps: each expiry frees its airtime an hour
-	// after it was spent.
-	need := used + air - d.budget
-	var freed time.Duration
-	for _, s := range d.window {
-		freed += s.air
-		if freed >= need {
-			return false, s.at.Add(time.Hour), false
-		}
-	}
-	return false, now.Add(time.Hour), false
-}
-
-// record spends airtime from the budget.
-func (d *dutyLedger) record(now time.Time, air time.Duration) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.window = append(d.window, dutyStamp{at: now, air: air})
-	d.prune(now)
-}
-
 // Duty reports the sliding-hour airtime spent and the budget; ok is
 // false when the pipeline is off or the band unbudgeted. Any
 // goroutine.
 func (e *engine) Duty() (used, budget time.Duration, ok bool) {
-	if !e.txEnabled() || e.duty == nil || e.duty.budget <= 0 {
+	if !e.txEnabled() || e.duty == nil || e.duty.Budget() <= 0 {
 		return 0, 0, false
 	}
-	return e.duty.usage(time.Now()), e.duty.budget, true
+	return e.duty.Usage(time.Now()), e.duty.Budget(), true
 }
 
 // admitDuty applies the budget to one popped entry: requeued for the
 // budget's freeing when that is near, dropped when it is not.
 func (e *engine) admitDuty(dev radio.Device, entry txEntry) bool {
-	if e.duty.budget <= 0 {
+	if e.duty.Budget() <= 0 {
 		return true
 	}
 	raw := entry.pkt.RawLength()
 	now := time.Now()
 	candidate := dev.Airtime(raw)
-	ok, freeAt, never := e.duty.admit(now, candidate)
+	ok, freeAt, never := e.duty.Admit(now, candidate)
 	if ok {
 		return true
 	}
@@ -1076,7 +1006,7 @@ func (e *engine) admitDuty(dev radio.Device, entry txEntry) bool {
 		if log.Core().Enabled(zap.DebugLevel) {
 			log.Debug("duty budget refuses the emission, dropping",
 				zap.Duration("candidate_airtime", candidate),
-				zap.Duration("used", e.duty.usage(now)), zap.Duration("budget", e.duty.budget),
+				zap.Duration("used", e.duty.Usage(now)), zap.Duration("budget", e.duty.Budget()),
 				zap.Bool("never", never))
 		}
 		e.bus.Publish(bus.TxDropped{
@@ -1087,7 +1017,7 @@ func (e *engine) admitDuty(dev radio.Device, entry txEntry) bool {
 	if log.Core().Enabled(zap.DebugLevel) {
 		log.Debug("tx deferred by duty budget",
 			zap.Duration("candidate_airtime", candidate),
-			zap.Duration("used", e.duty.usage(now)), zap.Duration("budget", e.duty.budget),
+			zap.Duration("used", e.duty.Usage(now)), zap.Duration("budget", e.duty.Budget()),
 			zap.Time("retry_at", freeAt), zap.Duration("retry_in", retryIn))
 	}
 	entry.notBefore = freeAt

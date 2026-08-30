@@ -151,7 +151,7 @@ func TestTerminalPolicyDropsStayAtDebug(t *testing.T) {
 	e, dev, _, _ := txRig(t, "on-air")
 	core, observed := observer.New(logging.TraceLevel)
 	e.log = zap.New(core)
-	e.duty.budget = time.Nanosecond
+	e.duty.SetBudget(time.Nanosecond)
 	pkt := &meshwire.Packet{
 		Header:  meshwire.MakeHeader(meshwire.RouteFlood, meshwire.PayloadTypeAck, meshwire.PayloadVer1),
 		Payload: []byte{1, 2, 3, 4},
@@ -180,8 +180,8 @@ func TestDutyDeferralIsAVisibleDebugDecision(t *testing.T) {
 	e, dev, _, _ := txRig(t, "on-air")
 	core, observed := observer.New(logging.TraceLevel)
 	e.log = zap.New(core)
-	e.duty.budget = time.Millisecond
-	e.duty.record(time.Now().Add(-55*time.Minute), time.Millisecond)
+	e.duty.SetBudget(time.Millisecond)
+	e.duty.Record(time.Now().Add(-55*time.Minute), time.Millisecond)
 	pkt := &meshwire.Packet{
 		Header:  meshwire.MakeHeader(meshwire.RouteFlood, meshwire.PayloadTypeAck, meshwire.PayloadVer1),
 		Payload: []byte{1, 2, 3, 4},

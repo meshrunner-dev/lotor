@@ -314,34 +314,34 @@ func TestDirectPriorityBeatsFlood(t *testing.T) {
 }
 
 func TestDutyLedgerAdmitsAndFrees(t *testing.T) {
-	d := &dutyLedger{budget: 10 * time.Millisecond}
+	d := radio.NewAirtimeLedger(10*time.Millisecond, nil)
 	now := time.Now()
-	d.record(now, 8*time.Millisecond)
+	d.Record(now, 8*time.Millisecond)
 
-	if ok, _, _ := d.admit(now, 2*time.Millisecond); !ok {
+	if ok, _, _ := d.Admit(now, 2*time.Millisecond); !ok {
 		t.Fatal("2ms should fit an 8/10 window")
 	}
-	ok, freeAt, never := d.admit(now, 5*time.Millisecond)
+	ok, freeAt, never := d.Admit(now, 5*time.Millisecond)
 	if ok || never {
 		t.Fatalf("5ms must wait, not pass (%v) nor die (%v)", ok, never)
 	}
 	if want := now.Add(time.Hour); !freeAt.Equal(want) {
 		t.Fatalf("freeAt = %v, want the 8ms stamp's expiry %v", freeAt, want)
 	}
-	if ok, _, _ := d.admit(now.Add(time.Hour+time.Second), 5*time.Millisecond); !ok {
+	if ok, _, _ := d.Admit(now.Add(time.Hour+time.Second), 5*time.Millisecond); !ok {
 		t.Fatal("the window expired; 5ms should fit again")
 	}
-	if _, _, never := d.admit(now, 11*time.Millisecond); !never {
+	if _, _, never := d.Admit(now, 11*time.Millisecond); !never {
 		t.Fatal("an airtime above the whole budget can never fit")
 	}
-	if used, _, _ := d.admit(now, time.Millisecond); !used {
+	if used, _, _ := d.Admit(now, time.Millisecond); !used {
 		t.Fatal("unbudgeted check sanity")
 	}
 }
 
 func TestDutyDropsWhatCannotWait(t *testing.T) {
 	e, dev, sub, peer := txRig(t, "shadow")
-	e.duty = &dutyLedger{budget: time.Microsecond} // any frame exceeds it
+	e.duty = radio.NewAirtimeLedger(time.Microsecond, nil) // any frame exceeds it
 	runEngine(t, e, dev)
 	dev.frames <- peerAdvert(t, peer, time.Now())
 
@@ -708,9 +708,9 @@ func TestDutyGaugeDecaysWhenIdle(t *testing.T) {
 	// The gauge is read from operator sessions long after the last
 	// emission: it must report the sliding hour as it stands, not as
 	// the last transmission left it.
-	d := &dutyLedger{budget: time.Hour}
-	d.record(time.Now().Add(-90*time.Minute), 30*time.Second)
-	if used := d.usage(time.Now()); used != 0 {
+	d := radio.NewAirtimeLedger(time.Hour, nil)
+	d.Record(time.Now().Add(-90*time.Minute), 30*time.Second)
+	if used := d.Usage(time.Now()); used != 0 {
 		t.Fatalf("usage = %v after the hour passed, want 0", used)
 	}
 }
@@ -1150,10 +1150,10 @@ func TestADutyCeilingNeverRoundsAwayToNoCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the smallest holdable ceiling was refused: %v", err)
 	}
-	if e.duty.budget <= 0 {
-		t.Fatalf("budget = %v", e.duty.budget)
+	if e.duty.Budget() <= 0 {
+		t.Fatalf("budget = %v", e.duty.Budget())
 	}
-	ok, _, never := e.duty.admit(time.Now(), time.Millisecond)
+	ok, _, never := e.duty.Admit(time.Now(), time.Millisecond)
 	if ok || !never {
 		t.Errorf("a frame under a one-nanosecond budget: ok=%v never=%v", ok, never)
 	}

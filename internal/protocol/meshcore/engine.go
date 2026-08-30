@@ -193,7 +193,7 @@ type engine struct {
 	// dry; zero values otherwise, and Run never consults them.
 	policy          protocol.TXPolicy
 	queue           *txQueue
-	duty            *dutyLedger
+	duty            *radio.AirtimeLedger
 	nextFloodAdvert time.Time
 	nextLocalAdvert time.Time
 	// lastAskedAdvert is when an operator last ordered one, which
