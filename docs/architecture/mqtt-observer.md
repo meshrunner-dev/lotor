@@ -1,4 +1,4 @@
-# MQTT observer — wire contract and architecture
+# MQTT observer — architecture and wire contract
 
 Publishing what a relay hears and sends to MQTT turns it into an observer of
 the mesh. Analyzers, maps and dashboards consume a de-facto JSON contract

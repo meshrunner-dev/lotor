@@ -4,7 +4,7 @@
 // are measured from the reference implementation, quirks included:
 // several numbers travel as strings, some fields ride one direction
 // only, and a consumer must not be able to tell lotor from the
-// firmwares it already ingests. docs/mqtt-observer.md is the pinned
+// firmwares it already ingests. docs/architecture/mqtt-observer.md is the pinned
 // contract this package answers to.
 package mqtt
 

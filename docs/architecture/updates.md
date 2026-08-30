@@ -1,4 +1,4 @@
-# Software updates — architecture and guarantees
+# Software updates — mechanisms and guarantees
 
 Lotor's update system is a pull-based chain from a source commit to a running
 binary. It is designed to answer four questions independently:

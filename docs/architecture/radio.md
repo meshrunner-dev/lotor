@@ -1,10 +1,10 @@
-# Internal radio architecture
+# Radio plumbing
 
 This document describes Lotor's complete radio plumbing: how configuration
 becomes one physical transceiver session, how relays and stations attach to it,
 and how receive, transmit, airtime, authority, and failure handling cross the
 layers. It is an implementation guide for maintainers. The product-level rules
-remain in [`DESIGN.md`](../DESIGN.md).
+remain in [`DESIGN.md`](../../DESIGN.md).
 
 ## Invariants
 
@@ -370,20 +370,20 @@ When extending this plumbing:
 
 ## Code guide
 
-- [`internal/radio/radio.go`](../internal/radio/radio.go): hardware-neutral
+- [`internal/radio/radio.go`](../../internal/radio/radio.go): hardware-neutral
   types, `Driver`, `Envelope`, `Waveform`, and `Device`.
-- [`internal/radio/controller.go`](../internal/radio/controller.go): physical
+- [`internal/radio/controller.go`](../../internal/radio/controller.go): physical
   ownership, bindings, RX fan-out, and hardware-operation scheduling.
-- [`internal/radio/airtime.go`](../internal/radio/airtime.go): shared sliding
+- [`internal/radio/airtime.go`](../../internal/radio/airtime.go): shared sliding
   duty window and atomic reservations.
-- [`internal/radio/sx126x/`](../internal/radio/sx126x/): Semtech hardware driver.
-- [`cmd/lotor/manager.go`](../cmd/lotor/manager.go): controller and ledger
+- [`internal/radio/sx126x/`](../../internal/radio/sx126x/): Semtech hardware driver.
+- [`cmd/lotor/manager.go`](../../cmd/lotor/manager.go): controller and ledger
   lifetime, topology, attachment, and rebinding.
-- [`internal/relay/relay.go`](../internal/relay/relay.go): relay session
+- [`internal/relay/relay.go`](../../internal/relay/relay.go): relay session
   lifecycle over a logical controller port.
-- [`internal/protocol/meshcore/`](../internal/protocol/meshcore/): relay RX/TX
+- [`internal/protocol/meshcore/`](../../internal/protocol/meshcore/): relay RX/TX
   policy and protocol queues.
-- [`internal/station/station.go`](../internal/station/station.go):
+- [`internal/station/station.go`](../../internal/station/station.go):
   protocol-neutral station lifecycle and RF attachment contract.
-- [`internal/station/meshcore/`](../internal/station/meshcore/): MeshCore station
+- [`internal/station/meshcore/`](../../internal/station/meshcore/): MeshCore station
   application protocol, RX decisions, origination queue, LBT, and TX policy.

@@ -120,7 +120,7 @@ this preserves the driver's single-owner discipline without confusing
 physical ownership with logical consumers.
 
 The implementation-level walkthrough is in
-[`docs/internal-radio-architecture.md`](docs/internal-radio-architecture.md):
+[`docs/architecture/radio.md`](docs/architecture/radio.md):
 assembly, bindings, waveform authority, RX fan-out, TX scheduling, shared
 airtime accounting, and failure recovery for both relays and stations.
 

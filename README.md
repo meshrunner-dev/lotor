@@ -32,8 +32,8 @@ endorsed by the MeshCore project.
   maps consume lotor like any observer node.
 
 See [DESIGN.md](DESIGN.md) for the architecture,
-[the update mechanism and its guarantees](docs/updates.md), and
-[the MQTT observer wire contract](docs/mqtt-observer.md).
+[the update mechanism and its guarantees](docs/architecture/updates.md), and
+[the MQTT observer wire contract](docs/architecture/mqtt-observer.md).
 
 ## Deploying
 
