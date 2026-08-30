@@ -30,3 +30,15 @@ func TestAirtimeLedgerRestoresOrdersAndSharesWindow(t *testing.T) {
 		t.Fatal("different consumers supplied different budgets")
 	}
 }
+
+func TestAirtimeLedgerKeepsConcurrentRecordsOrdered(t *testing.T) {
+	now := time.Now()
+	ledger := NewAirtimeLedger(10*time.Second, nil)
+	ledger.Record(now.Add(-10*time.Minute), 7*time.Second)
+	ledger.Record(now.Add(-50*time.Minute), 2*time.Second)
+
+	if ok, freeAt, never := ledger.Admit(now, 2*time.Second); ok || never ||
+		!freeAt.Equal(now.Add(10*time.Minute)) {
+		t.Fatalf("admit = %v, %s, %v", ok, freeAt, never)
+	}
+}

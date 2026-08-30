@@ -114,6 +114,13 @@ func (l *AirtimeLedger) Admit(now time.Time, airtime time.Duration) (ok bool, fr
 func (l *AirtimeLedger) Record(at time.Time, airtime time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.window = append(l.window, AirtimeStamp{At: at, Airtime: airtime})
+	stamp := AirtimeStamp{At: at, Airtime: airtime}
+	i := len(l.window)
+	if i > 0 && at.Before(l.window[i-1].At) {
+		i = slices.IndexFunc(l.window, func(existing AirtimeStamp) bool {
+			return !existing.At.Before(at)
+		})
+	}
+	l.window = slices.Insert(l.window, i, stamp)
 	l.prune(at)
 }
