@@ -62,7 +62,7 @@ func TestAdvertPathCacheReportsTheLatestWitnessedRoute(t *testing.T) {
 	unknown := peer.PubKey
 	unknown[6]++
 	responses = svc.handle(t.Context(), companion.GetAdvertPath{PublicKey: unknown})
-	if len(responses) != 1 || responses[0] != (companion.ErrorResponse{Code: companion.ErrorNotFound}) {
+	if len(responses) != 1 || responses[0] != (companion.ErrorResponse{Code: companion.ErrNotFound}) {
 		t.Fatalf("unknown advert path = %#v", responses)
 	}
 }
@@ -74,7 +74,7 @@ func TestVirtualStationCustomSettingsAreExplicitlyEmpty(t *testing.T) {
 		t.Fatalf("custom vars = %#v", responses)
 	}
 	responses = svc.handle(t.Context(), companion.SetCustomVar{Name: "gps", Value: "1"})
-	if len(responses) != 1 || responses[0] != (companion.ErrorResponse{Code: companion.ErrorIllegalArgument}) {
+	if len(responses) != 1 || responses[0] != (companion.ErrorResponse{Code: companion.ErrIllegalArgument}) {
 		t.Fatalf("set custom var = %#v", responses)
 	}
 }

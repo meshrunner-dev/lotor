@@ -20,11 +20,11 @@ type advertPath struct {
 func (s *service) sendTrace(command companion.SendTracePath) []companion.Response {
 	width := 1 << (command.Flags & 0x03)
 	if len(command.Path) == 0 || len(command.Path)%width != 0 || len(command.Path)/width > mesh.MaxPathSize {
-		return errorResponses(companion.ErrorIllegalArgument)
+		return errorResponses(companion.ErrIllegalArgument)
 	}
 	packet, err := mesh.BuildTrace(command.Tag, command.Auth, command.Flags)
 	if err != nil || len(packet.Payload)+len(command.Path) > mesh.MaxPacketPayload {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	packet.Payload = append(packet.Payload, command.Path...)
 	packet.Header = mesh.MakeHeader(mesh.RouteDirect, mesh.PayloadTypeTrace, packet.PayloadVer())
@@ -104,5 +104,5 @@ func (s *service) getAdvertPath(publicKey [mesh.PubKeySize]byte) []companion.Res
 			Path: append([]byte(nil), item.path[:pathBytes]...),
 		}}
 	}
-	return errorResponses(companion.ErrorNotFound)
+	return errorResponses(companion.ErrNotFound)
 }

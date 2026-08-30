@@ -60,7 +60,7 @@ func (s *service) handleTransmission(command companion.Command) ([]companion.Res
 func (s *service) sendSelfAdvert(command companion.SendSelfAdvert) []companion.Response {
 	packet, err := s.selfAdvert(time.Now().Add(s.clockDelta))
 	if err != nil {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	kind := "station-advert-local"
 	if command.Flood {
@@ -77,11 +77,11 @@ func (s *service) sendSelfAdvert(command companion.SendSelfAdvert) []companion.R
 
 func (s *service) sendText(command companion.SendText) []companion.Response {
 	if command.TextType != mesh.TxtTypePlain && command.TextType != mesh.TxtTypeCLIData {
-		return errorResponses(companion.ErrorUnsupportedCommand)
+		return errorResponses(companion.ErrUnsupportedCommand)
 	}
 	contact, exists := s.contactByPrefix(command.RecipientPrefix[:])
 	if !exists {
-		return errorResponses(companion.ErrorNotFound)
+		return errorResponses(companion.ErrNotFound)
 	}
 	text := command.Text
 	if at := strings.IndexByte(text, 0); at >= 0 {
@@ -92,11 +92,11 @@ func (s *service) sendText(command companion.SendText) []companion.Response {
 		limit -= 2
 	}
 	if len(text) > limit {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	secret, err := s.id.SharedSecret(contact.info.PublicKey[:])
 	if err != nil {
-		return errorResponses(companion.ErrorIllegalArgument)
+		return errorResponses(companion.ErrIllegalArgument)
 	}
 	sentAt := time.Unix(int64(command.UnixSeconds), 0)
 	if command.TextType == mesh.TxtTypeCLIData {
@@ -106,7 +106,7 @@ func (s *service) sendText(command companion.SendText) []companion.Response {
 	packet, err := mesh.BuildDatagram(mesh.PayloadTypeTxtMsg,
 		contact.info.PublicKey[:mesh.PathHashSize], s.id.PubKey[:mesh.PathHashSize], secret, plain)
 	if err != nil {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	flood := contact.info.PathLen == 0xff
 	kind := "station-message-direct"
@@ -134,15 +134,15 @@ func (s *service) sendText(command companion.SendText) []companion.Response {
 
 func (s *service) sendChannelText(command companion.SendChannelText) []companion.Response {
 	if command.TextType != mesh.TxtTypePlain {
-		return errorResponses(companion.ErrorUnsupportedCommand)
+		return errorResponses(companion.ErrUnsupportedCommand)
 	}
 	item, exists := s.channels[command.Channel]
 	if !exists {
-		return errorResponses(companion.ErrorNotFound)
+		return errorResponses(companion.ErrNotFound)
 	}
 	channel, err := mesh.NewGroupChannel(item.secret[:])
 	if err != nil {
-		return errorResponses(companion.ErrorIllegalArgument)
+		return errorResponses(companion.ErrIllegalArgument)
 	}
 	text := command.Text
 	if room := stationMaxText - len(s.p.NodeName) - 2; len(text) > room {
@@ -151,7 +151,7 @@ func (s *service) sendChannelText(command companion.SendChannelText) []companion
 	plain := mesh.BuildGroupText(time.Unix(int64(command.UnixSeconds), 0), s.p.NodeName, text)
 	packet, err := mesh.BuildGroupDatagram(mesh.PayloadTypeGrpTxt, channel, plain)
 	if err != nil {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	s.routeFlood(packet)
 	if response := s.submitLocked(packet, "station-channel-text"); response != nil {
@@ -162,15 +162,15 @@ func (s *service) sendChannelText(command companion.SendChannelText) []companion
 
 func (s *service) sendChannelData(command companion.SendChannelData) []companion.Response {
 	if command.DataType == 0 || len(command.Data) > stationMaxGroupData {
-		return errorResponses(companion.ErrorIllegalArgument)
+		return errorResponses(companion.ErrIllegalArgument)
 	}
 	item, exists := s.channels[command.Channel]
 	if !exists {
-		return errorResponses(companion.ErrorNotFound)
+		return errorResponses(companion.ErrNotFound)
 	}
 	channel, err := mesh.NewGroupChannel(item.secret[:])
 	if err != nil {
-		return errorResponses(companion.ErrorIllegalArgument)
+		return errorResponses(companion.ErrIllegalArgument)
 	}
 	plain := make([]byte, 0, 3+len(command.Data))
 	plain = binary.LittleEndian.AppendUint16(plain, command.DataType)
@@ -178,7 +178,7 @@ func (s *service) sendChannelData(command companion.SendChannelData) []companion
 	plain = append(plain, command.Data...)
 	packet, err := mesh.BuildGroupDatagram(mesh.PayloadTypeGrpData, channel, plain)
 	if err != nil {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	if command.PathLen == 0xff {
 		s.routeFlood(packet)
@@ -194,14 +194,14 @@ func (s *service) sendChannelData(command companion.SendChannelData) []companion
 func (s *service) shareContact(publicKey [mesh.PubKeySize]byte) []companion.Response {
 	entry, exists := s.contacts[publicKey]
 	if !exists {
-		return errorResponses(companion.ErrorNotFound)
+		return errorResponses(companion.ErrNotFound)
 	}
 	if len(entry.advert) == 0 {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	packet, err := mesh.ParsePacket(entry.advert)
 	if err != nil {
-		return errorResponses(companion.ErrorFileIO)
+		return errorResponses(companion.ErrFileIO)
 	}
 	s.routeDirect(packet, 0, nil)
 	if response := s.submitLocked(packet, "station-contact-share"); response != nil {
@@ -267,7 +267,7 @@ func (s *service) submitAtPriorityLocked(packet *mesh.Packet, kind string, notBe
 		s.seen.mark(packet.Hash())
 		return nil
 	}
-	return errorResponses(companion.ErrorTableFull)
+	return errorResponses(companion.ErrTableFull)
 }
 
 func referencePriority(packet *mesh.Packet) uint8 {

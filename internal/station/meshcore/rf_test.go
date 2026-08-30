@@ -473,7 +473,7 @@ func TestStationStatsStayLocalToTheAttachment(t *testing.T) {
 		t.Fatalf("packet stats = %#v", responses)
 	}
 	responses = svc.handle(t.Context(), companion.GetStats{Type: 99})
-	if len(responses) != 1 || responses[0] != (companion.ErrorResponse{Code: companion.ErrorIllegalArgument}) {
+	if len(responses) != 1 || responses[0] != (companion.ErrorResponse{Code: companion.ErrIllegalArgument}) {
 		t.Fatalf("invalid stats response = %#v", responses)
 	}
 }
@@ -527,7 +527,7 @@ func TestStationTextMatchesReferenceLimitsClockAndTimeout(t *testing.T) {
 		TextType: mesh.TxtTypePlain, RecipientPrefix: [6]byte(peer.PubKey[:6]), Text: tooLong,
 	})
 	if got, _ := companion.MarshalResponse(responses[0]); !bytes.Equal(got,
-		[]byte{byte(companion.ResponseError), byte(companion.ErrorTableFull)}) {
+		[]byte{byte(companion.ResponseError), byte(companion.ErrTableFull)}) {
 		t.Fatalf("long text = % X", got)
 	}
 

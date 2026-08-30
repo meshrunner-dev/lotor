@@ -38,11 +38,11 @@ type remoteConnection struct {
 
 func (s *service) sendRawData(command companion.SendRawData) []companion.Response {
 	if len(command.Path) > 63 || len(command.Data) < 4 {
-		return errorResponses(companion.ErrorUnsupportedCommand)
+		return errorResponses(companion.ErrUnsupportedCommand)
 	}
 	packet, err := mesh.BuildRawCustom(command.Data)
 	if err != nil {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	s.routeDirect(packet, uint8(len(command.Path)), command.Path)
 	if responses := s.submitLocked(packet, "station-raw-data"); responses != nil {
@@ -54,7 +54,7 @@ func (s *service) sendRawData(command companion.SendRawData) []companion.Respons
 func (s *service) sendLogin(command companion.SendLogin) []companion.Response {
 	contact, exists := s.contacts[command.PublicKey]
 	if !exists {
-		return errorResponses(companion.ErrorNotFound)
+		return errorResponses(companion.ErrNotFound)
 	}
 	password := command.Password
 	if len(password) > 15 {
@@ -69,7 +69,7 @@ func (s *service) sendLogin(command companion.SendLogin) []companion.Response {
 		packet, _, err = mesh.BuildLoginReq(s.id, contact.info.PublicKey[:], tag, password)
 	}
 	if err != nil {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	flood := s.routeContact(packet, contact, false)
 	if responses := s.submitLocked(packet, "station-login"); responses != nil {
@@ -85,7 +85,7 @@ func (s *service) sendLogin(command companion.SendLogin) []companion.Response {
 func (s *service) sendStatusRequest(publicKey [mesh.PubKeySize]byte) []companion.Response {
 	body, err := mesh.FrameStatusRequest()
 	if err != nil {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	return s.sendKnownRequest(publicKey, body, pendingStatus, "station-status-request", false)
 }
@@ -102,7 +102,7 @@ func (s *service) sendTelemetryRequest(command companion.SendTelemetryRequest) [
 	}
 	body, err := mesh.FrameTelemetryRequest(0)
 	if err != nil {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	return s.sendKnownRequest(command.PublicKey, body, pendingTelemetry, "station-telemetry-request", false)
 }
@@ -113,7 +113,7 @@ func (s *service) sendContactDataRequest(command companion.ContactDataRequest) [
 			"station-binary-request", false)
 	}
 	if command.Kind != companion.CommandSendAnonymousRequest {
-		return errorResponses(companion.ErrorUnsupportedCommand)
+		return errorResponses(companion.ErrUnsupportedCommand)
 	}
 	contact, known := s.contacts[command.PublicKey]
 	if !known {
@@ -130,13 +130,13 @@ func (s *service) sendContactDataRequest(command companion.ContactDataRequest) [
 	}
 	secret, err := s.id.SharedSecret(command.PublicKey[:])
 	if err != nil {
-		return errorResponses(companion.ErrorIllegalArgument)
+		return errorResponses(companion.ErrIllegalArgument)
 	}
 	tag := s.uniqueTimestampLocked()
 	packet, err := mesh.BuildAnonDatagram(command.PublicKey[:mesh.PathHashSize], s.id.PubKey[:], secret,
 		mesh.FrameAdmin(tag, command.Data))
 	if err != nil {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	flood := s.routeContact(packet, contact, false)
 	if responses := s.submitLocked(packet, "station-anonymous-request"); responses != nil {
@@ -173,16 +173,16 @@ func (s *service) sendKnownRequest(publicKey [mesh.PubKeySize]byte, body []byte,
 ) []companion.Response {
 	contact, exists := s.contacts[publicKey]
 	if !exists {
-		return errorResponses(companion.ErrorNotFound)
+		return errorResponses(companion.ErrNotFound)
 	}
 	secret, err := s.id.SharedSecret(contact.info.PublicKey[:])
 	if err != nil {
-		return errorResponses(companion.ErrorIllegalArgument)
+		return errorResponses(companion.ErrIllegalArgument)
 	}
 	tag := s.uniqueTimestampLocked()
 	packet, err := mesh.BuildRequest(s.id, contact.info.PublicKey[:], secret, tag, body)
 	if err != nil {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	flood := s.routeContact(packet, contact, forceFlood)
 	if responses := s.submitLocked(packet, emissionKind); responses != nil {
@@ -197,7 +197,7 @@ func (s *service) sendKnownRequest(publicKey [mesh.PubKeySize]byte, body []byte,
 func (s *service) sendPathDiscovery(publicKey [mesh.PubKeySize]byte) []companion.Response {
 	body, err := mesh.FrameTelemetryRequest(^uint8(1))
 	if err != nil {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	return s.sendKnownRequest(publicKey, body, pendingDiscovery, "station-path-discovery", true)
 }
@@ -215,7 +215,7 @@ func (s *service) routeContact(packet *mesh.Packet, contact contactEntry, forceF
 func (s *service) sendControlData(data []byte) []companion.Response {
 	packet, err := mesh.BuildControl(data)
 	if err != nil {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	s.routeDirect(packet, 0, nil)
 	if responses := s.submitLocked(packet, "station-control-data"); responses != nil {
@@ -227,7 +227,7 @@ func (s *service) sendControlData(data []byte) []companion.Response {
 func (s *service) sendRawPacket(command companion.SendRawPacket) []companion.Response {
 	packet, err := mesh.ParsePacket(command.Packet)
 	if err != nil {
-		return errorResponses(companion.ErrorIllegalArgument)
+		return errorResponses(companion.ErrIllegalArgument)
 	}
 	kind := fmt.Sprintf("station-raw-packet-p%d", command.Priority)
 	if responses := s.submitAtPriorityLocked(packet, kind, time.Time{}, command.Priority); responses != nil {

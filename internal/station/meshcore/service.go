@@ -441,9 +441,9 @@ func (s *service) readCommand(conn net.Conn) (companion.Command, []companion.Res
 		if err == nil {
 			return cmd, nil, true
 		}
-		code := companion.ErrorIllegalArgument
+		code := companion.ErrIllegalArgument
 		if errors.Is(err, companion.ErrUnsupportedVariant) {
-			code = companion.ErrorUnsupportedCommand
+			code = companion.ErrUnsupportedCommand
 		}
 		return nil, []companion.Response{companion.ErrorResponse{Code: code}}, true
 	}
@@ -491,7 +491,7 @@ func (s *service) handle(ctx context.Context, cmd companion.Command) []companion
 		s.advertPaths = beforeAdvertPaths
 		s.log.Error("companion state persistence failed", zap.Error(err))
 		s.mu.Unlock()
-		return errorResponses(companion.ErrorFileIO)
+		return errorResponses(companion.ErrFileIO)
 	}
 	dropped := []emission(nil)
 	if lifecycleSucceeded(cmd, responses) {
@@ -551,7 +551,7 @@ func (s *service) handleQuery(cmd companion.Command) ([]companion.Response, bool
 		}
 		return s.handleSimple(c.Kind), true
 	case companion.UnknownCommand:
-		return errorResponses(companion.ErrorUnsupportedCommand), true
+		return errorResponses(companion.ErrUnsupportedCommand), true
 	default:
 		return nil, false
 	}
@@ -573,7 +573,7 @@ func (s *service) handleRuntimeQuery(cmd companion.Command) ([]companion.Respons
 			if _, exists := s.connections[c.PublicKey]; exists {
 				return okResponses(), true
 			}
-			return errorResponses(companion.ErrorNotFound), true
+			return errorResponses(companion.ErrNotFound), true
 		case companion.CommandLogout:
 			delete(s.connections, c.PublicKey)
 			return okResponses(), true
@@ -610,7 +610,7 @@ func (s *service) handleMutation(cmd companion.Command) []companion.Response {
 	case companion.FactoryReset:
 		return s.restoreFactoryLocked()
 	default:
-		return errorResponses(companion.ErrorUnsupportedCommand)
+		return errorResponses(companion.ErrUnsupportedCommand)
 	}
 }
 
@@ -618,7 +618,7 @@ func (s *service) restoreFactoryLocked() []companion.Response {
 	waveform := s.factoryState.Waveform.radio()
 	if s.binding != nil && waveform != s.p.Waveform {
 		if err := s.binding.SetWaveform(waveform); err != nil {
-			return errorResponses(companion.ErrorIllegalArgument)
+			return errorResponses(companion.ErrIllegalArgument)
 		}
 	}
 	s.restoreLocked(s.factoryState)
@@ -659,7 +659,7 @@ func (s *service) handlePreferenceMutation(cmd companion.Command) ([]companion.R
 	case companion.SetAdvertLocation:
 		if c.LatitudeE6 < -90_000_000 || c.LatitudeE6 > 90_000_000 ||
 			c.LongitudeE6 < -180_000_000 || c.LongitudeE6 > 180_000_000 {
-			return errorResponses(companion.ErrorIllegalArgument), true
+			return errorResponses(companion.ErrIllegalArgument), true
 		}
 		s.p.NodeLat = float64(c.LatitudeE6) / 1e6
 		s.p.NodeLon = float64(c.LongitudeE6) / 1e6
@@ -669,14 +669,14 @@ func (s *service) handlePreferenceMutation(cmd companion.Command) ([]companion.R
 		return okResponses(), true
 	case companion.SetDevicePIN:
 		if c.PIN != 0 && (c.PIN < 100_000 || c.PIN > 999_999) {
-			return errorResponses(companion.ErrorIllegalArgument), true
+			return errorResponses(companion.ErrIllegalArgument), true
 		}
 		s.p.PIN = uint64(c.PIN)
 		return okResponses(), true
 	case companion.ImportPrivateKey:
 		identity, err := mesh.LocalIdentityFromKeys(c.PrivateKey[:], nil)
 		if err != nil || !identity.FirmwareImportable() {
-			return errorResponses(companion.ErrorIllegalArgument), true
+			return errorResponses(companion.ErrIllegalArgument), true
 		}
 		s.id = identity
 		clear(s.expectedACKs[:])
@@ -686,7 +686,7 @@ func (s *service) handlePreferenceMutation(cmd companion.Command) ([]companion.R
 	case companion.SetCustomVar:
 		// Virtual stations currently expose no target-specific sensor
 		// settings, exactly the empty SensorManager reference behaviour.
-		return errorResponses(companion.ErrorIllegalArgument), true
+		return errorResponses(companion.ErrIllegalArgument), true
 	default:
 		return nil, false
 	}
@@ -703,7 +703,7 @@ func (s *service) handleIdentityQuery(kind companion.CommandCode) ([]companion.R
 		return []companion.Response{companion.SignStart{MaxBytes: maxSignData}}, true
 	case companion.CommandSignFinish:
 		if s.signData == nil {
-			return errorResponses(companion.ErrorBadState), true
+			return errorResponses(companion.ErrBadState), true
 		}
 		raw := s.id.Sign(s.signData)
 		s.signData = nil
@@ -717,10 +717,10 @@ func (s *service) handleIdentityQuery(kind companion.CommandCode) ([]companion.R
 
 func (s *service) appendSignData(data []byte) []companion.Response {
 	if s.signData == nil {
-		return errorResponses(companion.ErrorBadState)
+		return errorResponses(companion.ErrBadState)
 	}
 	if len(data) > maxSignData-len(s.signData) {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	s.signData = append(s.signData, data...)
 	return okResponses()
@@ -740,7 +740,7 @@ func (s *service) handleConfigurationMutation(cmd companion.Command) ([]companio
 		return okResponses(), true
 	case companion.SetPathHashMode:
 		if c.Mode > 2 {
-			return errorResponses(companion.ErrorIllegalArgument), true
+			return errorResponses(companion.ErrIllegalArgument), true
 		}
 		s.p.PathHashMode = int(c.Mode)
 		return okResponses(), true
@@ -787,7 +787,7 @@ func (s *service) setDeviceTime(seconds uint32) []companion.Response {
 	current := time.Now().Add(s.clockDelta)
 	requested := time.Unix(int64(seconds), 0)
 	if requested.Before(current.Truncate(time.Second)) {
-		return errorResponses(companion.ErrorIllegalArgument)
+		return errorResponses(companion.ErrIllegalArgument)
 	}
 	s.clockDelta = time.Until(requested)
 	return okResponses()
@@ -806,7 +806,7 @@ func okResponses() []companion.Response {
 	return []companion.Response{companion.StatusResponse(companion.ResponseOK)}
 }
 
-func errorResponses(code companion.ErrorCode) []companion.Response {
+func errorResponses(code companion.CommandError) []companion.Response {
 	return []companion.Response{companion.ErrorResponse{Code: code}}
 }
 
@@ -814,7 +814,7 @@ func (s *service) setRadioParams(c companion.SetRadioParams) []companion.Respons
 	if c.Repeat || c.FrequencyKHz < 150_000 || c.FrequencyKHz > 2_500_000 ||
 		c.Spreading < 5 || c.Spreading > 12 || c.CodingRate < 5 || c.CodingRate > 8 ||
 		c.BandwidthHz < 7_000 || c.BandwidthHz > 500_000 {
-		return errorResponses(companion.ErrorIllegalArgument)
+		return errorResponses(companion.ErrIllegalArgument)
 	}
 	waveform := s.p.Waveform
 	waveform.FrequencyHz = c.FrequencyKHz * 1_000
@@ -823,7 +823,7 @@ func (s *service) setRadioParams(c companion.SetRadioParams) []companion.Respons
 	waveform.CodingRate = int(c.CodingRate)
 	if s.binding != nil {
 		if err := s.binding.SetWaveform(waveform); err != nil {
-			return errorResponses(companion.ErrorIllegalArgument)
+			return errorResponses(companion.ErrIllegalArgument)
 		}
 	}
 	s.p.Waveform = waveform
@@ -834,15 +834,15 @@ func (s *service) setRadioPower(power int8) []companion.Response {
 	// Lotor's first station radio is the SX1262, whose reference companion
 	// range is -9..22 dBm. The physical envelope is judged again at admission.
 	if power < -9 || power > 22 {
-		return errorResponses(companion.ErrorIllegalArgument)
+		return errorResponses(companion.ErrIllegalArgument)
 	}
 	if s.binding != nil {
 		if err := s.binding.Envelope().Permits(s.p.Waveform, power, true); err != nil {
-			return errorResponses(companion.ErrorIllegalArgument)
+			return errorResponses(companion.ErrIllegalArgument)
 		}
 	} else if s.rfDevice != nil {
 		if err := s.rfDevice.Envelope().Permits(s.p.Waveform, power, true); err != nil {
-			return errorResponses(companion.ErrorIllegalArgument)
+			return errorResponses(companion.ErrIllegalArgument)
 		}
 	}
 	s.p.TXPowerDBm = power
@@ -852,14 +852,14 @@ func (s *service) setRadioPower(power int8) []companion.Response {
 func (s *service) getChannel(index uint8) []companion.Response {
 	ch, exists := s.channels[index]
 	if !exists || int(index) >= s.p.MaxChannels {
-		return errorResponses(companion.ErrorNotFound)
+		return errorResponses(companion.ErrNotFound)
 	}
 	return []companion.Response{companion.ChannelInfo{Index: index, Name: ch.name, Secret: ch.secret}}
 }
 
 func (s *service) setChannel(c companion.SetChannel) []companion.Response {
 	if int(c.Index) >= s.p.MaxChannels {
-		return errorResponses(companion.ErrorNotFound)
+		return errorResponses(companion.ErrNotFound)
 	}
 	name := c.Name
 	if len(name) > maxChannelName {
@@ -875,7 +875,7 @@ func (s *service) setDefaultFloodScope(c companion.SetDefaultFloodScope) []compa
 		return okResponses()
 	}
 	if c.Name == "" || len(c.Name) > 30 {
-		return errorResponses(companion.ErrorIllegalArgument)
+		return errorResponses(companion.ErrIllegalArgument)
 	}
 	s.defaultScope, s.defaultKey = c.Name, c.Key
 	return okResponses()
@@ -922,7 +922,7 @@ func (s *service) handleSimple(kind companion.CommandCode) []companion.Response 
 	case companion.CommandSendSelfAdvert:
 		return []companion.Response{companion.StatusResponse(companion.ResponseDisabled)}
 	default:
-		return errorResponses(companion.ErrorUnsupportedCommand)
+		return errorResponses(companion.ErrUnsupportedCommand)
 	}
 }
 
@@ -953,7 +953,7 @@ func (s *service) getStats(kind companion.StatsType) []companion.Response {
 			ReceiveErrors: s.stats.receiveErrors,
 		}}
 	default:
-		return errorResponses(companion.ErrorIllegalArgument)
+		return errorResponses(companion.ErrIllegalArgument)
 	}
 }
 

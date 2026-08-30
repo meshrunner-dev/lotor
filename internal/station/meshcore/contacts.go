@@ -39,7 +39,7 @@ func (s *service) getContacts(command companion.GetContacts) []companion.Respons
 func (s *service) getContact(publicKey [mesh.PubKeySize]byte) []companion.Response {
 	entry, exists := s.contacts[publicKey]
 	if !exists {
-		return errorResponses(companion.ErrorNotFound)
+		return errorResponses(companion.ErrNotFound)
 	}
 	return []companion.Response{companion.ContactResponse{Contact: entry.info}}
 }
@@ -47,7 +47,7 @@ func (s *service) getContact(publicKey [mesh.PubKeySize]byte) []companion.Respon
 func (s *service) addUpdateContact(command companion.AddUpdateContact) []companion.Response {
 	entry, exists := s.contacts[command.PublicKey]
 	if !exists && s.durableContactCount() >= s.p.MaxContacts {
-		return errorResponses(companion.ErrorTableFull)
+		return errorResponses(companion.ErrTableFull)
 	}
 	lastModified := uint32(time.Now().Add(s.clockDelta).Unix())
 	if command.HasLastModified {
@@ -71,7 +71,7 @@ func (s *service) addUpdateContact(command companion.AddUpdateContact) []compani
 func (s *service) resetContactPath(publicKey [mesh.PubKeySize]byte) []companion.Response {
 	entry, exists := s.contacts[publicKey]
 	if !exists {
-		return errorResponses(companion.ErrorNotFound)
+		return errorResponses(companion.ErrNotFound)
 	}
 	entry.info.PathLen = 0xff
 	entry.info.Path = [mesh.MaxPathSize]byte{}
@@ -81,7 +81,7 @@ func (s *service) resetContactPath(publicKey [mesh.PubKeySize]byte) []companion.
 
 func (s *service) removeContact(publicKey [mesh.PubKeySize]byte) []companion.Response {
 	if _, exists := s.contacts[publicKey]; !exists {
-		return errorResponses(companion.ErrorNotFound)
+		return errorResponses(companion.ErrNotFound)
 	}
 	delete(s.contacts, publicKey)
 	return okResponses()
@@ -91,17 +91,17 @@ func (s *service) exportContact(command companion.ExportContact) []companion.Res
 	if command.Self {
 		packet, err := s.selfAdvert(time.Now().Add(s.clockDelta))
 		if err != nil {
-			return errorResponses(companion.ErrorTableFull)
+			return errorResponses(companion.ErrTableFull)
 		}
 		raw, err := packet.MarshalBinary()
 		if err != nil {
-			return errorResponses(companion.ErrorFileIO)
+			return errorResponses(companion.ErrFileIO)
 		}
 		return []companion.Response{companion.ExportedContact{Packet: raw}}
 	}
 	entry, exists := s.contacts[command.PublicKey]
 	if !exists || len(entry.advert) == 0 {
-		return errorResponses(companion.ErrorNotFound)
+		return errorResponses(companion.ErrNotFound)
 	}
 	return []companion.Response{companion.ExportedContact{Packet: append([]byte(nil), entry.advert...)}}
 }
@@ -109,11 +109,11 @@ func (s *service) exportContact(command companion.ExportContact) []companion.Res
 func (s *service) importContact(raw []byte) []companion.Response {
 	packet, err := mesh.ParsePacket(raw)
 	if err != nil || packet.PayloadType() != mesh.PayloadTypeAdvert {
-		return errorResponses(companion.ErrorIllegalArgument)
+		return errorResponses(companion.ErrIllegalArgument)
 	}
 	result, err := s.storeAdvert(packet, false)
 	if err != nil {
-		return errorResponses(companion.ErrorIllegalArgument)
+		return errorResponses(companion.ErrIllegalArgument)
 	}
 	return append(okResponses(), s.advertResponsesLocked(result, packet)...)
 }

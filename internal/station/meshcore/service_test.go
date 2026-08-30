@@ -116,7 +116,7 @@ func TestAttachedStationUsesPhysicalPowerEnvelopeWhileRadioIsDown(t *testing.T) 
 	if got := svc.selfInfo().MaxTXPowerDBm; got != envelope.MaxTxPowerDBm {
 		t.Fatalf("self info max power = %d, want %d", got, envelope.MaxTxPowerDBm)
 	}
-	if got := svc.handle(t.Context(), companion.SetRadioTXPower{PowerDBm: 11}); len(got) != 1 || got[0] != (companion.ErrorResponse{Code: companion.ErrorIllegalArgument}) {
+	if got := svc.handle(t.Context(), companion.SetRadioTXPower{PowerDBm: 11}); len(got) != 1 || got[0] != (companion.ErrorResponse{Code: companion.ErrIllegalArgument}) {
 		t.Fatalf("power above physical envelope = %#v", got)
 	}
 	if got := svc.handle(t.Context(), companion.SetRadioTXPower{PowerDBm: 10}); len(got) != 1 || got[0] != companion.StatusResponse(companion.ResponseOK) {
@@ -170,7 +170,7 @@ func TestDetachedStationForbidsRepeatingAndKeepsRadioPreferences(t *testing.T) {
 	svc := requireService(t, built)
 	responses := svc.handle(t.Context(), companion.SetRadioParams{Repeat: true})
 	wire, _ := companion.MarshalResponse(responses[0])
-	want, _ := companion.MarshalResponse(companion.ErrorResponse{Code: companion.ErrorIllegalArgument})
+	want, _ := companion.MarshalResponse(companion.ErrorResponse{Code: companion.ErrIllegalArgument})
 	if !bytes.Equal(wire, want) {
 		t.Fatalf("repeat response = % X, want % X", wire, want)
 	}
@@ -265,7 +265,7 @@ func TestCompanionPreferencesSurviveStationRestart(t *testing.T) {
 	_ = first.handle(t.Context(), companion.SetTuningParams{
 		RXDelayMilli: 2_500, AirtimeFactorMilli: 1_250,
 	})
-	if got := first.handle(t.Context(), companion.SetDevicePIN{PIN: 1234}); len(got) != 1 || got[0] != (companion.ErrorResponse{Code: companion.ErrorIllegalArgument}) {
+	if got := first.handle(t.Context(), companion.SetDevicePIN{PIN: 1234}); len(got) != 1 || got[0] != (companion.ErrorResponse{Code: companion.ErrIllegalArgument}) {
 		t.Fatalf("invalid PIN response = %#v", got)
 	}
 	_ = first.handle(t.Context(), companion.SetDevicePIN{PIN: 123456})
@@ -307,7 +307,7 @@ func TestPreferenceWriteFailureRollsBackAndReportsFileIO(t *testing.T) {
 	svc := requireService(t, built)
 	responses := svc.handle(t.Context(), companion.SetAdvertName{Name: "Lost"})
 	wire, _ := companion.MarshalResponse(responses[0])
-	want, _ := companion.MarshalResponse(companion.ErrorResponse{Code: companion.ErrorFileIO})
+	want, _ := companion.MarshalResponse(companion.ErrorResponse{Code: companion.ErrFileIO})
 	if !bytes.Equal(wire, want) || svc.p.NodeName != "Alice" {
 		t.Fatalf("failed save = % X name %q, want % X and rollback", wire, svc.p.NodeName, want)
 	}
@@ -432,7 +432,7 @@ func TestFactoryResetWriteFailureRollsBackWithoutRestartingSession(t *testing.T)
 	store.fail = true
 
 	responses := svc.handle(t.Context(), companion.FactoryReset{})
-	if len(responses) != 1 || responses[0] != (companion.ErrorResponse{Code: companion.ErrorFileIO}) {
+	if len(responses) != 1 || responses[0] != (companion.ErrorResponse{Code: companion.ErrFileIO}) {
 		t.Fatalf("factory reset failure responses = %#v", responses)
 	}
 	if svc.p.NodeName != "Persisted" || svc.stats.sent != 4 || svc.disconnect != 0 {
@@ -527,7 +527,7 @@ func TestEveryReferenceCompanionCommandReachesAStationHandler(t *testing.T) {
 		seen[command.Code()] = struct{}{}
 		for _, response := range svc.handle(t.Context(), command) {
 			if failure, ok := response.(companion.ErrorResponse); ok &&
-				failure.Code == companion.ErrorUnsupportedCommand {
+				failure.Code == companion.ErrUnsupportedCommand {
 				t.Fatalf("command %d (%T) reached unsupported fallback", command.Code(), command)
 			}
 		}
@@ -585,7 +585,7 @@ func TestCompanionIdentityImportExportAndSigningSurviveRestart(t *testing.T) {
 		t.Fatalf("signature = %#v", responses)
 	}
 	responses = second.handle(t.Context(), companion.SimpleCommand{Kind: companion.CommandSignFinish})
-	if len(responses) != 1 || responses[0] != (companion.ErrorResponse{Code: companion.ErrorBadState}) {
+	if len(responses) != 1 || responses[0] != (companion.ErrorResponse{Code: companion.ErrBadState}) {
 		t.Fatalf("second sign finish = %#v", responses)
 	}
 }
