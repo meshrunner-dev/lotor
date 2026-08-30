@@ -33,3 +33,16 @@ args=(-trimpath -buildvcs=true -ldflags "$ldflags" -o "$out")
 
 GOOS="${goos:-}" GOARCH="${goarch:-}" GOARM="${goarm:-}" CGO_ENABLED=0 \
   go build "${args[@]}" "$pkg"
+
+# A git checkout must yield a stamped binary. -buildvcs=true fails
+# when it finds a repository it cannot read, but a checkout it does
+# not recognise as one at all — a git worktree, for instance — leaves
+# the binary silently unstamped, provenance lost with no error. A
+# packager building from a tarball has no repository and keeps its
+# fallbacks; a checkout that has one owes the revision.
+if git rev-parse --git-dir >/dev/null 2>&1 &&
+   ! go version -m "$out" | grep -q "vcs.revision="; then
+  echo "build: this is a git checkout but $out carries no revision" >&2
+  echo "build: go stamped nothing — check that the build ran inside the repository" >&2
+  exit 1
+fi
