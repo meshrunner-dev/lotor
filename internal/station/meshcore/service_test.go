@@ -240,6 +240,62 @@ func TestPreferenceWriteFailureRollsBackAndReportsFileIO(t *testing.T) {
 	}
 }
 
+func TestCompanionIdentityImportExportAndSigningSurviveRestart(t *testing.T) {
+	store := &memoryStationState{}
+	spec := testSpec(t)
+	spec.State = store
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := requireService(t, built)
+	imported, err := mesh.LocalIdentityFromSeed(bytes.Repeat([]byte{17}, mesh.SeedSize))
+	if err != nil || !imported.FirmwareImportable() {
+		t.Fatalf("test identity: %v, key %x", err, imported.PubKey[:2])
+	}
+	command := companion.ImportPrivateKey{}
+	copy(command.PrivateKey[:], imported.PrvKey())
+	responses := first.handle(t.Context(), command)
+	if len(responses) != 1 || responses[0] != companion.StatusResponse(companion.ResponseOK) {
+		t.Fatalf("identity import = %#v", responses)
+	}
+
+	built, err = build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := requireService(t, built)
+	if second.id.PubKey != imported.PubKey {
+		t.Fatalf("restored public key = %x, want %x", second.id.PubKey, imported.PubKey)
+	}
+	responses = second.handle(t.Context(), companion.SimpleCommand{Kind: companion.CommandExportPrivateKey})
+	exported, ok := responses[0].(companion.PrivateKey)
+	if !ok || !bytes.Equal(exported.Key[:], imported.PrvKey()) {
+		t.Fatalf("identity export = %#v", responses)
+	}
+
+	responses = second.handle(t.Context(), companion.SimpleCommand{Kind: companion.CommandSignStart})
+	start, ok := responses[0].(companion.SignStart)
+	if !ok || start.MaxBytes != maxSignData {
+		t.Fatalf("sign start = %#v", responses)
+	}
+	for _, fragment := range [][]byte{[]byte("mesh"), []byte("core")} {
+		responses = second.handle(t.Context(), companion.SignData{Data: fragment})
+		if len(responses) != 1 || responses[0] != companion.StatusResponse(companion.ResponseOK) {
+			t.Fatalf("sign fragment = %#v", responses)
+		}
+	}
+	responses = second.handle(t.Context(), companion.SimpleCommand{Kind: companion.CommandSignFinish})
+	signed, ok := responses[0].(companion.Signature)
+	if !ok || !second.id.Verify(signed.Value[:], []byte("meshcore")) {
+		t.Fatalf("signature = %#v", responses)
+	}
+	responses = second.handle(t.Context(), companion.SimpleCommand{Kind: companion.CommandSignFinish})
+	if len(responses) != 1 || responses[0] != (companion.ErrorResponse{Code: companion.ErrorBadState}) {
+		t.Fatalf("second sign finish = %#v", responses)
+	}
+}
+
 func TestContactCRUDFiltersAndPersists(t *testing.T) {
 	store := &memoryStationState{}
 	spec := testSpec(t)

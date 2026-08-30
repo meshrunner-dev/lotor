@@ -37,6 +37,7 @@ const (
 	maxContactSlots  = 510
 	maxMailboxSlots  = 4096
 	maxConnectionPIN = math.MaxUint32
+	maxSignData      = 8 * 1024
 )
 
 func init() {
@@ -292,6 +293,7 @@ type service struct {
 	outbound     chan emission
 	startedAt    time.Time
 	stats        stationStats
+	signData     []byte
 }
 
 func (s *service) Run(ctx context.Context) error {
@@ -485,7 +487,12 @@ func (s *service) handleQuery(cmd companion.Command) ([]companion.Response, bool
 		return s.exportContact(c), true
 	case companion.GetStats:
 		return s.getStats(c.Type), true
+	case companion.SignData:
+		return s.appendSignData(c.Data), true
 	case companion.SimpleCommand:
+		if responses, handled := s.handleIdentityQuery(c.Kind); handled {
+			return responses, true
+		}
 		if c.Kind == companion.CommandSyncNextMessage {
 			return nil, false
 		}
@@ -505,41 +512,93 @@ func (s *service) handleMutation(cmd companion.Command) []companion.Response {
 	if responses, handled := s.handleConfigurationMutation(cmd); handled {
 		return responses
 	}
+	if responses, handled := s.handlePreferenceMutation(cmd); handled {
+		return responses
+	}
 	switch c := cmd.(type) {
 	case companion.SetDeviceTime:
 		return s.setDeviceTime(c.UnixSeconds)
 	case companion.SimpleCommand:
 		return s.handleSimple(c.Kind)
+	case companion.SetRadioParams:
+		return s.setRadioParams(c)
+	case companion.SetRadioTXPower:
+		return s.setRadioPower(c.PowerDBm)
+	default:
+		return errorResponses(companion.ErrorUnsupportedCommand)
+	}
+}
+
+func (s *service) handlePreferenceMutation(cmd companion.Command) ([]companion.Response, bool) {
+	switch c := cmd.(type) {
 	case companion.SetAdvertName:
 		if len(c.Name) > maxStationName {
 			c.Name = c.Name[:maxStationName]
 		}
 		s.p.NodeName = c.Name
-		return okResponses()
+		return okResponses(), true
 	case companion.SetAdvertLocation:
 		if c.LatitudeE6 < -90_000_000 || c.LatitudeE6 > 90_000_000 ||
 			c.LongitudeE6 < -180_000_000 || c.LongitudeE6 > 180_000_000 {
-			return errorResponses(companion.ErrorIllegalArgument)
+			return errorResponses(companion.ErrorIllegalArgument), true
 		}
 		s.p.NodeLat = float64(c.LatitudeE6) / 1e6
 		s.p.NodeLon = float64(c.LongitudeE6) / 1e6
-		return okResponses()
-	case companion.SetRadioParams:
-		return s.setRadioParams(c)
-	case companion.SetRadioTXPower:
-		return s.setRadioPower(c.PowerDBm)
+		return okResponses(), true
 	case companion.SetTuningParams:
 		s.p.RXDelayMilli, s.p.AirFactorMilli = c.RXDelayMilli, c.AirtimeFactorMilli
-		return okResponses()
+		return okResponses(), true
 	case companion.SetDevicePIN:
 		if c.PIN != 0 && (c.PIN < 100_000 || c.PIN > 999_999) {
-			return errorResponses(companion.ErrorIllegalArgument)
+			return errorResponses(companion.ErrorIllegalArgument), true
 		}
 		s.p.PIN = uint64(c.PIN)
-		return okResponses()
+		return okResponses(), true
+	case companion.ImportPrivateKey:
+		identity, err := mesh.LocalIdentityFromKeys(c.PrivateKey[:], nil)
+		if err != nil || !identity.FirmwareImportable() {
+			return errorResponses(companion.ErrorIllegalArgument), true
+		}
+		s.id = identity
+		clear(s.expectedACKs[:])
+		return okResponses(), true
 	default:
-		return errorResponses(companion.ErrorUnsupportedCommand)
+		return nil, false
 	}
+}
+
+func (s *service) handleIdentityQuery(kind companion.CommandCode) ([]companion.Response, bool) {
+	switch kind {
+	case companion.CommandExportPrivateKey:
+		key := companion.PrivateKey{}
+		copy(key.Key[:], s.id.PrvKey())
+		return []companion.Response{key}, true
+	case companion.CommandSignStart:
+		s.signData = make([]byte, 0, maxSignData)
+		return []companion.Response{companion.SignStart{MaxBytes: maxSignData}}, true
+	case companion.CommandSignFinish:
+		if s.signData == nil {
+			return errorResponses(companion.ErrorBadState), true
+		}
+		raw := s.id.Sign(s.signData)
+		s.signData = nil
+		signature := companion.Signature{}
+		copy(signature.Value[:], raw)
+		return []companion.Response{signature}, true
+	default:
+		return nil, false
+	}
+}
+
+func (s *service) appendSignData(data []byte) []companion.Response {
+	if s.signData == nil {
+		return errorResponses(companion.ErrorBadState)
+	}
+	if len(data) > maxSignData-len(s.signData) {
+		return errorResponses(companion.ErrorTableFull)
+	}
+	s.signData = append(s.signData, data...)
+	return okResponses()
 }
 
 func (s *service) handleConfigurationMutation(cmd companion.Command) ([]companion.Response, bool) {

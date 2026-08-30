@@ -63,9 +63,9 @@ func (w persistedWaveform) radio() radio.Waveform {
 	}
 }
 
-// persistedState contains only preferences the companion protocol may own.
-// Configuration remains authoritative for identity, capacity and regulatory
-// policy; the application cannot rewrite those through this blob.
+// persistedState contains only state the companion protocol may own. The
+// configured identity seeds a new station, then an imported identity becomes
+// durable here. Capacity and regulatory policy remain configuration-owned.
 type persistedState struct {
 	Version int `json:"version"`
 
@@ -82,6 +82,7 @@ type persistedState struct {
 	PathHashMode   int                `json:"pathHashMode"`
 	RXDelayMilli   uint32             `json:"rxDelayMilli"`
 	AirFactorMilli uint32             `json:"airtimeFactorMilli"`
+	PrivateKey     []byte             `json:"privateKey,omitempty"`
 	ClockDelta     int64              `json:"clockDeltaNs"`
 	AutoFlags      uint8              `json:"autoAddFlags"`
 	AutoHops       uint8              `json:"autoAddMaxHops"`
@@ -99,6 +100,7 @@ func (s *service) snapshotLocked() persistedState {
 		MultiACKs: s.p.MultiACKs, AdvertLoc: s.p.AdvertLoc, TelemetryMode: s.p.TelemetryMode,
 		ManualContact: s.p.ManualContacts, PathHashMode: s.p.PathHashMode,
 		RXDelayMilli: s.p.RXDelayMilli, AirFactorMilli: s.p.AirFactorMilli,
+		PrivateKey: s.id.PrvKey(),
 		ClockDelta: int64(s.clockDelta), AutoFlags: s.autoFlags, AutoHops: s.autoHops,
 		DefaultScope: s.defaultScope, DefaultKey: s.defaultKey,
 		Channels: make([]persistedChannel, 0, len(s.channels)),
@@ -132,6 +134,12 @@ func (s *service) restoreLocked(state persistedState) {
 	s.p.AdvertLoc, s.p.TelemetryMode = state.AdvertLoc, state.TelemetryMode
 	s.p.ManualContacts, s.p.PathHashMode = state.ManualContact, state.PathHashMode
 	s.p.RXDelayMilli, s.p.AirFactorMilli = state.RXDelayMilli, state.AirFactorMilli
+	if len(state.PrivateKey) == mesh.PrvKeySize {
+		identity, err := mesh.LocalIdentityFromKeys(state.PrivateKey, nil)
+		if err == nil {
+			s.id = identity
+		}
+	}
 	s.clockDelta = time.Duration(state.ClockDelta)
 	s.autoFlags, s.autoHops = state.AutoFlags, state.AutoHops
 	s.defaultScope, s.defaultKey = state.DefaultScope, state.DefaultKey
@@ -194,6 +202,12 @@ func (s *service) validateState(state persistedState) error {
 	}
 	if err := validatePreferences(check); err != nil {
 		return fmt.Errorf("meshcore station state: %w", err)
+	}
+	if len(state.PrivateKey) != 0 {
+		identity, err := mesh.LocalIdentityFromKeys(state.PrivateKey, nil)
+		if err != nil || !identity.FirmwareImportable() {
+			return errors.New("meshcore station state: invalid private identity")
+		}
 	}
 	if err := s.validateChannels(state.Channels); err != nil {
 		return err
@@ -262,11 +276,11 @@ func (s *service) persistLocked(ctx context.Context, before persistedState) erro
 		return nil
 	}
 	after := s.snapshotLocked()
-	beforeRaw, err := json.Marshal(before)
+	beforeRaw, err := json.Marshal(before) //nolint:gosec // this state deliberately owns the imported identity
 	if err != nil {
 		return err
 	}
-	afterRaw, err := json.Marshal(after)
+	afterRaw, err := json.Marshal(after) //nolint:gosec // persistence is the companion import contract
 	if err != nil {
 		return err
 	}
