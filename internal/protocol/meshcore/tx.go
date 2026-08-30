@@ -910,7 +910,9 @@ func (e *engine) clearChannel(ctx context.Context, dev radio.Device, log *zap.Lo
 	attempts := 0
 	for {
 		attempts++
-		busy, err := dev.AssessChannel(ctx, e.policy.LBTThresholdDB)
+		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
+		busy, err := dev.AssessChannel(attemptCtx, e.policy.LBTThresholdDB)
+		cancel()
 		switch {
 		case errors.Is(err, radio.ErrBusyReceiving):
 			logging.Trace(log, "lbt resolved", zap.String("result", "reception-pending"),

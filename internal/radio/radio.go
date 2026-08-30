@@ -1,10 +1,8 @@
-// Package radio is the seam between relays and transceiver hardware.
-// A Device is an opened attachment; a driver turns a resolved hardware
-// configuration into one. Radios carry no waveform choice — they
-// declare an Envelope of what choices are possible, and the relay's
-// choices are validated against it. There is deliberately no transmit
-// on the Device interface yet: the daemon is receive-only by
-// construction until the relay engines earn their transmit path.
+// Package radio is the seam between logical consumers and transceiver
+// hardware. A Device is an opened attachment; a driver turns a resolved
+// hardware configuration into one. Radios declare an Envelope of possible
+// waveform choices, while a controller serializes receive and transmit work
+// for the relay and stations sharing one physical attachment.
 package radio
 
 import (
@@ -21,7 +19,7 @@ import (
 	"meshrunner.dev/lotor/internal/schema"
 )
 
-// Waveform is a relay's channel choice, in protocol-neutral units.
+// Waveform is a logical consumer's channel choice, in protocol-neutral units.
 type Waveform struct {
 	FrequencyHz     uint32 `yaml:"frequency_hz"`
 	SpreadingFactor int    `yaml:"spreading_factor"`
@@ -177,7 +175,9 @@ type Telemetry interface {
 	ChipStats() (ChipStats, bool)
 }
 
-// Device is an opened radio owned by exactly one relay.
+// Device is an opened radio owned by exactly one goroutine. A physical Device
+// belongs to its controller; relay and station engines receive logical Device
+// ports backed by that controller.
 type Device interface {
 	Envelope() Envelope
 	Configure(w Waveform) error

@@ -297,3 +297,282 @@ func TestCompatibleStationDoesNotBounceRelayHardware(t *testing.T) {
 			dev.configured, dev.closed)
 	}
 }
+
+func TestControllerCloseConcurrentWithBroadcast(t *testing.T) {
+	dev := newControllerFakeDevice()
+	c, _ := controllerRig(t, dev)
+	w := Waveform{FrequencyHz: 869_618_000, SpreadingFactor: 8, BandwidthHz: 62_500, CodingRate: 8}
+	binding, err := c.Bind("alice", RoleStation, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitController(t, c)
+	awaitBinding(t, binding)
+
+	for range 1_000 {
+		logical, err := binding.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		finished := make(chan struct{}, 2)
+		go func() {
+			<-start
+			c.broadcast(context.Background(), receiveResult{frame: Frame{Payload: []byte{1}}})
+			finished <- struct{}{}
+		}()
+		go func() {
+			<-start
+			_ = logical.Close()
+			finished <- struct{}{}
+		}()
+		close(start)
+		<-finished
+		<-finished
+	}
+}
+
+func TestRelayReceiveBacklogDoesNotBlockHardwareOperations(t *testing.T) {
+	dev := newControllerFakeDevice()
+	c, _ := controllerRig(t, dev)
+	w := Waveform{FrequencyHz: 869_618_000, SpreadingFactor: 8, BandwidthHz: 62_500, CodingRate: 8}
+	relayBinding, err := c.Bind("mc", RoleRelay, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stationBinding, err := c.Bind("alice", RoleStation, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitController(t, c)
+	awaitBinding(t, relayBinding)
+	relay, err := relayBinding.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = relay.Close() })
+	station, err := stationBinding.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = station.Close() })
+
+	// More than the old relay channel capacity, without reading the relay.
+	for i := range 128 {
+		c.broadcast(context.Background(), receiveResult{frame: Frame{Payload: []byte{byte(i)}}})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if busy, err := station.AssessChannel(ctx, 0); err != nil || busy {
+		t.Fatalf("station channel assessment behind relay backlog = busy %t, err %v", busy, err)
+	}
+}
+
+func TestCanceledQueuedOperationNeverReachesHardware(t *testing.T) {
+	dev := newControllerFakeDevice()
+	dev.hold, dev.holdStart = make(chan struct{}), make(chan struct{})
+	c, _ := controllerRig(t, dev)
+	w := Waveform{FrequencyHz: 869_618_000, SpreadingFactor: 8, BandwidthHz: 62_500, CodingRate: 8}
+	binding, err := c.Bind("alice", RoleStation, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitController(t, c)
+	logical, err := binding.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	holdDone := make(chan error, 1)
+	go func() {
+		_, txErr := logical.Transmit(context.Background(), []byte("hold"), 1)
+		holdDone <- txErr
+	}()
+	select {
+	case <-dev.holdStart:
+	case <-time.After(time.Second):
+		t.Fatal("holding operation did not start")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	queuedDone := make(chan error, 1)
+	go func() {
+		_, txErr := logical.Transmit(ctx, []byte("canceled"), 1)
+		queuedDone <- txErr
+	}()
+	awaitPendingOperations(t, c, 1)
+	cancel()
+	if err := <-queuedDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled operation returned %v", err)
+	}
+	close(dev.hold)
+	if err := <-holdDone; err != nil {
+		t.Fatal(err)
+	}
+
+	dev.mu.Lock()
+	defer dev.mu.Unlock()
+	if want := []string{"hold"}; !reflect.DeepEqual(dev.order, want) {
+		t.Fatalf("physical order = %v, want %v", dev.order, want)
+	}
+}
+
+func TestCloseRejectsQueuedOperationButLetsStartedTransmitFinish(t *testing.T) {
+	dev := newControllerFakeDevice()
+	dev.hold, dev.holdStart = make(chan struct{}), make(chan struct{})
+	c, _ := controllerRig(t, dev)
+	w := Waveform{FrequencyHz: 869_618_000, SpreadingFactor: 8, BandwidthHz: 62_500, CodingRate: 8}
+	binding, err := c.Bind("alice", RoleStation, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitController(t, c)
+	logical, err := binding.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	holdDone := make(chan error, 1)
+	go func() {
+		_, txErr := logical.Transmit(context.Background(), []byte("hold"), 1)
+		holdDone <- txErr
+	}()
+	<-dev.holdStart
+	queuedDone := make(chan error, 1)
+	go func() {
+		_, txErr := logical.Transmit(context.Background(), []byte("closed"), 1)
+		queuedDone <- txErr
+	}()
+	awaitPendingOperations(t, c, 1)
+	if err := logical.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-queuedDone; !errors.Is(err, ErrBindingClosed) {
+		t.Fatalf("queued operation after close returned %v", err)
+	}
+	close(dev.hold)
+	if err := <-holdDone; err != nil {
+		t.Fatalf("started operation was truncated: %v", err)
+	}
+
+	dev.mu.Lock()
+	defer dev.mu.Unlock()
+	if want := []string{"hold"}; !reflect.DeepEqual(dev.order, want) {
+		t.Fatalf("physical order = %v, want %v", dev.order, want)
+	}
+}
+
+func TestBlockedWaveformEndsExistingLogicalSession(t *testing.T) {
+	dev := newControllerFakeDevice()
+	c, _ := controllerRig(t, dev)
+	w := Waveform{FrequencyHz: 869_618_000, SpreadingFactor: 8, BandwidthHz: 62_500, CodingRate: 8}
+	other := w
+	other.FrequencyHz = 868_000_000
+	relay, err := c.Bind("mc", RoleRelay, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	station, err := c.Bind("alice", RoleStation, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitController(t, c)
+	awaitBinding(t, relay)
+	logical, err := station.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := station.SetWaveform(other); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := logical.Receive(ctx); !errors.Is(err, ErrBindingBlocked) {
+		t.Fatalf("blocked session returned %v", err)
+	}
+	if _, err := station.Open(); !errors.Is(err, ErrBindingBlocked) {
+		t.Fatalf("blocked binding opened: %v", err)
+	}
+	if err := station.SetWaveform(w); err != nil {
+		t.Fatal(err)
+	}
+	awaitBinding(t, station)
+	if reopened, err := station.Open(); err != nil {
+		t.Fatalf("compatible station did not reopen: %v", err)
+	} else {
+		_ = reopened.Close()
+	}
+}
+
+func TestControllerValidatesLiveWaveformAgainstDriver(t *testing.T) {
+	dev := newControllerFakeDevice()
+	driver := Driver{
+		Inspect: func(map[string]any) (Envelope, error) { return dev.Envelope(), nil },
+		Open:    func(map[string]any, *zap.Logger) (Device, error) { return dev, nil },
+		CheckWaveform: func(w Waveform) error {
+			if w.BandwidthHz != 62_500 {
+				return errors.New("unsupported bandwidth")
+			}
+			return nil
+		},
+	}
+	c, err := NewController("slot1", driver, nil, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := Waveform{FrequencyHz: 869_618_000, SpreadingFactor: 8, BandwidthHz: 62_500, CodingRate: 8}
+	invalid := valid
+	invalid.BandwidthHz = 100_000
+	if _, err := c.Bind("bad", RoleStation, invalid); err == nil {
+		t.Fatal("driver-invalid initial waveform was accepted")
+	}
+	binding, err := c.Bind("alice", RoleStation, valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := binding.SetWaveform(invalid); err == nil {
+		t.Fatal("driver-invalid live waveform was accepted")
+	}
+}
+
+func TestClosedLogicalPortKeepsItsAirtimeButNotNewTelemetry(t *testing.T) {
+	dev := newControllerFakeDevice()
+	c, _ := controllerRig(t, dev)
+	w := Waveform{FrequencyHz: 869_618_000, SpreadingFactor: 8, BandwidthHz: 62_500, CodingRate: 8}
+	binding, err := c.Bind("alice", RoleStation, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitController(t, c)
+	logical, err := binding.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := logical.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := logical.Airtime(3); got != 3*time.Millisecond {
+		t.Fatalf("closed logical airtime = %s", got)
+	}
+	if _, ok := logical.NoiseFloor(); ok {
+		t.Fatal("closed logical port observed another physical generation")
+	}
+}
+
+func awaitPendingOperations(t *testing.T, c *Controller, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		pending := len(c.relayQueue)
+		for _, queue := range c.stationQueues {
+			pending += len(queue)
+		}
+		c.mu.Unlock()
+		if pending >= want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("pending operations did not reach %d", want)
+}

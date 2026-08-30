@@ -135,7 +135,7 @@ func (c *Controller) Bind(name string, role ConsumerRole, waveform Waveform) (*B
 	if role != RoleRelay && role != RoleStation {
 		return nil, fmt.Errorf("unknown radio consumer role %q", role)
 	}
-	if err := c.envelope.Allows(waveform); err != nil {
+	if err := c.validateWaveform(waveform); err != nil {
 		return nil, err
 	}
 	key := bindingKey(role, name)
@@ -178,10 +178,10 @@ func (b *Binding) Unbind() {
 	delete(c.bindings, key)
 	for port := range c.ports {
 		if port.binding == b {
-			c.closePortLocked(port, ErrControllerDown)
+			c.closePortLocked(port, ErrBindingClosed)
 		}
 	}
-	c.dropBindingOperationsLocked(b, ErrControllerDown)
+	c.dropBindingOperationsLocked(b, ErrBindingClosed)
 	c.rebuildRROrderLocked()
 	after, hasAfter := c.authoritativeWaveformLocked()
 	if hadBefore != hasAfter || before != after {
@@ -223,19 +223,45 @@ func (c *Controller) dropBindingOperationsLocked(binding *Binding, err error) {
 // the new request.
 func (b *Binding) SetWaveform(waveform Waveform) error {
 	c := b.controller
-	if err := c.envelope.Allows(waveform); err != nil {
+	if err := c.validateWaveform(waveform); err != nil {
 		return err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.bindings[bindingKey(b.role, b.name)] != b {
-		return ErrControllerDown
+		return ErrBindingClosed
 	}
 	before, hadBefore := c.authoritativeWaveformLocked()
+	beforeState := b.stateLocked()
 	b.waveform = waveform
 	after, hasAfter := c.authoritativeWaveformLocked()
 	if hadBefore != hasAfter || before != after {
 		c.configurationChangedLocked()
+	} else if afterState := b.stateLocked(); beforeState != afterState {
+		// A non-authoritative station can block or unblock itself without
+		// changing the physical waveform. End its existing logical session so
+		// the owner observes the new binding state instead of waiting forever
+		// on an inbox that will no longer receive frames.
+		for port := range c.ports {
+			if port.binding == b {
+				err := ErrControllerDown
+				if afterState == BindingBlocked {
+					err = ErrBindingBlocked
+				}
+				c.closePortLocked(port, err)
+			}
+		}
+		c.notifyChangedLocked()
+	}
+	return nil
+}
+
+func (c *Controller) validateWaveform(waveform Waveform) error {
+	if err := c.envelope.Allows(waveform); err != nil {
+		return err
+	}
+	if c.driver.CheckWaveform != nil {
+		return c.driver.CheckWaveform(waveform)
 	}
 	return nil
 }
@@ -397,7 +423,12 @@ func (b *Binding) openLocked() (Device, error) {
 			return nil, fmt.Errorf("radio binding %q already has an open session", b.name)
 		}
 	}
-	port := &controllerPort{binding: b, inbox: make(chan receiveResult, 32)}
+	port := &controllerPort{
+		binding: b,
+		wake:    make(chan struct{}, 1),
+		done:    make(chan struct{}),
+		airtime: c.physical.Airtime,
+	}
 	c.ports[port] = struct{}{}
 	return port, nil
 }
@@ -408,16 +439,11 @@ func (c *Controller) Run(ctx context.Context) {
 	for ctx.Err() == nil {
 		waveform, version, ok := c.configuration()
 		if !ok {
-			c.setPhysicalState(ControllerStarting, nil, nil, Waveform{})
-			select {
-			case <-ctx.Done():
-				break
-			case <-c.wake:
-				continue
-			}
+			c.waitForConfiguration(ctx)
 			if ctx.Err() != nil {
 				break
 			}
+			continue
 		}
 		dev, err := c.driver.Open(c.cfg, c.log)
 		if err == nil {
@@ -460,6 +486,14 @@ func (c *Controller) Run(ctx context.Context) {
 	c.state, c.cause = ControllerStopped, ""
 	c.notifyChangedLocked()
 	c.mu.Unlock()
+}
+
+func (c *Controller) waitForConfiguration(ctx context.Context) {
+	c.setPhysicalState(ControllerStarting, nil, nil, Waveform{})
+	select {
+	case <-ctx.Done():
+	case <-c.wake:
+	}
 }
 
 func (c *Controller) configuration() (Waveform, uint64, bool) {
@@ -566,19 +600,18 @@ func (c *Controller) broadcast(ctx context.Context, result receiveResult) {
 		return ports[i].binding.role == RoleRelay && ports[j].binding.role != RoleRelay
 	})
 	for _, port := range ports {
-		if port.binding.role == RoleRelay {
-			select {
-			case port.inbox <- result:
-			case <-ctx.Done():
-				return
-			}
-			continue
+		if ctx.Err() != nil {
+			return
 		}
-		select {
-		case port.inbox <- result:
-		default:
+		accepted, depth := port.deliver(result)
+		if !accepted && port.binding.role == RoleStation && depth >= stationReceiveQueueDepth {
 			c.log.Warn("station receive queue full, dropping frame",
 				zap.String("station", port.binding.name))
+		}
+		if accepted && port.binding.role == RoleRelay && depth >= relayReceiveQueueWarning &&
+			depth&(depth-1) == 0 {
+			c.log.Warn("relay receive queue is backing up",
+				zap.String("relay", port.binding.name), zap.Int("queue_depth", depth))
 		}
 	}
 }
@@ -590,13 +623,24 @@ type operationResult struct {
 }
 
 type radioOperation struct {
-	port *controllerPort
-	run  func(Device) operationResult
-	done chan operationResult
+	port   *controllerPort
+	run    func(Device) operationResult
+	done   chan operationResult
+	ctxErr func() error
+
+	// canceled and started are owned by Controller.mu. Once started is true,
+	// cancellation waits for the hardware result so an on-air operation can
+	// still be accounted by its caller.
+	canceled bool
+	started  bool
 }
 
 func (c *Controller) enqueue(operation *radioOperation) error {
 	c.mu.Lock()
+	if operation.contextError() != nil {
+		c.mu.Unlock()
+		return operation.contextError()
+	}
 	if operation.port.closed || operation.port.binding.stateLocked() != BindingActive || c.physical == nil {
 		c.mu.Unlock()
 		return ErrControllerDown
@@ -671,13 +715,85 @@ func (c *Controller) rebuildRROrderLocked() {
 	}
 	sort.Strings(order)
 	c.rrOrder = order
-	if len(order) == 0 {
+	if len(order) == 0 || !containsSorted(order, c.rrLast) {
 		c.rrLast = ""
 	}
 }
 
+func containsSorted(values []string, value string) bool {
+	if value == "" {
+		return false
+	}
+	at := sort.SearchStrings(values, value)
+	return at < len(values) && values[at] == value
+}
+
 func (c *Controller) execute(dev Device, operation *radioOperation) {
+	c.mu.Lock()
+	var refusal error
+	switch {
+	case operation.canceled:
+		refusal = operation.contextError()
+		if refusal == nil {
+			refusal = context.Canceled
+		}
+	case operation.contextError() != nil:
+		refusal = operation.contextError()
+	case operation.port.closed:
+		refusal = ErrBindingClosed
+	case operation.port.binding.stateLocked() != BindingActive || c.physical != dev:
+		refusal = ErrControllerDown
+	default:
+		operation.started = true
+	}
+	c.mu.Unlock()
+	if refusal != nil {
+		operation.done <- operationResult{err: refusal}
+		return
+	}
 	operation.done <- operation.run(dev)
+}
+
+func (o *radioOperation) contextError() error {
+	if o.ctxErr == nil {
+		return nil
+	}
+	return o.ctxErr()
+}
+
+// cancelOperation abandons an operation that has not started. Once hardware
+// execution begins, the caller must wait for the report: returning early would
+// let a real transmission escape duty accounting.
+func (c *Controller) cancelOperation(operation *radioOperation) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if operation.started {
+		return false
+	}
+	operation.canceled = true
+	c.removeOperationLocked(operation)
+	return true
+}
+
+func (c *Controller) removeOperationLocked(want *radioOperation) {
+	remove := func(queue []*radioOperation) []*radioOperation {
+		for i, operation := range queue {
+			if operation == want {
+				return append(queue[:i], queue[i+1:]...)
+			}
+		}
+		return queue
+	}
+	c.relayQueue = remove(c.relayQueue)
+	for key, queue := range c.stationQueues {
+		queue = remove(queue)
+		if len(queue) == 0 {
+			delete(c.stationQueues, key)
+		} else {
+			c.stationQueues[key] = queue
+		}
+	}
+	c.rebuildRROrderLocked()
 }
 
 func (c *Controller) failPendingLocked(err error) {
@@ -704,18 +820,44 @@ func (c *Controller) failPendingLocked(err error) {
 
 type controllerPort struct {
 	binding *Binding
-	inbox   chan receiveResult
+
+	// closed is owned by Controller.mu and gates hardware operations. The
+	// receive queue has its own ownership so broadcast never blocks the
+	// controller's physical operation loop.
 	closed  bool
+	mu      sync.Mutex
+	queue   []receiveResult
+	wake    chan struct{}
+	done    chan struct{}
+	stop    error
+	airtime func(int) time.Duration
 }
+
+const (
+	stationReceiveQueueDepth = 32
+	relayReceiveQueueWarning = 64
+)
 
 func (p *controllerPort) Envelope() Envelope { return p.binding.controller.envelope }
 
 func (p *controllerPort) Configure(waveform Waveform) error {
+	c := p.binding.controller
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if p.closed || c.bindings[bindingKey(p.binding.role, p.binding.name)] != p.binding {
+		return ErrBindingClosed
+	}
 	if waveform != p.binding.waveform {
 		return errors.New("logical radio cannot be retuned outside its binding")
 	}
-	state, cause := p.binding.State()
+	state := p.binding.stateLocked()
 	if state == BindingBlocked {
+		authority := c.authoritativeLocked()
+		cause := "no authoritative waveform"
+		if authority != nil {
+			cause = fmt.Sprintf("%s %q is authoritative on a different waveform",
+				authority.role, authority.name)
+		}
 		return fmt.Errorf("%w: %s", ErrBindingBlocked, cause)
 	}
 	return nil
@@ -724,25 +866,62 @@ func (p *controllerPort) Configure(waveform Waveform) error {
 func (*controllerPort) StartReceive() error { return nil }
 
 func (p *controllerPort) Receive(ctx context.Context) (Frame, error) {
-	select {
-	case <-ctx.Done():
-		return Frame{}, ctx.Err()
-	case result, ok := <-p.inbox:
-		if !ok {
-			return Frame{}, ErrControllerDown
+	for {
+		p.mu.Lock()
+		if p.stop != nil {
+			err := p.stop
+			p.mu.Unlock()
+			return Frame{}, err
 		}
-		return result.frame, result.err
+		if len(p.queue) > 0 {
+			result := p.queue[0]
+			p.queue[0] = receiveResult{}
+			p.queue = p.queue[1:]
+			p.mu.Unlock()
+			return result.frame, result.err
+		}
+		p.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return Frame{}, ctx.Err()
+		case <-p.done:
+		case <-p.wake:
+		}
 	}
+}
+
+func (p *controllerPort) deliver(result receiveResult) (accepted bool, depth int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stop != nil {
+		return false, -1
+	}
+	if p.binding.role == RoleStation && len(p.queue) >= stationReceiveQueueDepth {
+		return false, len(p.queue)
+	}
+	p.queue = append(p.queue, result)
+	select {
+	case p.wake <- struct{}{}:
+	default:
+	}
+	return true, len(p.queue)
 }
 
 func (p *controllerPort) operation(ctx context.Context, operation *radioOperation) (operationResult, error) {
 	operation.port, operation.done = p, make(chan operationResult, 1)
+	operation.ctxErr = ctx.Err
 	if err := p.binding.controller.enqueue(operation); err != nil {
 		return operationResult{}, err
 	}
 	select {
 	case <-ctx.Done():
-		return operationResult{}, ctx.Err()
+		if p.binding.controller.cancelOperation(operation) {
+			return operationResult{}, ctx.Err()
+		}
+		// Hardware execution already started. Preserve its result so a
+		// completed transmission reaches the shared duty ledger.
+		result := <-operation.done
+		return result, result.err
 	case result := <-operation.done:
 		return result, result.err
 	}
@@ -769,6 +948,9 @@ func (p *controllerPort) physical() Device {
 	c := p.binding.controller
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if p.closed {
+		return nil
+	}
 	return c.physical
 }
 
@@ -794,8 +976,11 @@ func (p *controllerPort) ChipStats() (ChipStats, bool) {
 }
 
 func (p *controllerPort) Airtime(bytes int) time.Duration {
-	if dev := p.physical(); dev != nil {
-		return dev.Airtime(bytes)
+	if p.airtime != nil {
+		// Airtime is pure arithmetic at the configured waveform. Keeping
+		// the calculator of this logical session prevents a controller
+		// bounce from silently turning a shadow reservation into zero.
+		return p.airtime(bytes)
 	}
 	return 0
 }
@@ -804,7 +989,7 @@ func (p *controllerPort) Close() error {
 	c := p.binding.controller
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.closePortLocked(p, nil)
+	c.closePortLocked(p, ErrBindingClosed)
 	return nil
 }
 
@@ -814,11 +999,41 @@ func (c *Controller) closePortLocked(port *controllerPort, err error) {
 	}
 	port.closed = true
 	delete(c.ports, port)
-	if err != nil {
-		select {
-		case port.inbox <- receiveResult{err: err}:
-		default:
+	if err == nil {
+		err = ErrControllerDown
+	}
+	c.dropPortOperationsLocked(port, err)
+	port.mu.Lock()
+	port.stop = err
+	port.queue = nil
+	close(port.done)
+	port.mu.Unlock()
+}
+
+func (c *Controller) dropPortOperationsLocked(port *controllerPort, err error) {
+	fail := func(queue []*radioOperation) []*radioOperation {
+		kept := queue[:0]
+		for _, operation := range queue {
+			if operation.port != port {
+				kept = append(kept, operation)
+				continue
+			}
+			operation.canceled = true
+			select {
+			case operation.done <- operationResult{err: err}:
+			default:
+			}
+		}
+		return kept
+	}
+	c.relayQueue = fail(c.relayQueue)
+	for key, queue := range c.stationQueues {
+		queue = fail(queue)
+		if len(queue) == 0 {
+			delete(c.stationQueues, key)
+		} else {
+			c.stationQueues[key] = queue
 		}
 	}
-	close(port.inbox)
+	c.rebuildRROrderLocked()
 }

@@ -197,15 +197,19 @@ Delivery deliberately distinguishes the forwarding path from optional clients:
 ```text
 physical Receive
       │
-      ├── relay inbox       blocking/lossless
+      ├── relay queue       lossless, independently drained
       ├── station A inbox   bounded (32), drop when full
       └── station B inbox   bounded (32), drop when full
 ```
 
-The relay is offered the result first and its inbox is lossless. Station inboxes
-are bounded and lossy. A companion that stops reading can lose its own view of
-traffic, with a warning, but cannot apply backpressure to the relay or physical
-receive loop.
+The controller never waits for a logical consumer while delivering. Each port
+owns its receive queue: the relay queue is lossless and warns at exponentially
+spaced high-water marks, while station queues are bounded and lossy. A slow
+relay therefore consumes memory visibly but cannot deadlock the controller's
+hardware-operation scheduler. A companion that stops reading can lose its own
+view of traffic, with a warning, but cannot apply backpressure to the relay or
+physical receive loop. Companion socket pushes cross a separate bounded writer
+queue, so a zero TCP window cannot stop that station's RF processing either.
 
 The driver assigns a correlation identifier when a reception first crosses the
 hardware seam. The same `radio.Frame` and correlation then reach every logical
@@ -236,6 +240,13 @@ Controller scheduling is intentionally simple:
 - stations are visited round-robin, while each station's own operations remain
   FIFO; and
 - an operation already executing is not preempted.
+
+Cancellation removes an operation that has not started. Once hardware
+execution has begun, the logical call waits for its report even if its parent
+session is cancelled; this is required for a real transmission to reach the
+shared airtime ledger. Protocol transmitters provide their own bounded context
+without inheriting session cancellation, while each LBT request is bounded by
+the remaining LBT window.
 
 Strict relay priority can starve stations under sustained relay hardware work.
 That is an explicit safety policy: forwarding continuity wins over local
@@ -310,6 +321,11 @@ The relay and station lifecycles react differently by design:
 Invalid declarative configuration is different from a recoverable device
 failure. Preflight creates a visible stillborn relay or unavailable attachment
 instead of retrying hardware forever with a choice that can never work.
+
+Preflight is topological: changing a radio, relay, or attached station judges
+every consumer on the resulting radio before persistence. Driver waveform and
+transmit checks apply to stations as well as relays, and all non-dry consumers
+must request the same physical duty budget.
 
 ## Observability
 
