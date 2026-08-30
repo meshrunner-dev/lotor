@@ -214,17 +214,18 @@ func (s *service) receiveAdvert(ctx context.Context, packet *mesh.Packet) {
 			Code: companion.PushContactDeleted, Body: result.evicted[:],
 		})
 	}
-	if err == nil && result.stored {
-		advert, _ := mesh.ParseAdvert(packet.Payload)
-		entry := s.contacts[advert.Identity.PubKey]
-		s.cacheAdvertPathLocked(entry.info.PublicKey, packet)
+	if err == nil && result.announce {
+		s.cacheAdvertPathLocked(result.contact.PublicKey, packet)
 		if result.created {
-			wire, _ := companion.MarshalResponse(companion.ContactResponse{Contact: entry.info})
+			wire, _ := companion.MarshalResponse(companion.ContactResponse{Contact: result.contact})
 			responses = append(responses, companion.Push{Code: companion.PushNewAdvert, Body: wire[1:]})
 		} else {
-			responses = append(responses, companion.Push{Code: companion.PushAdvert, Body: entry.info.PublicKey[:]})
+			responses = append(responses, companion.Push{
+				Code: companion.PushAdvert, Body: result.contact.PublicKey[:],
+			})
 		}
-	} else if err == nil && result.full {
+	}
+	if err == nil && result.full {
 		responses = append(responses, companion.Push{Code: companion.PushContactsFull})
 	}
 	s.mu.Unlock()

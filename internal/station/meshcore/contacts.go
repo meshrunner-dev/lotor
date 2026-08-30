@@ -158,9 +158,11 @@ func (s *service) durableContactCount() int {
 
 type advertStoreResult struct {
 	stored, created bool
+	announce        bool
 	full            bool
 	evicted         [mesh.PubKeySize]byte
 	hadEviction     bool
+	contact         companion.Contact
 }
 
 // storeAdvert verifies and updates a contact from an advert. enforceReplay is
@@ -179,17 +181,37 @@ func (s *service) storeAdvert(packet *mesh.Packet, enforceReplay bool) (advertSt
 	if exists && enforceReplay && uint32(advert.Timestamp.Unix()) <= entry.info.LastAdvertUnix {
 		return advertStoreResult{}, nil
 	}
-	result := advertStoreResult{created: !exists}
+	if exists && entry.ephemeral {
+		delete(s.contacts, key)
+		entry, exists = contactEntry{}, false
+	}
+	result := advertStoreResult{created: !exists, announce: true}
 	if !exists {
 		var admitted bool
-		result, admitted = s.admitNewContact(advert.Data.Type, packet.PathHashCount())
+		admission, ok := s.admitNewContact(advert.Data.Type, packet.PathHashCount())
+		result.full, result.evicted, result.hadEviction = admission.full,
+			admission.evicted, admission.hadEviction
+		admitted = ok
+		entry.info = contactFromAdvert(advert, time.Now().Add(s.clockDelta))
+		result.contact = entry.info
 		if !admitted {
 			return result, nil
 		}
 		s.nextContact++
 		entry.order = s.nextContact
 	}
-	entry.info.PublicKey = key
+	s.updateContactFromAdvert(&entry, advert)
+	entry.advert, err = canonicalAdvert(packet)
+	if err != nil {
+		return advertStoreResult{}, err
+	}
+	s.contacts[key] = entry
+	result.stored, result.contact = true, entry.info
+	return result, nil
+}
+
+func (s *service) updateContactFromAdvert(entry *contactEntry, advert *mesh.Advert) {
+	entry.info.PublicKey = advert.Identity.PubKey
 	entry.info.Type = advert.Data.Type
 	entry.info.Name = advert.Data.Name
 	entry.info.LastAdvertUnix = uint32(advert.Timestamp.Unix())
@@ -197,25 +219,30 @@ func (s *service) storeAdvert(packet *mesh.Packet, enforceReplay bool) (advertSt
 	if advert.Data.HasLoc {
 		entry.info.LatitudeE6, entry.info.LongitudeE6 = advert.Data.LatE6, advert.Data.LonE6
 	}
-	entry.info.PathLen = packet.PathLen
-	entry.info.Path = [mesh.MaxPathSize]byte{}
-	copy(entry.info.Path[:], packet.Path)
+}
 
-	// Export/share stores a plain, zero-path FLOOD advert exactly like the
-	// reference blob store, independent of the scope/path by which it arrived.
+// canonicalAdvert is the export/share copy: a plain, zero-path flood,
+// independent of the scope and inbound route by which it arrived.
+func canonicalAdvert(packet *mesh.Packet) ([]byte, error) {
 	copyPacket := *packet
 	copyPacket.Payload = append([]byte(nil), packet.Payload...)
 	copyPacket.Path = nil
 	copyPacket.Header = mesh.MakeHeader(mesh.RouteFlood, mesh.PayloadTypeAdvert, packet.PayloadVer())
 	copyPacket.TransportCodes = [2]uint16{}
 	copyPacket.SetPathHashSizeAndCount(packet.PathHashSize(), 0)
-	entry.advert, err = copyPacket.MarshalBinary()
-	if err != nil {
-		return advertStoreResult{}, err
+	return copyPacket.MarshalBinary()
+}
+
+func contactFromAdvert(advert *mesh.Advert, now time.Time) companion.Contact {
+	contact := companion.Contact{
+		PublicKey: advert.Identity.PubKey, Type: advert.Data.Type, PathLen: 0xff,
+		Name: advert.Data.Name, LastAdvertUnix: uint32(advert.Timestamp.Unix()),
+		LastModifiedUnix: uint32(now.Unix()),
 	}
-	s.contacts[key] = entry
-	result.stored = true
-	return result, nil
+	if advert.Data.HasLoc {
+		contact.LatitudeE6, contact.LongitudeE6 = advert.Data.LatE6, advert.Data.LonE6
+	}
+	return contact
 }
 
 func (s *service) admitNewContact(advertType uint8, hops int) (advertStoreResult, bool) {

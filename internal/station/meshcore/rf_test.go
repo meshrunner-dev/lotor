@@ -135,9 +135,10 @@ func TestAdvertCapacityNotifiesTheCompanion(t *testing.T) {
 		}
 		app := attachApplication(t, svc)
 		packet, _ := advert(t, 3, 1_800_000_003)
-		got := readPushAfter(t, app, func() { svc.receiveAdvert(t.Context(), packet) })
-		if !bytes.Equal(got, []byte{byte(companion.PushContactsFull)}) {
-			t.Fatalf("contacts-full push = % X", got)
+		got := readPushesAfter(t, app, 2, func() { svc.receiveAdvert(t.Context(), packet) })
+		if got[0][0] != byte(companion.PushNewAdvert) ||
+			!bytes.Equal(got[1], []byte{byte(companion.PushContactsFull)}) {
+			t.Fatalf("full-table pushes = % X", got)
 		}
 	})
 
@@ -161,6 +162,24 @@ func TestAdvertCapacityNotifiesTheCompanion(t *testing.T) {
 		if got[1][0] != byte(companion.PushNewAdvert) || len(got[1]) < 33 ||
 			!bytes.Equal(got[1][1:33], newest[:]) {
 			t.Fatalf("new-advert push = % X", got[1])
+		}
+		if contact := svc.contacts[newest].info; contact.PathLen != 0xff {
+			t.Fatalf("advert inbound path became contact route: %+v", contact)
+		}
+	})
+
+	t.Run("manual", func(t *testing.T) {
+		svc := buildService(t)
+		svc.p.ManualContacts = true
+		app := attachApplication(t, svc)
+		packet, publicKey := advert(t, 4, 1_800_000_004)
+		got := readPushAfter(t, app, func() { svc.receiveAdvert(t.Context(), packet) })
+		if got[0] != byte(companion.PushNewAdvert) || len(svc.contacts) != 0 {
+			t.Fatalf("manual advert push = % X contacts=%d", got, len(svc.contacts))
+		}
+		path := svc.handle(t.Context(), companion.GetAdvertPath{PublicKey: publicKey})
+		if len(path) != 1 {
+			t.Fatalf("manual advert path = %#v", path)
 		}
 	})
 }
