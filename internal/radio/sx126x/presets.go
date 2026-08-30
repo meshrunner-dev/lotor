@@ -43,6 +43,28 @@ var presets = map[string]map[string]any{
 		attrMaxTxPower: int8(22),
 		attrFreqRange:  []uint32{850_000_000, 930_000_000},
 	},
+	// Station G3 station kit on an Orange Pi Zero 2W header: the same
+	// BQ35LORA900V1M daughterboard the Lyra entry carries — an SX1262
+	// behind a power amplifier and an LNA — so the PA again takes the
+	// chip to its full 22 dBm, DIO2 steers the RF switch and DIO3
+	// feeds the 1.8 V TCXO. Only the header's three lines move, and
+	// every one of them names its chip: this SoC carries its 288-line
+	// pinctrl on the SECOND character device and leaves the first to a
+	// 32-line bank, so a pin trusting the default would land on an
+	// unrelated line. The SPI node stays with the operator's override
+	// scope, as always.
+	"orangepi-zero2w-station-g3": {
+		attrResetPin:   "gpiochip1:76",
+		attrBusyPin:    "gpiochip1:228",
+		attrDIO1Pin:    "gpiochip1:261",
+		attrDIO2RF:     true,
+		attrTCXO:       tcxo1V8,
+		attrDCDC:       true,
+		attrRXBoosted:  true,
+		attrChip:       chipSX1262,
+		attrMaxTxPower: int8(22),
+		attrFreqRange:  []uint32{850_000_000, 930_000_000},
+	},
 }
 
 // Presets exposes the catalog to the registry.

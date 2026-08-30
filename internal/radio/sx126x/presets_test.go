@@ -33,6 +33,37 @@ func TestEveryPresetIsABoardThatInspects(t *testing.T) {
 	}
 }
 
+func TestTheZero2WKitRidesTheSecondCharacterDevice(t *testing.T) {
+	// This SoC's 288-line pinctrl is gpiochip1 to the character
+	// device and base 0 to sysfs, so the numbers other daemons print
+	// are this bank's offsets and nothing may resolve onto the
+	// default chip — that one is the 32-line PL block, and a reset
+	// driven there would toggle an unrelated line.
+	cfg := map[string]any{"spi": "/dev/spidev1.0"}
+	maps.Copy(cfg, Presets()["orangepi-zero2w-station-g3"])
+	typed, err := config.Decode[map[string]any](cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := settingsFrom(typed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []struct {
+		name string
+		pin  *Pin
+		want int
+	}{
+		{"reset", s.ResetPin, 76},
+		{"busy", s.BusyPin, 228},
+		{"dio1", s.DIO1Pin, 261},
+	} {
+		if p.pin.Chip != "gpiochip1" || p.pin.Offset != p.want {
+			t.Errorf("%s = %s:%d, want gpiochip1:%d", p.name, p.pin.Chip, p.pin.Offset, p.want)
+		}
+	}
+}
+
 func TestStationG3KitResolvesItsSplitBanks(t *testing.T) {
 	// The kit's one peculiarity: reset lives on the SoC's second GPIO
 	// bank while busy and DIO1 ride the default — the per-pin chip
