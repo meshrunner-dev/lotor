@@ -104,6 +104,8 @@ func (s *service) sendText(command companion.SendText) []companion.Response {
 	if command.TextType == mesh.TxtTypePlain {
 		head := plain[:5+len(text)]
 		expectedACK = mesh.AckCRC(head, s.id.PubKey[:])
+		s.expectedACKs[s.nextACK] = ackExpectation{crc: expectedACK, at: time.Now(), used: true}
+		s.nextACK = (s.nextACK + 1) % len(s.expectedACKs)
 	}
 	return []companion.Response{companion.Sent{
 		Flood: flood, ExpectedACK: expectedACK, TimeoutMillis: s.estimateTimeout(packet, flood),
@@ -224,12 +226,17 @@ func pathByteLen(pathLen uint8) int {
 }
 
 func (s *service) submitLocked(packet *mesh.Packet, kind string) []companion.Response {
+	return s.submitAtLocked(packet, kind, time.Time{})
+}
+
+func (s *service) submitAtLocked(packet *mesh.Packet, kind string, notBefore time.Time) []companion.Response {
 	if s.txPolicy.Mode == "" || s.txPolicy.Mode == config.TXDry || s.rfDevice == nil || s.duty == nil {
 		return []companion.Response{companion.StatusResponse(companion.ResponseDisabled)}
 	}
-	item := emission{packet: packet, correlation: correlation.New(), kind: kind}
+	item := emission{packet: packet, correlation: correlation.New(), kind: kind, notBefore: notBefore}
 	select {
 	case s.outbound <- item:
+		s.seen.mark(packet.Hash())
 		return nil
 	default:
 		return errorResponses(companion.ErrorTableFull)

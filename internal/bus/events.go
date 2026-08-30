@@ -1,10 +1,31 @@
 package bus
 
 import (
+	"strings"
 	"time"
 
 	"meshrunner.dev/lotor/internal/correlation"
 )
+
+const (
+	// SourceRelay identifies a repeater pipeline on generic traffic events.
+	SourceRelay = "relay"
+	// SourceStation identifies a non-forwarding virtual companion.
+	SourceStation = "station"
+)
+
+// ArchiveSourceKey gives heterogeneous traffic producers disjoint durable
+// names. Relay names retain their historical spelling; station names use a
+// slash that the instance-name grammar forbids, so neither kind can collide.
+func ArchiveSourceKey(kind, name, legacyRelay string) string {
+	if kind == "" || kind == SourceRelay {
+		if name != "" {
+			return name
+		}
+		return legacyRelay
+	}
+	return strings.TrimSuffix(kind, "/") + "/" + name
+}
 
 // FrameHeard is published for every frame a relay's radio delivers,
 // before any protocol judgement.
@@ -81,7 +102,11 @@ type FrameCorrupt struct {
 // to the reception it answers; originated traffic (adverts) carries
 // its own.
 type FrameSent struct {
-	Relay       string
+	Relay string
+	// SourceKind and Source supersede Relay for non-relay producers. Relay
+	// stays populated by existing repeater pipelines and wire observers.
+	SourceKind  string
+	Source      string
 	Correlation correlation.ID
 	At          time.Time
 	Airtime     time.Duration
@@ -97,10 +122,15 @@ type FrameSent struct {
 	Raw []byte
 }
 
+// SourceKey is the collision-free durable identity of this producer.
+func (e FrameSent) SourceKey() string { return ArchiveSourceKey(e.SourceKind, e.Source, e.Relay) }
+
 // TxDropped is an emission the pipeline gave up on, with its reason:
 // queue-full, duty, lbt (when the site chose drop), tx-failed.
 type TxDropped struct {
 	Relay       string
+	SourceKind  string
+	Source      string
 	Correlation correlation.ID
 	At          time.Time
 	Reason      string
@@ -109,6 +139,9 @@ type TxDropped struct {
 	// Empty when the pipeline gave up before it knew.
 	Kind string
 }
+
+// SourceKey is the collision-free durable identity of this producer.
+func (e TxDropped) SourceKey() string { return ArchiveSourceKey(e.SourceKind, e.Source, e.Relay) }
 
 // NoiseFloor is a relay channel's measured ambient level — what the
 // radio hears between frames: the batch median in DBm, the 90th

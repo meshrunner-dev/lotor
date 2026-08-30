@@ -365,16 +365,17 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 	case bus.NoiseStarved:
 		err = s.store.insertMetric(ctx, "noise_starved", e.Relay, e.At, float64(e.Aborted))
 	case bus.FrameSent:
-		window, next := s.nextTxWindow(e.Relay, e.At, e.Airtime)
-		if err = s.store.recordSent(ctx, e.At, e.Relay, e.Correlation.String(), e.Kind,
+		source := e.SourceKey()
+		window, next := s.nextTxWindow(source, e.At, e.Airtime)
+		if err = s.store.recordSent(ctx, e.At, source, e.Correlation.String(), e.Kind,
 			e.Airtime, e.PowerDBm, e.Shadow, window); err == nil {
 			if s.txWindows == nil {
 				s.txWindows = map[string][]txStamp{}
 			}
-			s.txWindows[e.Relay] = next
+			s.txWindows[source] = next
 		}
 	case bus.TxDropped:
-		err = s.store.recordTxDrop(ctx, e.At, e.Relay, e.Correlation.String(), e.Reason, e.Kind)
+		err = s.store.recordTxDrop(ctx, e.At, e.SourceKey(), e.Correlation.String(), e.Reason, e.Kind)
 	case bus.RelayState:
 		err = s.store.insertRelayState(ctx, e.At, e.Relay, e.State, e.Err)
 	case bus.ObserverState:
@@ -439,9 +440,9 @@ func frameCorrelation(ev bus.Event) []zap.Field {
 	case bus.FrameCorrupt:
 		relay, id = e.Relay, e.Correlation.Short()
 	case bus.FrameSent:
-		relay, id = e.Relay, e.Correlation.Short()
+		relay, id = e.SourceKey(), e.Correlation.Short()
 	case bus.TxDropped:
-		relay, id = e.Relay, e.Correlation.Short()
+		relay, id = e.SourceKey(), e.Correlation.Short()
 	default:
 		return nil
 	}

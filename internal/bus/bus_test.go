@@ -2,6 +2,18 @@ package bus
 
 import "testing"
 
+func TestTrafficSourceKeysKeepStationsDisjointFromRelays(t *testing.T) {
+	relay := FrameSent{Relay: "alice"}
+	station := FrameSent{SourceKind: SourceStation, Source: "alice"}
+	if relay.SourceKey() != "alice" || station.SourceKey() != "station/alice" ||
+		relay.SourceKey() == station.SourceKey() {
+		t.Fatalf("source keys relay=%q station=%q", relay.SourceKey(), station.SourceKey())
+	}
+	if got := (TxDropped{SourceKind: SourceStation, Source: "alice"}).SourceKey(); got != "station/alice" {
+		t.Fatalf("drop source = %q", got)
+	}
+}
+
 func TestFanOutAndDropAccounting(t *testing.T) {
 	b := New()
 	fast := b.Subscribe(4)

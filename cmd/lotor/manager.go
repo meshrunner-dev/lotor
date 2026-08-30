@@ -544,7 +544,7 @@ func (m *manager) spentAirtimeForRadio(ctx context.Context, radioName string) []
 	}
 	for name, sc := range m.file.Stations {
 		if sc.Radio == radioName && sc.TXMode() != config.TXDry {
-			ownerSet[name] = true
+			ownerSet[bus.ArchiveSourceKey(bus.SourceStation, name, "")] = true
 		}
 	}
 	var spent []protocol.Spent

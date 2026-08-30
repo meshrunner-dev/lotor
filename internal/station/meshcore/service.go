@@ -124,8 +124,8 @@ func validatePreferences(p params) error {
 	if p.NodeLat < -90 || p.NodeLat > 90 || p.NodeLon < -180 || p.NodeLon > 180 {
 		return fmt.Errorf("meshcore station params: invalid location %g,%g", p.NodeLat, p.NodeLon)
 	}
-	if p.MultiACKs < 0 || p.MultiACKs > 3 {
-		return fmt.Errorf("meshcore station params: multi_acks %d — want 0..3", p.MultiACKs)
+	if p.MultiACKs < 0 || p.MultiACKs > 1 {
+		return fmt.Errorf("meshcore station params: multi_acks %d — want 0 or 1", p.MultiACKs)
 	}
 	if p.AdvertLoc < 0 || p.AdvertLoc > math.MaxUint8 || p.TelemetryMode < 0 || p.TelemetryMode > math.MaxUint8 {
 		return errors.New("meshcore station params: advert_loc_policy and telemetry_mode must fit one byte")
@@ -226,6 +226,12 @@ type contactEntry struct {
 	order  uint64
 }
 
+type ackExpectation struct {
+	crc  uint32
+	at   time.Time
+	used bool
+}
+
 type service struct {
 	name, listen, radioName string
 	p                       params
@@ -255,6 +261,9 @@ type service struct {
 	sendScope    [16]byte
 	sendUnscoped bool
 	mailbox      [][]byte
+	seen         packetRing
+	expectedACKs [8]ackExpectation
+	nextACK      int
 	binding      *radio.Binding
 	rfCause      string
 	stateStore   station.StateStore

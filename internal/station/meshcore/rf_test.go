@@ -3,6 +3,8 @@ package meshcore
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"net"
 	"testing"
 	"time"
 
@@ -69,6 +71,10 @@ func TestRFGroupMailboxSurvivesRestartAndSync(t *testing.T) {
 	if len(svc.mailbox) != 1 || svc.mailbox[0][0] != byte(companion.ResponseChannelMessageV3) {
 		t.Fatalf("mailbox = % X", svc.mailbox)
 	}
+	svc.processRF(t.Context(), radio.Frame{Payload: raw, SNR: 2.25})
+	if len(svc.mailbox) != 1 {
+		t.Fatalf("duplicate group message entered mailbox %d times", len(svc.mailbox))
+	}
 
 	built, err = build(spec)
 	if err != nil {
@@ -90,6 +96,169 @@ func TestRFGroupMailboxSurvivesRestartAndSync(t *testing.T) {
 	}
 	if got := requireService(t, built).mailbox; len(got) != 0 {
 		t.Fatalf("popped mailbox restored: % X", got)
+	}
+}
+
+func TestFloodedDirectTextQueuesACKPathReturn(t *testing.T) {
+	spec := testSpec(t)
+	spec.TX = station.TXPolicy{Mode: config.TXShadow, QueueDepth: 4}
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	svc.rfDevice = &stationRadio{}
+	svc.duty = radio.NewAirtimeLedger(time.Hour, nil)
+	peer, err := mesh.NewLocalIdentity(bytes.NewReader(bytes.Repeat([]byte{11}, 64)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = svc.handle(t.Context(), companion.AddUpdateContact{Contact: companion.Contact{
+		PublicKey: peer.PubKey, Type: mesh.AdvTypeChat, PathLen: 0xff, Name: "peer",
+	}})
+	secret, err := peer.SharedSecret(svc.id.PubKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := mesh.BuildTextPlaintext(time.Unix(1_800_000_000, 0), mesh.TxtTypePlain, "private")
+	packet, err := mesh.BuildDatagram(mesh.PayloadTypeTxtMsg,
+		svc.id.PubKey[:mesh.PathHashSize], peer.PubKey[:mesh.PathHashSize], secret, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet.SetPathHashSizeAndCount(1, 2)
+	packet.Path = []byte{4, 5}
+	raw, _ := packet.MarshalBinary()
+	svc.processRF(t.Context(), radio.Frame{Payload: raw})
+	item := <-svc.outbound
+	if item.packet.PayloadType() != mesh.PayloadTypePath || !item.packet.IsRouteFlood() ||
+		item.notBefore.IsZero() {
+		t.Fatalf("path reply = %+v", item)
+	}
+	datagram, err := mesh.ParseDatagram(item.packet.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := datagram.Open(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	returned, err := mesh.DecodePathReturn(opened)
+	if err != nil || returned.PathLen != packet.PathLen || !bytes.Equal(returned.Path, packet.Path) ||
+		returned.ExtraType != uint8(mesh.PayloadTypeAck) || len(returned.Extra) < 4 ||
+		binary.LittleEndian.Uint32(returned.Extra) != mesh.AckCRC(plain, peer.PubKey[:]) {
+		t.Fatalf("returned path = %+v, %v", returned, err)
+	}
+	svc.processRF(t.Context(), radio.Frame{Payload: raw})
+	select {
+	case duplicate := <-svc.outbound:
+		t.Fatalf("duplicate text queued another reply: %+v", duplicate)
+	default:
+	}
+}
+
+func TestACKPushConfirmsAnExpectedSend(t *testing.T) {
+	spec := testSpec(t)
+	spec.TX = station.TXPolicy{Mode: config.TXShadow, QueueDepth: 4}
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	svc.rfDevice = &stationRadio{}
+	svc.duty = radio.NewAirtimeLedger(time.Hour, nil)
+	peer := [32]byte{1, 2, 3}
+	_ = svc.handle(t.Context(), companion.AddUpdateContact{Contact: companion.Contact{
+		PublicKey: peer, Type: mesh.AdvTypeChat, PathLen: 0xff, Name: "peer",
+	}})
+	responses := svc.handle(t.Context(), companion.SendText{
+		TextType: mesh.TxtTypePlain, UnixSeconds: 1_800_000_000,
+		RecipientPrefix: [6]byte{1, 2, 3}, Text: "hello",
+	})
+	sent, ok := responses[0].(companion.Sent)
+	if !ok {
+		t.Fatalf("send = %#v", responses)
+	}
+	<-svc.outbound
+
+	stationSide, appSide := net.Pipe()
+	defer stationSide.Close()
+	defer appSide.Close()
+	svc.mu.Lock()
+	svc.client, svc.generation = stationSide, 1
+	svc.mu.Unlock()
+	frames := make(chan [][]byte, 1)
+	go func() {
+		got := make([][]byte, 0, 2)
+		for range 2 {
+			frame, readErr := companion.ReadFrame(appSide, companion.ToApplication)
+			if readErr != nil {
+				return
+			}
+			got = append(got, frame.Payload)
+		}
+		frames <- got
+	}()
+	ack := make([]byte, 4)
+	binary.LittleEndian.PutUint32(ack, sent.ExpectedACK)
+	packet, err := mesh.BuildAck(ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := packet.MarshalBinary()
+	svc.processRF(t.Context(), radio.Frame{Payload: raw, SNR: 1, RSSI: -90})
+	got := <-frames
+	if len(got) != 2 || got[0][0] != byte(companion.PushLogRXData) ||
+		got[1][0] != byte(companion.PushSendConfirmed) ||
+		binary.LittleEndian.Uint32(got[1][1:5]) != sent.ExpectedACK {
+		t.Fatalf("ACK pushes = % X", got)
+	}
+}
+
+func TestReceivedPathPersistsAndQueuesReciprocal(t *testing.T) {
+	store := &memoryStationState{}
+	spec := testSpec(t)
+	spec.State = store
+	spec.TX = station.TXPolicy{Mode: config.TXShadow, QueueDepth: 4}
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	svc.rfDevice = &stationRadio{}
+	svc.duty = radio.NewAirtimeLedger(time.Hour, nil)
+	peer, err := mesh.NewLocalIdentity(bytes.NewReader(bytes.Repeat([]byte{12}, 64)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = svc.handle(t.Context(), companion.AddUpdateContact{Contact: companion.Contact{
+		PublicKey: peer.PubKey, Type: mesh.AdvTypeChat, PathLen: 0xff, Name: "peer",
+	}})
+	secret, _ := peer.SharedSecret(svc.id.PubKey[:])
+	packet, err := mesh.BuildPathReturn(svc.id.PubKey[:mesh.PathHashSize],
+		peer.PubKey[:mesh.PathHashSize], secret, 2, []byte{9, 10}, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet.SetPathHashSizeAndCount(1, 1)
+	packet.Path = []byte{7}
+	raw, _ := packet.MarshalBinary()
+	svc.processRF(t.Context(), radio.Frame{Payload: raw})
+	contact := svc.contacts[peer.PubKey].info
+	if contact.PathLen != 2 || contact.Path[0] != 9 || contact.Path[1] != 10 || contact.LastModifiedUnix == 0 {
+		t.Fatalf("stored contact path = %+v", contact)
+	}
+	item := <-svc.outbound
+	if item.kind != "station-path-reciprocal" || !item.packet.IsRouteDirect() ||
+		item.packet.PathLen != 2 || !bytes.Equal(item.packet.Path, []byte{9, 10}) {
+		t.Fatalf("reciprocal = %+v", item)
+	}
+	restored, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := requireService(t, restored).contacts[peer.PubKey].info; got.PathLen != 2 || got.Path[1] != 10 {
+		t.Fatalf("restored path = %+v", got)
 	}
 }
 
