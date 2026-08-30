@@ -1,9 +1,7 @@
 package meshcore
 
 import (
-	"encoding/hex"
-	"fmt"
-	"strings"
+	"meshrunner.dev/lotor/internal/meshcorecfg"
 
 	"meshrunner.dev/pkg/meshcore"
 )
@@ -20,21 +18,5 @@ import (
 //   - 96 bytes: an expanded private key with its public key appended;
 //     the pair is verified to agree.
 func identityFromConfig(value string) (*meshcore.LocalIdentity, error) {
-	raw, err := hex.DecodeString(strings.TrimSpace(value))
-	if err != nil {
-		return nil, fmt.Errorf("identity: want hex: %w", err)
-	}
-	switch len(raw) {
-	case meshcore.SeedSize:
-		return meshcore.LocalIdentityFromSeed(raw)
-	case meshcore.PrvKeySize:
-		return meshcore.LocalIdentityFromKeys(raw, nil)
-	case meshcore.PrvKeySize + meshcore.PubKeySize:
-		return meshcore.LocalIdentityFromKeys(raw[:meshcore.PrvKeySize], raw[meshcore.PrvKeySize:])
-	default:
-		return nil, fmt.Errorf(
-			"identity: %d bytes — want a %d-byte seed, a %d-byte private key, or a %d-byte key pair",
-			len(raw), meshcore.SeedSize, meshcore.PrvKeySize,
-			meshcore.PrvKeySize+meshcore.PubKeySize)
-	}
+	return meshcorecfg.Identity(value)
 }

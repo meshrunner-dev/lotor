@@ -5,7 +5,10 @@ package meshcore
 // exists in one and not the other fails the build gate, which is what
 // keeps the console's help honest.
 
-import "meshrunner.dev/lotor/internal/schema"
+import (
+	"meshrunner.dev/lotor/internal/meshcorecfg"
+	"meshrunner.dev/lotor/internal/schema"
+)
 
 // Schema describes every attribute a meshcore relay accepts.
 func Schema() []schema.Attr {
@@ -17,22 +20,7 @@ func Schema() []schema.Attr {
 // relay hears nothing. The band preset supplies these; overriding
 // them is leaving the mesh.
 func waveformSchema() []schema.Attr {
-	return []schema.Attr{
-		{Name: "frequency_hz", Type: schema.Int,
-			Doc: "carrier frequency in hertz — a mesh agreement, exact"},
-		{Name: "spreading_factor", Type: schema.Int,
-			Doc: "LoRa spreading factor (7..12)"},
-		{Name: "bandwidth_hz", Type: schema.Int,
-			Doc: "LoRa bandwidth in hertz"},
-		{Name: "coding_rate", Type: schema.Int,
-			Doc: "LoRa coding rate denominator (5..8)"},
-		{Name: "preamble", Type: schema.Int,
-			Doc: "preamble length in symbols"},
-		{Name: "sync_word", Type: schema.Int,
-			Doc: "LoRa sync word"},
-		{Name: "crc", Type: schema.Bool,
-			Doc: "whether frames carry a CRC"},
-	}
+	return meshcorecfg.WaveformSchema()
 }
 
 // relayingSchema is the relaying behaviour: how frames move through
