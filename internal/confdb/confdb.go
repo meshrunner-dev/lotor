@@ -39,6 +39,7 @@ const Memory = ":memory:"
 const (
 	KindRadio    = "radio"
 	KindRelay    = "relay"
+	KindStation  = "station"
 	KindSensor   = "sensor"
 	KindSentinel = "sentinel"
 	KindCLI      = "cli"
@@ -295,6 +296,15 @@ func assign(f *config.File, kind, name string, attrs []byte) error {
 			return err
 		}
 		f.Relays[name] = r
+	case KindStation:
+		s, err := fromAttrs[config.Station](attrs)
+		if err != nil {
+			return err
+		}
+		if f.Stations == nil {
+			f.Stations = map[string]config.Station{}
+		}
+		f.Stations[name] = s
 	case KindSensor:
 		s, err := fromAttrs[config.Sensor](attrs)
 		if err != nil {
@@ -410,12 +420,15 @@ type importObject struct {
 
 // fileObjects flattens a configuration into its store rows.
 func fileObjects(f *config.File) []importObject {
-	objects := make([]importObject, 0, len(f.Radios)+len(f.Relays)+len(f.Sensors)+2)
+	objects := make([]importObject, 0, len(f.Radios)+len(f.Relays)+len(f.Stations)+len(f.Sensors)+2)
 	for name, r := range f.Radios {
 		objects = append(objects, importObject{KindRadio, name, r})
 	}
 	for name, r := range f.Relays {
 		objects = append(objects, importObject{KindRelay, name, r})
+	}
+	for name, s := range f.Stations {
+		objects = append(objects, importObject{KindStation, name, s})
 	}
 	for name, sn := range f.Sensors {
 		objects = append(objects, importObject{KindSensor, name, sn})

@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -57,6 +59,20 @@ type Relay struct {
 	NoiseHistory *bool `yaml:"noise_history"`
 	// TX gates and tunes the transmit path; absent means dry — the
 	// receive-only posture.
+	TX *TX `yaml:"tx"`
+}
+
+// Station declares one locally hosted end-user identity. Its listener and
+// protocol state exist independently of RF; Radio is optional and attaching or
+// detaching it must not tear down the companion connection. The layered
+// protocol configuration carries the station's desired waveform and identity.
+type Station struct {
+	Protocol string  `yaml:"protocol"`
+	Listen   string  `yaml:"listen"`
+	Radio    string  `yaml:"radio"`
+	Layered  Layered `yaml:",inline"`
+	// TX is the station's own transmit gate. It shares the radio's physical
+	// scheduler and ledger when attached, but never grants forwarding authority.
 	TX *TX `yaml:"tx"`
 }
 
@@ -260,15 +276,16 @@ type Update struct {
 
 // File is the top-level configuration.
 type File struct {
-	Radios   map[string]Radio  `yaml:"radios"`
-	Relays   map[string]Relay  `yaml:"relays"`
-	Sensors  map[string]Sensor `yaml:"sensors"`
-	Sentinel *Sentinel         `yaml:"sentinel"`
-	CLI      *CLI              `yaml:"cli"`
-	Web      *Web              `yaml:"web"`
-	System   *System           `yaml:"system"`
-	Update   *Update           `yaml:"update"`
-	MQTT     map[string]MQTT   `yaml:"mqtt"`
+	Radios   map[string]Radio   `yaml:"radios"`
+	Relays   map[string]Relay   `yaml:"relays"`
+	Stations map[string]Station `yaml:"stations"`
+	Sensors  map[string]Sensor  `yaml:"sensors"`
+	Sentinel *Sentinel          `yaml:"sentinel"`
+	CLI      *CLI               `yaml:"cli"`
+	Web      *Web               `yaml:"web"`
+	System   *System            `yaml:"system"`
+	Update   *Update            `yaml:"update"`
+	MQTT     map[string]MQTT    `yaml:"mqtt"`
 }
 
 // The cadence a sensor may be read at. The floor keeps a bus shared
@@ -355,6 +372,7 @@ func validateNames(f *File) error {
 		names []string
 	}{
 		{"relay", keysOf(f.Relays)}, {"radio", keysOf(f.Radios)},
+		{"station", keysOf(f.Stations)},
 		{"sensor", keysOf(f.Sensors)}, {"observer", keysOf(f.MQTT)},
 	} {
 		for _, name := range set.names {
@@ -435,12 +453,12 @@ func Load(path string) (*File, error) {
 func (f *File) validate() error { return f.Validate(true) }
 
 // Validate cross-checks an assembled configuration, wherever it was
-// assembled. A file with no relays is a mistake — nobody writes one
-// to run nothing — but a database may honestly hold none yet: a
+// assembled. A file with neither relays nor stations is a mistake — nobody
+// writes one to run nothing — but a database may honestly hold none yet: a
 // daemon comes up with its console and waits to be configured.
 func (f *File) Validate(requireRelays bool) error {
-	if requireRelays && len(f.Relays) == 0 {
-		return errors.New("no relays declared")
+	if requireRelays && len(f.Relays) == 0 && len(f.Stations) == 0 {
+		return errors.New("no relays or stations declared")
 	}
 	// The handles first: a name the console cannot spell makes every
 	// later judgement moot, because the object it names could never
@@ -472,6 +490,37 @@ func (f *File) Validate(requireRelays bool) error {
 		}
 		owner[r.Radio] = name
 	}
+	listeners := make(map[uint16]string, len(f.Stations))
+	for name, s := range f.Stations {
+		if s.Protocol == "" {
+			return fmt.Errorf("station %q: protocol is required", name)
+		}
+		if s.Listen == "" {
+			return fmt.Errorf("station %q: listen is required", name)
+		}
+		port, err := stationListenPort(s.Listen)
+		if err != nil {
+			return fmt.Errorf("station %q: %w", name, err)
+		}
+		if other, taken := listeners[port]; taken {
+			return fmt.Errorf("stations %q and %q both use companion TCP port %d", other, name, port)
+		}
+		listeners[port] = name
+		if s.Radio != "" {
+			if _, ok := f.Radios[s.Radio]; !ok {
+				return fmt.Errorf("station %q: radio %q is not declared", name, s.Radio)
+			}
+		}
+		if s.TX != nil {
+			if err := s.TX.Normalize(); err != nil {
+				return fmt.Errorf("station %q: %w", name, err)
+			}
+			if s.TX.Mode == TXOnAirZeroHop {
+				return fmt.Errorf("station %q: tx mode %q belongs to relays — want dry, shadow or on-air",
+					name, TXOnAirZeroHop)
+			}
+		}
+	}
 	for name, r := range f.Radios {
 		if r.Driver == "" {
 			return fmt.Errorf("radio %q: driver is required", name)
@@ -485,6 +534,21 @@ func (f *File) Validate(requireRelays bool) error {
 		return f.Sentinel.validate()
 	}
 	return nil
+}
+
+// stationListenPort validates the explicit TCP address and returns the port
+// whose uniqueness is the station contract. Two different local addresses do
+// not make a shared port dedicated to either station.
+func stationListenPort(listen string) (uint16, error) {
+	_, rawPort, err := net.SplitHostPort(listen)
+	if err != nil {
+		return 0, fmt.Errorf("listen %q is not host:port: %w", listen, err)
+	}
+	port, err := strconv.ParseUint(rawPort, 10, 16)
+	if err != nil || port == 0 {
+		return 0, fmt.Errorf("listen %q has no numeric TCP port in 1..65535", listen)
+	}
+	return uint16(port), nil
 }
 
 // defaultListeners fills the listener addresses a present-but-silent

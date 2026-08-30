@@ -499,6 +499,34 @@ func TestAFutureStoreIsRefusedBeforeAnyDDL(t *testing.T) {
 	_ = ok.Close()
 }
 
+func TestStationConfigurationRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, Memory, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	f := &config.File{Stations: map[string]config.Station{
+		"alice": {
+			Protocol: "meshcore", Listen: "127.0.0.1:5000",
+			Layered: config.Layered{Profile: "eu-868-narrow"},
+			TX:      &config.TX{Mode: config.TXShadow},
+		},
+	}}
+	if err := s.ImportFile(ctx, f, "test"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	station, ok := got.Stations["alice"]
+	if !ok || station.Protocol != "meshcore" || station.Listen != "127.0.0.1:5000" ||
+		station.Layered.Profile != "eu-868-narrow" || station.TX == nil || station.TX.Mode != config.TXShadow {
+		t.Fatalf("station round trip = %+v", station)
+	}
+}
+
 func TestAFutureStoreKeepsItsJournalMode(t *testing.T) {
 	// The pragmas are writes too: journal_mode=DELETE durably rewrote
 	// a future base's journaling protocol before the refusal landed.

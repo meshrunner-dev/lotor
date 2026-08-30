@@ -38,6 +38,33 @@ func RelayAttrs() []schema.Attr {
 	}
 }
 
+// StationAttrs describes a locally hosted station's structure. The protocol
+// contributes its identity, mailbox and desired waveform fields.
+func StationAttrs() []schema.Attr {
+	return []schema.Attr{
+		{Name: "protocol", Type: schema.String,
+			Doc: "the protocol this station speaks (chooses the rest of its attributes)"},
+		{Name: "listen", Type: schema.String,
+			Doc: "the dedicated companion TCP listener; required and unique"},
+		{Name: "radio", Type: schema.String,
+			Doc: "optional radio attachment; empty keeps the station TCP-only"},
+		{Name: attrProfile, Type: schema.String,
+			Doc: `the station preset; "custom" starts from nothing`},
+		{Name: "tx.mode", Type: schema.String,
+			Enum: []string{TXDry, TXShadow, TXOnAir},
+			Doc:  "the station transmit gate; absent means dry"},
+		{Name: "tx.lbt_threshold_db", Type: schema.Float,
+			Doc: "margin above the noise floor that marks the channel busy (0 disables the RSSI stage)"},
+		{Name: "tx.lbt_exhausted", Type: schema.String,
+			Enum: []string{LBTTransmit, LBTDrop},
+			Doc:  "what a channel busy past the bounded wait earns"},
+		{Name: "tx.queue_depth", Type: schema.Int,
+			Doc: "outbound queue bound, 1..63 (0 takes 32)"},
+		{Name: "tx.cad", Type: schema.Bool,
+			Doc: "listen with the radio's activity detection before keying"},
+	}
+}
+
 // attrProfile is the layering knob every layered kind carries.
 const attrProfile = "profile"
 

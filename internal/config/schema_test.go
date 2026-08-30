@@ -61,6 +61,9 @@ func TestStructuralSchemasCoverTheirStructs(t *testing.T) {
 		// attributes, not an attribute itself; profile alone is.
 		"overrides": "the attr storage, not an attr",
 	})
+	covered(t, StationAttrs(), reflect.TypeFor[Station](), map[string]string{
+		"overrides": "the attr storage, not an attr",
+	})
 	covered(t, RadioAttrs(), reflect.TypeFor[Radio](), map[string]string{
 		"overrides": "the attr storage, not an attr",
 	})

@@ -287,6 +287,60 @@ func TestTXRejectsANegativeThreshold(t *testing.T) {
 	}
 }
 
+func TestStationsValidateIndependentTCPAndOptionalRadio(t *testing.T) {
+	station := Station{Protocol: "meshcore", Listen: "127.0.0.1:5000"}
+	f := &File{Stations: map[string]Station{"alice": station}}
+	if err := f.Validate(true); err != nil {
+		t.Fatalf("detached station-only file: %v", err)
+	}
+
+	station.Radio = "slot1"
+	f.Stations["alice"] = station
+	if err := f.Validate(false); err == nil {
+		t.Fatal("station attached to an undeclared radio")
+	}
+	f.Radios = map[string]Radio{"slot1": {Driver: "test"}}
+	if err := f.Validate(false); err != nil {
+		t.Fatalf("attached station: %v", err)
+	}
+}
+
+func TestStationsRequireDedicatedNumericPorts(t *testing.T) {
+	base := Station{Protocol: "meshcore", Listen: "127.0.0.1:5000"}
+	for _, c := range []struct {
+		name   string
+		listen string
+	}{
+		{"missing port", "127.0.0.1"},
+		{"service name", "127.0.0.1:meshcore"},
+		{"zero", "127.0.0.1:0"},
+	} {
+		f := &File{Stations: map[string]Station{"alice": {
+			Protocol: "meshcore", Listen: c.listen,
+		}}}
+		if err := f.Validate(false); err == nil {
+			t.Errorf("%s accepted", c.name)
+		}
+	}
+
+	f := &File{Stations: map[string]Station{
+		"alice": base,
+		"bob":   {Protocol: "meshcore", Listen: "10.0.0.1:5000"},
+	}}
+	if err := f.Validate(false); err == nil {
+		t.Fatal("two stations sharing a port on different addresses")
+	}
+}
+
+func TestStationRejectsRelayOnlyTXRung(t *testing.T) {
+	f := &File{Stations: map[string]Station{"alice": {
+		Protocol: "meshcore", Listen: "127.0.0.1:5000", TX: &TX{Mode: TXOnAirZeroHop},
+	}}}
+	if err := f.Validate(false); err == nil {
+		t.Fatal("station accepted on-air-zero-hop")
+	}
+}
+
 func TestASensorsCadenceIsBounded(t *testing.T) {
 	// A bus shared with a radio is not a thing to read a thousand
 	// times a second, and every other cadence here says its range.
