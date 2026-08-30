@@ -233,9 +233,10 @@ type channel struct {
 }
 
 type contactEntry struct {
-	info   companion.Contact
-	advert []byte
-	order  uint64
+	info      companion.Contact
+	advert    []byte
+	order     uint64
+	syncSince uint32
 }
 
 type ackExpectation struct {
@@ -784,9 +785,7 @@ func (s *service) setDeviceTime(seconds uint32) []companion.Response {
 		return errorResponses(companion.ErrorIllegalArgument)
 	}
 	s.clockDelta = time.Until(requested)
-	// The reference accepts a forward clock update without writing a response
-	// frame. Companion applications treat it as fire-and-forget.
-	return nil
+	return okResponses()
 }
 
 func (s *service) uniqueTimestampLocked() uint32 {

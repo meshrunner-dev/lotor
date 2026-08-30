@@ -149,6 +149,20 @@ func TestDetachedStationForbidsRepeatingAndKeepsRadioPreferences(t *testing.T) {
 	}
 }
 
+func TestDeviceTimeUpdateAcknowledgesLikeTheReference(t *testing.T) {
+	built, err := build(testSpec(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	responses := svc.handle(t.Context(), companion.SetDeviceTime{
+		UnixSeconds: uint32(time.Now().Add(time.Minute).Unix()),
+	})
+	if len(responses) != 1 || responses[0] != companion.StatusResponse(companion.ResponseOK) {
+		t.Fatalf("set device time responses = %#v", responses)
+	}
+}
+
 type memoryStationState struct {
 	state []byte
 	fail  bool

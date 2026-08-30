@@ -205,6 +205,89 @@ func TestRemoteLoginAndStatusRequestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRoomLoginAndKeepAliveCarryPersistedSyncCursor(t *testing.T) {
+	store := &memoryStationState{}
+	spec := testSpec(t)
+	spec.State = store
+	spec.TX = station.TXPolicy{Mode: config.TXShadow, QueueDepth: 8}
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	svc.rfDevice = &stationRadio{}
+	svc.duty = radio.NewAirtimeLedger(time.Hour, nil)
+	room := testPeer(t, 37)
+	responses := svc.handle(t.Context(), companion.AddUpdateContact{Contact: companion.Contact{
+		PublicKey: room.PubKey, Type: mesh.AdvTypeRoom, PathLen: 0, Name: "room",
+	}})
+	if len(responses) != 1 || responses[0] != companion.StatusResponse(companion.ResponseOK) {
+		t.Fatalf("add room = %#v", responses)
+	}
+	secret, err := room.SharedSecret(svc.id.PubKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	const syncSince = uint32(1_800_000_000)
+	plain := mesh.BuildTextPlaintext(time.Unix(int64(syncSince), 0), mesh.TxtTypeSignedPlain,
+		string([]byte{1, 2, 3, 4})+"signed")
+	packet, err := mesh.BuildDatagram(mesh.PayloadTypeTxtMsg,
+		svc.id.PubKey[:mesh.PathHashSize], room.PubKey[:mesh.PathHashSize], secret, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := packet.MarshalBinary()
+	svc.processRF(t.Context(), radio.Frame{Payload: raw})
+	if svc.contacts[room.PubKey].syncSince != syncSince {
+		t.Fatalf("sync cursor = %d, want %d", svc.contacts[room.PubKey].syncSince, syncSince)
+	}
+
+	built, err = build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc = requireService(t, built)
+	svc.rfDevice = &stationRadio{}
+	svc.duty = radio.NewAirtimeLedger(time.Hour, nil)
+	responses = svc.handle(t.Context(), companion.SendLogin{PublicKey: room.PubKey, Password: "guest"})
+	if _, ok := responses[0].(companion.Sent); !ok {
+		t.Fatalf("room login = %#v", responses)
+	}
+	emission := <-svc.outbound
+	anon, err := mesh.ParseAnonDatagram(emission.packet.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := anon.Open(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body, err := mesh.UnframeAdmin(opened)
+	if err != nil || len(body) < 9 || binary.LittleEndian.Uint32(body[:4]) != syncSince ||
+		string(body[4:9]) != "guest" {
+		t.Fatalf("room login body = % X, %v", body, err)
+	}
+
+	svc.connections[room.PubKey] = remoteConnection{
+		keepAlive: time.Minute, activeAt: time.Now(), nextPing: time.Now().Add(-time.Second),
+	}
+	svc.checkConnections()
+	emission = <-svc.outbound
+	datagram, err := mesh.ParseDatagram(emission.packet.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err = datagram.Open(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body, err = mesh.UnframeAdmin(opened)
+	if err != nil || len(body) < 5 || body[0] != mesh.ReqKeepAlive ||
+		binary.LittleEndian.Uint32(body[1:5]) != syncSince {
+		t.Fatalf("room keep-alive body = % X, %v", body, err)
+	}
+}
+
 func TestAnonymousRequestNeedsNoPersistentContact(t *testing.T) {
 	svc := testRFService(t)
 	peer := testPeer(t, 29)

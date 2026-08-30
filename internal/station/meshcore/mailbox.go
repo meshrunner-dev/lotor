@@ -1,6 +1,13 @@
 package meshcore
 
-import "meshrunner.dev/pkg/meshcore/companion"
+import (
+	"context"
+
+	"go.uber.org/zap"
+
+	mesh "meshrunner.dev/pkg/meshcore"
+	"meshrunner.dev/pkg/meshcore/companion"
+)
 
 func mailboxChannel(payload []byte) bool {
 	if len(payload) == 0 {
@@ -34,4 +41,30 @@ func (s *service) enqueueMailboxLocked(response companion.Response) bool {
 	}
 	s.mailbox = append(s.mailbox, payload)
 	return true
+}
+
+func (s *service) enqueueContactMailbox(ctx context.Context, publicKey [mesh.PubKeySize]byte,
+	syncSince uint32, response companion.Response,
+) {
+	s.mu.Lock()
+	before := s.snapshotLocked()
+	changed := false
+	if entry, exists := s.contacts[publicKey]; exists && syncSince > entry.syncSince {
+		entry.syncSince = syncSince
+		s.contacts[publicKey] = entry
+		changed = true
+	}
+	accepted := s.enqueueMailboxLocked(response)
+	var err error
+	if accepted || changed {
+		err = s.persistLocked(ctx, before)
+	}
+	s.mu.Unlock()
+	if err != nil {
+		s.log.Error("station contact mailbox persistence failed", zap.Error(err))
+		return
+	}
+	if accepted {
+		s.push(companion.MessagesWaiting{})
+	}
 }

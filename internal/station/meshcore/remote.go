@@ -2,7 +2,6 @@ package meshcore
 
 import (
 	"bytes"
-	crand "crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"time"
@@ -62,7 +61,13 @@ func (s *service) sendLogin(command companion.SendLogin) []companion.Response {
 		password = password[:15]
 	}
 	tag := s.uniqueTimestampLocked()
-	packet, _, err := mesh.BuildLoginReq(s.id, contact.info.PublicKey[:], tag, password)
+	var packet *mesh.Packet
+	var err error
+	if contact.info.Type == mesh.AdvTypeRoom {
+		packet, _, err = mesh.BuildRoomLoginReq(s.id, contact.info.PublicKey[:], tag, contact.syncSince, password)
+	} else {
+		packet, _, err = mesh.BuildLoginReq(s.id, contact.info.PublicKey[:], tag, password)
+	}
 	if err != nil {
 		return errorResponses(companion.ErrorTableFull)
 	}
@@ -78,8 +83,8 @@ func (s *service) sendLogin(command companion.SendLogin) []companion.Response {
 }
 
 func (s *service) sendStatusRequest(publicKey [mesh.PubKeySize]byte) []companion.Response {
-	body, ok := standardRequestBody(mesh.ReqGetStatus, 0)
-	if !ok {
+	body, err := mesh.FrameStatusRequest()
+	if err != nil {
 		return errorResponses(companion.ErrorTableFull)
 	}
 	return s.sendKnownRequest(publicKey, body, pendingStatus, "station-status-request", false)
@@ -95,19 +100,11 @@ func (s *service) sendTelemetryRequest(command companion.SendTelemetryRequest) [
 		body = append(body, encoder.Bytes()...)
 		return []companion.Response{companion.Push{Code: companion.PushTelemetryResponse, Body: body}}
 	}
-	body, ok := standardRequestBody(mesh.ReqGetTelemetry, 0)
-	if !ok {
+	body, err := mesh.FrameTelemetryRequest(0)
+	if err != nil {
 		return errorResponses(companion.ErrorTableFull)
 	}
 	return s.sendKnownRequest(command.PublicKey, body, pendingTelemetry, "station-telemetry-request", false)
-}
-
-func standardRequestBody(kind uint8, inversePermissions uint8) ([]byte, bool) {
-	body := []byte{kind, inversePermissions, 0, 0, 0, 0, 0, 0, 0}
-	if _, err := crand.Read(body[5:9]); err != nil {
-		return nil, false
-	}
-	return body, true
 }
 
 func (s *service) sendContactDataRequest(command companion.ContactDataRequest) []companion.Response {
@@ -171,8 +168,8 @@ func (s *service) sendKnownRequest(publicKey [mesh.PubKeySize]byte, body []byte,
 }
 
 func (s *service) sendPathDiscovery(publicKey [mesh.PubKeySize]byte) []companion.Response {
-	body, ok := standardRequestBody(mesh.ReqGetTelemetry, ^uint8(1))
-	if !ok {
+	body, err := mesh.FrameTelemetryRequest(^uint8(1))
+	if err != nil {
 		return errorResponses(companion.ErrorTableFull)
 	}
 	return s.sendKnownRequest(publicKey, body, pendingDiscovery, "station-path-discovery", true)
@@ -341,7 +338,7 @@ func (s *service) checkConnections() {
 			continue
 		}
 		tag := s.uniqueTimestampLocked()
-		body := []byte{mesh.ReqKeepAlive, 0, 0, 0, 0}
+		body := mesh.FrameKeepAliveRequest(contact.syncSince)
 		packet, err := mesh.BuildRequest(s.id, key[:], secret, tag, body)
 		if err != nil {
 			s.connections[key] = connection

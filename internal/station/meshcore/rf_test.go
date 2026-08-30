@@ -55,6 +55,7 @@ func TestRFGroupMailboxSurvivesRestartAndSync(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := requireService(t, built)
+	_ = svc.handle(t.Context(), companion.DeviceQuery{TargetVersion: 3})
 	secret := [16]byte{1, 2, 3}
 	_ = svc.handle(t.Context(), companion.SetChannel{Index: 2, Name: "ops", Secret: secret})
 	group, err := mesh.NewGroupChannel(secret[:])
@@ -270,6 +271,7 @@ func TestRFDirectTextDecryptsForKnownContact(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := requireService(t, built)
+	_ = svc.handle(t.Context(), companion.DeviceQuery{TargetVersion: 3})
 	peer, err := mesh.NewLocalIdentity(bytes.NewReader(bytes.Repeat([]byte{7}, 64)))
 	if err != nil {
 		t.Fatal(err)
@@ -292,6 +294,32 @@ func TestRFDirectTextDecryptsForKnownContact(t *testing.T) {
 	if len(svc.mailbox) != 1 || svc.mailbox[0][0] != byte(companion.ResponseContactMessageV3) ||
 		string(svc.mailbox[0][16:]) != "private" {
 		t.Fatalf("direct mailbox = % X", svc.mailbox)
+	}
+}
+
+func TestLegacyApplicationGetsPreV3MailboxFrames(t *testing.T) {
+	built, err := build(testSpec(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	_ = svc.handle(t.Context(), companion.DeviceQuery{TargetVersion: 2})
+	secret := [16]byte{1, 2, 3}
+	_ = svc.handle(t.Context(), companion.SetChannel{Index: 2, Name: "ops", Secret: secret})
+	group, err := mesh.NewGroupChannel(secret[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := mesh.BuildGroupDatagram(mesh.PayloadTypeGrpTxt, group,
+		mesh.BuildGroupText(time.Unix(1_800_000_000, 0), "bob", "legacy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := packet.MarshalBinary()
+	svc.processRF(t.Context(), radio.Frame{Payload: raw, SNR: 2.25})
+	if len(svc.mailbox) != 1 || svc.mailbox[0][0] != byte(companion.ResponseChannelMessage) ||
+		string(svc.mailbox[0][8:]) != "bob: legacy" {
+		t.Fatalf("legacy mailbox = % X", svc.mailbox)
 	}
 }
 

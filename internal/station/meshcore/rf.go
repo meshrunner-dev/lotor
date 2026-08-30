@@ -262,11 +262,26 @@ func (s *service) receiveDirectText(ctx context.Context, packet *mesh.Packet, fr
 		if packet.IsRouteFlood() {
 			pathLen = packet.PathLen
 		}
-		s.enqueueMailbox(ctx, companion.ContactMessageV3{
+		s.mu.Lock()
+		appVersion := s.appVersion
+		s.mu.Unlock()
+		var response companion.Response = companion.ContactMessageV3{
 			SNRx4: snrQuarter(frame.SNR), SenderPrefix: [6]byte(contact.info.PublicKey[:6]),
 			PathLen: pathLen, TextType: message.Type, UnixSeconds: uint32(message.Timestamp.Unix()),
 			SignedPrefix: prefix, Text: message.Text,
-		})
+		}
+		if appVersion < 3 {
+			response = companion.ContactMessage{
+				SenderPrefix: [6]byte(contact.info.PublicKey[:6]), PathLen: pathLen,
+				TextType: message.Type, UnixSeconds: uint32(message.Timestamp.Unix()),
+				SignedPrefix: prefix, Text: message.Text,
+			}
+		}
+		syncSince := uint32(0)
+		if message.Type == mesh.TxtTypeSignedPlain {
+			syncSince = uint32(message.Timestamp.Unix())
+		}
+		s.enqueueContactMailbox(ctx, contact.info.PublicKey, syncSince, response)
 		s.replyToText(contact, packet, plain, message)
 		return
 	}
@@ -497,11 +512,8 @@ func (s *service) receiveGroup(ctx context.Context, packet *mesh.Packet, frame r
 				if end := bytes.IndexByte(text, 0); end >= 0 {
 					text = text[:end]
 				}
-				s.enqueueMailbox(ctx, companion.ChannelMessageV3{
-					SNRx4: snrQuarter(frame.SNR), Channel: index, PathLen: pathLen,
-					TextType: mesh.TxtTypePlain, UnixSeconds: uint32(message.Timestamp.Unix()),
-					Text: string(text),
-				})
+				s.enqueueGroupText(ctx, index, pathLen, frame.SNR,
+					uint32(message.Timestamp.Unix()), string(text))
 			}
 			return
 		}
@@ -514,6 +526,25 @@ func (s *service) receiveGroup(ctx context.Context, packet *mesh.Packet, frame r
 		}
 		return
 	}
+}
+
+func (s *service) enqueueGroupText(ctx context.Context, channel, pathLen uint8, snr float64,
+	timestamp uint32, text string,
+) {
+	s.mu.Lock()
+	appVersion := s.appVersion
+	s.mu.Unlock()
+	var response companion.Response = companion.ChannelMessageV3{
+		SNRx4: snrQuarter(snr), Channel: channel, PathLen: pathLen,
+		TextType: mesh.TxtTypePlain, UnixSeconds: timestamp, Text: text,
+	}
+	if appVersion < 3 {
+		response = companion.ChannelMessage{
+			Channel: channel, PathLen: pathLen, TextType: mesh.TxtTypePlain,
+			UnixSeconds: timestamp, Text: text,
+		}
+	}
+	s.enqueueMailbox(ctx, response)
 }
 
 func snrQuarter(snr float64) int8 {

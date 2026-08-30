@@ -35,6 +35,7 @@ type persistedContact struct {
 	LastModifiedUnix uint32   `json:"lastModifiedUnix"`
 	Advert           []byte   `json:"advert,omitempty"`
 	Order            uint64   `json:"order"`
+	SyncSince        uint32   `json:"syncSince,omitempty"`
 }
 
 type persistedWaveform struct {
@@ -120,7 +121,8 @@ func (s *service) snapshotLocked() persistedState {
 			PublicKey: info.PublicKey, Type: info.Type, Flags: info.Flags, PathLen: info.PathLen,
 			Path: info.Path, Name: info.Name, LastAdvertUnix: info.LastAdvertUnix,
 			LatitudeE6: info.LatitudeE6, LongitudeE6: info.LongitudeE6,
-			LastModifiedUnix: info.LastModifiedUnix, Advert: append([]byte(nil), entry.advert...), Order: entry.order,
+			LastModifiedUnix: info.LastModifiedUnix, Advert: append([]byte(nil), entry.advert...),
+			Order: entry.order, SyncSince: entry.syncSince,
 		})
 	}
 	sort.Slice(state.Contacts, func(i, j int) bool { return state.Contacts[i].Order < state.Contacts[j].Order })
@@ -158,6 +160,7 @@ func (s *service) restoreLocked(state persistedState) {
 		}
 		s.contacts[item.PublicKey] = contactEntry{
 			info: info, advert: append([]byte(nil), item.Advert...), order: item.Order,
+			syncSince: item.SyncSince,
 		}
 		s.nextContact = max(s.nextContact, item.Order)
 	}
