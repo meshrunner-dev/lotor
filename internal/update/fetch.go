@@ -31,6 +31,11 @@ type Client struct {
 	Trusted []PublicKey
 	// HTTP serves the requests; nil takes a client with sane bounds.
 	HTTP *http.Client
+	// Progress, when set, is told how much of an artifact has arrived
+	// as it arrives. It runs on the fetching goroutine, once per
+	// chunk, so it must not block — the pacing of what an operator
+	// sees belongs to whoever renders it, not to the download.
+	Progress func(done, total int64)
 }
 
 func (c *Client) http() *http.Client {

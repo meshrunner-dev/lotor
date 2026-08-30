@@ -1634,7 +1634,9 @@ func (s *session) updateInstall(ctx context.Context, in input) error {
 	}
 	dir := update.StageDir(s.deps.StateDir)
 	fmt.Fprintf(s.out, "fetching %s (%d bytes)…\r\n", m.Version, art.Size)
+	done := s.showFetchProgress(client)
 	staged, err := client.Download(ctx, art, dir)
+	done()
 	if err != nil {
 		return err
 	}
@@ -1657,6 +1659,87 @@ func (s *session) updateInstall(ctx context.Context, in input) error {
 		"%s staged — the installer takes it from here, and the daemon will restart\r\n",
 		m.Version)
 	return nil
+}
+
+// showFetchProgress draws a download in place and returns the call
+// that takes the line back. A megabyte over a slow link is a long
+// silence otherwise, and an operator watching a relay update needs to
+// know the difference between slow and stuck.
+//
+// Only a terminal gets it: repainting a line means nothing to a pipe,
+// and a script's transcript is better off with the two plain lines
+// this sits between. The blank return is deliberate — a session that
+// draws nothing still has something to call at the end.
+func (s *session) showFetchProgress(client *update.Client) func() {
+	if !s.colors {
+		return func() {}
+	}
+	var last time.Time
+	paint := func(done, total int64) {
+		fmt.Fprintf(s.out, "\r  %s %3d%%  %s / %s\x1b[K",
+			progressBar(done, total), percentOf(done, total),
+			humanBytes(done), humanBytes(total))
+	}
+	client.Progress = func(done, total int64) {
+		// Paced, not per chunk: the console may be a telnet session
+		// on the far end of the same radio link the relay serves. The
+		// last chunk always paints, so the bar reaches its end even
+		// when the whole download fits inside one interval.
+		now := time.Now()
+		if done < total && now.Sub(last) < progressEvery {
+			return
+		}
+		last = now
+		paint(done, total)
+	}
+	return func() {
+		client.Progress = nil
+		fmt.Fprint(s.out, "\r\x1b[K")
+	}
+}
+
+// progressEvery paces the repaint. Fast enough to read as motion,
+// slow enough that a narrow link carries bytes rather than frames.
+const progressEvery = 100 * time.Millisecond
+
+// progressCells is the bar's width, chosen to leave the whole line
+// well inside eighty columns beside the percentage and the sizes.
+const progressCells = 24
+
+// progressBar draws the fraction as a bar. A total of zero — a
+// manifest that never said how big — draws an empty one rather than
+// dividing by it.
+func progressBar(done, total int64) string {
+	filled := 0
+	if total > 0 {
+		filled = int(min(done, total) * progressCells / total)
+	}
+	return "▕" + strings.Repeat("█", filled) +
+		strings.Repeat("░", progressCells-filled) + "▏"
+}
+
+// percentOf is the fraction as whole percent, bounded to 100 so a
+// server sending one byte too many cannot report 101.
+func percentOf(done, total int64) int {
+	if total <= 0 {
+		return 0
+	}
+	return int(min(done, total) * 100 / total)
+}
+
+// humanBytes renders a size the way an operator reads one: three
+// significant figures at most, and the unit that keeps them.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	value, exp := float64(n)/unit, 0
+	for value >= unit && exp < 3 {
+		value /= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %s", value, [...]string{"kiB", "MiB", "GiB", "TiB"}[exp])
 }
 
 // mqttStatus shows one observer connection as it runs: the broker

@@ -60,6 +60,21 @@ type Ready struct {
 	Staged   time.Time `json:"staged"`
 }
 
+// progressCounter reports the bytes going past it. It is a writer in
+// the same fan-out as the file and the hash, so what it counts is
+// exactly what was written and hashed — never what a reader merely
+// offered.
+type progressCounter struct {
+	done, total int64
+	report      func(done, total int64)
+}
+
+func (p *progressCounter) Write(b []byte) (int, error) {
+	p.done += int64(len(b))
+	p.report(p.done, p.total)
+	return len(b), nil
+}
+
 // Download fetches one artifact into dir under the staged name,
 // verifying size and sha256 as the bytes arrive, and unpacking the
 // result when the artifact travels compressed. The order is the
@@ -121,7 +136,11 @@ func (c *Client) fetch(ctx context.Context, a Artifact, dest string, mode os.Fil
 		return err
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, a.Size+1))
+	sink := io.MultiWriter(f, h)
+	if c.Progress != nil {
+		sink = io.MultiWriter(f, h, &progressCounter{total: a.Size, report: c.Progress})
+	}
+	n, err := io.Copy(sink, io.LimitReader(resp.Body, a.Size+1))
 	if err == nil {
 		err = f.Sync()
 	}
