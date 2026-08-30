@@ -125,6 +125,18 @@ var (
 	drivers = map[string]Driver{}
 )
 
+// Registered lists every driver name, sorted, for schema-derived discovery.
+func Registered() []string {
+	mu.RLock()
+	defer mu.RUnlock()
+	names := make([]string, 0, len(drivers))
+	for name := range drivers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // Register adds a driver under its config name. Drivers register from
 // init; a duplicate name is a programming error and panics.
 func Register(name string, d Driver) {

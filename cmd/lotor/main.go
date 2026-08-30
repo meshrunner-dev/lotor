@@ -508,7 +508,8 @@ func acquireInstanceLock(configPath string) (func(), error) {
 func sensorKind() schema.Kind {
 	return schema.Kind{
 		Name: confdb.KindSensor, Doc: "one part attached to this machine, and what it measures",
-		Attrs: config.SensorAttrs(), ChoiceAttr: attrDriver,
+		Attrs:      choiceAttrs(config.SensorAttrs(), attrDriver, sensor.Registered()),
+		ChoiceAttr: attrDriver,
 		Contributed: func(choice string) []schema.Attr {
 			d, err := sensor.Lookup(choice)
 			if err != nil {
@@ -517,6 +518,18 @@ func sensorKind() schema.Kind {
 			return d.Schema
 		},
 	}
+}
+
+// choiceAttrs publishes the live registry as the closed values of a kind's
+// choice attribute. Validation, help and completion then share one vocabulary.
+func choiceAttrs(attrs []schema.Attr, choice string, values []string) []schema.Attr {
+	for i := range attrs {
+		if attrs[i].Name == choice {
+			attrs[i].Enum = append([]string(nil), values...)
+			break
+		}
+	}
+	return attrs
 }
 
 // sortedNames lists a preset catalogue in a stable order — what the
@@ -530,6 +543,25 @@ func sortedNames(presets map[string]map[string]any) []string {
 	return names
 }
 
+// profileNames completes an add line before or after its choice attribute.
+// Attributes are order-independent, so profile= typed before driver= or
+// protocol= sees the union; once the choice is present, the offer narrows to
+// that implementation's own catalog.
+func profileNames(choice string, choices []string,
+	catalog func(string) map[string]map[string]any,
+) []string {
+	if choice != "" {
+		return sortedNames(catalog(choice))
+	}
+	all := make(map[string]map[string]any)
+	for _, candidate := range choices {
+		for name := range catalog(candidate) {
+			all[name] = nil
+		}
+	}
+	return sortedNames(all)
+}
+
 // buildKinds assembles the configuration vocabulary the console (and
 // later channels) navigate: the structural attributes from the config
 // package, the contributed ones from whichever protocol or driver an
@@ -539,7 +571,8 @@ func buildKinds() []schema.Kind {
 	kinds = append(kinds, []schema.Kind{
 		{
 			Name: confdb.KindRelay, Doc: "one protocol instance, owning one radio",
-			Attrs: config.RelayAttrs(), ChoiceAttr: attrProtocol,
+			Attrs:      choiceAttrs(config.RelayAttrs(), attrProtocol, protocol.Registered()),
+			ChoiceAttr: attrProtocol,
 			Contributed: func(choice string) []schema.Attr {
 				b, err := protocol.Lookup(choice)
 				if err != nil {
@@ -548,17 +581,21 @@ func buildKinds() []schema.Kind {
 				return b.Schema
 			},
 			Profiles: func(choice string) []string {
-				b, err := protocol.Lookup(choice)
-				if err != nil {
-					return nil
-				}
-				return sortedNames(b.Presets)
+				return profileNames(choice, protocol.Registered(),
+					func(name string) map[string]map[string]any {
+						b, err := protocol.Lookup(name)
+						if err != nil {
+							return nil
+						}
+						return b.Presets
+					})
 			},
 		},
 		sensorKind(),
 		{
 			Name: confdb.KindRadio, Doc: "one physical transceiver attachment",
-			Attrs: config.RadioAttrs(), ChoiceAttr: attrDriver,
+			Attrs:      choiceAttrs(config.RadioAttrs(), attrDriver, radio.Registered()),
+			ChoiceAttr: attrDriver,
 			Contributed: func(choice string) []schema.Attr {
 				d, err := radio.Lookup(choice)
 				if err != nil {
@@ -567,11 +604,14 @@ func buildKinds() []schema.Kind {
 				return d.Schema
 			},
 			Profiles: func(choice string) []string {
-				d, err := radio.Lookup(choice)
-				if err != nil {
-					return nil
-				}
-				return sortedNames(d.Presets)
+				return profileNames(choice, radio.Registered(),
+					func(name string) map[string]map[string]any {
+						d, err := radio.Lookup(name)
+						if err != nil {
+							return nil
+						}
+						return d.Presets
+					})
 			},
 		},
 	}...)

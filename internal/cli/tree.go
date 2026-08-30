@@ -1741,6 +1741,16 @@ func (s *session) attrsForAddLine(kind string, rest []string) []schema.Attr {
 	return k.AttrsFor(choice)
 }
 
+// attrsForLine resolves the mutation vocabulary in the line being edited.
+// Add works at a collection, where attrsAt has no instance to inspect; its
+// choice and contributed attributes therefore come from the unfinished line.
+func (s *session) attrsForLine(path, rest []string) []schema.Attr {
+	if len(rest) > 0 && isAddVerb(rest[0]) && len(path) == 1 && !s.isSingleton(path) {
+		return s.attrsForAddLine(path[0], rest)
+	}
+	return s.attrsAt(path)
+}
+
 // argTermsFor is what may still be written after a verb: the
 // attributes a mutation acts on, or the arguments a command takes.
 // Help and completion both read it, so an argument nobody can
@@ -1753,11 +1763,7 @@ func (s *session) argTermsFor(path, rest []string) []term {
 	case verbRemove, verbDisable, verbEnable:
 		return s.instanceNameTerms(path)
 	case verbSet, verbSet64, verbUnset, verbAdd, verbAdd64:
-		attrs := s.attrsAt(path)
-		if isAddVerb(verb) && len(path) == 1 && !s.isSingleton(path) {
-			// The choice is on the line, not in the store yet.
-			attrs = s.attrsForAddLine(path[0], rest)
-		}
+		attrs := s.attrsForLine(path, rest)
 		out := make([]term, 0, len(attrs))
 		for _, a := range attrs {
 			doc := a.Doc
@@ -1863,7 +1869,7 @@ func humanList(words []string) string {
 // attribute allows, the values a flag declares for itself, or the
 // names of whatever a flag named after a kind takes.
 func (s *session) completeValue(path, rest []string, attr, val string) (string, []string) {
-	for _, a := range s.attrsAt(path) {
+	for _, a := range s.attrsForLine(path, rest) {
 		if a.Name == attr && len(a.Enum) > 0 {
 			return s.finishPlain(val, a.Enum, cAttr)
 		}

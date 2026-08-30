@@ -44,6 +44,46 @@ func sampleFile() *config.File {
 	}
 }
 
+func TestRadioProfilesCompleteBeforeTheDriverIsTyped(t *testing.T) {
+	var profiles func(string) []string
+	var drivers []string
+	for _, kind := range buildKinds() {
+		if kind.Name == confdb.KindRadio {
+			profiles = kind.Profiles
+			for _, attr := range kind.Attrs {
+				if attr.Name == "driver" {
+					drivers = attr.Enum
+				}
+			}
+			break
+		}
+	}
+	if profiles == nil {
+		t.Fatal("radio kind exposes no profile catalog")
+	}
+	want := "lyra-zerow-station-g3"
+	got := profiles("")
+	found := false
+	for _, profile := range got {
+		if profile == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("radio profiles before driver = %v, missing %q", got, want)
+	}
+	want = "sx126x-spi"
+	found = false
+	for _, driver := range drivers {
+		if driver == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("radio driver choices = %v, missing %q", drivers, want)
+	}
+}
+
 func TestApplyChangesEditsTheOverrideScope(t *testing.T) {
 	f := sampleFile()
 	change, relayName, err := applyChanges(f, "relay", "meshcore-868",

@@ -2423,8 +2423,18 @@ func checkRadioAlone(rd config.Radio) error {
 	if err != nil {
 		return err
 	}
-	return checkScopes(rd.Layered, drv.Presets,
-		func(cfg map[string]any) error { _, e := drv.Inspect(cfg); return e })
+	check := func(cfg map[string]any) error { _, e := drv.Inspect(cfg); return e }
+	if err := checkScopes(rd.Layered, drv.Presets, check); err != nil {
+		return err
+	}
+	// The selected profile may have no override scope, so the loop
+	// above never sees it. Resolve it explicitly: an unowned radio is
+	// still not allowed to persist a profile this binary does not know.
+	cfg, _, err := rd.Layered.Resolve(drv.Presets)
+	if err != nil {
+		return err
+	}
+	return check(cfg)
 }
 
 // checkSensorAlone validates a sensor that no relay has to consult:

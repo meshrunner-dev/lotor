@@ -213,6 +213,28 @@ func TestCreateRefusalIsInvisible(t *testing.T) {
 	}
 }
 
+func TestCreateRadioRefusesAProfileUnknownToThisBinary(t *testing.T) {
+	m := lifecycleManager(t)
+	_, err := m.Create(context.Background(), confdb.KindRadio, "g3",
+		map[string]string{
+			"driver":  "sx126x-spi",
+			"profile": "profile-this-binary-does-not-know",
+		}, "test")
+	if err == nil || !strings.Contains(err.Error(), "unknown profile") {
+		t.Fatalf("unknown radio profile refusal = %v", err)
+	}
+	if _, exists := m.file.Radios["g3"]; exists {
+		t.Fatal("the refused radio reached the manager's live file")
+	}
+	persisted, loadErr := m.store.Load(context.Background())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if _, exists := persisted.Radios["g3"]; exists {
+		t.Fatal("the refused radio reached the configuration store")
+	}
+}
+
 func TestManagerStartBringsUpTheTree(t *testing.T) {
 	f := sampleFile()
 	f.MQTT = map[string]config.MQTT{

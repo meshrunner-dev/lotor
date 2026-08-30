@@ -267,6 +267,8 @@ func TestProfileValuesComplete(t *testing.T) {
 	for _, c := range []struct{ line, add string }{
 		{"/mqtt/add eu profile=meshm", "apper "},
 		{"/mqtt/add eu profile=cus", "tom "},
+		{"/radio/add g3 profile=lyra-zerow-station-", "g3 "},
+		{"/radio/add g3 driver=sx126x-spi profile=rak6421-13300x-", "slot1 "},
 	} {
 		add, hints := s.complete(c.line)
 		if add != c.add || hints != nil {
@@ -276,6 +278,23 @@ func TestProfileValuesComplete(t *testing.T) {
 	// Two analyzers: the shared prefix advances, both show as hints.
 	if _, hints := s.complete("/mqtt/add eu profile=analyzer"); len(hints) != 2 {
 		t.Errorf("analyzer hints = %v", hints)
+	}
+}
+
+func TestChoiceValuesCompleteWhileAdding(t *testing.T) {
+	s := &session{deps: testDeps(t)}
+	for _, c := range []struct{ line, add string }{
+		{"/radio/add g3 driver=sx126", "x-spi "},
+		{"/relay/add mc protocol=mesh", "core "},
+	} {
+		add, hints := s.complete(c.line)
+		if add != c.add || hints != nil {
+			t.Errorf("complete(%q) = %q %v, want %q", c.line, add, hints, c.add)
+		}
+	}
+	s.setPath([]string{"radio"})
+	if add, hints := s.complete("add g3 driver=sx126"); add != "x-spi " || hints != nil {
+		t.Errorf("radio-context driver completion = %q %v", add, hints)
 	}
 }
 

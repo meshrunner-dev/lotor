@@ -85,7 +85,8 @@ func testKinds() []schema.Kind {
 	return []schema.Kind{
 		{
 			Name: "relay", Doc: "one protocol instance", ChoiceAttr: "protocol",
-			Attrs: []schema.Attr{{Name: "protocol", Type: schema.String, Doc: "the protocol"}},
+			Attrs: []schema.Attr{{Name: "protocol", Type: schema.String,
+				Enum: []string{"meshcore"}, Doc: "the protocol"}},
 			Contributed: func(choice string) []schema.Attr {
 				if choice != "meshcore" {
 					return nil
@@ -98,7 +99,17 @@ func testKinds() []schema.Kind {
 		},
 		{
 			Name: "radio", Doc: "one transceiver", ChoiceAttr: "driver",
-			Attrs: []schema.Attr{{Name: "driver", Type: schema.String, Doc: "the driver"}},
+			Attrs: []schema.Attr{
+				{Name: "driver", Type: schema.String,
+					Enum: []string{"sx126x-spi"}, Doc: "the driver"},
+				{Name: "profile", Type: schema.String, Doc: "the board preset"},
+			},
+			Profiles: func(choice string) []string {
+				if choice == "" || choice == "sx126x-spi" {
+					return []string{"lyra-zerow-station-g3", "rak6421-13300x-slot1"}
+				}
+				return nil
+			},
 		},
 		{
 			Name: "mqtt", Doc: "observer connections",
