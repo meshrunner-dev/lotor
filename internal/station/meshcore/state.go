@@ -69,25 +69,27 @@ func (w persistedWaveform) radio() radio.Waveform {
 type persistedState struct {
 	Version int `json:"version"`
 
-	Waveform      persistedWaveform  `json:"waveform"`
-	TXPowerDBm    int8               `json:"txPowerDbm"`
-	NodeName      string             `json:"nodeName"`
-	NodeLat       float64            `json:"nodeLat"`
-	NodeLon       float64            `json:"nodeLon"`
-	PIN           uint64             `json:"pin"`
-	MultiACKs     int                `json:"multiAcks"`
-	AdvertLoc     int                `json:"advertLocPolicy"`
-	TelemetryMode int                `json:"telemetryMode"`
-	ManualContact bool               `json:"manualAddContacts"`
-	PathHashMode  int                `json:"pathHashMode"`
-	ClockDelta    int64              `json:"clockDeltaNs"`
-	AutoFlags     uint8              `json:"autoAddFlags"`
-	AutoHops      uint8              `json:"autoAddMaxHops"`
-	DefaultScope  string             `json:"defaultScope"`
-	DefaultKey    [16]byte           `json:"defaultScopeKey"`
-	Channels      []persistedChannel `json:"channels,omitempty"`
-	Contacts      []persistedContact `json:"contacts,omitempty"`
-	Mailbox       [][]byte           `json:"mailbox,omitempty"`
+	Waveform       persistedWaveform  `json:"waveform"`
+	TXPowerDBm     int8               `json:"txPowerDbm"`
+	NodeName       string             `json:"nodeName"`
+	NodeLat        float64            `json:"nodeLat"`
+	NodeLon        float64            `json:"nodeLon"`
+	PIN            uint64             `json:"pin"`
+	MultiACKs      int                `json:"multiAcks"`
+	AdvertLoc      int                `json:"advertLocPolicy"`
+	TelemetryMode  int                `json:"telemetryMode"`
+	ManualContact  bool               `json:"manualAddContacts"`
+	PathHashMode   int                `json:"pathHashMode"`
+	RXDelayMilli   uint32             `json:"rxDelayMilli"`
+	AirFactorMilli uint32             `json:"airtimeFactorMilli"`
+	ClockDelta     int64              `json:"clockDeltaNs"`
+	AutoFlags      uint8              `json:"autoAddFlags"`
+	AutoHops       uint8              `json:"autoAddMaxHops"`
+	DefaultScope   string             `json:"defaultScope"`
+	DefaultKey     [16]byte           `json:"defaultScopeKey"`
+	Channels       []persistedChannel `json:"channels,omitempty"`
+	Contacts       []persistedContact `json:"contacts,omitempty"`
+	Mailbox        [][]byte           `json:"mailbox,omitempty"`
 }
 
 func (s *service) snapshotLocked() persistedState {
@@ -96,6 +98,7 @@ func (s *service) snapshotLocked() persistedState {
 		NodeName: s.p.NodeName, NodeLat: s.p.NodeLat, NodeLon: s.p.NodeLon, PIN: s.p.PIN,
 		MultiACKs: s.p.MultiACKs, AdvertLoc: s.p.AdvertLoc, TelemetryMode: s.p.TelemetryMode,
 		ManualContact: s.p.ManualContacts, PathHashMode: s.p.PathHashMode,
+		RXDelayMilli: s.p.RXDelayMilli, AirFactorMilli: s.p.AirFactorMilli,
 		ClockDelta: int64(s.clockDelta), AutoFlags: s.autoFlags, AutoHops: s.autoHops,
 		DefaultScope: s.defaultScope, DefaultKey: s.defaultKey,
 		Channels: make([]persistedChannel, 0, len(s.channels)),
@@ -128,6 +131,7 @@ func (s *service) restoreLocked(state persistedState) {
 	s.p.PIN, s.p.MultiACKs = state.PIN, state.MultiACKs
 	s.p.AdvertLoc, s.p.TelemetryMode = state.AdvertLoc, state.TelemetryMode
 	s.p.ManualContacts, s.p.PathHashMode = state.ManualContact, state.PathHashMode
+	s.p.RXDelayMilli, s.p.AirFactorMilli = state.RXDelayMilli, state.AirFactorMilli
 	s.clockDelta = time.Duration(state.ClockDelta)
 	s.autoFlags, s.autoHops = state.AutoFlags, state.AutoHops
 	s.defaultScope, s.defaultKey = state.DefaultScope, state.DefaultKey
@@ -184,6 +188,7 @@ func (s *service) validateState(state persistedState) error {
 	check.PIN, check.MultiACKs = state.PIN, state.MultiACKs
 	check.AdvertLoc, check.TelemetryMode = state.AdvertLoc, state.TelemetryMode
 	check.ManualContacts, check.PathHashMode = state.ManualContact, state.PathHashMode
+	check.RXDelayMilli, check.AirFactorMilli = state.RXDelayMilli, state.AirFactorMilli
 	if err := validateAir(check); err != nil {
 		return fmt.Errorf("meshcore station state: %w", err)
 	}

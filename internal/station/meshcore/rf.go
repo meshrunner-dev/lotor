@@ -91,6 +91,7 @@ func (s *service) receiveRF(ctx context.Context, device radio.Device) error {
 	for {
 		frame, err := device.Receive(ctx)
 		if errors.Is(err, radio.ErrCorrupt) {
+			s.recordCorruptReception(frame)
 			s.pushRawReception(frame)
 			logging.Trace(s.log, "station radio corrupt reception",
 				zap.String("corr", frame.Correlation.Short()), zap.Error(err))
@@ -112,12 +113,14 @@ func (s *service) clearRFDevice(device radio.Device) {
 }
 
 func (s *service) processRF(ctx context.Context, frame radio.Frame) {
+	s.recordReception(frame)
 	s.pushRawReception(frame)
 	packet, err := mesh.ParsePacket(frame.Payload)
 	if err != nil {
 		s.log.Debug("station frame malformed", zap.String("corr", frame.Correlation.Short()), zap.Error(err))
 		return
 	}
+	s.recordReceivedRoute(packet)
 	s.mu.Lock()
 	duplicate := s.seen.witness(packet.Hash())
 	s.mu.Unlock()
@@ -149,6 +152,34 @@ func (s *service) processRF(ctx context.Context, frame radio.Frame) {
 		s.receiveGroup(ctx, packet, frame)
 	default:
 		return
+	}
+}
+
+func (s *service) recordReception(frame radio.Frame) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stats.received++
+	s.stats.rxAir += max(time.Duration(0), frame.Airtime)
+	s.stats.lastRSSIDBm = int8(max(float64(math.MinInt8), min(float64(math.MaxInt8), math.Trunc(frame.RSSI))))
+	s.stats.lastSNRx4 = snrQuarter(frame.SNR)
+}
+
+func (s *service) recordCorruptReception(frame radio.Frame) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stats.receiveErrors++
+	s.stats.rxAir += max(time.Duration(0), frame.Airtime)
+	s.stats.lastRSSIDBm = int8(max(float64(math.MinInt8), min(float64(math.MaxInt8), math.Trunc(frame.RSSI))))
+	s.stats.lastSNRx4 = snrQuarter(frame.SNR)
+}
+
+func (s *service) recordReceivedRoute(packet *mesh.Packet) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if packet.IsRouteFlood() {
+		s.stats.receivedFlood++
+	} else if packet.IsRouteDirect() {
+		s.stats.receivedDirect++
 	}
 }
 
@@ -558,6 +589,7 @@ func (s *service) transmit(ctx context.Context, item emission) {
 		}
 	}
 	reservation.Commit(at, actualAir)
+	s.recordTransmission(item.packet, actualAir)
 	if s.bus != nil {
 		s.bus.Publish(bus.FrameSent{SourceKind: bus.SourceStation, Source: s.name,
 			Correlation: item.correlation, At: at,
@@ -567,6 +599,18 @@ func (s *service) transmit(ctx context.Context, item emission) {
 		zap.String("kind", item.kind), zap.Bool("shadow", shadow), zap.Error(txErr))
 	logging.Trace(s.log, "station tx emission accounted", zap.String("corr", item.correlation.Short()),
 		zap.Duration("airtime", actualAir), zap.Int8("power_dbm", actualPower), zap.Bool("shadow", shadow))
+}
+
+func (s *service) recordTransmission(packet *mesh.Packet, airtime time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stats.sent++
+	s.stats.txAir += max(time.Duration(0), airtime)
+	if packet.IsRouteFlood() {
+		s.stats.sentFlood++
+	} else if packet.IsRouteDirect() {
+		s.stats.sentDirect++
+	}
 }
 
 func (s *service) reserveDuty(ctx context.Context, ledger *radio.AirtimeLedger,

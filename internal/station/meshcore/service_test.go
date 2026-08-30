@@ -189,6 +189,17 @@ func TestCompanionPreferencesSurviveStationRestart(t *testing.T) {
 	secret := [16]byte{1, 2, 3}
 	_ = first.handle(t.Context(), companion.SetChannel{Index: 2, Name: "ops", Secret: secret})
 	_ = first.handle(t.Context(), companion.SetDefaultFloodScope{Name: "fr", Key: [16]byte{9}})
+	_ = first.handle(t.Context(), companion.SetTuningParams{
+		RXDelayMilli: 2_500, AirtimeFactorMilli: 1_250,
+	})
+	if got := first.handle(t.Context(), companion.SetDevicePIN{PIN: 1234}); len(got) != 1 || got[0] != (companion.ErrorResponse{Code: companion.ErrorIllegalArgument}) {
+		t.Fatalf("invalid PIN response = %#v", got)
+	}
+	_ = first.handle(t.Context(), companion.SetDevicePIN{PIN: 123456})
+	_ = first.handle(t.Context(), companion.SetOtherParams{
+		ManualContacts: true, TelemetryMode: 0xff, AdvertLocPolicy: 2, MultiACKs: 7,
+		HasTelemetry: true, HasAdvertLoc: true, HasMultiACKs: true,
+	})
 
 	built, err = build(spec)
 	if err != nil {
@@ -197,9 +208,18 @@ func TestCompanionPreferencesSurviveStationRestart(t *testing.T) {
 	second := requireService(t, built)
 	if second.p.NodeName != "Persisted" || second.RadioDemand().Waveform.BandwidthHz != 125_000 ||
 		second.p.SpreadingFactor != 9 || second.channels[2].name != "ops" ||
-		second.channels[2].secret != secret || second.defaultScope != "fr" || second.defaultKey[0] != 9 {
+		second.channels[2].secret != secret || second.defaultScope != "fr" || second.defaultKey[0] != 9 ||
+		second.p.RXDelayMilli != 2_500 || second.p.AirFactorMilli != 1_250 || second.p.PIN != 123456 ||
+		!second.p.ManualContacts || second.p.TelemetryMode != 0x3f || second.p.AdvertLoc != 2 ||
+		second.p.MultiACKs != 7 {
 		t.Fatalf("restored service = params %+v channel %+v scope %q/%x",
 			second.p, second.channels[2], second.defaultScope, second.defaultKey)
+	}
+	responses := second.handle(t.Context(), companion.SimpleCommand{Kind: companion.CommandGetTuningParams})
+	if len(responses) != 1 || responses[0] != (companion.TuningParams{
+		RXDelayMilli: 2_500, AirtimeFactorMilli: 1_250,
+	}) {
+		t.Fatalf("restored tuning response = %#v", responses)
 	}
 }
 

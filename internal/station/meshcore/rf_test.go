@@ -19,6 +19,8 @@ import (
 type stationRadio struct {
 	transmits int
 	assesses  int
+	noise     radio.NoiseFloor
+	noiseOK   bool
 }
 
 func (*stationRadio) Envelope() radio.Envelope {
@@ -30,9 +32,9 @@ func (*stationRadio) Receive(ctx context.Context) (radio.Frame, error) {
 	<-ctx.Done()
 	return radio.Frame{}, ctx.Err()
 }
-func (*stationRadio) NoiseFloor() (radio.NoiseFloor, bool) { return radio.NoiseFloor{}, false }
-func (*stationRadio) NoiseStarved() uint64                 { return 0 }
-func (*stationRadio) ChipStats() (radio.ChipStats, bool)   { return radio.ChipStats{}, false }
+func (r *stationRadio) NoiseFloor() (radio.NoiseFloor, bool) { return r.noise, r.noiseOK }
+func (*stationRadio) NoiseStarved() uint64                   { return 0 }
+func (*stationRadio) ChipStats() (radio.ChipStats, bool)     { return radio.ChipStats{}, false }
 func (r *stationRadio) Transmit(_ context.Context, _ []byte, power int8) (radio.TxReport, error) {
 	r.transmits++
 	return radio.TxReport{At: time.Now(), Airtime: 100 * time.Millisecond, PowerDBm: power}, nil
@@ -322,6 +324,49 @@ func TestShadowStationConsumesSharedLedgerWithoutKeying(t *testing.T) {
 	if device.transmits != 0 || device.assesses != 1 || svc.duty.Usage(time.Now()) != 100*time.Millisecond {
 		t.Fatalf("shadow: transmits %d assesses %d usage %s",
 			device.transmits, device.assesses, svc.duty.Usage(time.Now()))
+	}
+	if svc.stats.sent != 1 || svc.stats.sentFlood != 1 || svc.stats.txAir != 100*time.Millisecond {
+		t.Fatalf("shadow station stats = %+v", svc.stats)
+	}
+}
+
+func TestStationStatsStayLocalToTheAttachment(t *testing.T) {
+	built, err := build(testSpec(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	svc.startedAt = time.Now().Add(-42 * time.Second)
+	svc.rfDevice = &stationRadio{noise: radio.NoiseFloor{DBm: -105.75}, noiseOK: true}
+	svc.stats = stationStats{
+		received: 11, sent: 7, sentFlood: 3, sentDirect: 4,
+		receivedFlood: 5, receivedDirect: 6, receiveErrors: 2,
+		txAir: 4*time.Second + 900*time.Millisecond, rxAir: 8*time.Second + 100*time.Millisecond,
+		lastRSSIDBm: -91, lastSNRx4: 13,
+	}
+
+	responses := svc.handle(t.Context(), companion.GetStats{Type: companion.StatsCore})
+	core, ok := responses[0].(companion.CoreStats)
+	if !ok || core.UptimeSeconds != 42 || core.QueueLength != 0 || core.BatteryMillivolts != 0 {
+		t.Fatalf("core stats = %#v", responses)
+	}
+	responses = svc.handle(t.Context(), companion.GetStats{Type: companion.StatsRadio})
+	rf, ok := responses[0].(companion.RadioStats)
+	if !ok || rf.NoiseFloorDBm != -105 || rf.LastRSSIDBm != -91 || rf.LastSNRx4 != 13 ||
+		rf.TXAirSeconds != 4 || rf.RXAirSeconds != 8 {
+		t.Fatalf("radio stats = %#v", responses)
+	}
+	responses = svc.handle(t.Context(), companion.GetStats{Type: companion.StatsPackets})
+	packets, ok := responses[0].(companion.PacketStats)
+	if !ok || packets != (companion.PacketStats{
+		Received: 11, Sent: 7, SentFlood: 3, SentDirect: 4,
+		ReceivedFlood: 5, ReceivedDirect: 6, ReceiveErrors: 2,
+	}) {
+		t.Fatalf("packet stats = %#v", responses)
+	}
+	responses = svc.handle(t.Context(), companion.GetStats{Type: 99})
+	if len(responses) != 1 || responses[0] != (companion.ErrorResponse{Code: companion.ErrorIllegalArgument}) {
+		t.Fatalf("invalid stats response = %#v", responses)
 	}
 }
 

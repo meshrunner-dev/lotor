@@ -30,6 +30,7 @@ const (
 	defaultContacts  = 100
 	defaultChannels  = 8
 	defaultMailbox   = 16
+	defaultAirFactor = 1_000
 	maxStationName   = 31
 	maxChannelName   = 31
 	maxChannelSlots  = 255
@@ -60,6 +61,8 @@ type params struct {
 	TelemetryMode  int     `yaml:"telemetry_mode"`
 	ManualContacts bool    `yaml:"manual_add_contacts"`
 	PathHashMode   int     `yaml:"path_hash_mode"`
+	RXDelayMilli   uint32  `yaml:"rx_delay_milli"`
+	AirFactorMilli uint32  `yaml:"airtime_factor_milli"`
 	MaxContacts    int     `yaml:"max_contacts"`
 	MaxChannels    int     `yaml:"max_channels"`
 	MailboxCap     int     `yaml:"mailbox_capacity"`
@@ -72,6 +75,9 @@ func resolve(cfg map[string]any) (params, *mesh.LocalIdentity, error) {
 	}
 	if err := validateAir(p); err != nil {
 		return p, nil, err
+	}
+	if _, configured := cfg["airtime_factor_milli"]; !configured {
+		p.AirFactorMilli = defaultAirFactor
 	}
 	if err := validatePreferences(p); err != nil {
 		return p, nil, err
@@ -124,11 +130,11 @@ func validatePreferences(p params) error {
 	if p.NodeLat < -90 || p.NodeLat > 90 || p.NodeLon < -180 || p.NodeLon > 180 {
 		return fmt.Errorf("meshcore station params: invalid location %g,%g", p.NodeLat, p.NodeLon)
 	}
-	if p.MultiACKs < 0 || p.MultiACKs > 1 {
-		return fmt.Errorf("meshcore station params: multi_acks %d — want 0 or 1", p.MultiACKs)
+	if p.MultiACKs < 0 || p.MultiACKs > math.MaxUint8 {
+		return fmt.Errorf("meshcore station params: multi_acks %d — want 0..255", p.MultiACKs)
 	}
-	if p.AdvertLoc < 0 || p.AdvertLoc > math.MaxUint8 || p.TelemetryMode < 0 || p.TelemetryMode > math.MaxUint8 {
-		return errors.New("meshcore station params: advert_loc_policy and telemetry_mode must fit one byte")
+	if p.AdvertLoc < 0 || p.AdvertLoc > math.MaxUint8 || p.TelemetryMode < 0 || p.TelemetryMode > 0x3f {
+		return errors.New("meshcore station params: advert_loc_policy must fit one byte and telemetry_mode six bits")
 	}
 	if p.PathHashMode < 0 || p.PathHashMode > 2 {
 		return fmt.Errorf("meshcore station params: path_hash_mode %d — want 0..2", p.PathHashMode)
@@ -187,7 +193,7 @@ func build(spec station.Spec) (station.Service, error) {
 		p: p, id: id, log: log, buildVersion: spec.Build.Version,
 		channels: make(map[uint8]channel), contacts: make(map[[mesh.PubKeySize]byte]contactEntry),
 		state: station.StateStarting, stateStore: spec.State, txPolicy: spec.TX, bus: spec.Bus,
-		rfWake: make(chan struct{}, 1),
+		rfWake: make(chan struct{}, 1), startedAt: time.Now(),
 	}
 	queueDepth := spec.TX.QueueDepth
 	if queueDepth <= 0 {
@@ -232,6 +238,17 @@ type ackExpectation struct {
 	used bool
 }
 
+// stationStats are the counters attributable to this virtual station. They do
+// not expose another attachment's traffic when the physical radio is shared.
+type stationStats struct {
+	received, sent                uint32
+	sentFlood, sentDirect         uint32
+	receivedFlood, receivedDirect uint32
+	receiveErrors                 uint32
+	txAir, rxAir                  time.Duration
+	lastRSSIDBm, lastSNRx4        int8
+}
+
 type service struct {
 	name, listen, radioName string
 	p                       params
@@ -273,6 +290,8 @@ type service struct {
 	rfWake       chan struct{}
 	rfDevice     radio.Device
 	outbound     chan emission
+	startedAt    time.Time
+	stats        stationStats
 }
 
 func (s *service) Run(ctx context.Context) error {
@@ -464,6 +483,8 @@ func (s *service) handleQuery(cmd companion.Command) ([]companion.Response, bool
 		}
 	case companion.ExportContact:
 		return s.exportContact(c), true
+	case companion.GetStats:
+		return s.getStats(c.Type), true
 	case companion.SimpleCommand:
 		if c.Kind == companion.CommandSyncNextMessage {
 			return nil, false
@@ -507,6 +528,15 @@ func (s *service) handleMutation(cmd companion.Command) []companion.Response {
 		return s.setRadioParams(c)
 	case companion.SetRadioTXPower:
 		return s.setRadioPower(c.PowerDBm)
+	case companion.SetTuningParams:
+		s.p.RXDelayMilli, s.p.AirFactorMilli = c.RXDelayMilli, c.AirtimeFactorMilli
+		return okResponses()
+	case companion.SetDevicePIN:
+		if c.PIN != 0 && (c.PIN < 100_000 || c.PIN > 999_999) {
+			return errorResponses(companion.ErrorIllegalArgument)
+		}
+		s.p.PIN = uint64(c.PIN)
+		return okResponses()
 	default:
 		return errorResponses(companion.ErrorUnsupportedCommand)
 	}
@@ -526,6 +556,20 @@ func (s *service) handleConfigurationMutation(cmd companion.Command) ([]companio
 			return errorResponses(companion.ErrorIllegalArgument), true
 		}
 		s.p.PathHashMode = int(c.Mode)
+		return okResponses(), true
+	case companion.SetOtherParams:
+		s.p.ManualContacts = c.ManualContacts
+		if c.HasTelemetry {
+			// The reference stores three two-bit telemetry permissions and
+			// drops the two unused high bits when it reports them again.
+			s.p.TelemetryMode = int(c.TelemetryMode & 0x3f)
+		}
+		if c.HasAdvertLoc {
+			s.p.AdvertLoc = int(c.AdvertLocPolicy)
+		}
+		if c.HasMultiACKs {
+			s.p.MultiACKs = int(c.MultiACKs)
+		}
 		return okResponses(), true
 	case companion.SetDefaultFloodScope:
 		return s.setDefaultFloodScope(c), true
@@ -674,6 +718,10 @@ func (s *service) handleSimple(kind companion.CommandCode) []companion.Response 
 		return []companion.Response{companion.EncodedResponse{Payload: response}}
 	case companion.CommandGetBatteryAndStorage:
 		return []companion.Response{companion.BatteryAndStorage{}}
+	case companion.CommandGetTuningParams:
+		return []companion.Response{companion.TuningParams{
+			RXDelayMilli: s.p.RXDelayMilli, AirtimeFactorMilli: s.p.AirFactorMilli,
+		}}
 	case companion.CommandGetAutoAddConfig:
 		return []companion.Response{companion.AutoAddConfig{Flags: s.autoFlags, MaxHops: s.autoHops}}
 	case companion.CommandGetAllowedRepeatFreq:
@@ -687,6 +735,42 @@ func (s *service) handleSimple(kind companion.CommandCode) []companion.Response 
 	default:
 		return errorResponses(companion.ErrorUnsupportedCommand)
 	}
+}
+
+func (s *service) getStats(kind companion.StatsType) []companion.Response {
+	switch kind {
+	case companion.StatsCore:
+		uptime := max(time.Duration(0), time.Since(s.startedAt)) / time.Second
+		return []companion.Response{companion.CoreStats{
+			UptimeSeconds: uint32(min(uptime, time.Duration(math.MaxUint32))),
+			QueueLength:   uint8(min(len(s.outbound), math.MaxUint8)),
+		}}
+	case companion.StatsRadio:
+		noiseFloor := int16(0)
+		if s.rfDevice != nil {
+			if noise, ok := s.rfDevice.NoiseFloor(); ok {
+				noiseFloor = int16(max(float64(math.MinInt16), min(float64(math.MaxInt16), math.Trunc(noise.DBm))))
+			}
+		}
+		return []companion.Response{companion.RadioStats{
+			NoiseFloorDBm: noiseFloor, LastRSSIDBm: s.stats.lastRSSIDBm, LastSNRx4: s.stats.lastSNRx4,
+			TXAirSeconds: durationSeconds(s.stats.txAir), RXAirSeconds: durationSeconds(s.stats.rxAir),
+		}}
+	case companion.StatsPackets:
+		return []companion.Response{companion.PacketStats{
+			Received: s.stats.received, Sent: s.stats.sent,
+			SentFlood: s.stats.sentFlood, SentDirect: s.stats.sentDirect,
+			ReceivedFlood: s.stats.receivedFlood, ReceivedDirect: s.stats.receivedDirect,
+			ReceiveErrors: s.stats.receiveErrors,
+		}}
+	default:
+		return errorResponses(companion.ErrorIllegalArgument)
+	}
+}
+
+func durationSeconds(value time.Duration) uint32 {
+	seconds := max(time.Duration(0), value) / time.Second
+	return uint32(min(seconds, time.Duration(math.MaxUint32)))
 }
 
 func (s *service) selfInfo() companion.SelfInfo {
