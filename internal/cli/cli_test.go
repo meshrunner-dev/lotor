@@ -247,7 +247,7 @@ func TestFramesAndChain(t *testing.T) {
 	deps := testDeps(t)
 	orig, dup := seed(t, deps)
 
-	out := run(t, deps, "frames", "corr "+dup.Short()[:4])
+	out := run(t, deps, "frames", "correlation "+dup.Short()[:4])
 	for _, want := range []string{
 		`"Radio-Club" (repeater)`,
 		"duplicate → " + orig.Short(),
@@ -276,12 +276,14 @@ func TestErrorsAreOneLiners(t *testing.T) {
 	out := run(t, deps,
 		"nope",
 		"frames relay=meshcore-433",
+		"correlation ffff",
 		"corr ffff",
 	)
 	for _, want := range []string{
 		`error: unknown command "nope"`,
 		`error: no relay "meshcore-433" (relays: meshcore-868)`,
 		`error: no correlation matching "ffff"`,
+		`error: unknown command "corr"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("transcript lacks %q:\n%s", want, out)
@@ -454,12 +456,12 @@ func TestOriginatedEmissionIsAddressable(t *testing.T) {
 		Relay: "meshcore-868", Correlation: id, At: time.Now(), Kind: "advert-flood",
 		Airtime: 1164 * time.Millisecond, PowerDBm: -5, Shadow: true,
 	})
-	out := run(t, deps, "corr "+id.Short())
+	out := run(t, deps, "correlation "+id.Short())
 	if !strings.Contains(out, "originated") || !strings.Contains(out, "advert-flood") ||
 		!strings.Contains(out, "(shadow)") {
 		t.Errorf("originated emission unreachable:\n%s", out)
 	}
-	if bad := run(t, deps, "corr ffffffff"); !strings.Contains(bad, "no correlation matching") {
+	if bad := run(t, deps, "correlation ffffffff"); !strings.Contains(bad, "no correlation matching") {
 		t.Errorf("an unknown prefix should still say so:\n%s", bad)
 	}
 }

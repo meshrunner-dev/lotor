@@ -344,7 +344,7 @@ func framesCommand() *command {
 		},
 		detail: []string{
 			"frames [last=<n|span>] [since=<moment>] [until=<moment>] [relay=] [type=] [verdict=]",
-			"frames around=<corr-prefix> [span=<duration>] [relay=] [type=] [verdict=]",
+			"frames around=<correlation-prefix> [span=<duration>] [relay=] [type=] [verdict=]",
 			"frames watch [relay=<name>] [type=<type>] [verdict=<verdict>]",
 			"a moment is written the way the views write one: 00:52,",
 			"00:52:18, or \"2026-08-27 23:00\" — a bare clock means its",
@@ -372,10 +372,10 @@ func journalCommands() []*command {
 	return []*command{
 		framesCommand(),
 		{
-			name:  "corr",
-			forms: []form{{"corr <prefix>", "one correlation and its causal chain"}},
+			name:  "correlation",
+			forms: []form{{"correlation <prefix>", "one correlation and its causal chain"}},
 			takes: &positional{name: "prefix", doc: "a correlation id, or enough of one"},
-			run:   (*session).corr,
+			run:   (*session).correlation,
 		},
 		{
 			name:   "nodes",

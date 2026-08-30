@@ -1507,16 +1507,16 @@ func TestAnUnnamedArgumentIsDeclaredLikeEveryOther(t *testing.T) {
 	s := &session{deps: testDeps(t), colors: true}
 	// It leads the help, in chevrons, because it is what comes first
 	// on the line — and a word nobody can discover does not exist.
-	if help := s.helpForLine("corr ", 0); !strings.Contains(help,
+	if help := s.helpForLine("correlation ", 0); !strings.Contains(help,
 		cPunct+"<"+cReset+cAttr+"prefix"+cReset+cPunct+">"+cReset) {
 		t.Errorf("the slot is not written as one:\n%s", help)
 	}
 	// Completion offers nothing for a word the operator invents.
-	if add, hints := s.complete("corr pre"); add != "" || len(hints) > 0 {
+	if add, hints := s.complete("correlation pre"); add != "" || len(hints) > 0 {
 		t.Errorf("a slot was offered as a word to type: %q %v", add, hints)
 	}
 	// The value carries no colour: this console has no opinion on it.
-	if painted := s.paintLine("corr abc123"); strings.Contains(painted, cUnres+"abc123") {
+	if painted := s.paintLine("correlation abc123"); strings.Contains(painted, cUnres+"abc123") {
 		t.Errorf("a chosen value was marked unresolved: %q", painted)
 	}
 	// A command that declares no slot takes no bare word at all.
@@ -1524,7 +1524,7 @@ func TestAnUnnamedArgumentIsDeclaredLikeEveryOther(t *testing.T) {
 		t.Errorf("an undeclared positional was swallowed:\n%s", out)
 	}
 	// And one that does takes exactly one.
-	if out := run(t, testDeps(t), "corr aa bb"); !strings.Contains(out, "one prefix") {
+	if out := run(t, testDeps(t), "correlation aa bb"); !strings.Contains(out, "one prefix") {
 		t.Errorf("a second positional was accepted:\n%s", out)
 	}
 }

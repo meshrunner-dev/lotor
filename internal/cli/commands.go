@@ -539,10 +539,10 @@ func who(f sentinel.Frame) string {
 	}
 }
 
-func (s *session) corr(ctx context.Context, in input) error {
+func (s *session) correlation(ctx context.Context, in input) error {
 	args := in.pos
 	if len(args) != 1 {
-		return errors.New("usage: corr <prefix>")
+		return errors.New("usage: correlation <prefix>")
 	}
 	sen, err := s.needSentinel()
 	if err != nil {
