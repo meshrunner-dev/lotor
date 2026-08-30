@@ -183,10 +183,32 @@ func asks(cfg map[string]any) (station.RadioDemand, error) {
 	}, err
 }
 
+// defaultNodeName is what a station calls itself when nobody has named
+// it: the product, then enough of its own public key to stay
+// unambiguous on a mesh where several may run. A relay refuses to
+// announce unnamed on purpose — it is infrastructure, and its name is
+// a deliberate act. A station is somebody's companion: its
+// application names it as soon as it connects, so the default only
+// has to carry the moments before that, and it must never be empty on
+// the air.
+func defaultNodeName(id *mesh.LocalIdentity) string {
+	if id == nil {
+		return product.Name
+	}
+	return product.Name + "-" + hex.EncodeToString(id.PubKey[:4])
+}
+
 func build(spec station.Spec) (station.Service, error) {
 	p, id, err := resolve(spec.Config)
 	if err != nil {
 		return nil, err
+	}
+	// Before the factory snapshot, so a factory reset restores this
+	// name rather than the empty one, and before every reader — the
+	// advert, the self description, and the group-text budget that
+	// sizes itself on the name's length.
+	if p.NodeName == "" {
+		p.NodeName = defaultNodeName(id)
 	}
 	log := spec.Log
 	if log == nil {
@@ -212,6 +234,12 @@ func build(spec station.Spec) (station.Service, error) {
 	defer cancel()
 	if err := s.loadState(loadCtx); err != nil {
 		return nil, err
+	}
+	// A store written before this default, or by a companion that
+	// cleared its name, is healed the same way: nothing goes on the
+	// air nameless.
+	if s.p.NodeName == "" {
+		s.p.NodeName = defaultNodeName(s.id)
 	}
 	if spec.Build.SourceTime.IsZero() {
 		s.buildDate = "local build"

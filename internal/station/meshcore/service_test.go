@@ -19,6 +19,7 @@ import (
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/meshcorecfg"
+	"meshrunner.dev/lotor/internal/product"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/station"
 	"meshrunner.dev/lotor/internal/version"
@@ -859,4 +860,59 @@ func takeEmission(t *testing.T, svc *service) emission {
 
 func pollEmission(svc *service) (emission, bool) {
 	return svc.outbound.takeUntil(context.Background(), time.Now())
+}
+
+func TestAnUnnamedStationStillHasAName(t *testing.T) {
+	// A relay refuses to announce unnamed — it is infrastructure, and
+	// its name is a deliberate act. A station is somebody's companion:
+	// its application names it on connection, so the default only has
+	// to carry the moments before that. What it may never be is empty
+	// on the air.
+	spec := testSpec(t)
+	cfg := spec.Config
+	delete(cfg, "node_name")
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok := built.(*service)
+	if !ok {
+		t.Fatalf("build returned %T", built)
+	}
+	want := product.Name + "-" + hex.EncodeToString(s.id.PubKey[:4])
+	if s.p.NodeName != want {
+		t.Errorf("node name = %q, want %q", s.p.NodeName, want)
+	}
+	// It reaches the air, and the group-text budget sizes itself on
+	// the same string rather than on the empty one it replaced.
+	packet, err := s.selfAdvert(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	advert, err := mesh.ParseAdvert(packet.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if advert.Data.Name != want {
+		t.Errorf("advertised name = %q, want %q", advert.Data.Name, want)
+	}
+	// The factory snapshot carries it, so a reset restores a named
+	// station rather than a nameless one.
+	if s.factoryState.NodeName != want {
+		t.Errorf("factory name = %q, want %q", s.factoryState.NodeName, want)
+	}
+
+	// An operator's own name outranks the default, and a companion's
+	// choice outranks both — proved by the ordinary fixture.
+	named, err := build(testSpec(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured, ok := named.(*service)
+	if !ok {
+		t.Fatalf("build returned %T", named)
+	}
+	if got := configured.p.NodeName; got != "Alice" {
+		t.Errorf("configured name = %q, want Alice", got)
+	}
 }
