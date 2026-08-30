@@ -16,6 +16,7 @@ import (
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/logging"
 )
 
 // TX modes: what sent frames are worth telling a broker about.
@@ -130,7 +131,14 @@ func (o *Observer) Counters(sub *bus.Subscription) Counters {
 // Run consumes the subscription until the context ends. The caller
 // owns the subscription's lifetime; the observer owns the sink's.
 func (o *Observer) Run(ctx context.Context, sub *bus.Subscription) {
-	defer o.sink.Close()
+	logging.Trace(o.log, "observer loop started",
+		zap.String("relay", o.cfg.Relay),
+		zap.Duration("status_interval", o.cfg.StatusInterval),
+		zap.Duration("neighbours_interval", o.cfg.NeighborsInterval))
+	defer func() {
+		o.sink.Close()
+		logging.Trace(o.log, "observer loop stopped", zap.Error(ctx.Err()))
+	}()
 	var tickC, nbTickC <-chan time.Time
 	if o.cfg.Status && o.cfg.StatusInterval > 0 {
 		tick := time.NewTicker(o.cfg.StatusInterval)
@@ -155,17 +163,21 @@ func (o *Observer) Run(ctx context.Context, sub *bus.Subscription) {
 		case <-ctx.Done():
 			return
 		case <-o.cfg.Connects:
+			logging.Trace(o.log, "observer broker session ready")
 			o.publishStatus(time.Now())
 			if first {
 				first = false
 				o.startNeighbors(ctx, &nbBusy, nbDone)
 			}
 		case at := <-tickC:
+			logging.Trace(o.log, "observer status tick")
 			o.publishStatus(at)
 		case <-nbTickC:
+			logging.Trace(o.log, "observer neighbourhood tick")
 			o.startNeighbors(ctx, &nbBusy, nbDone)
 		case <-nbDone:
 			nbBusy = false
+			logging.Trace(o.log, "observer neighbourhood worker idle")
 		case ev, ok := <-sub.C:
 			if !ok {
 				return
@@ -180,14 +192,27 @@ func (o *Observer) Run(ctx context.Context, sub *bus.Subscription) {
 // must keep flowing meanwhile. One round at a time; a tick landing on
 // a running round is dropped, not queued.
 func (o *Observer) startNeighbors(ctx context.Context, busy *bool, done chan<- struct{}) {
-	if o.cfg.Neighbors == nil || *busy {
+	if o.cfg.Neighbors == nil {
+		logging.Trace(o.log, "observer neighbourhood skipped", zap.String("reason", "disabled"))
+		return
+	}
+	if *busy {
+		logging.Trace(o.log, "observer neighbourhood skipped", zap.String("reason", "already-running"))
 		return
 	}
 	*busy = true
+	logging.Trace(o.log, "observer neighbourhood worker started")
 	go func() {
 		defer func() { done <- struct{}{} }()
 		entries, queried, ran := o.cfg.Neighbors(ctx)
-		if !ran || ctx.Err() != nil {
+		if !ran {
+			logging.Trace(o.log, "observer neighbourhood produced no snapshot",
+				zap.String("reason", "round-not-run"))
+			return
+		}
+		if ctx.Err() != nil {
+			logging.Trace(o.log, "observer neighbourhood produced no snapshot",
+				zap.String("reason", "cancelled"))
 			return
 		}
 		selfRegions, selfDefault := "", ""
@@ -197,8 +222,13 @@ func (o *Observer) startNeighbors(ctx context.Context, busy *bool, done chan<- s
 		payload, err := NeighborsJSON(time.Now(), o.cfg.Origin, o.cfg.OriginID,
 			selfRegions, selfDefault, entries, queried)
 		if err != nil {
+			o.log.Warn("observer payload not encoded",
+				zap.String("class", TopicNeighbors), zap.Error(err))
 			return
 		}
+		logging.Trace(o.log, "observer payload encoded",
+			zap.String("class", TopicNeighbors), zap.Int("payload_bytes", len(payload)),
+			zap.Int("neighbours", len(entries)), zap.Int("queried", queried))
 		o.publish(TopicNeighbors, 0, payload)
 	}()
 }
@@ -206,17 +236,39 @@ func (o *Observer) startNeighbors(ctx context.Context, busy *bool, done chan<- s
 func (o *Observer) event(ev bus.Event) {
 	switch e := ev.(type) {
 	case bus.FrameHeard:
-		if e.Relay != o.cfg.Relay || !o.cfg.RX || len(e.Raw) == 0 {
+		if e.Relay != o.cfg.Relay {
+			return
+		}
+		if !o.cfg.RX {
+			o.log.Debug("observer frame ignored",
+				zap.String("direction", "rx"), zap.String("reason", "rx-disabled"))
+			return
+		}
+		if len(e.Raw) == 0 {
+			logging.Trace(o.log, "observer bus event ignored",
+				zap.String("direction", "rx"), zap.String("reason", "empty-frame"))
 			return
 		}
 		o.frame(e.Raw, e.At, true, e.SNR, e.RSSI)
 	case bus.FrameSent:
 		// A shadow emission never touched the air; telling a broker
 		// it did would put frames on maps that no antenna radiated.
-		if e.Relay != o.cfg.Relay || e.Shadow || len(e.Raw) == 0 {
+		if e.Relay != o.cfg.Relay {
+			return
+		}
+		if e.Shadow {
+			o.log.Debug("observer frame ignored",
+				zap.String("direction", "tx"), zap.String("reason", "shadow"))
+			return
+		}
+		if len(e.Raw) == 0 {
+			logging.Trace(o.log, "observer bus event ignored",
+				zap.String("direction", "tx"), zap.String("reason", "empty-frame"))
 			return
 		}
 		if o.cfg.TX == TXOff || o.cfg.TX == "" {
+			o.log.Debug("observer frame ignored",
+				zap.String("direction", "tx"), zap.String("reason", "tx-disabled"))
 			return
 		}
 		o.frame(e.Raw, e.At, false, 0, 0)
@@ -229,31 +281,59 @@ func (o *Observer) event(ev bus.Event) {
 // already records corruption.
 func (o *Observer) frame(raw []byte, at time.Time, rx bool, snr, rssi float64) {
 	if !o.cfg.Packets && !o.cfg.Raw {
+		o.log.Debug("observer frame ignored",
+			zap.String("direction", direction(rx)), zap.String("reason", "outputs-disabled"))
 		return
 	}
 	pkt, err := meshcore.ParsePacket(raw)
 	if err != nil {
+		o.log.Debug("observer frame ignored",
+			zap.String("direction", direction(rx)), zap.String("reason", "invalid-frame"),
+			zap.Int("wire_bytes", len(raw)), zap.Error(err))
 		return
 	}
 	if !rx && o.cfg.TX == TXSelfAdverts && !o.selfAdvert(pkt) {
-		o.filtered()
+		o.filtered("tx-policy", pkt, rx)
 		return
 	}
 	if o.types != nil && !o.types[pkt.PayloadType().String()] {
-		o.filtered()
+		o.filtered("type-filter", pkt, rx)
 		return
 	}
+	o.log.Debug("observer frame selected",
+		zap.String("direction", direction(rx)),
+		zap.String("packet_type", pkt.PayloadType().String()),
+		zap.Int("wire_bytes", len(raw)))
 	if o.cfg.Packets {
-		if payload, err := PacketJSON(raw, pkt, at, rx,
-			o.cfg.Origin, o.cfg.OriginID, snr, rssi); err == nil {
+		payload, err := PacketJSON(raw, pkt, at, rx,
+			o.cfg.Origin, o.cfg.OriginID, snr, rssi)
+		if err != nil {
+			o.log.Warn("observer payload not encoded",
+				zap.String("class", TopicPackets), zap.Error(err))
+		} else {
+			logging.Trace(o.log, "observer payload encoded",
+				zap.String("class", TopicPackets), zap.Int("payload_bytes", len(payload)))
 			o.publish(TopicPackets, 0, payload)
 		}
 	}
 	if o.cfg.Raw {
-		if payload, err := RawJSON(raw, at, o.cfg.Origin, o.cfg.OriginID); err == nil {
+		payload, err := RawJSON(raw, at, o.cfg.Origin, o.cfg.OriginID)
+		if err != nil {
+			o.log.Warn("observer payload not encoded",
+				zap.String("class", TopicRaw), zap.Error(err))
+		} else {
+			logging.Trace(o.log, "observer payload encoded",
+				zap.String("class", TopicRaw), zap.Int("payload_bytes", len(payload)))
 			o.publish(TopicRaw, 0, payload)
 		}
 	}
+}
+
+func direction(rx bool) string {
+	if rx {
+		return "rx"
+	}
+	return "tx"
 }
 
 // selfAdvert reports whether a sent frame is this node announcing
@@ -279,8 +359,12 @@ func (o *Observer) publishStatus(at time.Time) {
 	payload, err := StatusJSON(at, o.cfg.Origin, o.cfg.OriginID,
 		o.cfg.Model, o.cfg.Firmware, o.cfg.Radio, o.cfg.Client, h)
 	if err != nil {
+		o.log.Warn("observer payload not encoded",
+			zap.String("class", TopicStatus), zap.Error(err))
 		return
 	}
+	logging.Trace(o.log, "observer payload encoded",
+		zap.String("class", TopicStatus), zap.Int("payload_bytes", len(payload)))
 	// QoS 1, like the reference: the heartbeat is the one message
 	// worth a broker's acknowledgement.
 	o.publish(TopicStatus, 1, payload)
@@ -298,24 +382,37 @@ func (o *Observer) publish(class string, qos byte, payload []byte) {
 		o.mu.Lock()
 		o.n.PublishErrors++
 		o.mu.Unlock()
-		o.log.Warn("observer topic refused", zap.Error(err))
+		o.log.Warn("observer topic refused", zap.String("class", class), zap.Error(err))
 		return
 	}
-	if err := o.sink.Publish(topic, qos, o.retained(class), payload); err != nil {
+	retain := o.retained(class)
+	started := time.Now()
+	err = o.sink.Publish(topic, qos, retain, payload)
+	if err != nil {
 		o.mu.Lock()
 		o.n.PublishErrors++
 		o.mu.Unlock()
-		o.log.Debug("observer publish failed", zap.String("topic", topic), zap.Error(err))
+		o.log.Debug("observer publish failed",
+			zap.String("class", class), zap.String("topic", topic), zap.Error(err))
 		return
 	}
+	logging.Trace(o.log, "observer broker publish completed",
+		zap.String("class", class), zap.String("topic", topic),
+		zap.Uint8("qos", qos), zap.Bool("retain", retain),
+		zap.Int("payload_bytes", len(payload)), zap.Duration("elapsed", time.Since(started)),
+		zap.Bool("success", true))
 	o.mu.Lock()
 	o.n.Published++
 	o.n.LastPublished = time.Now()
 	o.mu.Unlock()
+	o.log.Debug("observer message published", zap.String("class", class), zap.String("topic", topic))
 }
 
-func (o *Observer) filtered() {
+func (o *Observer) filtered(reason string, pkt *meshcore.Packet, rx bool) {
 	o.mu.Lock()
 	o.n.Filtered++
 	o.mu.Unlock()
+	o.log.Debug("observer frame filtered",
+		zap.String("direction", direction(rx)), zap.String("reason", reason),
+		zap.String("packet_type", pkt.PayloadType().String()))
 }

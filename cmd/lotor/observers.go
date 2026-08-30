@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"meshrunner.dev/lotor/internal/product"
 	"sort"
 	"strings"
 	"sync"
@@ -22,7 +21,9 @@ import (
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/cli"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/mqtt"
+	"meshrunner.dev/lotor/internal/product"
 	enginemc "meshrunner.dev/lotor/internal/protocol/meshcore"
 )
 
@@ -263,6 +264,8 @@ func (m *manager) neighboursRound(relayName string, log *zap.Logger,
 		info, ok := m.infos[relayName]
 		m.viewMu.RUnlock()
 		if !ok || info.Neighbours == nil {
+			logging.Trace(log, "neighbourhood round skipped",
+				zap.String("reason", "relay-view-unavailable"))
 			return nil, 0, false
 		}
 		// A round is emissions: discover, then a question per
@@ -297,8 +300,11 @@ func (m *manager) neighboursRound(relayName string, log *zap.Logger,
 				case err == nil:
 					e.Status = "responded"
 					e.Regions = strings.Join(regions, ",")
+					log.Debug("neighbour scopes answered",
+						zap.String("neighbour", e.PubKey[:12]), zap.Int("regions", len(regions)))
 				case errors.Is(err, enginemc.ErrNoAnswer):
 					e.Status = "timeout"
+					log.Debug("neighbour scopes timed out", zap.String("neighbour", e.PubKey[:12]))
 				default:
 					e.Status = "send_failed"
 					log.Debug("neighbour scopes not asked",
@@ -306,6 +312,8 @@ func (m *manager) neighboursRound(relayName string, log *zap.Logger,
 				}
 			} else {
 				e.Status = "send_failed"
+				log.Debug("neighbour scopes not asked",
+					zap.String("neighbour", e.PubKey[:12]), zap.String("reason", "unavailable"))
 			}
 			entries = append(entries, e)
 		}
@@ -322,6 +330,7 @@ func (m *manager) neighboursRound(relayName string, log *zap.Logger,
 // stands, said in the journal. false means the round was cancelled.
 func refreshNeighbours(ctx context.Context, info cli.RelayInfo, log *zap.Logger) bool {
 	if info.Discover == nil {
+		logging.Trace(log, "neighbourhood refresh skipped", zap.String("reason", "unsupported"))
 		return true
 	}
 	answers, until, err := info.Discover()
@@ -341,17 +350,21 @@ func refreshNeighbours(ctx context.Context, info cli.RelayInfo, log *zap.Logger)
 	// hanging on a quiet channel.
 	overdue := time.NewTimer(time.Until(until) + 30*time.Second)
 	defer overdue.Stop()
+	received := 0
 	for {
 		select {
 		case <-ctx.Done():
+			logging.Trace(log, "neighbourhood refresh cancelled", zap.Int("answers", received))
 			return false
 		case <-overdue.C:
 			log.Debug("neighbourhood refresh window never closed — table as it stands")
 			return true
 		case _, more := <-answers:
 			if !more {
+				logging.Trace(log, "neighbourhood refresh completed", zap.Int("answers", received))
 				return true
 			}
+			received++
 		}
 	}
 }
@@ -366,7 +379,7 @@ func joinScanWindow(ctx context.Context, info cli.RelayInfo, log *zap.Logger) bo
 			until = end.Add(2 * time.Second)
 		}
 	}
-	log.Debug("joining the scan already listening", zap.Time("window_closes", until))
+	logging.Trace(log, "joining the scan already listening", zap.Time("window_closes", until))
 	select {
 	case <-ctx.Done():
 		return false
@@ -448,6 +461,19 @@ func (m *manager) startObserver(ctx context.Context, name string) {
 		m.observerDown(name, err, log)
 		return
 	}
+	auth := "anonymous"
+	if p.Audience != "" {
+		auth = "device-token"
+	} else if p.Username != "" {
+		auth = "static"
+	}
+	logging.Trace(log, "observer assembled",
+		zap.String("relay", cfg.Relay), zap.String("iata", cfg.IATA),
+		zap.String("topic_template", cfg.Topic), zap.String("auth", auth),
+		zap.Bool("rx", cfg.RX), zap.String("tx", cfg.TX),
+		zap.Bool("packets", cfg.Packets), zap.Bool("raw", cfg.Raw),
+		zap.Bool("status", cfg.Status), zap.Duration("status_interval", cfg.StatusInterval),
+		zap.Duration("neighbours_interval", cfg.NeighborsInterval), zap.Bool("retain", cfg.Retain))
 	connects := make(chan struct{}, 1)
 	cfg.Connects = connects
 	m.viewMu.RLock()
@@ -499,6 +525,8 @@ func (m *manager) stopObserver(name string) {
 	if !ok {
 		return
 	}
+	log := m.log.Named("mqtt").With(zap.String("observer", name))
+	logging.Trace(log, "observer stopping", zap.String("relay", h.relay))
 	if h.live != nil {
 		// When Close returns, no callback of this incarnation is
 		// still in flight: "stopped" lands after its last word, and
@@ -509,7 +537,7 @@ func (m *manager) stopObserver(name string) {
 	<-h.done
 	delete(m.observers, name)
 	m.bus.Publish(bus.ObserverState{Observer: name, At: time.Now(), State: "stopped"})
-	m.log.Named("mqtt").Info("observer stopped", zap.String("observer", name))
+	log.Info("observer stopped")
 }
 
 // reconcileObservers realigns every observer with the relay topology
@@ -533,11 +561,15 @@ func (m *manager) reconcileObservers() {
 		h, live := m.observers[name]
 		switch {
 		case live && err != nil:
+			logging.Trace(log, "observer topology invalidated", zap.Error(err))
 			m.stopObserver(name)
 			m.observerDown(name, err, log)
 		case live && h.relay != target:
+			logging.Trace(log, "observer relay changed",
+				zap.String("from", h.relay), zap.String("to", target))
 			m.bounceObserver(name)
 		case !live && err == nil:
+			logging.Trace(log, "observer topology became usable", zap.String("relay", target))
 			m.startObserver(m.ctx, name)
 		case !live && m.obsCause[name] != err.Error():
 			// Still down, but the reason moved with the topology: the

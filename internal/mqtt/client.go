@@ -20,6 +20,7 @@ import (
 	paho "github.com/eclipse/paho.mqtt.golang"
 	"go.uber.org/zap"
 
+	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/product"
 )
 
@@ -106,7 +107,7 @@ func (s *connectionStory) handle(_ paho.Client, n paho.ConnectionNotification) {
 	case paho.ConnectionNotificationConnecting:
 		s.connecting(e, url)
 	case paho.ConnectionNotificationBrokerFailed:
-		s.log.Debug("observer broker attempt failed", url, zap.Error(e.Reason))
+		logging.Trace(s.log, "observer broker attempt failed", url, zap.Error(e.Reason))
 	case paho.ConnectionNotificationFailed:
 		s.failed(e, url)
 	case paho.ConnectionNotificationConnected:
@@ -117,7 +118,7 @@ func (s *connectionStory) handle(_ paho.Client, n paho.ConnectionNotification) {
 }
 
 func (s *connectionStory) connecting(e paho.ConnectionNotificationConnecting, url zap.Field) {
-	s.log.Debug("observer broker dialing", url,
+	logging.Trace(s.log, "observer broker dialing", url,
 		zap.Int("attempt", e.Attempt), zap.Bool("reconnect", e.IsReconnect))
 	// Paho numbers one round from zero. Retries within the round are
 	// socket noise rather than new lifecycle transitions.
@@ -138,7 +139,7 @@ func (s *connectionStory) connecting(e paho.ConnectionNotificationConnecting, ur
 }
 
 func (s *connectionStory) failed(e paho.ConnectionNotificationFailed, url zap.Field) {
-	s.log.Debug("observer broker round failed — backing off", url, zap.Error(e.Reason))
+	logging.Trace(s.log, "observer broker round failed — backing off", url, zap.Error(e.Reason))
 	cause := errorText(e.Reason)
 	if s.reconnectPending {
 		s.failuresPending = append(s.failuresPending, cause)
@@ -225,9 +226,20 @@ func Dial(o Options, log *zap.Logger) (*Broker, error) {
 	if keepalive <= 0 {
 		keepalive = defaultKeepalive
 	}
+	clientID := fmt.Sprintf("%s-%s-%s", product.Slug, o.Instance, hex.EncodeToString(salt[:]))
+	auth := "anonymous"
+	if o.Credentials != nil {
+		auth = "dynamic"
+	} else if o.Username != "" {
+		auth = "static"
+	}
+	logging.Trace(log, "observer broker client configured",
+		zap.String("url", o.URL), zap.String("client_id", clientID),
+		zap.Duration("keepalive", keepalive), zap.String("auth", auth),
+		zap.Bool("custom_ca", o.CAFile != ""))
 	opts := paho.NewClientOptions().
 		AddBroker(o.URL).
-		SetClientID(fmt.Sprintf("%s-%s-%s", product.Slug, o.Instance, hex.EncodeToString(salt[:]))).
+		SetClientID(clientID).
 		SetUsername(o.Username).
 		SetPassword(o.Password).
 		SetAutoReconnect(true).
@@ -282,4 +294,7 @@ func (b *Broker) Connected() bool { return b.client.IsConnectionOpen() }
 
 // Close ends the session, letting in-flight messages a moment to
 // leave.
-func (b *Broker) Close() { b.client.Disconnect(250) }
+func (b *Broker) Close() {
+	logging.Trace(b.log, "observer broker client closing")
+	b.client.Disconnect(250)
+}

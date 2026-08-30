@@ -1,0 +1,101 @@
+package mqtt
+
+import (
+	"testing"
+	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	zapobserver "go.uber.org/zap/zaptest/observer"
+
+	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/logging"
+)
+
+func mqttObservedOne(t *testing.T, logs *zapobserver.ObservedLogs, message string) zapobserver.LoggedEntry {
+	t.Helper()
+	entries := logs.FilterMessage(message).All()
+	if len(entries) != 1 {
+		t.Fatalf("%q logs = %+v, want exactly one", message, logs.All())
+	}
+	return entries[0]
+}
+
+func TestObserverLogsTrafficAtDebugAndBrokerCompletionAtTrace(t *testing.T) {
+	raw, _ := advertFrame(t)
+	core, observed := zapobserver.New(logging.TraceLevel)
+	rec := &recorder{}
+	o := New(Config{
+		Instance: "paris", Relay: "mc", IATA: "PAR", Topic: DefaultTopic,
+		RX: true, Packets: true, OriginID: "feed",
+	}, rec, zap.New(core).With(zap.String("observer", "paris")))
+
+	o.event(bus.FrameHeard{Relay: "mc", At: time.Now(), Raw: raw})
+
+	traffic := mqttObservedOne(t, observed, "observer frame selected")
+	if traffic.Level != zap.DebugLevel {
+		t.Errorf("traffic level = %s, want debug", traffic.Level)
+	}
+	trafficFields := traffic.ContextMap()
+	if trafficFields["direction"] != "rx" || trafficFields["packet_type"] != "ADVERT" {
+		t.Errorf("traffic fields = %+v", trafficFields)
+	}
+	if trafficFields["payload"] != nil || trafficFields["raw"] != nil {
+		t.Errorf("traffic log exposes message content: %+v", trafficFields)
+	}
+
+	completed := mqttObservedOne(t, observed, "observer broker publish completed")
+	if completed.Level != logging.TraceLevel {
+		t.Errorf("broker completion level = %s, want trace", completed.Level)
+	}
+	fields := completed.ContextMap()
+	if fields["observer"] != "paris" || fields["class"] != TopicPackets ||
+		fields["topic"] != "meshcore/PAR/feed/packets" || fields["qos"] != uint8(0) ||
+		fields["retain"] != false || fields["success"] != true {
+		t.Errorf("broker completion fields = %+v", fields)
+	}
+	if fields["payload_bytes"] == nil || fields["elapsed"] == nil {
+		t.Errorf("broker completion lacks size or timing: %+v", fields)
+	}
+	if fields["payload"] != nil || fields["raw"] != nil {
+		t.Errorf("broker completion exposes message content: %+v", fields)
+	}
+}
+
+func TestFailedPublicationDoesNotClaimBrokerCompletion(t *testing.T) {
+	raw, _ := advertFrame(t)
+	core, observed := zapobserver.New(logging.TraceLevel)
+	rec := &recorder{fail: true}
+	o := New(Config{
+		Relay: "mc", IATA: "PAR", Topic: DefaultTopic,
+		RX: true, Packets: true, OriginID: "feed",
+	}, rec, zap.New(core))
+
+	o.event(bus.FrameHeard{Relay: "mc", At: time.Now(), Raw: raw})
+
+	if got := observed.FilterMessage("observer broker publish completed").Len(); got != 0 {
+		t.Fatalf("broker completion logs = %d, want none after failure", got)
+	}
+	failed := mqttObservedOne(t, observed, "observer publish failed")
+	if failed.Level != zap.DebugLevel {
+		t.Errorf("publish failure level = %s, want debug", failed.Level)
+	}
+}
+
+func TestDebugLevelHidesBrokerCompletionDetail(t *testing.T) {
+	raw, _ := advertFrame(t)
+	core, observed := zapobserver.New(zapcore.DebugLevel)
+	o := New(Config{
+		Relay: "mc", IATA: "PAR", Topic: DefaultTopic,
+		RX: true, Packets: true, OriginID: "feed",
+	}, &recorder{}, zap.New(core))
+
+	o.event(bus.FrameHeard{Relay: "mc", At: time.Now(), Raw: raw})
+
+	if observed.FilterMessage("observer frame selected").Len() != 1 {
+		t.Fatal("debug traffic log is missing")
+	}
+	if got := observed.FilterMessage("observer broker publish completed").Len(); got != 0 {
+		t.Fatalf("trace broker completion logs at debug = %d, want none", got)
+	}
+}
