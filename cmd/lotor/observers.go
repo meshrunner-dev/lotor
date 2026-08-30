@@ -591,10 +591,15 @@ func (m *manager) bounceObserver(name string) {
 // just rebuilt: their captured face must follow the successor. The
 // caller holds mu.
 func (m *manager) bounceObserversOf(relayName string) {
+	names := make([]string, 0)
 	for name, h := range m.observers {
 		if h.relay == relayName {
-			m.bounceObserver(name)
+			names = append(names, name)
 		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		m.bounceObserver(name)
 	}
 }
 

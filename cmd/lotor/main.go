@@ -479,6 +479,8 @@ type shutdownWaits struct {
 	mgr                *manager
 }
 
+const shutdownTimeout = 15 * time.Second
+
 // shutdown takes the daemon down in the order that keeps its promises
 // — and tells the consoles first, while their sockets are still open
 // and the sessions are still there to be told.
@@ -488,11 +490,39 @@ func shutdown(log *zap.Logger, sessions *cli.Sessions,
 	log.Info("shutting down")
 	sessions.Farewell(product.Name + " is shutting down — this console is closing")
 	cancel()
-	w.producers.Wait()
-	w.mgr.Wait()
+	deadline := time.Now().Add(shutdownTimeout)
+	producersStopped := waitUntil(deadline, w.producers.Wait)
+	if !producersStopped {
+		log.Error("shutdown deadline reached while stopping listeners")
+	}
+	managerStopped := waitUntil(deadline, w.mgr.Wait)
+	if !managerStopped {
+		log.Error("shutdown deadline reached while stopping managed services")
+	}
 	w.journalDone()
-	w.journal.Wait()
-	w.mgr.Close()
+	journalStopped := waitUntil(deadline, w.journal.Wait)
+	if !journalStopped {
+		log.Error("shutdown deadline reached while draining journal")
+	}
+	if managerStopped {
+		w.mgr.Close()
+	}
+}
+
+func waitUntil(deadline time.Time, wait func()) bool {
+	done := make(chan struct{})
+	go func() {
+		wait()
+		close(done)
+	}()
+	timer := time.NewTimer(max(time.Duration(0), time.Until(deadline)))
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // acquireInstanceLock refuses a second daemon on the same

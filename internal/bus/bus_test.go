@@ -14,6 +14,18 @@ func TestTrafficSourceKeysKeepStationsDisjointFromRelays(t *testing.T) {
 	}
 }
 
+func TestFrameSentRelayIdentityExcludesStationsExplicitly(t *testing.T) {
+	if !(FrameSent{Relay: "mc"}).IsRelay("mc") {
+		t.Fatal("legacy relay emission did not match")
+	}
+	if !(FrameSent{SourceKind: SourceRelay, Source: "mc"}).IsRelay("mc") {
+		t.Fatal("explicit relay emission did not match")
+	}
+	if (FrameSent{SourceKind: SourceStation, Source: "mc", Relay: "mc"}).IsRelay("mc") {
+		t.Fatal("station emission was attributed to a relay")
+	}
+}
+
 func TestFanOutAndDropAccounting(t *testing.T) {
 	b := New()
 	fast := b.Subscribe(4)

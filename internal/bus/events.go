@@ -125,6 +125,16 @@ type FrameSent struct {
 // SourceKey is the collision-free durable identity of this producer.
 func (e FrameSent) SourceKey() string { return ArchiveSourceKey(e.SourceKind, e.Source, e.Relay) }
 
+// IsRelay reports whether this emission belongs to the named relay. It keeps
+// legacy relay producers compatible while making the exclusion of stations an
+// explicit consumer decision rather than an accident of an empty Relay field.
+func (e FrameSent) IsRelay(name string) bool {
+	if e.SourceKind != "" {
+		return e.SourceKind == SourceRelay && e.Source == name
+	}
+	return e.Relay == name
+}
+
 // TxDropped is an emission the pipeline gave up on, with its reason:
 // queue-full, duty, lbt (when the site chose drop), tx-failed.
 type TxDropped struct {

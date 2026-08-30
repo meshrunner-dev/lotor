@@ -254,7 +254,7 @@ func (o *Observer) event(ev bus.Event) {
 	case bus.FrameSent:
 		// A shadow emission never touched the air; telling a broker
 		// it did would put frames on maps that no antenna radiated.
-		if e.Relay != o.cfg.Relay {
+		if !e.IsRelay(o.cfg.Relay) {
 			return
 		}
 		log := o.log.With(zap.String("corr", e.Correlation.Short()))
