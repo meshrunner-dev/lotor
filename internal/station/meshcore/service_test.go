@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"meshrunner.dev/lotor/internal/meshcorecfg"
+	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/station"
 	"meshrunner.dev/lotor/internal/version"
 
@@ -82,6 +83,44 @@ func TestDetachedStationAnswersStartupProtocol(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("station did not stop")
+	}
+}
+
+func TestAttachedStationUsesPhysicalPowerEnvelopeWhileRadioIsDown(t *testing.T) {
+	built, err := build(testSpec(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	envelope := radio.Envelope{
+		MaxTxPowerSet: true, MaxTxPowerDBm: 10,
+		ChipMinDBm: -9, ChipMaxDBm: 22,
+		FreqRangeLowHz: 863_000_000, FreqRangeHiHz: 870_000_000,
+	}
+	driver := radio.Driver{
+		Inspect: func(map[string]any) (radio.Envelope, error) { return envelope, nil },
+		Open: func(map[string]any, *zap.Logger) (radio.Device, error) {
+			return &stationRadio{}, nil
+		},
+	}
+	controller, err := radio.NewController("slot1", driver, nil, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := controller.Bind("alice", radio.RoleStation, svc.p.Waveform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.AttachRadio("slot1", binding, nil, "radio unavailable")
+
+	if got := svc.selfInfo().MaxTXPowerDBm; got != envelope.MaxTxPowerDBm {
+		t.Fatalf("self info max power = %d, want %d", got, envelope.MaxTxPowerDBm)
+	}
+	if got := svc.handle(t.Context(), companion.SetRadioTXPower{PowerDBm: 11}); len(got) != 1 || got[0] != (companion.ErrorResponse{Code: companion.ErrorIllegalArgument}) {
+		t.Fatalf("power above physical envelope = %#v", got)
+	}
+	if got := svc.handle(t.Context(), companion.SetRadioTXPower{PowerDBm: 10}); len(got) != 1 || got[0] != companion.StatusResponse(companion.ResponseOK) {
+		t.Fatalf("power at physical envelope = %#v", got)
 	}
 }
 

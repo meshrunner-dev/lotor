@@ -118,6 +118,33 @@ func awaitBinding(t *testing.T, binding *Binding) {
 	t.Fatalf("binding state = %s: %s", state, cause)
 }
 
+func TestBindingExposesControllerEnvelopeBeforeHardwareOpens(t *testing.T) {
+	dev := newControllerFakeDevice()
+	driver := Driver{
+		Inspect: func(map[string]any) (Envelope, error) {
+			return Envelope{
+				MaxTxPowerSet: true, MaxTxPowerDBm: 10,
+				ChipMinDBm: -9, ChipMaxDBm: 22,
+				FreqRangeLowHz: 863_000_000, FreqRangeHiHz: 870_000_000,
+			}, nil
+		},
+		Open: func(map[string]any, *zap.Logger) (Device, error) { return dev, nil },
+	}
+	controller, err := NewController("slot1", driver, nil, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := controller.Bind("alice", RoleStation, Waveform{FrequencyHz: 869_618_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := controller.Envelope()
+	if got := binding.Envelope(); got != want {
+		t.Fatalf("binding envelope = %+v, want %+v", got, want)
+	}
+}
+
 func TestControllerRelayOwnsWaveformAndRXIsShared(t *testing.T) {
 	dev := newControllerFakeDevice()
 	c, _ := controllerRig(t, dev)

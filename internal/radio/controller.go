@@ -320,6 +320,10 @@ func (b *Binding) State() (BindingState, string) {
 	}
 }
 
+// Envelope reports the immutable physical bounds of the radio this logical
+// consumer is attached to, even while no short-lived Device session is open.
+func (b *Binding) Envelope() Envelope { return b.controller.Envelope() }
+
 // ControllerStatus is a coherent physical lifecycle snapshot.
 func (c *Controller) ControllerStatus() (ControllerState, string) {
 	c.mu.Lock()

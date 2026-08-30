@@ -836,7 +836,11 @@ func (s *service) setRadioPower(power int8) []companion.Response {
 	if power < -9 || power > 22 {
 		return errorResponses(companion.ErrorIllegalArgument)
 	}
-	if s.rfDevice != nil {
+	if s.binding != nil {
+		if err := s.binding.Envelope().Permits(s.p.Waveform, power, true); err != nil {
+			return errorResponses(companion.ErrorIllegalArgument)
+		}
+	} else if s.rfDevice != nil {
 		if err := s.rfDevice.Envelope().Permits(s.p.Waveform, power, true); err != nil {
 			return errorResponses(companion.ErrorIllegalArgument)
 		}
@@ -961,9 +965,18 @@ func durationSeconds(value time.Duration) uint32 {
 func (s *service) selfInfo() companion.SelfInfo {
 	lat := int32(math.Round(s.p.NodeLat * 1e6))
 	lon := int32(math.Round(s.p.NodeLon * 1e6))
+	maxPower := s.p.TXPowerDBm
+	if s.binding != nil {
+		envelope := s.binding.Envelope()
+		if envelope.MaxTxPowerSet {
+			maxPower = envelope.MaxTxPowerDBm
+		} else if envelope.ChipMinDBm != envelope.ChipMaxDBm {
+			maxPower = envelope.ChipMaxDBm
+		}
+	}
 	return companion.SelfInfo{
 		AdvertType: mesh.AdvTypeChat, TXPowerDBm: s.p.TXPowerDBm,
-		MaxTXPowerDBm: s.p.TXPowerDBm, PublicKey: s.id.PubKey,
+		MaxTXPowerDBm: maxPower, PublicKey: s.id.PubKey,
 		LatitudeE6: lat, LongitudeE6: lon, MultiACKs: uint8(s.p.MultiACKs),
 		AdvertLocPolicy: uint8(s.p.AdvertLoc), TelemetryMode: uint8(s.p.TelemetryMode),
 		ManualContacts: s.p.ManualContacts, FrequencyKHz: s.p.FrequencyHz / 1_000,
