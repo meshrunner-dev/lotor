@@ -50,6 +50,16 @@ endorsed by the MeshCore project.
   daemon keeps the same table, in the config store, mutated over the
   air by the `region` command without a relay restart.
 
+  Carriage is open by default, and the table is where it is
+  **restricted**. A relay is a relay: floods move, scoped or not,
+  whether or not anything here names their scope. Naming a region is
+  how an operator says something about that scope — allowed is the
+  default, `denyf` is the statement — and shutting the wildcard is
+  the one switch for every flood nobody named. A relay that carried
+  only the scopes it had been handed would go silent for its
+  neighbourhood the day it was installed, which is not what a mesh
+  asks of a repeater.
+
   A region is a mesh agreement, independent of the radio band, and
   the two words must not be conflated: a *band* is what the radio is
   tuned to, a *region* is which slice of the traffic on that band a
