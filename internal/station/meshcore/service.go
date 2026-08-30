@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/meshcorecfg"
@@ -165,9 +166,11 @@ func check(cfg map[string]any) error {
 	return err
 }
 
-func asks(cfg map[string]any) (radio.Waveform, error) {
+func asks(cfg map[string]any) (station.RadioDemand, error) {
 	p, _, err := resolve(cfg)
-	return p.Waveform, err
+	return station.RadioDemand{
+		Waveform: p.Waveform, PowerDBm: p.TXPowerDBm, DutyCyclePct: p.DutyCyclePct,
+	}, err
 }
 
 func build(spec station.Spec) (station.Service, error) {
@@ -183,8 +186,14 @@ func build(spec station.Spec) (station.Service, error) {
 		name: spec.Name, listen: spec.Listen, radioName: spec.Radio,
 		p: p, id: id, log: log, buildVersion: spec.Build.Version,
 		channels: make(map[uint8]channel), contacts: make(map[[mesh.PubKeySize]byte]contactEntry),
-		state: station.StateStarting, stateStore: spec.State,
+		state: station.StateStarting, stateStore: spec.State, txPolicy: spec.TX, bus: spec.Bus,
+		rfWake: make(chan struct{}, 1),
 	}
+	queueDepth := spec.TX.QueueDepth
+	if queueDepth <= 0 {
+		queueDepth = 32
+	}
+	s.outbound = make(chan emission, queueDepth)
 	loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := s.loadState(loadCtx); err != nil {
@@ -225,6 +234,7 @@ type service struct {
 	buildDate, buildVersion string
 
 	mu           sync.Mutex
+	writeMu      sync.Mutex
 	state        station.State
 	cause        string
 	rf           station.RFState
@@ -233,6 +243,7 @@ type service struct {
 	generation   uint64
 	remote       string
 	clockDelta   time.Duration
+	lastUnique   uint32
 	appVersion   uint8
 	autoFlags    uint8
 	autoHops     uint8
@@ -243,10 +254,16 @@ type service struct {
 	defaultScope string
 	sendScope    [16]byte
 	sendUnscoped bool
-	mailbox      []companion.Response
+	mailbox      [][]byte
 	binding      *radio.Binding
 	rfCause      string
 	stateStore   station.StateStore
+	txPolicy     station.TXPolicy
+	bus          *bus.Bus
+	duty         *radio.AirtimeLedger
+	rfWake       chan struct{}
+	rfDevice     radio.Device
+	outbound     chan emission
 }
 
 func (s *service) Run(ctx context.Context) error {
@@ -262,13 +279,21 @@ func (s *service) Run(ctx context.Context) error {
 	s.state, s.cause = station.StateRunning, ""
 	s.mu.Unlock()
 	s.log.Info("station listening", zap.String("listen", ln.Addr().String()))
+	rfCtx, cancelRF := context.WithCancel(ctx)
+	rfDone := make(chan struct{})
+	go func() {
+		defer close(rfDone)
+		s.runRF(rfCtx)
+	}()
 	stop := context.AfterFunc(ctx, func() { s.closeIO() })
 	defer func() {
 		stop()
+		cancelRF()
 		s.closeIO()
 		if ctx.Err() != nil {
 			s.setLifecycle(station.StateStopped, nil)
 		}
+		<-rfDone
 	}()
 	for {
 		conn, err := ln.Accept()
@@ -368,6 +393,8 @@ func (s *service) readCommand(conn net.Conn) (companion.Command, []companion.Res
 }
 
 func (s *service) writeResponses(conn net.Conn, generation uint64, responses []companion.Response) bool {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	for _, response := range responses {
 		if !s.currentClient(conn, generation) {
 			return false
@@ -394,6 +421,9 @@ func (s *service) handle(ctx context.Context, cmd companion.Command) []companion
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if responses, handled := s.handleQuery(cmd); handled {
+		return responses
+	}
+	if responses, handled := s.handleTransmission(cmd); handled {
 		return responses
 	}
 	before := s.snapshotLocked()
@@ -426,6 +456,9 @@ func (s *service) handleQuery(cmd companion.Command) ([]companion.Response, bool
 	case companion.ExportContact:
 		return s.exportContact(c), true
 	case companion.SimpleCommand:
+		if c.Kind == companion.CommandSyncNextMessage {
+			return nil, false
+		}
 		return s.handleSimple(c.Kind), true
 	case companion.UnknownCommand:
 		return errorResponses(companion.ErrorUnsupportedCommand), true
@@ -439,9 +472,14 @@ func (s *service) handleMutation(cmd companion.Command) []companion.Response {
 	if responses, handled := s.handleContactMutation(cmd); handled {
 		return responses
 	}
+	if responses, handled := s.handleConfigurationMutation(cmd); handled {
+		return responses
+	}
 	switch c := cmd.(type) {
 	case companion.SetDeviceTime:
 		return s.setDeviceTime(c.UnixSeconds)
+	case companion.SimpleCommand:
+		return s.handleSimple(c.Kind)
 	case companion.SetAdvertName:
 		if len(c.Name) > maxStationName {
 			c.Name = c.Name[:maxStationName]
@@ -460,26 +498,32 @@ func (s *service) handleMutation(cmd companion.Command) []companion.Response {
 		return s.setRadioParams(c)
 	case companion.SetRadioTXPower:
 		return s.setRadioPower(c.PowerDBm)
-	case companion.GetChannel:
-		return s.getChannel(c.Index)
-	case companion.SetChannel:
-		return s.setChannel(c)
-	case companion.SetAutoAddConfig:
-		s.autoFlags, s.autoHops = c.Flags, c.MaxHops
-		return okResponses()
-	case companion.SetPathHashMode:
-		if c.Mode > 2 {
-			return errorResponses(companion.ErrorIllegalArgument)
-		}
-		s.p.PathHashMode = int(c.Mode)
-		return okResponses()
-	case companion.SetDefaultFloodScope:
-		return s.setDefaultFloodScope(c)
-	case companion.SetFloodScope:
-		return s.setFloodScope(c)
 	default:
 		return errorResponses(companion.ErrorUnsupportedCommand)
 	}
+}
+
+func (s *service) handleConfigurationMutation(cmd companion.Command) ([]companion.Response, bool) {
+	switch c := cmd.(type) {
+	case companion.GetChannel:
+		return s.getChannel(c.Index), true
+	case companion.SetChannel:
+		return s.setChannel(c), true
+	case companion.SetAutoAddConfig:
+		s.autoFlags, s.autoHops = c.Flags, c.MaxHops
+		return okResponses(), true
+	case companion.SetPathHashMode:
+		if c.Mode > 2 {
+			return errorResponses(companion.ErrorIllegalArgument), true
+		}
+		s.p.PathHashMode = int(c.Mode)
+		return okResponses(), true
+	case companion.SetDefaultFloodScope:
+		return s.setDefaultFloodScope(c), true
+	case companion.SetFloodScope:
+		return s.setFloodScope(c), true
+	}
+	return nil, false
 }
 
 func (s *service) handleContactMutation(cmd companion.Command) ([]companion.Response, bool) {
@@ -495,9 +539,6 @@ func (s *service) handleContactMutation(cmd companion.Command) ([]companion.Resp
 		if c.Kind == companion.CommandRemoveContact {
 			return s.removeContact(c.PublicKey), true
 		}
-		if c.Kind == companion.CommandShareContact {
-			return []companion.Response{companion.StatusResponse(companion.ResponseDisabled)}, true
-		}
 	}
 	return nil, false
 }
@@ -512,6 +553,15 @@ func (s *service) setDeviceTime(seconds uint32) []companion.Response {
 	// The reference accepts a forward clock update without writing a response
 	// frame. Companion applications treat it as fire-and-forget.
 	return nil
+}
+
+func (s *service) uniqueTimestampLocked() uint32 {
+	now := uint32(time.Now().Add(s.clockDelta).Unix())
+	if now <= s.lastUnique {
+		now = s.lastUnique + 1
+	}
+	s.lastUnique = now
+	return now
 }
 
 func okResponses() []companion.Response {
@@ -547,6 +597,11 @@ func (s *service) setRadioPower(power int8) []companion.Response {
 	// range is -9..22 dBm. The physical envelope is judged again at admission.
 	if power < -9 || power > 22 {
 		return errorResponses(companion.ErrorIllegalArgument)
+	}
+	if s.rfDevice != nil {
+		if err := s.rfDevice.Envelope().Permits(s.p.Waveform, power, true); err != nil {
+			return errorResponses(companion.ErrorIllegalArgument)
+		}
 	}
 	s.p.TXPowerDBm = power
 	return okResponses()
@@ -605,9 +660,9 @@ func (s *service) handleSimple(kind companion.CommandCode) []companion.Response 
 		if len(s.mailbox) == 0 {
 			return []companion.Response{companion.StatusResponse(companion.ResponseNoMoreMessages)}
 		}
-		response := s.mailbox[0]
+		response := append([]byte(nil), s.mailbox[0]...)
 		s.mailbox = s.mailbox[1:]
-		return []companion.Response{response}
+		return []companion.Response{companion.EncodedResponse{Payload: response}}
 	case companion.CommandGetBatteryAndStorage:
 		return []companion.Response{companion.BatteryAndStorage{}}
 	case companion.CommandGetAutoAddConfig:
@@ -663,22 +718,28 @@ func (s *service) Info() station.Info {
 	}
 }
 
-func (s *service) AttachRadio(name string, binding *radio.Binding, cause string) {
+func (s *service) AttachRadio(name string, binding *radio.Binding, duty *radio.AirtimeLedger, cause string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.radioName, s.binding, s.rfCause = name, binding, cause
+	s.radioName, s.binding, s.duty, s.rfCause = name, binding, duty, cause
 	if name == "" {
 		s.rf = station.RFDetached
 		s.rfCause = ""
 	} else {
 		s.rf = station.RFDown
 	}
+	select {
+	case s.rfWake <- struct{}{}:
+	default:
+	}
 }
 
-func (s *service) RadioWaveform() radio.Waveform {
+func (s *service) RadioDemand() station.RadioDemand {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.p.Waveform
+	return station.RadioDemand{
+		Waveform: s.p.Waveform, PowerDBm: s.p.TXPowerDBm, DutyCyclePct: s.p.DutyCyclePct,
+	}
 }
 
 func (s *service) setLifecycle(state station.State, err error) {

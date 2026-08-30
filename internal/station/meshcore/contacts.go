@@ -108,7 +108,7 @@ func (s *service) importContact(raw []byte) []companion.Response {
 	if err != nil || packet.PayloadType() != mesh.PayloadTypeAdvert {
 		return errorResponses(companion.ErrorIllegalArgument)
 	}
-	if _, err := s.storeAdvert(packet, false); err != nil {
+	if _, _, err := s.storeAdvert(packet, false); err != nil {
 		return errorResponses(companion.ErrorIllegalArgument)
 	}
 	return okResponses()
@@ -146,27 +146,27 @@ func (s *service) evictOldestContact() bool {
 // storeAdvert verifies and updates a contact from an advert. enforceReplay is
 // true for actual RF reception and false for the reference's explicit import
 // loopback, which removes the packet from its duplicate table first.
-func (s *service) storeAdvert(packet *mesh.Packet, enforceReplay bool) (bool, error) {
+func (s *service) storeAdvert(packet *mesh.Packet, enforceReplay bool) (stored, created bool, err error) {
 	advert, err := mesh.ParseAdvert(packet.Payload)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if advert.Data.Name == "" {
-		return false, errors.New("advert has no name")
+		return false, false, errors.New("advert has no name")
 	}
 	key := advert.Identity.PubKey
 	entry, exists := s.contacts[key]
 	if exists && enforceReplay && uint32(advert.Timestamp.Unix()) <= entry.info.LastAdvertUnix {
-		return false, nil
+		return false, false, nil
 	}
 	if !exists {
 		if !s.shouldAutoAdd(advert.Data.Type) ||
 			(s.autoHops > 0 && packet.PathHashCount() >= int(s.autoHops)) {
-			return false, nil
+			return false, false, nil
 		}
 		if len(s.contacts) >= s.p.MaxContacts &&
 			(s.autoFlags&1 == 0 || !s.evictOldestContact()) {
-			return false, nil
+			return false, false, nil
 		}
 		s.nextContact++
 		entry.order = s.nextContact
@@ -193,10 +193,10 @@ func (s *service) storeAdvert(packet *mesh.Packet, enforceReplay bool) (bool, er
 	copyPacket.SetPathHashSizeAndCount(packet.PathHashSize(), 0)
 	entry.advert, err = copyPacket.MarshalBinary()
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	s.contacts[key] = entry
-	return !exists, nil
+	return true, !exists, nil
 }
 
 func (s *service) selfAdvert(at time.Time) (*mesh.Packet, error) {

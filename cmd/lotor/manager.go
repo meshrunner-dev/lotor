@@ -595,6 +595,60 @@ func (m *manager) sharedAirtimeLedger(radioName, consumer string, budget time.Du
 	return ledger, nil
 }
 
+func stationPolicy(sc config.Station) station.TXPolicy {
+	policy := station.TXPolicy{Mode: sc.TXMode()}
+	if sc.TX == nil {
+		return policy
+	}
+	policy.LBTThresholdDB = sc.TX.LBTThresholdDB
+	policy.LBTExhausted = sc.TX.LBTExhausted
+	policy.CAD = sc.TX.CAD == nil || *sc.TX.CAD
+	policy.QueueDepth = sc.TX.QueueDepth
+	return policy
+}
+
+func (m *manager) checkStationAttachment(sc config.Station, demand station.RadioDemand,
+	envelope radio.Envelope,
+) error {
+	if err := envelope.Allows(demand.Waveform); err != nil {
+		return err
+	}
+	driver, err := radio.Lookup(m.file.Radios[sc.Radio].Driver)
+	if err != nil {
+		return err
+	}
+	radioCfg, _, err := m.file.Radios[sc.Radio].Layered.Resolve(driver.Presets)
+	if err != nil {
+		return err
+	}
+	if driver.CheckWaveform != nil {
+		if err := driver.CheckWaveform(demand.Waveform); err != nil {
+			return err
+		}
+	}
+	if sc.TXMode() == config.TXDry {
+		return nil
+	}
+	if driver.CheckTransmit != nil {
+		if err := driver.CheckTransmit(radioCfg); err != nil {
+			return fmt.Errorf("tx: mode %s: %w", sc.TXMode(), err)
+		}
+	}
+	if err := envelope.Permits(demand.Waveform, demand.PowerDBm, true); err != nil {
+		return err
+	}
+	if sc.TXMode() == config.TXOnAir && !envelope.MaxTxPowerSet {
+		return errors.New("tx: on-air requires the radio's max_tx_power_dbm declared")
+	}
+	return nil
+}
+
+func (m *manager) releaseAirtimeConsumer(consumer string) {
+	for _, users := range m.airtimeUsers {
+		delete(users, consumer)
+	}
+}
+
 // accessStore hands a relay a persistence door onto the acl table,
 // keyed to its name: the successor of a bounced relay reads back the
 // durable roles its predecessor kept. Guests never cross this door.
@@ -736,6 +790,7 @@ func (m *manager) stopRelay(name string) {
 // companion endpoint whose RF status says down or detached.
 func (m *manager) startStation(ctx context.Context, name string) {
 	sc := m.file.Stations[name]
+	m.releaseAirtimeConsumer(confdb.KindStation + ":" + name)
 	builder, err := station.Lookup(sc.Protocol)
 	var cfg map[string]any
 	var traces []config.Trace
@@ -760,7 +815,7 @@ func (m *manager) startStation(ctx context.Context, name string) {
 	svc, err := builder.Build(station.Spec{
 		Name: name, Protocol: sc.Protocol, Listen: sc.Listen, Radio: sc.Radio,
 		Config: cfg, Log: m.log.Named("station").With(zap.String("station", name)),
-		Build: buildInfo, State: m.store,
+		Build: buildInfo, State: m.store, TX: stationPolicy(sc), Bus: m.bus,
 	})
 	if err != nil {
 		m.log.Error("station assembly failed", zap.String("station", name), zap.Error(err))
@@ -818,7 +873,7 @@ func (m *manager) attachStationRadio(name string, h *managedStation,
 	}
 	sc := m.file.Stations[name]
 	if sc.Radio == "" {
-		attacher.AttachRadio("", nil, "")
+		attacher.AttachRadio("", nil, nil, "")
 		return
 	}
 	if _, exists := m.controllers[sc.Radio]; !exists && m.ctx != nil {
@@ -826,24 +881,39 @@ func (m *manager) attachStationRadio(name string, h *managedStation,
 	}
 	controller, cause := m.radioController(sc.Radio)
 	if controller == nil {
-		attacher.AttachRadio(sc.Radio, nil, cause)
+		attacher.AttachRadio(sc.Radio, nil, nil, cause)
 		return
 	}
-	waveform, err := builder.Asks(cfg)
+	demand, err := builder.Asks(cfg)
 	if err != nil {
-		attacher.AttachRadio(sc.Radio, nil, err.Error())
+		attacher.AttachRadio(sc.Radio, nil, nil, err.Error())
 		return
 	}
 	if requester, ok := h.service.(station.RadioRequester); ok {
-		waveform = requester.RadioWaveform()
+		demand = requester.RadioDemand()
 	}
-	binding, err := controller.Bind(name, radio.RoleStation, waveform)
-	if err != nil {
-		attacher.AttachRadio(sc.Radio, nil, err.Error())
+	if err := m.checkStationAttachment(sc, demand, controller.Envelope()); err != nil {
+		attacher.AttachRadio(sc.Radio, nil, nil, err.Error())
 		return
 	}
+	binding, err := controller.Bind(name, radio.RoleStation, demand.Waveform)
+	if err != nil {
+		attacher.AttachRadio(sc.Radio, nil, nil, err.Error())
+		return
+	}
+	var ledger *radio.AirtimeLedger
+	if sc.TXMode() != config.TXDry {
+		budget := time.Duration(float64(time.Hour) * demand.DutyCyclePct / 100)
+		ledger, err = m.sharedAirtimeLedger(sc.Radio, confdb.KindStation+":"+name,
+			budget, m.spentAirtimeForRadio(m.ctx, sc.Radio))
+		if err != nil {
+			binding.Unbind()
+			attacher.AttachRadio(sc.Radio, nil, nil, err.Error())
+			return
+		}
+	}
 	h.binding = binding
-	attacher.AttachRadio(sc.Radio, binding, "")
+	attacher.AttachRadio(sc.Radio, binding, ledger, "")
 }
 
 // rebindStation applies a radio= mutation without closing the station's TCP
@@ -857,17 +927,18 @@ func (m *manager) rebindStation(name string) {
 		h.binding.Unbind()
 		h.binding = nil
 	}
+	m.releaseAirtimeConsumer(confdb.KindStation + ":" + name)
 	builder, err := station.Lookup(m.file.Stations[name].Protocol)
 	if err != nil {
 		if a, ok := h.service.(station.RadioAttacher); ok {
-			a.AttachRadio(m.file.Stations[name].Radio, nil, err.Error())
+			a.AttachRadio(m.file.Stations[name].Radio, nil, nil, err.Error())
 		}
 		return
 	}
 	cfg, _, err := m.file.Stations[name].Layered.Resolve(builder.Presets)
 	if err != nil {
 		if a, ok := h.service.(station.RadioAttacher); ok {
-			a.AttachRadio(m.file.Stations[name].Radio, nil, err.Error())
+			a.AttachRadio(m.file.Stations[name].Radio, nil, nil, err.Error())
 		}
 		return
 	}
@@ -1550,7 +1621,7 @@ func (m *manager) restartRadio(name string) {
 			h.binding = nil
 		}
 		if a, ok := h.service.(station.RadioAttacher); ok {
-			a.AttachRadio(name, nil, "radio controller restarting")
+			a.AttachRadio(name, nil, nil, "radio controller restarting")
 		}
 	}
 	m.stopRadio(name)

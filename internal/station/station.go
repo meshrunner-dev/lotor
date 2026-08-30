@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/schema"
 	"meshrunner.dev/lotor/internal/version"
@@ -73,14 +74,33 @@ type Service interface {
 // RadioAttacher is the optional live RF door. A manager may move a station
 // between radios without stopping its application listener or TCP client.
 type RadioAttacher interface {
-	AttachRadio(name string, binding *radio.Binding, cause string)
+	AttachRadio(name string, binding *radio.Binding, duty *radio.AirtimeLedger, cause string)
 }
 
 // RadioRequester exposes the live protocol-owned waveform. It may differ from
 // the configuration default after a companion application changed its radio
 // parameters and that preference survived a daemon restart.
 type RadioRequester interface {
-	RadioWaveform() radio.Waveform
+	RadioDemand() RadioDemand
+}
+
+// RadioDemand is everything a station protocol asks from an attachment. Duty
+// remains a percentage here because the manager owns conversion to the one
+// shared sliding-hour ledger.
+type RadioDemand struct {
+	Waveform     radio.Waveform
+	PowerDBm     int8
+	DutyCyclePct float64
+}
+
+// TXPolicy is the station's protocol-neutral origination gate. Stations never
+// receive a forwarding rung: dry, shadow and on-air are the whole ladder.
+type TXPolicy struct {
+	Mode           string
+	LBTThresholdDB float64
+	LBTExhausted   string
+	CAD            bool
+	QueueDepth     int
 }
 
 // StateStore is the protocol-neutral durable home for one station's mutable
@@ -102,13 +122,15 @@ type Spec struct {
 	Log      *zap.Logger
 	Build    version.Info
 	State    StateStore
+	TX       TXPolicy
+	Bus      *bus.Bus
 }
 
 // Builder constructs and validates one station protocol implementation.
 type Builder struct {
 	Build   func(Spec) (Service, error)
 	Check   func(map[string]any) error
-	Asks    func(map[string]any) (radio.Waveform, error)
+	Asks    func(map[string]any) (RadioDemand, error)
 	Presets map[string]map[string]any
 	Schema  []schema.Attr
 }

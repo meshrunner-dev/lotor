@@ -169,7 +169,7 @@ func TestStationRadioMutationKeepsCompanionConnection(t *testing.T) {
 	if _, err := m.Create(context.Background(), confdb.KindStation, "alice",
 		map[string]string{
 			"protocol": "meshcore", "listen": addr, "profile": "eu-868-narrow",
-			"identity": "new", "node_name": "Alice", "tx_power_dbm": "14",
+			"identity": "new", "node_name": "Alice", "tx_power_dbm": "14", "tx.mode": "shadow",
 		}, "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -215,6 +215,9 @@ func TestStationRadioMutationKeepsCompanionConnection(t *testing.T) {
 	if len(infos) != 1 || !infos[0].Connected || infos[0].Radio != "virtual-slot" {
 		t.Fatalf("attached station = %+v", infos)
 	}
+	if _, exists := m.airtimeUsers["virtual-slot"]["station:alice"]; !exists {
+		t.Fatal("attached transmitting station is absent from the physical duty ledger")
+	}
 	if _, err := m.Mutate(context.Background(), confdb.KindStation, "alice",
 		nil, []string{"radio"}, "test"); err != nil {
 		t.Fatal(err)
@@ -226,6 +229,9 @@ func TestStationRadioMutationKeepsCompanionConnection(t *testing.T) {
 	infos = m.StationInfos()
 	if infos[0].RF != string(station.RFDetached) || !infos[0].Connected {
 		t.Fatalf("detached station = %+v", infos[0])
+	}
+	if _, exists := m.airtimeUsers["virtual-slot"]["station:alice"]; exists {
+		t.Fatal("detached station still constrains the old radio's duty ledger")
 	}
 }
 

@@ -195,7 +195,7 @@ func TestCompanionPreferencesSurviveStationRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := requireService(t, built)
-	if second.p.NodeName != "Persisted" || second.RadioWaveform().BandwidthHz != 125_000 ||
+	if second.p.NodeName != "Persisted" || second.RadioDemand().Waveform.BandwidthHz != 125_000 ||
 		second.p.SpreadingFactor != 9 || second.channels[2].name != "ops" ||
 		second.channels[2].secret != secret || second.defaultScope != "fr" || second.defaultKey[0] != 9 {
 		t.Fatalf("restored service = params %+v channel %+v scope %q/%x",

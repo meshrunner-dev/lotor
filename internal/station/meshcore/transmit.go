@@ -1,0 +1,249 @@
+package meshcore
+
+import (
+	"bytes"
+	"encoding/binary"
+	"strings"
+	"time"
+
+	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/correlation"
+
+	mesh "meshrunner.dev/pkg/meshcore"
+	"meshrunner.dev/pkg/meshcore/companion"
+)
+
+const (
+	stationMaxText      = 10 * mesh.CipherBlockSize
+	stationMaxGroupData = mesh.MaxPacketPayload - mesh.CipherBlockSize - 3
+	stationTimeoutBase  = 500 * time.Millisecond
+)
+
+func (s *service) handleTransmission(command companion.Command) ([]companion.Response, bool) {
+	switch cmd := command.(type) {
+	case companion.SendSelfAdvert:
+		return s.sendSelfAdvert(cmd), true
+	case companion.SendText:
+		return s.sendText(cmd), true
+	case companion.SendChannelText:
+		return s.sendChannelText(cmd), true
+	case companion.SendChannelData:
+		return s.sendChannelData(cmd), true
+	case companion.ContactKey:
+		if cmd.Kind == companion.CommandShareContact {
+			return s.shareContact(cmd.PublicKey), true
+		}
+	}
+	return nil, false
+}
+
+func (s *service) sendSelfAdvert(command companion.SendSelfAdvert) []companion.Response {
+	packet, err := s.selfAdvert(time.Now().Add(s.clockDelta))
+	if err != nil {
+		return errorResponses(companion.ErrorTableFull)
+	}
+	kind := "station-advert-local"
+	if command.Flood {
+		s.routeFlood(packet)
+		kind = "station-advert-flood"
+	} else {
+		s.routeDirect(packet, 0, nil)
+	}
+	if response := s.submitLocked(packet, kind); response != nil {
+		return response
+	}
+	return okResponses()
+}
+
+func (s *service) sendText(command companion.SendText) []companion.Response {
+	if command.TextType != mesh.TxtTypePlain && command.TextType != mesh.TxtTypeCLIData {
+		return errorResponses(companion.ErrorUnsupportedCommand)
+	}
+	contact, exists := s.contactByPrefix(command.RecipientPrefix[:])
+	if !exists {
+		return errorResponses(companion.ErrorNotFound)
+	}
+	text := command.Text
+	if at := strings.IndexByte(text, 0); at >= 0 {
+		text = text[:at]
+	}
+	limit := stationMaxText
+	if command.Attempt > 3 {
+		limit -= 2
+	}
+	if len(text) > limit {
+		return errorResponses(companion.ErrorTableFull)
+	}
+	secret, err := s.id.SharedSecret(contact.info.PublicKey[:])
+	if err != nil {
+		return errorResponses(companion.ErrorIllegalArgument)
+	}
+	sentAt := time.Unix(int64(command.UnixSeconds), 0)
+	if command.TextType == mesh.TxtTypeCLIData {
+		sentAt = time.Unix(int64(s.uniqueTimestampLocked()), 0)
+	}
+	plain := mesh.BuildTextPlaintextAttempt(sentAt, command.TextType, text, int(command.Attempt))
+	packet, err := mesh.BuildDatagram(mesh.PayloadTypeTxtMsg,
+		contact.info.PublicKey[:mesh.PathHashSize], s.id.PubKey[:mesh.PathHashSize], secret, plain)
+	if err != nil {
+		return errorResponses(companion.ErrorTableFull)
+	}
+	flood := contact.info.PathLen == 0xff
+	kind := "station-message-direct"
+	if flood {
+		s.routeFlood(packet)
+		kind = "station-message-flood"
+	} else {
+		pathBytes := pathByteLen(contact.info.PathLen)
+		s.routeDirect(packet, contact.info.PathLen, contact.info.Path[:pathBytes])
+	}
+	if response := s.submitLocked(packet, kind); response != nil {
+		return response
+	}
+	expectedACK := uint32(0)
+	if command.TextType == mesh.TxtTypePlain {
+		head := plain[:5+len(text)]
+		expectedACK = mesh.AckCRC(head, s.id.PubKey[:])
+	}
+	return []companion.Response{companion.Sent{
+		Flood: flood, ExpectedACK: expectedACK, TimeoutMillis: s.estimateTimeout(packet, flood),
+	}}
+}
+
+func (s *service) sendChannelText(command companion.SendChannelText) []companion.Response {
+	if command.TextType != mesh.TxtTypePlain {
+		return errorResponses(companion.ErrorUnsupportedCommand)
+	}
+	item, exists := s.channels[command.Channel]
+	if !exists {
+		return errorResponses(companion.ErrorNotFound)
+	}
+	channel, err := mesh.NewGroupChannel(item.secret[:])
+	if err != nil {
+		return errorResponses(companion.ErrorIllegalArgument)
+	}
+	text := command.Text
+	if room := stationMaxText - len(s.p.NodeName) - 2; len(text) > room {
+		text = text[:room]
+	}
+	plain := mesh.BuildGroupText(time.Unix(int64(command.UnixSeconds), 0), s.p.NodeName, text)
+	packet, err := mesh.BuildGroupDatagram(mesh.PayloadTypeGrpTxt, channel, plain)
+	if err != nil {
+		return errorResponses(companion.ErrorTableFull)
+	}
+	s.routeFlood(packet)
+	if response := s.submitLocked(packet, "station-channel-text"); response != nil {
+		return response
+	}
+	return okResponses()
+}
+
+func (s *service) sendChannelData(command companion.SendChannelData) []companion.Response {
+	if command.DataType == 0 || len(command.Data) > stationMaxGroupData {
+		return errorResponses(companion.ErrorIllegalArgument)
+	}
+	item, exists := s.channels[command.Channel]
+	if !exists {
+		return errorResponses(companion.ErrorNotFound)
+	}
+	channel, err := mesh.NewGroupChannel(item.secret[:])
+	if err != nil {
+		return errorResponses(companion.ErrorIllegalArgument)
+	}
+	plain := make([]byte, 0, 3+len(command.Data))
+	plain = binary.LittleEndian.AppendUint16(plain, command.DataType)
+	plain = append(plain, byte(len(command.Data)))
+	plain = append(plain, command.Data...)
+	packet, err := mesh.BuildGroupDatagram(mesh.PayloadTypeGrpData, channel, plain)
+	if err != nil {
+		return errorResponses(companion.ErrorTableFull)
+	}
+	if command.PathLen == 0xff {
+		s.routeFlood(packet)
+	} else {
+		s.routeDirect(packet, command.PathLen, command.Path)
+	}
+	if response := s.submitLocked(packet, "station-channel-data"); response != nil {
+		return response
+	}
+	return okResponses()
+}
+
+func (s *service) shareContact(publicKey [mesh.PubKeySize]byte) []companion.Response {
+	entry, exists := s.contacts[publicKey]
+	if !exists {
+		return errorResponses(companion.ErrorNotFound)
+	}
+	if len(entry.advert) == 0 {
+		return errorResponses(companion.ErrorTableFull)
+	}
+	packet, err := mesh.ParsePacket(entry.advert)
+	if err != nil {
+		return errorResponses(companion.ErrorFileIO)
+	}
+	s.routeDirect(packet, 0, nil)
+	if response := s.submitLocked(packet, "station-contact-share"); response != nil {
+		return response
+	}
+	return okResponses()
+}
+
+func (s *service) contactByPrefix(prefix []byte) (contactEntry, bool) {
+	for _, entry := range s.orderedContacts() {
+		if bytes.Equal(entry.info.PublicKey[:len(prefix)], prefix) {
+			return entry, true
+		}
+	}
+	return contactEntry{}, false
+}
+
+func (s *service) routeFlood(packet *mesh.Packet) {
+	packet.Header = mesh.MakeHeader(mesh.RouteFlood, packet.PayloadType(), packet.PayloadVer())
+	packet.SetPathHashSizeAndCount(s.p.PathHashMode+1, 0)
+	packet.Path = nil
+	packet.TransportCodes = [2]uint16{}
+	if s.sendUnscoped {
+		return
+	}
+	key := s.sendScope
+	if key == ([16]byte{}) {
+		key = s.defaultKey
+	}
+	mesh.TransportKey(key).Scope(packet)
+}
+
+func (*service) routeDirect(packet *mesh.Packet, pathLen uint8, path []byte) {
+	packet.Header = mesh.MakeHeader(mesh.RouteDirect, packet.PayloadType(), packet.PayloadVer())
+	packet.PathLen = pathLen
+	packet.Path = append([]byte(nil), path...)
+	packet.TransportCodes = [2]uint16{}
+}
+
+func pathByteLen(pathLen uint8) int {
+	return int(pathLen&63) * (int(pathLen>>6) + 1)
+}
+
+func (s *service) submitLocked(packet *mesh.Packet, kind string) []companion.Response {
+	if s.txPolicy.Mode == "" || s.txPolicy.Mode == config.TXDry || s.rfDevice == nil || s.duty == nil {
+		return []companion.Response{companion.StatusResponse(companion.ResponseDisabled)}
+	}
+	item := emission{packet: packet, correlation: correlation.New(), kind: kind}
+	select {
+	case s.outbound <- item:
+		return nil
+	default:
+		return errorResponses(companion.ErrorTableFull)
+	}
+}
+
+func (s *service) estimateTimeout(packet *mesh.Packet, flood bool) uint32 {
+	airtime := time.Duration(0)
+	if s.rfDevice != nil {
+		airtime = s.rfDevice.Airtime(packet.RawLength())
+	}
+	if flood {
+		return uint32((stationTimeoutBase + 16*airtime).Milliseconds())
+	}
+	perHop := 6*airtime + 250*time.Millisecond
+	return uint32((stationTimeoutBase + time.Duration(packet.PathHashCount()+1)*perHop).Milliseconds())
+}
