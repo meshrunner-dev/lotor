@@ -319,15 +319,22 @@ func (s Settings) envelope() radio.Envelope {
 // runs them too — the same function, so what a dry run accepts is
 // exactly what Configure and Open can carry out.
 
+// The TCXO voltages the part accepts, as the config spells them.
+const (
+	tcxo1V6 = "1.6"
+	tcxo1V8 = "1.8"
+	tcxo3V3 = "3.3"
+)
+
 func tcxoFrom(s string) (sx126x.TCXOVoltage, error) {
 	switch s {
 	case "":
 		return sx126x.TCXONone, nil
-	case "1.6":
+	case tcxo1V6:
 		return sx126x.TCXO1V6, nil
-	case "1.8":
+	case tcxo1V8:
 		return sx126x.TCXO1V8, nil
-	case "3.3":
+	case tcxo3V3:
 		return sx126x.TCXO3V3, nil
 	}
 	return sx126x.TCXONone, fmt.Errorf("unsupported tcxo voltage %q", s)
