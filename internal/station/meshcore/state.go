@@ -3,11 +3,15 @@ package meshcore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
 
 	"meshrunner.dev/lotor/internal/radio"
+
+	mesh "meshrunner.dev/pkg/meshcore"
+	"meshrunner.dev/pkg/meshcore/companion"
 )
 
 const persistedStateVersion = 1
@@ -16,6 +20,21 @@ type persistedChannel struct {
 	Index  uint8    `json:"index"`
 	Name   string   `json:"name"`
 	Secret [16]byte `json:"secret"`
+}
+
+type persistedContact struct {
+	PublicKey        [32]byte `json:"publicKey"`
+	Type             uint8    `json:"type"`
+	Flags            uint8    `json:"flags"`
+	PathLen          uint8    `json:"pathLen"`
+	Path             [64]byte `json:"path"`
+	Name             string   `json:"name"`
+	LastAdvertUnix   uint32   `json:"lastAdvertUnix"`
+	LatitudeE6       int32    `json:"latitudeE6"`
+	LongitudeE6      int32    `json:"longitudeE6"`
+	LastModifiedUnix uint32   `json:"lastModifiedUnix"`
+	Advert           []byte   `json:"advert,omitempty"`
+	Order            uint64   `json:"order"`
 }
 
 type persistedWaveform struct {
@@ -67,6 +86,7 @@ type persistedState struct {
 	DefaultScope  string             `json:"defaultScope"`
 	DefaultKey    [16]byte           `json:"defaultScopeKey"`
 	Channels      []persistedChannel `json:"channels,omitempty"`
+	Contacts      []persistedContact `json:"contacts,omitempty"`
 }
 
 func (s *service) snapshotLocked() persistedState {
@@ -78,11 +98,22 @@ func (s *service) snapshotLocked() persistedState {
 		ClockDelta: int64(s.clockDelta), AutoFlags: s.autoFlags, AutoHops: s.autoHops,
 		DefaultScope: s.defaultScope, DefaultKey: s.defaultKey,
 		Channels: make([]persistedChannel, 0, len(s.channels)),
+		Contacts: make([]persistedContact, 0, len(s.contacts)),
 	}
 	for index, ch := range s.channels {
 		state.Channels = append(state.Channels, persistedChannel{Index: index, Name: ch.name, Secret: ch.secret})
 	}
 	sort.Slice(state.Channels, func(i, j int) bool { return state.Channels[i].Index < state.Channels[j].Index })
+	for _, entry := range s.contacts {
+		info := entry.info
+		state.Contacts = append(state.Contacts, persistedContact{
+			PublicKey: info.PublicKey, Type: info.Type, Flags: info.Flags, PathLen: info.PathLen,
+			Path: info.Path, Name: info.Name, LastAdvertUnix: info.LastAdvertUnix,
+			LatitudeE6: info.LatitudeE6, LongitudeE6: info.LongitudeE6,
+			LastModifiedUnix: info.LastModifiedUnix, Advert: append([]byte(nil), entry.advert...), Order: entry.order,
+		})
+	}
+	sort.Slice(state.Contacts, func(i, j int) bool { return state.Contacts[i].Order < state.Contacts[j].Order })
 	return state
 }
 
@@ -98,6 +129,20 @@ func (s *service) restoreLocked(state persistedState) {
 	s.channels = make(map[uint8]channel, len(state.Channels))
 	for _, item := range state.Channels {
 		s.channels[item.Index] = channel{name: item.Name, secret: item.Secret}
+	}
+	s.contacts = make(map[[mesh.PubKeySize]byte]contactEntry, len(state.Contacts))
+	s.nextContact = 0
+	for _, item := range state.Contacts {
+		info := companion.Contact{
+			PublicKey: item.PublicKey, Type: item.Type, Flags: item.Flags, PathLen: item.PathLen,
+			Path: item.Path, Name: item.Name, LastAdvertUnix: item.LastAdvertUnix,
+			LatitudeE6: item.LatitudeE6, LongitudeE6: item.LongitudeE6,
+			LastModifiedUnix: item.LastModifiedUnix,
+		}
+		s.contacts[item.PublicKey] = contactEntry{
+			info: info, advert: append([]byte(nil), item.Advert...), order: item.Order,
+		}
+		s.nextContact = max(s.nextContact, item.Order)
 	}
 }
 
@@ -116,6 +161,14 @@ func (s *service) loadState(ctx context.Context) error {
 	if state.Version != persistedStateVersion {
 		return fmt.Errorf("meshcore station state: version %d, want %d", state.Version, persistedStateVersion)
 	}
+	if err := s.validateState(state); err != nil {
+		return err
+	}
+	s.restoreLocked(state)
+	return nil
+}
+
+func (s *service) validateState(state persistedState) error {
 	check := s.p
 	check.Waveform, check.TXPowerDBm = state.Waveform.radio(), state.TXPowerDBm
 	check.NodeName, check.NodeLat, check.NodeLon = state.NodeName, state.NodeLat, state.NodeLon
@@ -128,8 +181,15 @@ func (s *service) loadState(ctx context.Context) error {
 	if err := validatePreferences(check); err != nil {
 		return fmt.Errorf("meshcore station state: %w", err)
 	}
-	seen := make(map[uint8]struct{}, len(state.Channels))
-	for _, item := range state.Channels {
+	if err := s.validateChannels(state.Channels); err != nil {
+		return err
+	}
+	return s.validateContacts(state.Contacts)
+}
+
+func (s *service) validateChannels(channels []persistedChannel) error {
+	seen := make(map[uint8]struct{}, len(channels))
+	for _, item := range channels {
 		if int(item.Index) >= s.p.MaxChannels || len(item.Name) > maxChannelName {
 			return fmt.Errorf("meshcore station state: invalid channel %d", item.Index)
 		}
@@ -138,7 +198,32 @@ func (s *service) loadState(ctx context.Context) error {
 		}
 		seen[item.Index] = struct{}{}
 	}
-	s.restoreLocked(state)
+	return nil
+}
+
+func (s *service) validateContacts(contacts []persistedContact) error {
+	if len(contacts) > s.p.MaxContacts {
+		return fmt.Errorf("meshcore station state: %d contacts exceed capacity %d", len(contacts), s.p.MaxContacts)
+	}
+	contactKeys := make(map[[mesh.PubKeySize]byte]struct{}, len(contacts))
+	for _, item := range contacts {
+		if _, duplicate := contactKeys[item.PublicKey]; duplicate {
+			return fmt.Errorf("meshcore station state: duplicate contact %x", item.PublicKey[:6])
+		}
+		contactKeys[item.PublicKey] = struct{}{}
+		if item.PathLen != 0xff && !mesh.ValidPathLen(item.PathLen) {
+			return fmt.Errorf("meshcore station state: invalid contact path 0x%02x", item.PathLen)
+		}
+		if len(item.Name) > maxStationName {
+			return fmt.Errorf("meshcore station state: contact name exceeds %d bytes", maxStationName)
+		}
+		if len(item.Advert) > 0 {
+			packet, err := mesh.ParsePacket(item.Advert)
+			if err != nil || packet.PayloadType() != mesh.PayloadTypeAdvert {
+				return errors.New("meshcore station state: invalid contact advert")
+			}
+		}
+	}
 	return nil
 }
 

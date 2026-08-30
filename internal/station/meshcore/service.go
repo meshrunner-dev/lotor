@@ -182,7 +182,8 @@ func build(spec station.Spec) (station.Service, error) {
 	s := &service{
 		name: spec.Name, listen: spec.Listen, radioName: spec.Radio,
 		p: p, id: id, log: log, buildVersion: spec.Build.Version,
-		channels: make(map[uint8]channel), state: station.StateStarting, stateStore: spec.State,
+		channels: make(map[uint8]channel), contacts: make(map[[mesh.PubKeySize]byte]contactEntry),
+		state: station.StateStarting, stateStore: spec.State,
 	}
 	loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -210,6 +211,12 @@ type channel struct {
 	secret [16]byte
 }
 
+type contactEntry struct {
+	info   companion.Contact
+	advert []byte
+	order  uint64
+}
+
 type service struct {
 	name, listen, radioName string
 	p                       params
@@ -230,6 +237,8 @@ type service struct {
 	autoFlags    uint8
 	autoHops     uint8
 	channels     map[uint8]channel
+	contacts     map[[mesh.PubKeySize]byte]contactEntry
+	nextContact  uint64
 	defaultKey   [16]byte
 	defaultScope string
 	sendScope    [16]byte
@@ -409,7 +418,13 @@ func (s *service) handleQuery(cmd companion.Command) ([]companion.Response, bool
 	case companion.AppStart:
 		return []companion.Response{s.selfInfo()}, true
 	case companion.GetContacts:
-		return []companion.Response{companion.ContactsStart{}, companion.EndOfContacts{}}, true
+		return s.getContacts(c), true
+	case companion.ContactKey:
+		if c.Kind == companion.CommandGetContactByKey {
+			return s.getContact(c.PublicKey), true
+		}
+	case companion.ExportContact:
+		return s.exportContact(c), true
 	case companion.SimpleCommand:
 		return s.handleSimple(c.Kind), true
 	case companion.UnknownCommand:
@@ -417,9 +432,13 @@ func (s *service) handleQuery(cmd companion.Command) ([]companion.Response, bool
 	default:
 		return nil, false
 	}
+	return nil, false
 }
 
 func (s *service) handleMutation(cmd companion.Command) []companion.Response {
+	if responses, handled := s.handleContactMutation(cmd); handled {
+		return responses
+	}
 	switch c := cmd.(type) {
 	case companion.SetDeviceTime:
 		return s.setDeviceTime(c.UnixSeconds)
@@ -461,6 +480,26 @@ func (s *service) handleMutation(cmd companion.Command) []companion.Response {
 	default:
 		return errorResponses(companion.ErrorUnsupportedCommand)
 	}
+}
+
+func (s *service) handleContactMutation(cmd companion.Command) ([]companion.Response, bool) {
+	switch c := cmd.(type) {
+	case companion.AddUpdateContact:
+		return s.addUpdateContact(c), true
+	case companion.ImportContact:
+		return s.importContact(c.Packet), true
+	case companion.ContactKey:
+		if c.Kind == companion.CommandResetPath {
+			return s.resetContactPath(c.PublicKey), true
+		}
+		if c.Kind == companion.CommandRemoveContact {
+			return s.removeContact(c.PublicKey), true
+		}
+		if c.Kind == companion.CommandShareContact {
+			return []companion.Response{companion.StatusResponse(companion.ResponseDisabled)}, true
+		}
+	}
+	return nil, false
 }
 
 func (s *service) setDeviceTime(seconds uint32) []companion.Response {

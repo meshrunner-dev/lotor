@@ -15,6 +15,7 @@ import (
 	"meshrunner.dev/lotor/internal/station"
 	"meshrunner.dev/lotor/internal/version"
 
+	mesh "meshrunner.dev/pkg/meshcore"
 	"meshrunner.dev/pkg/meshcore/companion"
 )
 
@@ -216,6 +217,104 @@ func TestPreferenceWriteFailureRollsBackAndReportsFileIO(t *testing.T) {
 	want, _ := companion.MarshalResponse(companion.ErrorResponse{Code: companion.ErrorFileIO})
 	if !bytes.Equal(wire, want) || svc.p.NodeName != "Alice" {
 		t.Fatalf("failed save = % X name %q, want % X and rollback", wire, svc.p.NodeName, want)
+	}
+}
+
+func TestContactCRUDFiltersAndPersists(t *testing.T) {
+	store := &memoryStationState{}
+	spec := testSpec(t)
+	spec.State = store
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	contact := companion.Contact{
+		PublicKey: [32]byte{1: 2, 31: 3}, Type: 2, Flags: 1, PathLen: 0x01,
+		Path: [64]byte{7},
+		Name: "Relay", LastAdvertUnix: 10, LatitudeE6: 1, LongitudeE6: 2,
+		LastModifiedUnix: 50,
+	}
+	responses := svc.handle(t.Context(), companion.AddUpdateContact{
+		Contact: contact, HasLocation: true, HasLastModified: true,
+	})
+	if len(responses) != 1 {
+		t.Fatalf("add responses = %#v", responses)
+	}
+	responses = svc.handle(t.Context(), companion.GetContacts{Since: 49, HasSince: true})
+	if len(responses) != 3 {
+		t.Fatalf("contact stream = %#v", responses)
+	}
+	start, ok := responses[0].(companion.ContactsStart)
+	item, itemOK := responses[1].(companion.ContactResponse)
+	end, endOK := responses[2].(companion.EndOfContacts)
+	if !ok || start.Count != 1 || !itemOK || item.Contact != contact || !endOK || end.MostRecent != 50 {
+		t.Fatalf("contact stream = %#v", responses)
+	}
+	if got := svc.handle(t.Context(), companion.GetContacts{Since: 50, HasSince: true}); len(got) != 2 {
+		t.Fatalf("filtered stream = %#v", got)
+	}
+
+	built, err = build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := requireService(t, built)
+	responses = restored.handle(t.Context(), companion.ContactKey{
+		Kind: companion.CommandGetContactByKey, PublicKey: contact.PublicKey,
+	})
+	if len(responses) != 1 {
+		t.Fatalf("restored contact = %#v", responses)
+	}
+	if got := restored.handle(t.Context(), companion.ContactKey{
+		Kind: companion.CommandResetPath, PublicKey: contact.PublicKey,
+	}); len(got) != 1 || restored.contacts[contact.PublicKey].info.PathLen != 0xff {
+		t.Fatalf("reset path = %#v", got)
+	}
+	_ = restored.handle(t.Context(), companion.ContactKey{
+		Kind: companion.CommandRemoveContact, PublicKey: contact.PublicKey,
+	})
+	if len(restored.contacts) != 0 {
+		t.Fatal("contact survived removal")
+	}
+}
+
+func TestImportedAdvertCanBeExported(t *testing.T) {
+	built, err := build(testSpec(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	peer, err := mesh.NewLocalIdentity(bytes.NewReader(bytes.Repeat([]byte{9}, 64)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := mesh.BuildAdvert(peer, time.Unix(1_800_000_000, 0),
+		&mesh.AdvertData{Type: mesh.AdvTypeChat, Name: "Peer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet.SetPathHashSizeAndCount(2, 1)
+	packet.Path = []byte{4, 5}
+	raw, err := packet.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	responses := svc.handle(t.Context(), companion.ImportContact{Packet: raw})
+	if len(responses) != 1 || len(svc.contacts) != 1 {
+		t.Fatalf("import = %#v contacts %d", responses, len(svc.contacts))
+	}
+	responses = svc.handle(t.Context(), companion.ExportContact{PublicKey: peer.PubKey})
+	exported, ok := responses[0].(companion.ExportedContact)
+	if !ok {
+		t.Fatalf("export = %#v", responses)
+	}
+	back, err := mesh.ParsePacket(exported.Packet)
+	if err != nil || back.Route() != mesh.RouteFlood || back.PathHashCount() != 0 || back.HasTransportCodes() {
+		t.Fatalf("exported packet = %#v, %v", back, err)
+	}
+	if _, err := mesh.ParseAdvert(back.Payload); err != nil {
+		t.Fatalf("exported advert: %v", err)
 	}
 }
 
