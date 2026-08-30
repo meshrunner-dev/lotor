@@ -43,6 +43,8 @@ func (s *service) handleTransmission(command companion.Command) ([]companion.Res
 		return s.sendContactDataRequest(cmd), true
 	case companion.SendPathDiscovery:
 		return s.sendPathDiscovery(cmd.PublicKey), true
+	case companion.SendTracePath:
+		return s.sendTrace(cmd), true
 	case companion.SendControlData:
 		return s.sendControlData(cmd.Data), true
 	case companion.SendRawPacket:

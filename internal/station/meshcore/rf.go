@@ -156,6 +156,8 @@ func (s *service) processRF(ctx context.Context, frame radio.Frame) {
 		s.receiveRaw(packet, frame)
 	case mesh.PayloadTypeControl:
 		s.receiveControl(packet, frame)
+	case mesh.PayloadTypeTrace:
+		s.receiveTrace(packet, frame)
 	default:
 		return
 	}
@@ -209,6 +211,7 @@ func (s *service) receiveAdvert(ctx context.Context, packet *mesh.Packet) {
 	if err == nil && stored {
 		advert, _ := mesh.ParseAdvert(packet.Payload)
 		entry := s.contacts[advert.Identity.PubKey]
+		s.cacheAdvertPathLocked(entry.info.PublicKey, packet)
 		if created {
 			wire, _ := companion.MarshalResponse(companion.ContactResponse{Contact: entry.info})
 			response = companion.Push{Code: companion.PushNewAdvert, Body: wire[1:]}

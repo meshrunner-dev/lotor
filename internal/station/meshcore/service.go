@@ -298,6 +298,7 @@ type service struct {
 	signData     []byte
 	pending      pendingRequest
 	connections  map[[mesh.PubKeySize]byte]remoteConnection
+	advertPaths  [16]advertPath
 }
 
 func (s *service) Run(ctx context.Context) error {
@@ -470,6 +471,9 @@ func (s *service) handle(ctx context.Context, cmd companion.Command) []companion
 }
 
 func (s *service) handleQuery(cmd companion.Command) ([]companion.Response, bool) {
+	if responses, handled := s.handleRuntimeQuery(cmd); handled {
+		return responses, true
+	}
 	switch c := cmd.(type) {
 	case companion.DeviceQuery:
 		s.appVersion = c.TargetVersion
@@ -489,8 +493,31 @@ func (s *service) handleQuery(cmd companion.Command) ([]companion.Response, bool
 		}
 	case companion.ExportContact:
 		return s.exportContact(c), true
+	case companion.SimpleCommand:
+		if responses, handled := s.handleIdentityQuery(c.Kind); handled {
+			return responses, true
+		}
+		if c.Kind == companion.CommandSyncNextMessage {
+			return nil, false
+		}
+		if c.Kind == companion.CommandGetCustomVars {
+			return []companion.Response{companion.CustomVars{}}, true
+		}
+		return s.handleSimple(c.Kind), true
+	case companion.UnknownCommand:
+		return errorResponses(companion.ErrorUnsupportedCommand), true
+	default:
+		return nil, false
+	}
+	return nil, false
+}
+
+func (s *service) handleRuntimeQuery(cmd companion.Command) ([]companion.Response, bool) {
+	switch c := cmd.(type) {
 	case companion.GetStats:
 		return s.getStats(c.Type), true
+	case companion.GetAdvertPath:
+		return s.getAdvertPath(c.PublicKey), true
 	case companion.SignData:
 		return s.appendSignData(c.Data), true
 	case companion.ContactRequest:
@@ -507,20 +534,9 @@ func (s *service) handleQuery(cmd companion.Command) ([]companion.Response, bool
 		default:
 			return nil, false
 		}
-	case companion.SimpleCommand:
-		if responses, handled := s.handleIdentityQuery(c.Kind); handled {
-			return responses, true
-		}
-		if c.Kind == companion.CommandSyncNextMessage {
-			return nil, false
-		}
-		return s.handleSimple(c.Kind), true
-	case companion.UnknownCommand:
-		return errorResponses(companion.ErrorUnsupportedCommand), true
 	default:
 		return nil, false
 	}
-	return nil, false
 }
 
 func (s *service) handleMutation(cmd companion.Command) []companion.Response {
@@ -582,6 +598,10 @@ func (s *service) handlePreferenceMutation(cmd companion.Command) ([]companion.R
 		s.pending = pendingRequest{}
 		clear(s.connections)
 		return okResponses(), true
+	case companion.SetCustomVar:
+		// Virtual stations currently expose no target-specific sensor
+		// settings, exactly the empty SensorManager reference behaviour.
+		return errorResponses(companion.ErrorIllegalArgument), true
 	default:
 		return nil, false
 	}
