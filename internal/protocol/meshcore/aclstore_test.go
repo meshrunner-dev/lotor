@@ -18,19 +18,14 @@ import (
 	"meshrunner.dev/lotor/internal/correlation"
 )
 
-// fakeStore is a session store whose three operations fail on demand,
-// separately: the audit's own shape, since load, save and forget each
-// carry a different promise.
+// fakeStore is an access store whose three operations fail on demand,
+// separately: load, save and forget each carry a different promise.
 type fakeStore struct {
 	rows                        []PersistedSession
 	loadErr, saveErr, forgetErr error
-	// swapErr fails the atomic replacement alone, which is neither a
-	// plain save nor a plain forget.
-	swapErr               error
-	loads, saves, forgets int
-	swaps                 int
-	saved                 map[[meshcore.PubKeySize]byte]PersistedSession
-	forgotten             []([meshcore.PubKeySize]byte)
+	loads, saves, forgets       int
+	saved                       map[[meshcore.PubKeySize]byte]PersistedSession
+	forgotten                   []([meshcore.PubKeySize]byte)
 }
 
 func newFakeStore() *fakeStore {
@@ -64,22 +59,6 @@ func (s *fakeStore) ForgetSession(k [meshcore.PubKeySize]byte) error {
 	return nil
 }
 
-// ReplaceSession is the one durable step a full table's admission
-// really is: the newcomer in, the victim out, both or neither.
-func (s *fakeStore) ReplaceSession(add PersistedSession, drop [meshcore.PubKeySize]byte) error {
-	s.swaps++
-	if s.swapErr != nil {
-		return s.swapErr
-	}
-	if s.saveErr != nil {
-		return s.saveErr
-	}
-	delete(s.saved, drop)
-	s.saved[add.PubKey] = add
-	s.forgotten = append(s.forgotten, drop)
-	return nil
-}
-
 // key builds a distinct public key from one byte.
 func aclKey(b byte) [meshcore.PubKeySize]byte {
 	var k [meshcore.PubKeySize]byte
@@ -98,14 +77,14 @@ func TestUnreadableStoreRefusesTheRelay(t *testing.T) {
 	store.loadErr = errors.New("disk on fire")
 	err := e.AttachSessions(store)
 	if err == nil {
-		t.Fatal("an unreadable session store was accepted")
+		t.Fatal("an unreadable access store was accepted")
 	}
 	if len(e.acl.by) != 0 {
 		t.Error("a refused load left sessions behind")
 	}
 }
 
-func TestLoadKeepsGrantsWhenTheStoreOverflows(t *testing.T) {
+func TestLoadPurgesLegacyGuestsAndKeepsAccess(t *testing.T) {
 	e, _ := identifiedEngine(t)
 	store := newFakeStore()
 	// Real keys: restoring a session derives its shared secret, and a
@@ -118,8 +97,8 @@ func TestLoadKeepsGrantsWhenTheStoreOverflows(t *testing.T) {
 		}
 		return id.PubKey
 	}
-	// One grant, listed last, behind a full table's worth of guests:
-	// the places must not be spent on whoever the store lists first.
+	// One grant, listed last, behind a full table's worth of legacy
+	// guest rows: guests must be deleted, not restored into ACL slots.
 	for range maxClients {
 		store.rows = append(store.rows, PersistedSession{
 			PubKey: peer(), Perms: permGuest, LastActive: time.Now(),
@@ -132,26 +111,29 @@ func TestLoadKeepsGrantsWhenTheStoreOverflows(t *testing.T) {
 	if err := e.AttachSessions(store); err != nil {
 		t.Fatal(err)
 	}
-	if len(e.acl.by) != maxClients {
-		t.Errorf("restored %d sessions, want %d", len(e.acl.by), maxClients)
+	if len(e.acl.by) != 1 {
+		t.Errorf("restored %d access entries, want 1", len(e.acl.by))
 	}
 	if _, kept := e.acl.by[granted]; !kept {
-		t.Error("the grant was crowded out by plain logins")
+		t.Error("the grant was crowded out by legacy guests")
+	}
+	if store.forgets != maxClients {
+		t.Errorf("cleaned %d legacy guests, want %d", store.forgets, maxClients)
 	}
 }
 
-func TestGrantsAndAdminsAreNeverEvicted(t *testing.T) {
+func TestAccessEntriesAreNeverEvicted(t *testing.T) {
 	e, _ := identifiedEngine(t)
 	store := newFakeStore()
 	if err := e.AttachSessions(store); err != nil {
 		t.Fatal(err)
 	}
-	// One granted admin, old and quiet, then a table's worth of fresh
-	// guests: the reference hunts its victim among non-admins alone,
-	// or a run of logins unseats the node's only administrator.
+	// One granted read-only entry, old and quiet, then a table's worth
+	// of fresh guests: a run of logins must not unseat any durable
+	// authorisation, not only administrators.
 	admin := aclKey(0xAA)
 	if err := e.acl.put(&client{
-		pubKey: admin, perms: permAdmin, granted: true,
+		pubKey: admin, perms: permReadOnly, granted: true,
 		lastActive: time.Now().Add(-time.Hour),
 	}); err != nil {
 		t.Fatal(err)
@@ -170,24 +152,24 @@ func TestGrantsAndAdminsAreNeverEvicted(t *testing.T) {
 		t.Fatalf("a guest could not take a guest's place: %v", err)
 	}
 	if _, kept := e.acl.by[admin]; !kept {
-		t.Fatal("a guest login evicted the granted admin")
+		t.Fatal("a guest login evicted the read-only access entry")
 	}
 	if _, gone := store.saved[admin]; !gone {
-		t.Error("the granted admin was deleted from the store")
+		t.Error("the read-only access entry was deleted from the store")
 	}
 	if len(e.acl.by) != maxClients {
 		t.Errorf("table holds %d, want %d", len(e.acl.by), maxClients)
 	}
 }
 
-func TestAFullTableOfGrantsRefusesTheLogin(t *testing.T) {
+func TestAFullTableOfAccessEntriesRefusesTheLogin(t *testing.T) {
 	e, _ := identifiedEngine(t)
 	if err := e.AttachSessions(newFakeStore()); err != nil {
 		t.Fatal(err)
 	}
 	for i := range maxClients {
 		if err := e.acl.put(&client{
-			pubKey: aclKey(byte(i)), perms: permAdmin, granted: true, lastActive: time.Now(),
+			pubKey: aclKey(byte(i)), perms: permReadOnly, granted: true, lastActive: time.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -238,6 +220,85 @@ func TestARefusedForgetKeepsTheEntry(t *testing.T) {
 	}
 	if _, gone := e.acl.by[k]; !gone {
 		t.Error("the entry was dropped from the table anyway — the two would disagree on restart")
+	}
+}
+
+func TestGuestActivityNeverTouchesTheAccessStore(t *testing.T) {
+	e, _ := identifiedEngine(t)
+	store := newFakeStore()
+	if err := e.AttachSessions(store); err != nil {
+		t.Fatal(err)
+	}
+	k := aclKey(0x2A)
+	c := &client{pubKey: k, perms: permGuest, lastActive: time.Now()}
+	if err := e.acl.put(c); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.acl.advance(c, 100, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	c.out = &outPath{pathLen: 1, path: []byte{0x42}, learned: time.Now()}
+	if err := e.acl.save(c); err != nil {
+		t.Fatal(err)
+	}
+	if store.saves != 0 || store.forgets != 0 || len(store.saved) != 0 {
+		t.Fatalf("guest activity touched the access store: saves=%d forgets=%d rows=%d",
+			store.saves, store.forgets, len(store.saved))
+	}
+}
+
+func TestGuestDemotionMustRemoveTheAccessEntry(t *testing.T) {
+	e, _ := identifiedEngine(t)
+	store := newFakeStore()
+	if err := e.AttachSessions(store); err != nil {
+		t.Fatal(err)
+	}
+	k := aclKey(0x2B)
+	admin := &client{
+		pubKey: k, perms: permAdmin, lastTimestamp: 10, lastActive: time.Now(),
+	}
+	if err := e.acl.put(admin); err != nil {
+		t.Fatal(err)
+	}
+	guest := *admin
+	guest.perms = permGuest
+	guest.granted = false
+
+	store.forgetErr = errors.New("disk read-only")
+	if err := e.acl.put(&guest); err == nil {
+		t.Fatal("a demotion whose ACL deletion failed was installed")
+	}
+	if live := e.acl.by[k]; live == nil || !live.isAdmin() {
+		t.Fatalf("failed demotion changed the live role: %+v", live)
+	}
+	if _, kept := store.saved[k]; !kept {
+		t.Fatal("failed demotion deleted the durable role")
+	}
+
+	store.forgetErr = nil
+	if err := e.acl.put(&guest); err != nil {
+		t.Fatal(err)
+	}
+	if live := e.acl.by[k]; live == nil || live.hasAccess() {
+		t.Fatalf("successful demotion did not install a guest session: %+v", live)
+	}
+	if _, kept := store.saved[k]; kept {
+		t.Fatal("successful demotion left the ACL entry durable")
+	}
+}
+
+func TestLegacyGuestCleanupMustSucceed(t *testing.T) {
+	e, _ := identifiedEngine(t)
+	store := newFakeStore()
+	store.rows = []PersistedSession{{
+		PubKey: aclKey(0x2C), Perms: permGuest, LastActive: time.Now(),
+	}}
+	store.forgetErr = errors.New("disk read-only")
+	if err := e.AttachSessions(store); err == nil {
+		t.Fatal("a legacy guest that could not be removed was accepted")
+	}
+	if len(e.acl.by) != 0 {
+		t.Fatal("a failed cleanup restored the legacy guest")
 	}
 }
 
@@ -441,11 +502,9 @@ func TestARefusedGrantLeavesTheLiveSessionAlone(t *testing.T) {
 	}
 }
 
-func TestAdmittingIntoAFullTableIsOneDurableStep(t *testing.T) {
-	// Two writes left the store holding thirty-three sessions for a
-	// table of thirty-two, and nothing said which a restart would
-	// drop: an evicted session could come back while the newcomer,
-	// replay guard and all, went missing instead.
+func TestAdmittingIntoAFullGuestTableKeepsGuestsOffDisk(t *testing.T) {
+	// A full live table may swap one guest for another, but neither
+	// side of that in-memory eviction belongs in the access store.
 	fill := func(t *testing.T) (*engine, *fakeStore) {
 		t.Helper()
 		e, _ := identifiedEngine(t)
@@ -464,8 +523,6 @@ func TestAdmittingIntoAFullTableIsOneDurableStep(t *testing.T) {
 		return e, store
 	}
 
-	// The swap succeeds: the two sets agree exactly, and it took one
-	// durable step rather than two.
 	e, store := fill(t)
 	victim := aclKey(0) // the least recently active
 	newcomer := aclKey(0xEE)
@@ -474,45 +531,14 @@ func TestAdmittingIntoAFullTableIsOneDurableStep(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if store.swaps != 1 {
-		t.Errorf("the admission took %d swaps, want one", store.swaps)
+	if store.saves != 0 || store.forgets != 0 || len(store.saved) != 0 {
+		t.Errorf("guest eviction touched the access store: saves=%d forgets=%d rows=%d",
+			store.saves, store.forgets, len(store.saved))
 	}
-	assertSetsAgree(t, e, store)
-	if _, gone := store.saved[victim]; gone {
-		t.Error("the victim is still persisted while the table dropped it")
+	if _, gone := e.acl.by[victim]; gone {
+		t.Error("the least-recent guest was not evicted")
 	}
-	if _, in := store.saved[newcomer]; !in {
-		t.Error("the newcomer never reached the store")
-	}
-
-	// The swap fails: neither side moves, and the login is refused.
-	e, store = fill(t)
-	store.swapErr = errors.New("disk full")
-	err := e.acl.put(&client{
-		pubKey: aclKey(0xFF), perms: permGuest, lastActive: time.Now().Add(time.Hour),
-	})
-	if err == nil {
-		t.Fatal("an admission the store refused reported success")
-	}
-	if _, leaked := e.acl.by[aclKey(0xFF)]; leaked {
-		t.Error("the refused newcomer was installed")
-	}
-	if _, gone := e.acl.by[aclKey(0)]; !gone {
-		t.Error("the victim was evicted for an admission that never persisted")
-	}
-	assertSetsAgree(t, e, store)
-}
-
-// assertSetsAgree proves the live table and the store hold exactly the
-// same sessions — the property two separate writes could not keep.
-func assertSetsAgree(t *testing.T, e *engine, store *fakeStore) {
-	t.Helper()
-	if len(e.acl.by) != len(store.saved) {
-		t.Fatalf("table holds %d sessions, store holds %d", len(e.acl.by), len(store.saved))
-	}
-	for k := range e.acl.by {
-		if _, ok := store.saved[k]; !ok {
-			t.Errorf("session %x lives only in the table", k[:4])
-		}
+	if _, in := e.acl.by[newcomer]; !in {
+		t.Error("the newcomer was not admitted")
 	}
 }

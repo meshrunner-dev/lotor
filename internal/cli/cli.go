@@ -116,7 +116,10 @@ type Neighbour struct {
 // shows it.
 type AirSession struct {
 	PubKey [32]byte
-	Admin  bool
+	// Role is the protocol's word for this session's effective
+	// permissions. In particular, a granted read-only client is not a
+	// guest merely because it is not an administrator.
+	Role string
 	// Path is the route home the client taught us, one hash byte per
 	// hop; HasPath false means answers flood. A zero-hop path says
 	// the client is adjacent, which is not the same as not knowing.
@@ -182,8 +185,8 @@ type RelayInfo struct {
 	// AirSessions lists the companions logged in over the air; nil
 	// when the protocol keeps no sessions.
 	AirSessions func() ([]AirSession, error)
-	// Access lists the grants and live sessions — the access list an
-	// admin manages; nil when the protocol keeps none.
+	// Access lists durable authorisations; live guests belong to
+	// AirSessions instead. Nil when the protocol keeps no access list.
 	Access func() ([]Access, error)
 	// Grant records a permission byte for a key — the wire's own
 	// value, passed through whole for the channels that carry one;
@@ -238,8 +241,8 @@ type AttrDelta struct {
 	New  string
 }
 
-// Access is one entry of the access list: who, what role, whether it
-// was granted or merely logged in, and how fresh.
+// Access is one durable entry of the access list: who, what role,
+// whether it was granted explicitly or earned by login, and how fresh.
 type Access struct {
 	PubKey [32]byte
 	// Role is the protocol's own word for what this entry may do —

@@ -14,14 +14,10 @@ import (
 )
 
 // Client sessions, the reference repeater's shape. A companion logs in
-// with a password and may then ask a handful of authenticated
-// questions: how the node is doing, what it hears, who it is.
-//
-// Only the guest role is served yet. The reference's admin role —
-// settings, access lists, a whole CLI over the air — is a surface
-// this daemon does not answer on today; until it does, administration
-// happens on the local console socket, where the operating system's
-// own permissions are the authentication.
+// with a password or a durable key grant and may then ask authenticated
+// questions. Admin sessions also carry the reference's CLI over the
+// air. Guest is the one ephemeral role; every non-guest role belongs
+// to the durable access list.
 const (
 	// The reference's ClientACL roles — PERM_ACL_* in ClientACL.h —
 	// living in the low two bits of the permission byte. Guest is not
@@ -86,7 +82,12 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	// a site that administers from the field without letting guests
 	// read anything is an ordinary posture, and gating logins on the
 	// guest mode alone would lock its owner out.
-	if e.p.AdminPassword == "" &&
+	// A known key may always perform the reference's blank-password
+	// recheck. That is what makes an explicit read-only grant useful
+	// without sharing either configured password; the configured doors
+	// only decide whether an unknown key may create a session.
+	known := e.acl.get(senderPub) != nil
+	if !known && e.p.AdminPassword == "" &&
 		e.p.GuestAccess != guestPassword && e.p.GuestAccess != guestOpen {
 		e.responseSuppressed(origin, "login", "access-closed")
 		return
@@ -128,10 +129,10 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 
 	c.lastTimestamp, c.lastActive = ts, time.Now()
 	c.asks = rateLimiter{max: e.p.SessionLimit, window: sessionLimitWindow}
-	// The session is only real once the table takes it, and the table
-	// only takes what reached the store: a login answered from RAM
-	// alone is one the next restart forgets — its replay guard with
-	// it, so the very frame that opened it opens it again.
+	c.active = true
+	// The session is only real once the table takes it. A non-guest
+	// login reaches the access store first; a guest deliberately stays
+	// in RAM and must log in again after a restart.
 	if err := e.acl.put(c); err != nil {
 		e.log.Warn("login refused: the session table would not take it",
 			zap.String("corr", origin.Short()),
@@ -260,6 +261,7 @@ func (e *engine) openReq(pkt *meshcore.Packet) (*client, []byte) {
 	}
 	for _, c := range e.acl.matching(d.SrcHash[0]) {
 		if plain, err := d.Open(c.secret); err == nil && len(plain) >= 5 {
+			c.active = true
 			return c, plain
 		}
 	}
@@ -407,9 +409,11 @@ func (e *engine) dropRateLimited(origin correlation.ID) {
 // not be made durable. Serving it anyway would leave the mesh with an
 // answer this node cannot promise not to give twice.
 func (e *engine) storeRefused(origin correlation.ID, what string, err error) {
-	e.log.Warn("session store refused the replay guard — "+what+" not served",
+	e.log.Warn("access store refused the replay guard — "+what+" not served",
 		zap.String("corr", origin.Short()), zap.Error(err))
 	e.bus.Publish(bus.TxDropped{
+		// Keep the recorded reason stable for existing journal and
+		// metrics consumers; only the log prose adopts the clearer name.
 		Relay: e.relay, Correlation: origin, At: time.Now(), Reason: "session-store", Kind: "answer",
 	})
 }

@@ -152,12 +152,12 @@ var drawers = []drawer{{
 	view:  (*session).airSessionView,
 }, {
 	name:      drawerACL,
-	doc:       "who may administer this relay — grants and live sessions",
+	doc:       "who has durable access to this relay",
 	on:        scopeRelay,
 	verbs:     []string{cmdGrant},
 	itemVerbs: []string{cmdRevoke},
 	itemFlag:  optKey,
-	empty:     "nobody granted, nobody logged in",
+	empty:     "nobody authorised",
 	keys:      (*session).accessKeys,
 	view:      (*session).accessView,
 	itemSet:   (*session).accessSet,
@@ -360,10 +360,10 @@ func (s *session) airSessionView(ctx context.Context, instance string, _ frameSe
 
 // airRole names what a companion may do here.
 func airRole(c AirSession) string {
-	if c.Admin {
-		return roleAdmin
+	if c.Role == "" {
+		return "guest"
 	}
-	return "guest"
+	return c.Role
 }
 
 // airAnswers says how a reply to this companion travels: down the
@@ -458,8 +458,8 @@ func (s *session) accessView(ctx context.Context, instance string, _ frameSelect
 	return v, nil
 }
 
-// accessHow says whether the entry was granted or merely logged in —
-// the distinction that decides whether it outlives idle.
+// accessHow says whether the durable role was granted explicitly or
+// earned by a successful admin-password login.
 func accessHow(a Access) string {
 	if a.Granted {
 		return "granted"

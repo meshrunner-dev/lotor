@@ -43,6 +43,7 @@ func (e *engine) pathVerdict(rx *reception) (verdict, why string, handled bool) 
 		if err != nil {
 			continue // some other session's packet, or not one at all
 		}
+		c.active = true
 		pr, err := meshcore.DecodePathReturn(plain)
 		if err != nil {
 			// Opened, so it was addressed to us and is ours to
@@ -71,8 +72,9 @@ func (e *engine) learnOutPath(c *client, pr *meshcore.PathReturn, origin correla
 		learned: time.Now(),
 	}
 	c.lastActive = time.Now()
-	// Best effort, and the one place it is: a route lost to disk
-	// trouble costs the next answer a flood, never a replay.
+	// Best effort, and the one place it is: a durable client's route
+	// lost to disk trouble costs the next answer a flood, never a
+	// replay. Guest routes are memory-only by definition.
 	if err := e.acl.save(c); err != nil {
 		e.log.Warn("the taught route did not reach the store",
 			zap.String("corr", origin.Short()), zap.Error(err))

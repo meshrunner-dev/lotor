@@ -609,11 +609,11 @@ func (e *engine) AttachCommands(run func(line string, admin []byte) string) {
 	e.commands = run
 }
 
-// AttachSessions gives the engine somewhere to persist its session
-// table and loads what is already there, the shared secret recomputed
-// per session. Called once, before Run: a nil identity keeps the
-// table in memory, since a secret it cannot recompute is a session it
-// cannot restore.
+// AttachSessions gives the engine somewhere to persist non-guest
+// access entries and loads what is already there, the shared secret
+// recomputed per entry. Guest sessions remain in memory only. Called
+// once, before Run: a nil identity keeps the table in memory, since a
+// secret it cannot recompute is an entry it cannot restore.
 // A store that cannot be read refuses the attachment, and with it the
 // relay: the table holds every admin's replay guard, and coming up
 // without it would rewind those clocks to zero — a recent capture of
@@ -628,10 +628,10 @@ func (e *engine) AttachSessions(store SessionStore) error {
 	}, func() rateLimiter {
 		return rateLimiter{max: e.p.SessionLimit, window: sessionLimitWindow}
 	}); err != nil {
-		return fmt.Errorf("sessions: the store holds this node's replay guards and could not be read: %w", err)
+		return fmt.Errorf("access list: the store holds this node's replay guards and could not be read: %w", err)
 	}
 	if n := len(e.acl.by); n > 0 {
-		e.log.Info("sessions restored", zap.Int("count", n))
+		e.log.Info("access entries restored", zap.Int("count", n))
 	}
 	return nil
 }

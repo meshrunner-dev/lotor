@@ -9,6 +9,7 @@ import (
 )
 
 // memStore is a SessionStore backed by a map, standing in for confdb.
+// Only durable access entries should ever be handed to it.
 type memStore struct {
 	rows map[[meshcore.PubKeySize]byte]PersistedSession
 }
@@ -26,17 +27,11 @@ func (m *memStore) LoadSessions() ([]PersistedSession, error) {
 func (m *memStore) SaveSession(p PersistedSession) error            { m.rows[p.PubKey] = p; return nil }
 func (m *memStore) ForgetSession(k [meshcore.PubKeySize]byte) error { delete(m.rows, k); return nil }
 
-// ReplaceSession is the swap the real store does in one transaction.
-func (m *memStore) ReplaceSession(add PersistedSession, drop [meshcore.PubKeySize]byte) error {
-	delete(m.rows, drop)
-	m.rows[add.PubKey] = add
-	return nil
-}
-
-func TestSessionsSurviveABounce(t *testing.T) {
+func TestAccessEntriesSurviveABounce(t *testing.T) {
 	store := newMemStore()
 
-	// First engine: a companion logs in, teaches a route, advances.
+	// First engine: an administrator has an access entry, teaches a
+	// route and advances its replay guard.
 	a := newACL(store)
 	var key [meshcore.PubKeySize]byte
 	for i := range key {
@@ -78,12 +73,16 @@ func TestSessionsSurviveABounce(t *testing.T) {
 	if got.out == nil || got.out.pathLen != 2 {
 		t.Errorf("the route home was lost: %+v", got.out)
 	}
+	if sessions := b.sessions(time.Now()); len(sessions) != 0 {
+		t.Fatalf("restored access appeared as live traffic: %+v", sessions)
+	}
 
-	// The distinction that bit in flight: a zero-hop adjacent client
-	// — empty path, still a route — must not reload as flood.
+	// The distinction that bit in flight: a zero-hop adjacent
+	// read-only principal — empty path, still a route — must not reload
+	// as flood.
 	var adj [meshcore.PubKeySize]byte
 	adj[0] = 0x77
-	ac := &client{pubKey: adj, secret: []byte("s"), perms: permGuest,
+	ac := &client{pubKey: adj, secret: []byte("s"), perms: permReadOnly, granted: true,
 		lastTimestamp: 1, lastActive: time.Now()}
 	ac.out = &outPath{pathLen: 0, path: nil, learned: time.Now()} // adjacent
 	a.put(ac)
@@ -101,25 +100,26 @@ func TestSessionsSurviveABounce(t *testing.T) {
 		t.Errorf("secret = %q, want the recomputed one", got.secret)
 	}
 
-	// A session gone stale on disk is not restored, and is forgotten.
-	stale := PersistedSession{Perms: permGuest, LastActive: time.Now().Add(-2 * sessionIdle)}
-	stale.PubKey[0] = 0xff
-	store.SaveSession(stale)
+	// A legacy guest row is not an access entry. Loading cleans it up
+	// instead of resurrecting its ephemeral session.
+	legacy := PersistedSession{Perms: permGuest, LastActive: time.Now()}
+	legacy.PubKey[0] = 0xff
+	store.SaveSession(legacy)
 	d := newACL(store)
 	d.load(func([]byte) ([]byte, error) { return []byte("x"), nil },
 		func() rateLimiter { return rateLimiter{max: 8, window: time.Minute} })
-	if d.get(stale.PubKey[:]) != nil {
-		t.Error("a stale session was restored")
+	if d.get(legacy.PubKey[:]) != nil {
+		t.Error("a legacy guest was restored into the access list")
 	}
-	if _, held := store.rows[stale.PubKey]; held {
-		t.Error("the stale session was not forgotten from the store")
+	if _, held := store.rows[legacy.PubKey]; held {
+		t.Error("the legacy guest was not removed from the store")
 	}
 }
 
-func TestASessionAnswersAcrossARestart(t *testing.T) {
-	// The complaint this test answers: the console showed the restored
-	// session, and the companion still had to log in again — so prove
-	// survival at the wire, not in a view. First life: a login.
+func TestGuestSessionIsMemoryOnly(t *testing.T) {
+	// A guest exists in the live session table, but neither SQLite nor
+	// the access-list views may learn it. A restart therefore requires
+	// a fresh login.
 	store := newMemStore()
 	e, dev, sub, peer := txRig(t, "on-air")
 	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
@@ -131,29 +131,32 @@ func TestASessionAnswersAcrossARestart(t *testing.T) {
 		t.Fatalf("sent = %+v", sent)
 	}
 	<-dev.sent
-
-	// Second life: same identity, same store, a fresh engine — the
-	// daemon restarted. No login precedes the request.
-	e2, dev2, sub2, _ := txRig(t, "on-air")
-	e2.p.GuestAccess, e2.p.GuestPassword = guestPassword, "raccoon"
-	e2.AttachSessions(store)
-	runEngine(t, e2, dev2)
-	dev2.frames <- request(t, e2.id, peer, nowTS(200), []byte{meshcore.ReqGetStatus, 0, 0, 0, 0})
-	if sent := awaitSent(t, sub2); sent.Kind != "req-resp" {
-		t.Fatalf("the restored session did not answer: %+v", sent)
+	if len(store.rows) != 0 {
+		t.Fatalf("guest login persisted %d ACL rows", len(store.rows))
 	}
-	tag, _ := openReply(t, <-dev2.sent, secret)
-	if tag != nowTS(200) {
-		t.Fatalf("tag = %d, want the request timestamp reflected", tag)
+	access, err := e.AccessList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(access) != 0 {
+		t.Fatalf("guest appeared in access list: %+v", access)
+	}
+	sessions, err := e.ClientSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].PubKey != peer.PubKey ||
+		sessions[0].Perms&permRoleMask != permGuest {
+		t.Fatalf("guest missing from sessions: %+v", sessions)
 	}
 
-	// And the guard survived with it: a timestamp at the old high
-	// water mark is a replay, restart or no restart.
-	dev2.frames <- request(t, e2.id, peer, nowTS(100), []byte{meshcore.ReqGetStatus, 0, 0, 0, 0})
-	select {
-	case raw := <-dev2.sent:
-		t.Fatalf("a pre-restart replay was answered: % x", raw[:8])
-	case <-time.After(700 * time.Millisecond):
+	restarted := newACL(store)
+	if err := restarted.load(func([]byte) ([]byte, error) { return secret, nil },
+		func() rateLimiter { return rateLimiter{max: 8, window: time.Minute} }); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.get(peer.PubKey[:]) != nil {
+		t.Fatal("guest session survived a restart")
 	}
 }
 
@@ -211,7 +214,7 @@ func TestAReadOnlyGrantIsNotAnAdmin(t *testing.T) {
 	// setperm 1 and 2 are the reference's read-only and read-write —
 	// stored as what they are, shown as what they are, and admin only
 	// at exactly three. Flattening them into admin was the bug.
-	e, dev, _, peer := txRig(t, "on-air")
+	e, dev, sub, peer := txRig(t, "on-air")
 	e.AttachSessions(newMemStore())
 	runEngine(t, e, dev)
 
@@ -231,6 +234,32 @@ func TestAReadOnlyGrantIsNotAnAdmin(t *testing.T) {
 	c := e.acl.get(peer.PubKey[:])
 	if c == nil || c.isAdmin() {
 		t.Fatal("a read-only grant reached the admin role")
+	}
+	sessions, err := e.ClientSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("a silent grant appeared as a live session: %+v", sessions)
+	}
+
+	// The granted key needs no shared password: its blank login keeps
+	// the role and turns the authorisation into a live session.
+	frame, secret := login(t, e.id, peer, nowTS(400), "", false)
+	dev.frames <- frame
+	if sent := awaitSent(t, sub); sent.Kind != "login-resp" {
+		t.Fatalf("blank login was not answered: %+v", sent)
+	}
+	_, body := openReply(t, <-dev.sent, secret)
+	if len(body) < 4 || body[3]&permRoleMask != permReadOnly {
+		t.Fatalf("blank login lost the read-only grant: % x", body)
+	}
+	sessions, err = e.ClientSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].Perms&permRoleMask != permReadOnly {
+		t.Fatalf("read-only principal absent from live sessions: %+v", sessions)
 	}
 }
 

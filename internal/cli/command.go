@@ -105,7 +105,7 @@ func init() {
 	commands = append(commands, accessCommands()...)
 }
 
-// accessCommands manage a relay's access list — who may administer it.
+// accessCommands manage a relay's durable access list.
 func accessCommands() []*command {
 	return []*command{
 		{
@@ -130,12 +130,12 @@ func accessCommands() []*command {
 		},
 		{
 			name:  cmdRevoke,
-			forms: []form{{cmdRevoke, "take back a grant, or drop a session"}},
+			forms: []form{{cmdRevoke, "remove an authorisation and its live session"}},
 			detail: []string{
 				cmdRevoke,
 				"admin only. It removes the entry you stand on from the",
-				"access list — a granted admin loses the role, a session",
-				"is dropped. Named by key prefix from the drawer.",
+				"access list and drops any session held by the same key.",
+				"Named by key prefix from the drawer.",
 			},
 			flags: []flagSpec{
 				{name: scopeRelay, valued: true, doc: docRelay},

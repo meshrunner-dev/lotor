@@ -632,6 +632,10 @@ func TestAdminLoginGrantsTheRole(t *testing.T) {
 	e, dev, sub, peer := txRig(t, "on-air")
 	e.p.GuestAccess, e.p.GuestPassword = guestPassword, "raccoon"
 	e.p.AdminPassword = "mask"
+	store := newMemStore()
+	if err := e.AttachSessions(store); err != nil {
+		t.Fatal(err)
+	}
 	runEngine(t, e, dev)
 
 	frame, secret := login(t, e.id, peer, nowTS(300), "mask", false)
@@ -642,6 +646,12 @@ func TestAdminLoginGrantsTheRole(t *testing.T) {
 	_, body := openReply(t, <-dev.sent, secret)
 	if len(body) < 4 || body[0] != meshcore.LoginOK || body[2] != 1 || body[3]&permRoleMask != permAdmin {
 		t.Fatalf("login reply = % x — want OK, admin bit, admin perms", body)
+	}
+	if saved, ok := store.rows[peer.PubKey]; !ok || saved.Perms&permRoleMask != permAdmin {
+		t.Fatalf("admin-password promotion was not persisted: %+v", saved)
+	}
+	if access, err := e.AccessList(); err != nil || len(access) != 1 || access[0].Granted {
+		t.Fatalf("admin-password promotion absent from ACL: %+v, %v", access, err)
 	}
 
 	// A password login sets the role the password earns, demotion
@@ -655,12 +665,21 @@ func TestAdminLoginGrantsTheRole(t *testing.T) {
 	if _, body := openReply(t, <-dev.sent, secret); body[2] != 0 {
 		t.Fatalf("the guest word kept the admin role: % x", body)
 	}
+	if _, persisted := store.rows[peer.PubKey]; persisted {
+		t.Fatal("guest demotion left an ACL row behind")
+	}
+	if access, err := e.AccessList(); err != nil || len(access) != 0 {
+		t.Fatalf("guest demotion remained in ACL: %+v, %v", access, err)
+	}
 	// And the admin word takes it back.
 	frame, secret = login(t, e.id, peer, nowTS(302), "mask", false)
 	dev.frames <- frame
 	awaitSent(t, sub)
 	if _, body := openReply(t, <-dev.sent, secret); body[2] != 1 {
 		t.Fatalf("the admin word did not restore the role: % x", body)
+	}
+	if saved, ok := store.rows[peer.PubKey]; !ok || saved.Perms&permRoleMask != permAdmin {
+		t.Fatalf("the restored admin role was not persisted: %+v", saved)
 	}
 }
 

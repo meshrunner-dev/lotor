@@ -104,7 +104,7 @@ func TestLegacyNamesAreHealedWithEverythingThatPointsAtThem(t *testing.T) {
 	// filtering by kind, rather than by name, keeps that distinction.
 	plant(confdb.KindSensor, "", map[string]any{"driver": "bme280"})
 	if err := s.SaveACL(ctx, "mc one", confdb.ACLRow{
-		PubKey: []byte{1, 2}, LastActive: time.Now(),
+		PubKey: []byte{1, 2}, Perms: 1, LastActive: time.Now(),
 	}); err != nil {
 		t.Fatal(err)
 	}

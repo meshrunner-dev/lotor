@@ -6,14 +6,16 @@ package meshcore
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"time"
 
 	"meshrunner.dev/pkg/meshcore"
 )
 
-// PersistedSession is one session as a store keeps it — the fields
-// that must outlive a restart, the shared secret excluded because it
-// is recomputed from the node identity and the peer key.
+// PersistedSession is one durable access entry as a store keeps it —
+// the fields that must outlive a restart, the shared secret excluded
+// because it is recomputed from the node identity and the peer key.
+// A guest is a live session, never a PersistedSession.
 type PersistedSession struct {
 	PubKey        [meshcore.PubKeySize]byte
 	Perms         byte
@@ -29,21 +31,15 @@ type PersistedSession struct {
 	LastActive time.Time
 }
 
-// SessionStore persists the session table, so a companion — an admin
-// above all — is not asked to log in again on every bounce, and its
-// replay guard is not reset to zero. Nil keeps the table in memory,
-// the posture for a relay with no store behind it.
+// SessionStore persists the access entries in the client table. The
+// name follows the table's historical API; guests never cross this
+// door. An access entry — an admin-password promotion included —
+// survives a bounce with its replay guard. Nil keeps every entry in
+// memory, the posture for a relay with no store behind it.
 type SessionStore interface {
 	LoadSessions() ([]PersistedSession, error)
 	SaveSession(s PersistedSession) error
 	ForgetSession(pubKey [meshcore.PubKeySize]byte) error
-	// ReplaceSession installs one session and forgets another as a
-	// single durable step. The table holds a fixed number of places,
-	// so admitting a newcomer is really a swap — and doing it in two
-	// writes leaves a window where the store holds one session more
-	// than the table can, with no ordering to say which of them a
-	// restart would keep.
-	ReplaceSession(add PersistedSession, drop [meshcore.PubKeySize]byte) error
 }
 
 // outPath is a route home a client taught us, so an answer can travel
@@ -74,10 +70,13 @@ type client struct {
 	lastActive    time.Time
 	// asks bounds what this session may make us emit.
 	asks rateLimiter
-	// granted marks a permission set explicitly, by an admin — the
-	// reference's persisted contact, distinct from a login that a
-	// password opened. It survives idle: a granted admin is meant to
-	// stay one whether or not it happens to be talking right now.
+	// active says this principal has authenticated traffic in this
+	// process lifetime. A restored or newly granted access entry is
+	// authorised, but it is not a live session until it speaks.
+	active bool
+	// granted marks a permission set explicitly, by an admin, distinct
+	// from an access entry that the admin password created. Both are
+	// durable; the bit explains how the role was earned.
 	granted bool
 }
 
@@ -91,9 +90,9 @@ func (c *client) isAdmin() bool { return c.perms&permRoleMask == permAdmin }
 // judges a frame, and a lock would only have protected the map while
 // the sessions it points at were written through anyway.
 //
-// Sessions live in memory only. A restart asks every companion to log
-// in again, which is the honest posture for a credential nothing here
-// persists.
+// Guests live in memory only. Non-guest roles are access entries and
+// cross a restart through store, including an admin role earned with
+// the admin password.
 type acl struct {
 	by    map[[meshcore.PubKeySize]byte]*client
 	store SessionStore // nil keeps the table in memory only
@@ -118,17 +117,24 @@ func (c *client) persisted() PersistedSession {
 	return p
 }
 
+// hasAccess says whether this client belongs to the durable access
+// list. Guest is the reference's zero/deleted role: it names a live
+// session only and must never reach the store.
+func (c *client) hasAccess() bool { return c.perms&permRoleMask != permGuest }
+
 // errSessionsFull refuses a new session when every one of the
 // table's places is held by an entry that outranks a login.
-var errSessionsFull = errors.New("the session table is full of grants and admins")
+var errSessionsFull = errors.New("the session table is full of durable access entries")
 
-// save mirrors one session to the store. The refusal is the caller's
-// to judge, and the judgement differs by what was being written: a
-// route learned may be lost to disk trouble and cost only a flood,
-// while a replay guard that never reached the disk is a command the
-// next restart would let through a second time.
+// save mirrors one durable access entry to the store. Guests stop
+// here: their replay guards and routes belong to the live session and
+// disappear with it. The refusal is the caller's to judge, and the
+// judgement differs by what was being written: a route learned may be
+// lost to disk trouble and cost only a flood, while an administrator's
+// replay guard that never reached disk is a command the next restart
+// would let through a second time.
 func (a *acl) save(c *client) error {
-	if a.store == nil {
+	if a.store == nil || !c.hasAccess() {
 		return nil
 	}
 	return a.store.SaveSession(c.persisted())
@@ -142,11 +148,12 @@ func (a *acl) forget(k [meshcore.PubKeySize]byte) error {
 	return a.store.ForgetSession(k)
 }
 
-// advance moves a session's replay guard and makes it durable before
-// the caller acts on the request that moved it. A store that refuses
-// leaves the guard exactly where it was and the caller must serve
-// nothing: an executed command whose timestamp only ever lived in RAM
-// is one the next restart accepts again from a recording.
+// advance moves a session's replay guard. For an access entry it makes
+// the move durable before the caller acts; for a guest the guard is
+// deliberately RAM-only with the session. A store that refuses an
+// access entry leaves the guard exactly where it was and the caller
+// must serve nothing: an executed command whose timestamp only ever
+// lived in RAM is one the next restart accepts again from a recording.
 func (a *acl) advance(c *client, ts uint32, now time.Time) error {
 	wasTS, wasActive := c.lastTimestamp, c.lastActive
 	c.lastTimestamp, c.lastActive = ts, now
@@ -157,15 +164,15 @@ func (a *acl) advance(c *client, ts uint32, now time.Time) error {
 	return nil
 }
 
-// load rebuilds the table from the store, the secret recomputed per
-// session and the too-stale left behind. secret returns the shared
-// key for a peer, or an error a nil identity would raise; asks hands
-// each restored session a fresh rate budget — the zero-value limiter
-// grants nothing, which is exactly the silent no-answer a restored
-// session must not wake up into.
+// load rebuilds the durable access list from the store, the secret
+// recomputed per entry. Legacy guest rows are deleted instead of
+// restored: loading one would turn an ephemeral session back into an
+// ACL entry. secret returns the shared key for a peer, or an error a
+// nil identity would raise; asks hands each restored client a fresh
+// rate budget.
 //
 // A store that cannot be read is an error, never an empty table: the
-// sessions it holds carry the replay guards of every admin, and
+// entries it holds carry the replay guards of every admin, and
 // starting without them silently rewinds those clocks to zero.
 func (a *acl) load(secret func(pubKey []byte) ([]byte, error), asks func() rateLimiter) error {
 	if a.store == nil {
@@ -175,64 +182,56 @@ func (a *acl) load(secret func(pubKey []byte) ([]byte, error), asks func() rateL
 	if err != nil {
 		return err
 	}
-	// Grants and admins first: a store holding more rows than the
-	// table has places must not spend them on whoever happens to be
-	// listed first.
-	for _, protectedPass := range []bool{true, false} {
-		for _, p := range rows {
-			if protectedFrom(p) != protectedPass || len(a.by) >= maxClients {
-				continue
+	for _, p := range rows {
+		if p.Perms&permRoleMask == permGuest {
+			if err := a.forget(p.PubKey); err != nil {
+				return fmt.Errorf("remove legacy guest %x: %w", p.PubKey[:6], err)
 			}
-			if !p.Granted && time.Since(p.LastActive) > sessionIdle {
-				// An expiry, not a revocation: a store that keeps the
-				// row has it skipped again at the next load.
-				_ = a.forget(p.PubKey)
-				continue
-			}
-			sec, err := secret(p.PubKey[:])
-			if err != nil {
-				continue
-			}
-			c := &client{
-				pubKey: p.PubKey, secret: sec, perms: p.Perms, granted: p.Granted,
-				lastTimestamp: p.LastTimestamp, lastActive: p.LastActive,
-				asks: asks(),
-			}
-			if p.HasOut {
-				c.out = &outPath{pathLen: p.OutPathLen, path: p.OutPath, learned: p.Learned}
-			}
-			a.by[p.PubKey] = c
+			continue
 		}
+		if len(a.by) >= maxClients {
+			continue
+		}
+		sec, err := secret(p.PubKey[:])
+		if err != nil {
+			continue
+		}
+		c := &client{
+			pubKey: p.PubKey, secret: sec, perms: p.Perms, granted: p.Granted,
+			lastTimestamp: p.LastTimestamp, lastActive: p.LastActive,
+			asks: asks(),
+		}
+		if p.HasOut {
+			c.out = &outPath{pathLen: p.OutPathLen, path: p.OutPath, learned: p.Learned}
+		}
+		a.by[p.PubKey] = c
 	}
 	return nil
 }
 
-// protectedFrom says whether a stored session outranks a plain login
-// — an explicit grant, or the admin role however it was earned.
-func protectedFrom(p PersistedSession) bool {
-	return p.Granted || p.Perms&permRoleMask == permAdmin
-}
-
-// put adds or refreshes a session, making room first when the table
-// is full. Nothing in the table moves unless the newcomer reached the
-// store: a session that exists only in RAM is one a restart forgets,
-// and for a login that means its own replay guard forgotten with it.
+// put adds or refreshes a client, making room first when the table is
+// full. A non-guest reaches the store before the live table moves. A
+// guest never reaches it; when a guest login demotes a durable entry,
+// that entry is forgotten before the guest session replaces it.
 func (a *acl) put(c *client) error {
 	var victim [meshcore.PubKeySize]byte
 	evicting := false
-	if _, known := a.by[c.pubKey]; !known {
+	old, known := a.by[c.pubKey]
+	if !known {
 		var room bool
 		if victim, evicting, room = a.evictable(); !room {
 			return errSessionsFull
 		}
 	}
-	// The swap is one durable step. Two writes left the store holding
-	// thirty-three sessions for a table of thirty-two — and nothing
-	// said which of them a restart would drop, so an evicted session
-	// could come back while the newcomer, replay guard and all, went
-	// missing instead.
-	if err := a.persist(c, victim, evicting); err != nil {
-		return err
+	switch {
+	case c.hasAccess():
+		if err := a.save(c); err != nil {
+			return err
+		}
+	case known && old.hasAccess():
+		if err := a.forget(c.pubKey); err != nil {
+			return err
+		}
 	}
 	if evicting {
 		delete(a.by, victim)
@@ -241,23 +240,11 @@ func (a *acl) put(c *client) error {
 	return nil
 }
 
-// persist writes the newcomer, and the eviction with it when there is
-// one. Nothing in the table moves unless this returns cleanly.
-func (a *acl) persist(c *client, victim [meshcore.PubKeySize]byte, evicting bool) error {
-	if a.store == nil {
-		return nil
-	}
-	if evicting {
-		return a.store.ReplaceSession(c.persisted(), victim)
-	}
-	return a.store.SaveSession(c.persisted())
-}
-
 // evictable names the session that would make room for a new one.
 // room is false when the table is full and every place is held by a
-// grant or an admin — the reference skips exactly those when it hunts
-// for its victim (ClientACL::putClient), because a run of fresh guest
-// logins must not be able to unseat the node's only administrator.
+// durable access entry. The reference skips non-guest permissions
+// when it hunts for its victim (ClientACL::putClient), because a run
+// of fresh guest logins must not unseat an authorised principal.
 // evicting is false when there was a free place to begin with.
 func (a *acl) evictable() (victim [meshcore.PubKeySize]byte, evicting, room bool) {
 	if len(a.by) < maxClients {
@@ -265,7 +252,7 @@ func (a *acl) evictable() (victim [meshcore.PubKeySize]byte, evicting, room bool
 	}
 	var when time.Time
 	for k, v := range a.by {
-		if v.granted || v.isAdmin() {
+		if v.hasAccess() {
 			continue
 		}
 		if !room || v.lastActive.Before(when) {
@@ -310,11 +297,14 @@ func (a *acl) remove(k [meshcore.PubKeySize]byte) error {
 	return nil
 }
 
-// entries is the access list as the console reads it: grants first
-// by their nature, then whoever is merely logged in.
+// entries is the durable access list as the console reads it. Guests
+// are sessions only and therefore absent by construction.
 func (a *acl) entries() []ACLEntry {
 	out := make([]ACLEntry, 0, len(a.by))
 	for k, c := range a.by {
+		if !c.hasAccess() {
+			continue
+		}
 		out = append(out, ACLEntry{
 			PubKey: k, Perms: c.perms, Admin: c.isAdmin(),
 			Granted: c.granted, LastActive: c.lastActive,
@@ -331,16 +321,16 @@ func (a *acl) get(pubKey []byte) *client {
 	return a.live(k)
 }
 
-// live returns the session under k, dropping it when it has gone
-// quiet. The caller holds mu.
+// live returns the client under k. An idle guest session is retired;
+// a durable access entry remains authorised independently of current
+// activity.
 func (a *acl) live(k [meshcore.PubKeySize]byte) *client {
 	c, ok := a.by[k]
 	if !ok {
 		return nil
 	}
-	if !c.granted && time.Since(c.lastActive) > sessionIdle {
+	if !c.hasAccess() && time.Since(c.lastActive) > sessionIdle {
 		delete(a.by, k)
-		_ = a.forget(k) // an expiry: the idle rule retires it again next load
 		return nil
 	}
 	return c

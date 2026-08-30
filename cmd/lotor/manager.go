@@ -348,7 +348,7 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 	rc := m.file.Relays[name]
 	var r *relay.Relay
 	asm, err := assemble(ctx, name, rc, m.file.Radios[rc.Radio], m.bus, m.log, m.sen,
-		m.sessionStore(name), m.regionStore(name), m.otaCommands(name),
+		m.accessStore(name), m.regionStore(name), m.otaCommands(name),
 		sensorFeed{supply: m.supplyVoltage, sensors: m.sensorTelemetry})
 	if err != nil {
 		m.log.Error("relay configuration failed",
@@ -399,15 +399,15 @@ func (m *manager) startRelay(ctx context.Context, name string) {
 	})
 }
 
-// sessionStore hands a relay a persistence door onto the acl table,
+// accessStore hands a relay a persistence door onto the acl table,
 // keyed to its name: the successor of a bounced relay reads back the
-// very sessions its predecessor kept.
-func (m *manager) sessionStore(relay string) enginemc.SessionStore {
+// durable roles its predecessor kept. Guests never cross this door.
+func (m *manager) accessStore(relay string) enginemc.SessionStore {
 	return &aclStore{store: m.store, relay: relay}
 }
 
 // regionStore hands a relay a persistence door onto the region
-// tables, keyed to its name, like sessionStore does for the acl.
+// tables, keyed to its name, like accessStore does for the acl.
 func (m *manager) regionStore(relay string) enginemc.RegionStore {
 	return &regionStoreAdapter{store: m.store, relay: relay}
 }
@@ -454,16 +454,16 @@ func (a *regionStoreAdapter) SaveRegions(pr enginemc.PersistedRegions) error {
 	})
 }
 
-// aclStore ties the meshcore session table to confdb. It touches the
-// database alone, never the manager's mutex — a save fired from the
-// engine goroutine mid-bounce must not wait on the lock the bounce
-// holds.
+// aclStore ties MeshCore's durable access entries to confdb. Guests
+// never cross this adapter. It touches the database alone, never the
+// manager's mutex — a replay-guard save fired from the engine
+// goroutine mid-bounce must not wait on the lock the bounce holds.
 type aclStore struct {
 	store *confdb.Store
 	relay string
 }
 
-// aclStoreWait bounds one session-table operation. The engine's own
+// aclStoreWait bounds one access-table operation. The engine's own
 // goroutine waits on these — a durable replay guard is the price of
 // serving the request that moved it — so an unbounded wait would let
 // disk contention stop reception itself. Past the bound the operation
@@ -509,15 +509,7 @@ func (a *aclStore) ForgetSession(pubKey [meshcore.PubKeySize]byte) error {
 	return a.store.ForgetACL(ctx, a.relay, pubKey[:])
 }
 
-func (a *aclStore) ReplaceSession(add enginemc.PersistedSession,
-	drop [meshcore.PubKeySize]byte,
-) error {
-	ctx, cancel := aclStoreCtx()
-	defer cancel()
-	return a.store.SwapACL(ctx, a.relay, aclRowOf(add), drop[:])
-}
-
-// aclRowOf is one session in the shape the store keeps it.
+// aclRowOf is one durable access entry in the shape the store keeps it.
 func aclRowOf(p enginemc.PersistedSession) confdb.ACLRow {
 	return confdb.ACLRow{
 		PubKey: p.PubKey[:], Perms: p.Perms, Granted: p.Granted,

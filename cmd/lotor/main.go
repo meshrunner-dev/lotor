@@ -987,7 +987,7 @@ type sensorFeed struct {
 }
 
 func assemble(ctx context.Context, name string, rc config.Relay, radioSpec config.Radio,
-	b *bus.Bus, log *zap.Logger, sen *sentinel.Sentinel, sessions enginemc.SessionStore,
+	b *bus.Bus, log *zap.Logger, sen *sentinel.Sentinel, access enginemc.SessionStore,
 	regions enginemc.RegionStore, commands otaRunner, parts sensorFeed,
 ) (*assembled, error) {
 	rlog := log.With(zap.String("relay", name))
@@ -998,10 +998,9 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 	logTraces(rlog, "radio config", p.res.radioTraces, secretAttrs(p.res.drv.Schema))
 	logTraces(rlog, "relay config", p.res.relayTraces, secretAttrs(p.res.builder.Schema))
 	announceOverrides(rlog, p.res.radioTraces, p.res.relayTraces)
-	// The session table persists where the protocol keeps one and a
-	// store was offered: a companion outlives the bounce, its replay
-	// guard with it.
-	if sessions != nil {
+	// Non-guest access persists where the protocol keeps an ACL and a
+	// store was offered. Guests remain live sessions only.
+	if access != nil {
 		if a, ok := p.eng.(interface {
 			AttachSessions(store enginemc.SessionStore) error
 		}); ok {
@@ -1009,7 +1008,7 @@ func assemble(ctx context.Context, name string, rc config.Relay, radioSpec confi
 			// relay that quietly starts with no sessions: the table
 			// holds every admin's replay guard, and coming up without
 			// it rewinds those clocks to zero.
-			if err := a.AttachSessions(sessions); err != nil {
+			if err := a.AttachSessions(access); err != nil {
 				return nil, err
 			}
 		}
@@ -1229,8 +1228,7 @@ func neighboursOf(eng protocol.Engine) func() []cli.Neighbour {
 	}
 }
 
-// accessOf exposes an engine's access list — grants and sessions —
-// when it keeps one.
+// accessOf exposes an engine's durable access list when it keeps one.
 func accessOf(eng protocol.Engine) func() ([]cli.Access, error) {
 	a, ok := eng.(interface {
 		AccessList() ([]enginemc.ACLEntry, error)
@@ -1311,7 +1309,7 @@ func airSessionsOf(eng protocol.Engine) func() ([]cli.AirSession, error) {
 		out := make([]cli.AirSession, len(rows))
 		for i, r := range rows {
 			out[i] = cli.AirSession{
-				PubKey: r.PubKey, Admin: r.Admin,
+				PubKey: r.PubKey, Role: enginemc.RoleName(r.Perms),
 				Path: r.Path, HasPath: r.HasPath,
 				PathLearned: r.PathLearned, LastActive: r.LastActive,
 			}

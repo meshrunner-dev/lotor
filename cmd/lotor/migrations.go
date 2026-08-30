@@ -62,7 +62,7 @@ func storeMigrations() []confdb.Migration {
 	}, {
 		To: 9,
 		Doc: "runtime state whose relay no longer exists is dropped — " +
-			"before the cascade, a removal left sessions and regions behind",
+			"before the cascade, a removal left access entries and regions behind",
 		Run: dropOrphanRuntime,
 	}, {
 		To: 10,
@@ -80,7 +80,51 @@ func storeMigrations() []confdb.Migration {
 			"for: a name the console cannot spell is renamed, references and " +
 			"runtime state following it",
 		Run: migrateInstanceNames,
-	}}
+	}, aclDurabilityMigration()}
+}
+
+func aclDurabilityMigration() confdb.Migration {
+	return confdb.Migration{
+		To: 13,
+		Doc: "the ACL becomes durable access only: legacy guest sessions are " +
+			"discarded and the table refuses the guest/deleted role",
+		Run: migrateACLDurability,
+	}
+}
+
+// migrateACLDurability rebuilds the ACL through the invariant fresh
+// stores are born with: guest (role zero) is a live session, never a
+// durable authorisation. Copying only non-guest rows both cleans stores
+// written by older binaries and installs the CHECK that prevents the
+// distinction from drifting again.
+func migrateACLDurability(ctx context.Context, tx *sql.Tx) error {
+	steps := []string{
+		`ALTER TABLE acl RENAME TO acl_pre13`,
+		`CREATE TABLE acl(
+		   relay          TEXT NOT NULL,
+		   pubkey         BLOB NOT NULL,
+		   perms          INTEGER NOT NULL CHECK((perms & 3) <> 0),
+		   last_timestamp INTEGER NOT NULL,
+		   out_path       BLOB,
+		   out_path_len   INTEGER,
+		   learned        TEXT,
+		   last_active    TEXT NOT NULL,
+		   granted        INTEGER NOT NULL DEFAULT 0,
+		   PRIMARY KEY(relay, pubkey)
+		 )`,
+		`INSERT INTO acl(relay, pubkey, perms, last_timestamp, out_path,
+		   out_path_len, learned, last_active, granted)
+		 SELECT relay, pubkey, perms, last_timestamp, out_path,
+		   out_path_len, learned, last_active, granted
+		 FROM acl_pre13 WHERE (perms & 3) <> 0`,
+		`DROP TABLE acl_pre13`,
+	}
+	for _, stmt := range steps {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // migrateInstanceNames heals the names an older import let through.
@@ -343,7 +387,7 @@ func migrateImportRevisions(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// dropOrphanRuntime removes sessions and region tables that outlived
+// dropOrphanRuntime removes access entries and region tables that outlived
 // their relay: removals before the cascade existed left them behind,
 // and a relay recreated under the name would have inherited them.
 func dropOrphanRuntime(ctx context.Context, tx *sql.Tx) error {

@@ -119,7 +119,7 @@ func (s *Store) LoadRegions(ctx context.Context, relay string,
 
 // ReplaceRegions writes one relay's whole map in a single
 // transaction. The table holds at most 32 entries, so writing the
-// state entire buys the same guarantee SwapACL buys the sessions: a
+// state entire buys the same guarantee a transaction buys the ACL: a
 // crash never leaves the store holding half of two maps, and every
 // mutation the engine persists is the map it is about to install.
 func (s *Store) ReplaceRegions(ctx context.Context, relay string,

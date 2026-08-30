@@ -424,15 +424,15 @@ func TestRevisionsKeepMaskedCopiesEverywhere(t *testing.T) {
 }
 
 func TestImportReplacesRuntimeState(t *testing.T) {
-	// An import is a NEW configuration: sessions and regions must not
-	// survive it by mere equality of names.
+	// An import is a NEW configuration: access entries and regions must
+	// not survive it by mere equality of names.
 	ctx := context.Background()
 	s, err := Open(ctx, Memory, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
-	if err := s.SaveACL(ctx, "mc", ACLRow{PubKey: []byte{9}, LastActive: time.Now()}); err != nil {
+	if err := s.SaveACL(ctx, "mc", ACLRow{PubKey: []byte{9}, Perms: 1, LastActive: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.ReplaceRegions(ctx, "mc",
@@ -444,7 +444,7 @@ func TestImportReplacesRuntimeState(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rows, _ := s.LoadACL(ctx, "mc"); len(rows) != 0 {
-		t.Error("sessions survived the import")
+		t.Error("access entries survived the import")
 	}
 	if _, _, ok, _ := s.LoadRegions(ctx, "mc"); ok {
 		t.Error("regions survived the import")

@@ -124,7 +124,7 @@ func TestLoadRegionsJudgesRangesBeforeNarrowing(t *testing.T) {
 
 func TestRemovingARelayTakesItsRuntimeStateAlong(t *testing.T) {
 	// A relay recreated under a removed name must start anew: leaving
-	// the old sessions and regions behind silently resurrected the
+	// the old access entries and regions behind silently resurrected the
 	// grants and the transport policy of a thing the operator deleted.
 	ctx := context.Background()
 	s, err := Open(ctx, Memory, 0)
@@ -135,7 +135,7 @@ func TestRemovingARelayTakesItsRuntimeStateAlong(t *testing.T) {
 	if err := s.Replace(ctx, KindRelay, "mc", map[string]any{"radio": "r"}, "t", "add", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveACL(ctx, "mc", ACLRow{PubKey: []byte{1, 2}, LastActive: time.Now()}); err != nil {
+	if err := s.SaveACL(ctx, "mc", ACLRow{PubKey: []byte{1, 2}, Perms: 1, LastActive: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.ReplaceRegions(ctx, "mc",
@@ -147,7 +147,7 @@ func TestRemovingARelayTakesItsRuntimeStateAlong(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rows, _ := s.LoadACL(ctx, "mc"); len(rows) != 0 {
-		t.Error("the sessions survived the relay")
+		t.Error("the access entries survived the relay")
 	}
 	if _, _, ok, _ := s.LoadRegions(ctx, "mc"); ok {
 		t.Error("the region table survived the relay")

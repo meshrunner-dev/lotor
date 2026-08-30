@@ -23,7 +23,10 @@ import (
 // secret leaves the pipeline with it.
 type ClientSession struct {
 	PubKey [meshcore.PubKeySize]byte
-	Admin  bool
+	// Perms carries the reference's role byte so a read-only or
+	// read-write principal is not mislabeled as a guest in the
+	// session view.
+	Perms byte
 	// Path is the route home the client taught us, one hash byte per
 	// hop; HasPath false means it has not, and answers flood. The two
 	// are distinct on purpose: a zero-hop path says the client is
@@ -85,9 +88,9 @@ func (e *engine) Grant(pubKey []byte, perms byte) error {
 	return o.done.wait("permission change")
 }
 
-// ACLEntry is one grant or session, as the console shows the access
-// list: who, what role, whether it was granted or merely logged in,
-// and how fresh.
+// ACLEntry is one durable authorisation, as the console shows the
+// access list: who, what role, whether it was granted explicitly or
+// earned with the admin password, and how fresh.
 type ACLEntry struct {
 	PubKey [meshcore.PubKeySize]byte
 	// Perms is the byte as stored — the reference's vocabulary, the
@@ -98,7 +101,7 @@ type ACLEntry struct {
 	LastActive time.Time
 }
 
-// AccessList reports the grants and live sessions — any goroutine.
+// AccessList reports durable non-guest authorisations — any goroutine.
 func (e *engine) AccessList() ([]ACLEntry, error) {
 	o := &aclListOrder{reply: make(chan []ACLEntry, 1)}
 	select {
@@ -122,9 +125,9 @@ type aclListOrder struct {
 
 // accessListBody frames the access list the way the reference's
 // REQ_TYPE_GET_ACCESS_LIST answers it: seven bytes per entry — a
-// six-byte key prefix and the permission byte — guests skipped like
-// the reference skips them, the list cut where the reply would
-// outgrow the packet. Sorted by key so two asks read alike.
+// six-byte key prefix and the permission byte — the list cut where
+// the reply would outgrow the packet. entries has already excluded
+// guests. Sorted by key so two asks read alike.
 func (e *engine) accessListBody(bodyMax int) []byte {
 	const entrySize = 6 + 1
 	// bodyMax is what the route this answer will travel can actually
@@ -140,9 +143,6 @@ func (e *engine) accessListBody(bodyMax int) []byte {
 	})
 	body := make([]byte, 0, min(len(rows), bodyMax/entrySize)*entrySize)
 	for _, r := range rows {
-		if r.Perms&permRoleMask == permGuest {
-			continue // the reference's "skip deleted (or guest) entries"
-		}
 		if len(body)+entrySize > bodyMax {
 			break
 		}
@@ -301,12 +301,12 @@ func (e *engine) drainSessionsAsk(now time.Time) {
 func (a *acl) sessions(now time.Time) []ClientSession {
 	out := make([]ClientSession, 0, len(a.by))
 	for _, c := range a.by {
-		if now.Sub(c.lastActive) > sessionIdle {
+		if !c.active || now.Sub(c.lastActive) > sessionIdle {
 			continue
 		}
 		row := ClientSession{
 			PubKey:     c.pubKey,
-			Admin:      c.isAdmin(),
+			Perms:      c.perms,
 			LastActive: c.lastActive,
 		}
 		if c.out != nil {

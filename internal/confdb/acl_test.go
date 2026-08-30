@@ -15,6 +15,11 @@ func TestACLRoundTripsAndForgets(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
+	if err := s.SaveACL(ctx, "mc", ACLRow{
+		PubKey: bytes.Repeat([]byte{0xcd}, 32), Perms: 0, LastActive: time.Now(),
+	}); err == nil {
+		t.Fatal("the ACL accepted the guest/deleted role")
+	}
 
 	key := bytes.Repeat([]byte{0xab}, 32)
 	now := time.Now().Truncate(time.Second)
@@ -47,9 +52,9 @@ func TestACLRoundTripsAndForgets(t *testing.T) {
 	if rows, _ := s.LoadACL(ctx, "other"); len(rows) != 0 {
 		t.Errorf("relay isolation broken: %d", len(rows))
 	}
-	// A route-less session stores as such: nil path, zero learned.
+	// A route-less access entry stores as such: nil path, zero learned.
 	if err := s.SaveACL(ctx, "mc", ACLRow{PubKey: bytes.Repeat([]byte{1}, 32),
-		Perms: 0, LastActive: now}); err != nil {
+		Perms: 1, LastActive: now}); err != nil {
 		t.Fatal(err)
 	}
 	rows, err = s.LoadACL(ctx, "mc")
@@ -57,11 +62,12 @@ func TestACLRoundTripsAndForgets(t *testing.T) {
 		t.Fatalf("load after route-less save: %v", err)
 	}
 	if len(rows) != 2 {
-		t.Fatalf("expected two sessions, have %d", len(rows))
+		t.Fatalf("expected two access entries, have %d", len(rows))
 	}
 	for _, r := range rows {
-		if r.Perms == 0 && (r.OutPath != nil || !r.Learned.IsZero()) {
-			t.Errorf("route-less session grew a route: %+v", r)
+		if bytes.Equal(r.PubKey, bytes.Repeat([]byte{1}, 32)) &&
+			(r.OutPath != nil || !r.Learned.IsZero()) {
+			t.Errorf("route-less access entry grew a route: %+v", r)
 		}
 	}
 	if err := s.ForgetACL(ctx, "mc", key); err != nil {
@@ -73,47 +79,8 @@ func TestACLRoundTripsAndForgets(t *testing.T) {
 	}
 }
 
-func TestSwapACLIsOneStep(t *testing.T) {
-	// Admitting a session into a full table is a swap, and the store
-	// must never be caught holding both — a crash between two writes
-	// would decide by accident which one survives.
-	ctx := context.Background()
-	s, err := Open(ctx, Memory, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = s.Close() }()
-
-	victim := []byte{1, 2, 3}
-	newcomer := []byte{4, 5, 6}
-	now := time.Now()
-	if err := s.SaveACL(ctx, "mc", ACLRow{
-		PubKey: victim, Perms: 1, LastActive: now.Add(-time.Hour),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SwapACL(ctx, "mc", ACLRow{
-		PubKey: newcomer, Perms: 3, Granted: true, LastTimestamp: 99, LastActive: now,
-	}, victim); err != nil {
-		t.Fatal(err)
-	}
-	rows, err := s.LoadACL(ctx, "mc")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("the store holds %d sessions after a swap, want one", len(rows))
-	}
-	if !bytes.Equal(rows[0].PubKey, newcomer) {
-		t.Errorf("the store kept %x, want the newcomer", rows[0].PubKey)
-	}
-	if rows[0].Perms != 3 || !rows[0].Granted || rows[0].LastTimestamp != 99 {
-		t.Errorf("the newcomer arrived as %+v", rows[0])
-	}
-}
-
 func TestACLLoadsFreshestFirst(t *testing.T) {
-	// Which sessions a restart keeps when the store holds more than
+	// Which access entries a restart keeps when the store holds more than
 	// the table has places for is a policy, not row order.
 	ctx := context.Background()
 	s, err := Open(ctx, Memory, 0)
@@ -125,7 +92,7 @@ func TestACLLoadsFreshestFirst(t *testing.T) {
 	now := time.Now()
 	for i, age := range []time.Duration{3 * time.Hour, time.Hour, 2 * time.Hour} {
 		if err := s.SaveACL(ctx, "mc", ACLRow{
-			PubKey: []byte{byte(i)}, LastActive: now.Add(-age),
+			PubKey: []byte{byte(i)}, Perms: 1, LastActive: now.Add(-age),
 		}); err != nil {
 			t.Fatal(err)
 		}

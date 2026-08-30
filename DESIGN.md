@@ -248,6 +248,19 @@ says so at startup — traceability includes configuration.
   the distinction exists so the first admin command lands on a
   contract, not a retrofit.
 
+MeshCore's over-the-air client table has two deliberately separate
+views. **Sessions** are principals that have authenticated traffic in
+the current process; a guest exists only there, expires on idle and is
+never written to disk. The **ACL** contains durable non-guest roles:
+`read-only`, `read-write` and `admin`. A successful admin-password
+login creates or promotes its key to a durable admin entry, while a
+guest-password or open login creates only an ephemeral guest session.
+An operator who wants targeted access without sharing a password
+grants the complete public key `read-only`; that key can then perform
+the protocol's blank-password recheck. Demoting an ACL principal with
+the guest credential removes the durable entry before the guest
+session is admitted, so a restart cannot resurrect the old role.
+
 ## Build profiles
 
 Two build flavours share one source tree; the `lean` tag selects the

@@ -1674,14 +1674,14 @@ func TestAirSessionsAreADrawerOnTheRelay(t *testing.T) {
 			// A taught route, hop by hop, is the whole point of asking.
 			{PubKey: routed, HasPath: true, Path: []byte{0x4f, 0xa2}, LastActive: time.Now()},
 			// Zero hops is knowledge too: the client is adjacent.
-			{PubKey: adjacent, HasPath: true, Path: []byte{}, LastActive: time.Now()},
+			{PubKey: adjacent, Role: roleReadOnly, HasPath: true, Path: []byte{}, LastActive: time.Now()},
 			// And no route yet is what it costs.
-			{PubKey: lost, LastActive: time.Now()},
+			{PubKey: lost, Role: roleAdmin, LastActive: time.Now()},
 		}, nil
 	}
 	out := run(t, deps, "/relay/meshcore-868/sessions/print")
 	for _, want := range []string{"4f→a2 (2 hops)", "adjacent (0 hops)", "none yet — answers flood",
-		"direct", "flood", "guest"} {
+		"direct", "flood", "guest", "read-only", "admin"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the table lacks %q:\n%s", want, out)
 		}

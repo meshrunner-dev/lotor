@@ -1,10 +1,10 @@
 package confdb
 
-// The session store: who has logged in over the air, and what each of
-// them may still do, kept across a restart so a companion — an admin
-// above all — is not asked to log in again every time its relay
-// bounces. The replay guard is the load-bearing reason it persists:
-// a last_timestamp reset to zero would let every past command replay.
+// The durable access store: non-guest MeshCore roles kept across a
+// restart. Guests are live sessions and never enter this table. The
+// replay guard is the load-bearing reason an access entry carries its
+// runtime state: a last_timestamp reset to zero would let a past admin
+// command replay.
 
 import (
 	"context"
@@ -12,10 +12,10 @@ import (
 	"time"
 )
 
-// ACLRow is one persisted session, as the store keeps it. The shared
-// secret is not here: it is recomputed from the node identity and the
-// peer key, so a credential the mesh never needs to see is one the
-// disk never holds.
+// ACLRow is one durable authorisation, as the store keeps it. The
+// shared secret is not here: it is recomputed from the node identity
+// and the peer key, so a credential the mesh never needs to see is one
+// the disk never holds.
 type ACLRow struct {
 	PubKey        []byte
 	Perms         byte
@@ -31,11 +31,10 @@ type ACLRow struct {
 	Granted bool
 }
 
-// LoadACL reads one relay's sessions, freshest bound applied by the
-// caller: the store keeps what it was told, and how stale is too
-// stale is the engine's policy, not the disk's.
+// LoadACL reads one relay's durable authorisations. The engine also
+// uses this read to remove guest rows left by older Lotor versions.
 func (s *Store) LoadACL(ctx context.Context, relay string) ([]ACLRow, error) {
-	// Freshest first, and explicitly: which sessions a restart keeps
+	// Freshest first, and explicitly: which entries a restart keeps
 	// when the store holds more than the table has places for is a
 	// policy, not whatever order the rows happen to come back in.
 	rows, err := s.db.QueryContext(ctx,
@@ -76,8 +75,9 @@ func (s *Store) LoadACL(ctx context.Context, relay string) ([]ACLRow, error) {
 	return out, rows.Err()
 }
 
-// SaveACL writes one session, replacing whatever it held: a login, a
-// timestamp advance, a route learned all pass here.
+// SaveACL writes one durable access entry, replacing whatever it held:
+// an admin login, a timestamp advance, and a route learned all pass
+// here. The protocol adapter is responsible for excluding guests.
 func (s *Store) SaveACL(ctx context.Context, relay string, r ACLRow) error {
 	return saveACLTx(ctx, s.db, relay, r)
 }
@@ -87,8 +87,7 @@ type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-// saveACLTx is the one place a session row is written, so a save and
-// the save inside a swap cannot describe the same session differently.
+// saveACLTx is the one place an access row is written.
 func saveACLTx(ctx context.Context, db execer, relay string, r ACLRow) error {
 	var learned any
 	if !r.Learned.IsZero() {
@@ -118,32 +117,10 @@ func saveACLTx(ctx context.Context, db execer, relay string, r ACLRow) error {
 	return err
 }
 
-// ForgetACL drops one session — an eviction, an idle retirement, or a
-// revoke.
+// ForgetACL revokes one durable access entry. It also removes legacy
+// guest rows during startup cleanup.
 func (s *Store) ForgetACL(ctx context.Context, relay string, pubKey []byte) error {
 	_, err := s.db.ExecContext(ctx,
 		"DELETE FROM acl WHERE relay = ? AND pubkey = ?", relay, pubKey)
 	return err
-}
-
-// SwapACL admits one session and drops another in a single
-// transaction. The table upstream holds a fixed number of places, so
-// this is what admitting a newcomer into a full one really is: doing
-// it as two writes leaves the store briefly holding one session more
-// than the table can, and a crash in that window decides by accident
-// which of the two survives.
-func (s *Store) SwapACL(ctx context.Context, relay string, add ACLRow, drop []byte) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM acl WHERE relay = ? AND pubkey = ?", relay, drop); err != nil {
-		return err
-	}
-	if err := saveACLTx(ctx, tx, relay, add); err != nil {
-		return err
-	}
-	return tx.Commit()
 }

@@ -12,12 +12,12 @@ import (
 func TestSessionSnapshotCarriesTheRouteButNeverTheSecret(t *testing.T) {
 	a := newACL(nil)
 	now := time.Now()
-	with := &client{secret: []byte("derived"), lastActive: now}
+	with := &client{secret: []byte("derived"), lastActive: now, active: true}
 	with.pubKey[0] = 0xBB
 	with.out = &outPath{pathLen: 2, path: []byte{0x4f, 0xa2}, learned: now}
-	without := &client{secret: []byte("derived"), lastActive: now}
+	without := &client{secret: []byte("derived"), lastActive: now, active: true}
 	without.pubKey[0] = 0xCC
-	idle := &client{lastActive: now.Add(-2 * sessionIdle)}
+	idle := &client{lastActive: now.Add(-2 * sessionIdle), active: true}
 	idle.pubKey[0] = 0xDD
 	a.put(with)
 	a.put(without)

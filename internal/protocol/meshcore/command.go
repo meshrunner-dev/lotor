@@ -69,6 +69,7 @@ func (e *engine) openText(pkt *meshcore.Packet) (*client, []byte) {
 	}
 	for _, c := range e.acl.matching(d.SrcHash[0]) {
 		if plain, err := d.Open(c.secret); err == nil && len(plain) >= 5 {
+			c.active = true
 			return c, plain
 		}
 	}

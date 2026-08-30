@@ -276,7 +276,7 @@ func TestOTARegionDoorGetsTheRawLine(t *testing.T) {
 }
 
 func TestOrphanRuntimeIsDroppedOnUpgrade(t *testing.T) {
-	// A removal before the cascade existed left sessions and regions
+	// A removal before the cascade existed left access entries and regions
 	// behind; shape 9 sweeps them so a recreated name starts anew.
 	ctx := context.Background()
 	s, err := confdb.Open(ctx, confdb.Memory, 0)
