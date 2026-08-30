@@ -216,11 +216,19 @@ says so at startup — traceability includes configuration.
   and subscribe the same way. The bus is what makes the sentinel's
   optionality free — publishing to zero subscribers costs nothing —
   and what keeps later ambitions cheap (see below).
-- **Web UI** — to come: minimalist first, backed by SSE from the bus.
-  The visual structure for multi-relay realities will iterate; the
-  data feed will not. The whole web server is a build-time option: light builds omit
-  it and embed no UI filesystem at all — a headless binary for hosts
-  where flash and RAM are counted.
+- **Web UI** — a scaffold today, minimalist by intent: one page, one
+  snapshot shape served twice — `GET /api/status` whole, `GET /events`
+  as SSE from the bus (state changes wake it, a tick paces it, the
+  client degrades to polling and climbs back on its own). The visual
+  structure for multi-relay realities will iterate; the data feed will
+  not. Read-only over plain HTTP, loopback by default — the same
+  privilege-follows-transport rule as telnet — configured by the
+  `web:` block exactly as `cli:` configures the telnet listener. All
+  assets ship inside the binary; the static bytes never spell the
+  product, the snapshot carries the identity. The whole web server is
+  a build-time option: light builds omit it and embed no UI
+  filesystem at all — a headless binary for hosts where flash and RAM
+  are counted.
 - **CLI over telnet** for now (SSH considered later), plus an always-on
   local console over a unix socket. Privilege follows the transport:
   the socket is **admin** because the OS's file permissions already
