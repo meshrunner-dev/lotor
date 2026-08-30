@@ -60,6 +60,7 @@ linters:
         wire-formats-belong-upstream:
           files:
             - "**/internal/protocol/meshcore/*.go"
+            - "**/internal/station/meshcore/*.go"
             - "!$test"
           deny:
             - pkg: encoding/binary

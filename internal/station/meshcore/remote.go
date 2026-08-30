@@ -2,7 +2,6 @@ package meshcore
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"time"
 
@@ -78,7 +77,7 @@ func (s *service) sendLogin(command companion.SendLogin) []companion.Response {
 	}
 	s.pending = pendingRequest{kind: pendingLogin, tag: tag, publicKey: command.PublicKey}
 	return []companion.Response{companion.Sent{
-		Flood: flood, ExpectedACK: binary.LittleEndian.Uint32(command.PublicKey[:4]),
+		Flood: flood, ExpectedACK: companion.LoginExpectedACK(command.PublicKey),
 		TimeoutMillis: s.estimateTimeout(packet, flood),
 	}}
 }
@@ -273,7 +272,8 @@ func (s *service) receiveRemoteResponse(packet *mesh.Packet, correlations ...cor
 func (s *service) consumeRemoteResponse(publicKey [mesh.PubKeySize]byte, plain []byte,
 	corr correlation.ID,
 ) {
-	if len(plain) < mesh.AdminTagSize {
+	tag, body, err := mesh.UnframeAdmin(plain)
+	if err != nil {
 		return
 	}
 	s.mu.Lock()
@@ -282,30 +282,28 @@ func (s *service) consumeRemoteResponse(publicKey [mesh.PubKeySize]byte, plain [
 		s.mu.Unlock()
 		return
 	}
-	tag := binary.LittleEndian.Uint32(plain)
 	var response companion.Response
 	switch pending.kind {
 	case pendingLogin:
 		s.pending = pendingRequest{}
 		response = s.loginPushLocked(publicKey, plain)
 	case pendingStatus:
-		if len(plain) > 4 {
+		if len(body) > 0 {
 			s.pending = pendingRequest{}
-			body := append([]byte{0}, publicKey[:6]...)
-			response = companion.Push{Code: companion.PushStatusResponse, Body: append(body, plain[4:]...)}
+			pushBody := append([]byte{0}, publicKey[:6]...)
+			response = companion.Push{Code: companion.PushStatusResponse, Body: append(pushBody, body...)}
 		}
 	case pendingTelemetry:
-		if len(plain) > 4 && tag == pending.tag {
+		if len(body) > 0 && tag == pending.tag {
 			s.pending = pendingRequest{}
-			body := append([]byte{0}, publicKey[:6]...)
-			response = companion.Push{Code: companion.PushTelemetryResponse, Body: append(body, plain[4:]...)}
+			pushBody := append([]byte{0}, publicKey[:6]...)
+			response = companion.Push{Code: companion.PushTelemetryResponse, Body: append(pushBody, body...)}
 		}
 	case pendingBinary:
-		if len(plain) > 4 && tag == pending.tag {
+		if len(body) > 0 && tag == pending.tag {
 			s.pending = pendingRequest{}
-			body := []byte{0}
-			body = binary.LittleEndian.AppendUint32(body, tag)
-			response = companion.Push{Code: companion.PushBinaryResponse, Body: append(body, plain[4:]...)}
+			response = companion.Push{Code: companion.PushBinaryResponse,
+				Body: append([]byte{0}, plain...)}
 		}
 	case pendingDiscovery, pendingNone:
 	}
@@ -316,12 +314,14 @@ func (s *service) consumeRemoteResponse(publicKey [mesh.PubKeySize]byte, plain [
 }
 
 func (s *service) loginPushLocked(publicKey [mesh.PubKeySize]byte, plain []byte) companion.Response {
-	if len(plain) >= 6 && bytes.Equal(plain[4:6], []byte("OK")) {
+	_, body, err := mesh.UnframeAdmin(plain)
+	if err == nil && bytes.HasPrefix(body, []byte("OK")) {
 		return companion.Push{Code: companion.PushLoginSuccess,
 			Body: append([]byte{0}, publicKey[:6]...)}
 	}
-	if len(plain) >= 13 && plain[4] == mesh.LoginOK {
-		keepAlive := time.Duration(plain[5]) * 16 * time.Second
+	reply, err := mesh.ParseLoginReply(plain)
+	if err == nil && reply.Result == mesh.LoginOK {
+		keepAlive := time.Duration(reply.KeepAlive) * 16 * time.Second
 		if keepAlive > 0 {
 			if _, exists := s.connections[publicKey]; exists || len(s.connections) < maxConnections {
 				now := time.Now()
@@ -330,10 +330,14 @@ func (s *service) loginPushLocked(publicKey [mesh.PubKeySize]byte, plain []byte)
 				}
 			}
 		}
-		body := append([]byte{plain[6]}, publicKey[:6]...)
-		body = append(body, plain[:4]...)
-		body = append(body, plain[7], plain[12])
-		return companion.Push{Code: companion.PushLoginSuccess, Body: body}
+		isAdmin := byte(0)
+		if reply.IsAdmin {
+			isAdmin = 1
+		}
+		pushBody := append([]byte{isAdmin}, publicKey[:6]...)
+		pushBody = append(pushBody, mesh.FrameAdmin(reply.Clock, nil)...)
+		pushBody = append(pushBody, reply.Permissions, reply.FirmwareLevel)
+		return companion.Push{Code: companion.PushLoginSuccess, Body: pushBody}
 	}
 	return companion.Push{Code: companion.PushLoginFail, Body: append([]byte{0}, publicKey[:6]...)}
 }
@@ -385,10 +389,10 @@ func (s *service) checkConnections() {
 func (s *service) receivePathDiscovery(contact contactEntry, packet *mesh.Packet, path *mesh.PathReturn,
 	corr correlation.ID,
 ) bool {
-	if len(path.Extra) < 4 {
+	tag, err := mesh.ParseAck(path.Extra)
+	if err != nil {
 		return false
 	}
-	tag := binary.LittleEndian.Uint32(path.Extra)
 	s.mu.Lock()
 	pending := s.pending
 	if pending.kind != pendingDiscovery || pending.publicKey != contact.info.PublicKey || pending.tag != tag {
@@ -411,7 +415,7 @@ func (s *service) receiveRaw(packet *mesh.Packet, frame radio.Frame) {
 		return
 	}
 	body := make([]byte, 0, 3+len(packet.Payload))
-	body = append(body, byte(snrQuarter(frame.SNR)), byte(int8(frame.RSSI)), 0xff)
+	body = append(body, mesh.EncodeSNR(frame.SNR), byte(int8(frame.RSSI)), 0xff)
 	s.push(companion.Push{Code: companion.PushRawData, Body: append(body, packet.Payload...)}, frame.Correlation)
 }
 
@@ -420,6 +424,6 @@ func (s *service) receiveControl(packet *mesh.Packet, frame radio.Frame) {
 		return
 	}
 	body := make([]byte, 0, 3+len(packet.Payload))
-	body = append(body, byte(snrQuarter(frame.SNR)), byte(int8(frame.RSSI)), packet.PathLen)
+	body = append(body, mesh.EncodeSNR(frame.SNR), byte(int8(frame.RSSI)), packet.PathLen)
 	s.push(companion.Push{Code: companion.PushControlData, Body: append(body, packet.Payload...)}, frame.Correlation)
 }

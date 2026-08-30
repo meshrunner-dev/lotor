@@ -63,7 +63,7 @@ func (s *service) receiveTrace(packet *mesh.Packet, frame radio.Frame) {
 	for _, snr := range trace.SNRx4 {
 		body = append(body, byte(snr))
 	}
-	body = append(body, byte(snrQuarter(frame.SNR)))
+	body = append(body, mesh.EncodeSNR(frame.SNR))
 	s.push(companion.Push{Code: companion.PushTraceData, Body: body}, frame.Correlation)
 }
 

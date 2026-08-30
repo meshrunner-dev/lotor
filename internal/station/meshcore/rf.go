@@ -3,8 +3,6 @@ package meshcore
 import (
 	"bytes"
 	"context"
-	crand "crypto/rand"
-	"encoding/binary"
 	"errors"
 	"maps"
 	"math"
@@ -176,7 +174,7 @@ func (s *service) recordReception(frame radio.Frame) {
 	s.stats.received++
 	s.stats.rxAir += max(time.Duration(0), frame.Airtime)
 	s.stats.lastRSSIDBm = int8(max(float64(math.MinInt8), min(float64(math.MaxInt8), math.Trunc(frame.RSSI))))
-	s.stats.lastSNRx4 = snrQuarter(frame.SNR)
+	s.stats.lastSNRx4 = int8(mesh.EncodeSNR(frame.SNR))
 }
 
 func (s *service) recordCorruptReception(frame radio.Frame) {
@@ -185,7 +183,7 @@ func (s *service) recordCorruptReception(frame radio.Frame) {
 	s.stats.receiveErrors++
 	s.stats.rxAir += max(time.Duration(0), frame.Airtime)
 	s.stats.lastRSSIDBm = int8(max(float64(math.MinInt8), min(float64(math.MaxInt8), math.Trunc(frame.RSSI))))
-	s.stats.lastSNRx4 = snrQuarter(frame.SNR)
+	s.stats.lastSNRx4 = int8(mesh.EncodeSNR(frame.SNR))
 }
 
 func (s *service) recordReceivedRoute(packet *mesh.Packet) {
@@ -200,7 +198,7 @@ func (s *service) recordReceivedRoute(packet *mesh.Packet) {
 
 func (s *service) pushRawReception(frame radio.Frame) {
 	body := make([]byte, 0, 2+len(frame.Payload))
-	body = append(body, byte(snrQuarter(frame.SNR)), byte(int8(math.Round(frame.RSSI))))
+	body = append(body, mesh.EncodeSNR(frame.SNR), byte(int8(math.Round(frame.RSSI))))
 	body = append(body, frame.Payload...)
 	if 1+len(body) <= companion.MaxPayload {
 		s.push(companion.Push{Code: companion.PushLogRXData, Body: body}, frame.Correlation)
@@ -292,10 +290,6 @@ func (s *service) receiveDirectText(ctx context.Context, packet *mesh.Packet, fr
 			message.Type != mesh.TxtTypeSignedPlain) {
 			return
 		}
-		var prefix []byte
-		if message.Type == mesh.TxtTypeSignedPlain && len(plain) >= 9 {
-			prefix = append([]byte(nil), plain[5:9]...)
-		}
 		pathLen := uint8(0xff)
 		if packet.IsRouteFlood() {
 			pathLen = packet.PathLen
@@ -304,15 +298,15 @@ func (s *service) receiveDirectText(ctx context.Context, packet *mesh.Packet, fr
 		appVersion := s.appVersion
 		s.mu.Unlock()
 		var response companion.Response = companion.ContactMessageV3{
-			SNRx4: snrQuarter(frame.SNR), SenderPrefix: [6]byte(contact.info.PublicKey[:6]),
+			SNRx4: int8(mesh.EncodeSNR(frame.SNR)), SenderPrefix: [6]byte(contact.info.PublicKey[:6]),
 			PathLen: pathLen, TextType: message.Type, UnixSeconds: uint32(message.Timestamp.Unix()),
-			SignedPrefix: prefix, Text: message.Text,
+			SignedPrefix: message.SignedPrefix, Text: message.Text,
 		}
 		if appVersion < 3 {
 			response = companion.ContactMessage{
 				SenderPrefix: [6]byte(contact.info.PublicKey[:6]), PathLen: pathLen,
 				TextType: message.Type, UnixSeconds: uint32(message.Timestamp.Unix()),
-				SignedPrefix: prefix, Text: message.Text,
+				SignedPrefix: message.SignedPrefix, Text: message.Text,
 			}
 		}
 		syncSince := uint32(0)
@@ -329,23 +323,12 @@ func (s *service) replyToText(identity *mesh.LocalIdentity, contact contactEntry
 	received *mesh.Packet, plain []byte,
 	message *mesh.TextPlaintext,
 ) {
-	var ack []byte
-	switch message.Type {
-	case mesh.TxtTypePlain:
-		ack = make([]byte, 6)
-		binary.LittleEndian.PutUint32(ack, mesh.AckCRC(plain[:5+len(message.Text)], contact.info.PublicKey[:]))
-		if tail := 5 + len(message.Text) + 1; tail < len(plain) {
-			ack[4] = plain[tail]
-		}
-		_, _ = crand.Read(ack[5:])
-	case mesh.TxtTypeCLIData:
-		// A flooded command reply teaches us its sender's path but expects
-		// no ACK body.
-	case mesh.TxtTypeSignedPlain:
-		ack = make([]byte, 4)
-		binary.LittleEndian.PutUint32(ack,
-			mesh.AckCRC(plain[:min(len(plain), 9+len(message.Text))], identity.PubKey[:]))
-	default:
+	ackKey := contact.info.PublicKey[:]
+	if message.Type == mesh.TxtTypeSignedPlain {
+		ackKey = identity.PubKey[:]
+	}
+	ack, err := mesh.BuildTextAckBody(plain, ackKey)
+	if err != nil {
 		return
 	}
 	if received.IsRouteFlood() {
@@ -440,10 +423,10 @@ func (s *service) receiveACK(payload []byte, correlations ...correlation.ID) {
 		return
 	}
 	trip := max(0, time.Since(matched.at).Milliseconds())
-	body := make([]byte, 0, 8)
-	body = binary.LittleEndian.AppendUint32(body, crc)
-	body = binary.LittleEndian.AppendUint32(body, uint32(min(trip, int64(^uint32(0)))))
-	s.push(companion.Push{Code: companion.PushSendConfirmed, Body: body}, firstCorrelation(correlations))
+	s.push(companion.SendConfirmed{
+		ExpectedACK: crc,
+		TripMillis:  uint32(min(trip, int64(^uint32(0)))),
+	}, firstCorrelation(correlations))
 }
 
 func (s *service) receivePath(ctx context.Context, packet *mesh.Packet) {
@@ -559,20 +542,20 @@ func (s *service) receiveGroup(ctx context.Context, packet *mesh.Packet, frame r
 		if packet.PayloadType() == mesh.PayloadTypeGrpTxt {
 			message, err := mesh.ParseGroupText(plain)
 			if err == nil {
-				text := plain[5:]
-				if end := bytes.IndexByte(text, 0); end >= 0 {
-					text = text[:end]
+				text := message.Text
+				if message.Sender != "" {
+					text = message.Sender + ": " + text
 				}
 				s.enqueueGroupText(ctx, index, pathLen, frame.SNR,
-					uint32(message.Timestamp.Unix()), string(text))
+					uint32(message.Timestamp.Unix()), text)
 			}
 			return
 		}
-		if len(plain) >= 3 && int(plain[2]) <= len(plain)-3 {
+		message, err := mesh.ParseGroupData(plain)
+		if err == nil {
 			s.enqueueMailbox(ctx, companion.ChannelData{
-				SNRx4: snrQuarter(frame.SNR), Channel: index, PathLen: pathLen,
-				DataType: uint16(plain[0]) | uint16(plain[1])<<8,
-				Data:     append([]byte(nil), plain[3:3+int(plain[2])]...),
+				SNRx4: int8(mesh.EncodeSNR(frame.SNR)), Channel: index, PathLen: pathLen,
+				DataType: message.Type, Data: message.Data,
 			})
 		}
 		return
@@ -586,7 +569,7 @@ func (s *service) enqueueGroupText(ctx context.Context, channel, pathLen uint8, 
 	appVersion := s.appVersion
 	s.mu.Unlock()
 	var response companion.Response = companion.ChannelMessageV3{
-		SNRx4: snrQuarter(snr), Channel: channel, PathLen: pathLen,
+		SNRx4: int8(mesh.EncodeSNR(snr)), Channel: channel, PathLen: pathLen,
 		TextType: mesh.TxtTypePlain, UnixSeconds: timestamp, Text: text,
 	}
 	if appVersion < 3 {
@@ -596,10 +579,6 @@ func (s *service) enqueueGroupText(ctx context.Context, channel, pathLen uint8, 
 		}
 	}
 	s.enqueueMailbox(ctx, response)
-}
-
-func snrQuarter(snr float64) int8 {
-	return int8(max(-128, min(127, math.Round(snr*4))))
 }
 
 func (s *service) identitySnapshot() *mesh.LocalIdentity {

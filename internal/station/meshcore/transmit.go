@@ -2,7 +2,6 @@ package meshcore
 
 import (
 	"bytes"
-	"encoding/binary"
 	"strings"
 	"time"
 
@@ -172,10 +171,10 @@ func (s *service) sendChannelData(command companion.SendChannelData) []companion
 	if err != nil {
 		return errorResponses(companion.ErrIllegalArgument)
 	}
-	plain := make([]byte, 0, 3+len(command.Data))
-	plain = binary.LittleEndian.AppendUint16(plain, command.DataType)
-	plain = append(plain, byte(len(command.Data)))
-	plain = append(plain, command.Data...)
+	plain, err := mesh.BuildGroupData(command.DataType, command.Data)
+	if err != nil {
+		return errorResponses(companion.ErrIllegalArgument)
+	}
 	packet, err := mesh.BuildGroupDatagram(mesh.PayloadTypeGrpData, channel, plain)
 	if err != nil {
 		return errorResponses(companion.ErrTableFull)
