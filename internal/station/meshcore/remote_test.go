@@ -2,6 +2,7 @@ package meshcore
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"net"
 	"testing"
@@ -57,7 +58,10 @@ func attachApplication(t *testing.T, svc *service) net.Conn {
 	svc.client = stationSide
 	svc.generation++
 	svc.mu.Unlock()
+	writerCtx, cancelWriter := context.WithCancel(t.Context())
+	go svc.runPushes(writerCtx)
 	t.Cleanup(func() {
+		cancelWriter()
 		_ = stationSide.Close()
 		_ = appSide.Close()
 	})

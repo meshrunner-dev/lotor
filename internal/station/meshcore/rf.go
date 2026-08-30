@@ -36,6 +36,7 @@ type emission struct {
 	correlation correlation.ID
 	kind        string
 	notBefore   time.Time
+	busySince   time.Time
 	priority    uint8
 }
 
@@ -207,6 +208,8 @@ func (s *service) pushRawReception(frame radio.Frame) {
 }
 
 func (s *service) receiveAdvert(ctx context.Context, packet *mesh.Packet) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	s.mu.Lock()
 	before := s.snapshotLocked()
 	result, err := s.storeAdvert(packet, true)
@@ -264,8 +267,9 @@ func (s *service) advertResponsesLocked(result advertStoreResult,
 }
 
 func (s *service) receiveDirectText(ctx context.Context, packet *mesh.Packet, frame radio.Frame) {
+	identity := s.identitySnapshot()
 	datagram, err := mesh.ParseDatagram(packet.Payload)
-	if err != nil || !bytes.Equal(datagram.DestHash, s.id.PubKey[:mesh.PathHashSize]) {
+	if err != nil || !bytes.Equal(datagram.DestHash, identity.PubKey[:mesh.PathHashSize]) {
 		return
 	}
 	s.mu.Lock()
@@ -275,7 +279,7 @@ func (s *service) receiveDirectText(ctx context.Context, packet *mesh.Packet, fr
 		if !bytes.Equal(datagram.SrcHash, contact.info.PublicKey[:mesh.PathHashSize]) {
 			continue
 		}
-		secret, err := s.id.SharedSecret(contact.info.PublicKey[:])
+		secret, err := identity.SharedSecret(contact.info.PublicKey[:])
 		if err != nil {
 			continue
 		}
@@ -316,12 +320,13 @@ func (s *service) receiveDirectText(ctx context.Context, packet *mesh.Packet, fr
 			syncSince = uint32(message.Timestamp.Unix())
 		}
 		s.enqueueContactMailbox(ctx, contact.info.PublicKey, syncSince, response)
-		s.replyToText(contact, packet, plain, message)
+		s.replyToText(identity, contact, packet, plain, message)
 		return
 	}
 }
 
-func (s *service) replyToText(contact contactEntry, received *mesh.Packet, plain []byte,
+func (s *service) replyToText(identity *mesh.LocalIdentity, contact contactEntry,
+	received *mesh.Packet, plain []byte,
 	message *mesh.TextPlaintext,
 ) {
 	var ack []byte
@@ -339,12 +344,12 @@ func (s *service) replyToText(contact contactEntry, received *mesh.Packet, plain
 	case mesh.TxtTypeSignedPlain:
 		ack = make([]byte, 4)
 		binary.LittleEndian.PutUint32(ack,
-			mesh.AckCRC(plain[:min(len(plain), 9+len(message.Text))], s.id.PubKey[:]))
+			mesh.AckCRC(plain[:min(len(plain), 9+len(message.Text))], identity.PubKey[:]))
 	default:
 		return
 	}
 	if received.IsRouteFlood() {
-		s.sendPathReturn(contact, received, ack)
+		s.sendPathReturn(identity, contact, received, ack)
 		return
 	}
 	if len(ack) > 0 {
@@ -352,8 +357,10 @@ func (s *service) replyToText(contact contactEntry, received *mesh.Packet, plain
 	}
 }
 
-func (s *service) sendPathReturn(contact contactEntry, received *mesh.Packet, ack []byte) {
-	secret, err := s.id.SharedSecret(contact.info.PublicKey[:])
+func (s *service) sendPathReturn(identity *mesh.LocalIdentity, contact contactEntry,
+	received *mesh.Packet, ack []byte,
+) {
+	secret, err := identity.SharedSecret(contact.info.PublicKey[:])
 	if err != nil {
 		return
 	}
@@ -362,7 +369,7 @@ func (s *service) sendPathReturn(contact contactEntry, received *mesh.Packet, ac
 		extraType = uint8(mesh.PayloadTypeAck)
 	}
 	packet, err := mesh.BuildPathReturn(contact.info.PublicKey[:mesh.PathHashSize],
-		s.id.PubKey[:mesh.PathHashSize], secret, received.PathLen, received.Path, extraType, ack)
+		identity.PubKey[:mesh.PathHashSize], secret, received.PathLen, received.Path, extraType, ack)
 	if err != nil {
 		return
 	}
@@ -440,8 +447,9 @@ func (s *service) receiveACK(payload []byte, correlations ...correlation.ID) {
 }
 
 func (s *service) receivePath(ctx context.Context, packet *mesh.Packet) {
+	identity := s.identitySnapshot()
 	datagram, err := mesh.ParseDatagram(packet.Payload)
-	if err != nil || !bytes.Equal(datagram.DestHash, s.id.PubKey[:mesh.PathHashSize]) {
+	if err != nil || !bytes.Equal(datagram.DestHash, identity.PubKey[:mesh.PathHashSize]) {
 		return
 	}
 	s.mu.Lock()
@@ -451,7 +459,7 @@ func (s *service) receivePath(ctx context.Context, packet *mesh.Packet) {
 		if !bytes.Equal(datagram.SrcHash, candidate.info.PublicKey[:mesh.PathHashSize]) {
 			continue
 		}
-		secret, err := s.id.SharedSecret(candidate.info.PublicKey[:])
+		secret, err := identity.SharedSecret(candidate.info.PublicKey[:])
 		if err != nil {
 			continue
 		}
@@ -476,7 +484,7 @@ func (s *service) receivePath(ctx context.Context, packet *mesh.Packet) {
 			s.receiveACK(path.Extra, corr)
 		}
 		if packet.IsRouteFlood() {
-			s.sendReciprocalPath(candidate, packet, path, secret)
+			s.sendReciprocalPath(identity, candidate, packet, path, secret)
 		}
 		return
 	}
@@ -485,6 +493,8 @@ func (s *service) receivePath(ctx context.Context, packet *mesh.Packet) {
 func (s *service) storeContactPath(ctx context.Context, publicKey [mesh.PubKeySize]byte,
 	path *mesh.PathReturn,
 ) bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, exists := s.contacts[publicKey]
@@ -509,11 +519,12 @@ func (s *service) storeContactPath(ctx context.Context, publicKey [mesh.PubKeySi
 	return true
 }
 
-func (s *service) sendReciprocalPath(contact contactEntry, received *mesh.Packet,
+func (s *service) sendReciprocalPath(identity *mesh.LocalIdentity, contact contactEntry,
+	received *mesh.Packet,
 	returned *mesh.PathReturn, secret []byte,
 ) {
 	packet, err := mesh.BuildPathReturn(contact.info.PublicKey[:mesh.PathHashSize],
-		s.id.PubKey[:mesh.PathHashSize], secret, received.PathLen, received.Path, 0, nil)
+		identity.PubKey[:mesh.PathHashSize], secret, received.PathLen, received.Path, 0, nil)
 	if err != nil {
 		return
 	}
@@ -591,7 +602,15 @@ func snrQuarter(snr float64) int8 {
 	return int8(max(-128, min(127, math.Round(snr*4))))
 }
 
+func (s *service) identitySnapshot() *mesh.LocalIdentity {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.id
+}
+
 func (s *service) enqueueMailbox(ctx context.Context, response companion.Response) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	s.mu.Lock()
 	before := s.snapshotLocked()
 	result, encodeErr := s.enqueueMailboxLocked(response, correlationFromContext(ctx))
@@ -631,19 +650,53 @@ func (s *service) push(response companion.Response, correlations ...correlation.
 	if conn == nil {
 		return
 	}
+	item := companionPush{conn: conn, generation: generation, payload: payload, corr: corr}
+	select {
+	case s.pushes <- item:
+	default:
+		fields := []zap.Field{zap.Uint8("code", responseCode(payload)), zap.Int("bytes", len(payload))}
+		if !corr.IsZero() {
+			fields = append(fields, zap.String("corr", corr.Short()))
+		}
+		s.log.Warn("companion push queue full, dropping push", fields...)
+	}
+}
+
+func (s *service) runPushes(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case item := <-s.pushes:
+			s.writePush(item)
+		}
+	}
+}
+
+func (s *service) writePush(item companionPush) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	if !s.currentClient(conn, generation) {
+	if !s.currentClient(item.conn, item.generation) {
 		return
 	}
-	fields := []zap.Field{zap.Uint8("code", responseCode(payload)), zap.Int("bytes", len(payload))}
-	if !corr.IsZero() {
-		fields = append(fields, zap.String("corr", corr.Short()))
+	fields := []zap.Field{
+		zap.Uint8("code", responseCode(item.payload)),
+		zap.Int("bytes", len(item.payload)),
 	}
-	if err := companion.WriteFrame(conn, companion.ToApplication, payload); err != nil {
+	if !item.corr.IsZero() {
+		fields = append(fields, zap.String("corr", item.corr.Short()))
+	}
+	if err := item.conn.SetWriteDeadline(time.Now().Add(companionWriteTimeout)); err != nil {
+		logging.Trace(s.log, "companion push deadline failed", append(fields, zap.Error(err))...)
+		_ = item.conn.Close()
+		return
+	}
+	if err := companion.WriteFrame(item.conn, companion.ToApplication, item.payload); err != nil {
 		logging.Trace(s.log, "companion push failed", append(fields, zap.Error(err))...)
+		_ = item.conn.Close()
 		return
 	}
+	_ = item.conn.SetWriteDeadline(time.Time{})
 	logging.Trace(s.log, "companion push sent", fields...)
 }
 
@@ -694,7 +747,9 @@ func (s *service) transmit(ctx context.Context, item emission) {
 	at, actualAir, actualPower := time.Now(), airtime, power
 	var txErr error
 	if !shadow {
-		report, err := device.Transmit(ctx, raw, power)
+		txCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*airtime+time.Second)
+		report, err := device.Transmit(txCtx, raw, power)
+		cancel()
 		txErr = err
 		if report.Airtime > 0 {
 			at, actualAir, actualPower = report.At, report.Airtime, report.PowerDBm
@@ -761,8 +816,24 @@ func (s *service) stationClearChannel(ctx context.Context, device radio.Device,
 	}
 	deadline := time.Now().Add(stationLBTBound)
 	for {
-		busy, err := device.AssessChannel(ctx, policy.LBTThresholdDB)
+		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
+		busy, err := device.AssessChannel(attemptCtx, policy.LBTThresholdDB)
+		cancel()
 		if errors.Is(err, radio.ErrBusyReceiving) {
+			now := time.Now()
+			if item.busySince.IsZero() {
+				item.busySince = now
+			}
+			busyFor := now.Sub(item.busySince)
+			if busyFor >= stationLBTBound && policy.LBTExhausted == config.LBTDrop {
+				s.txDrop(item, "lbt")
+				return false
+			}
+			retry := stationLBTRetry/2 + rand.N(stationLBTRetry) //nolint:gosec // timing jitter, not security
+			item.notBefore = now.Add(retry)
+			logging.Trace(s.log, "station tx requeued for reception",
+				zap.String("corr", item.correlation.Short()), zap.Duration("retry_in", retry),
+				zap.Duration("busy_for", busyFor))
 			s.requeue(item)
 			return false
 		}

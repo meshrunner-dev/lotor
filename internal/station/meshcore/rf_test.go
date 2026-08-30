@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/station"
 
@@ -21,6 +22,9 @@ type stationRadio struct {
 	assesses  int
 	noise     radio.NoiseFloor
 	noiseOK   bool
+	assessErr error
+	txStarted chan struct{}
+	txRelease chan struct{}
 }
 
 func (*stationRadio) Envelope() radio.Envelope {
@@ -35,13 +39,23 @@ func (*stationRadio) Receive(ctx context.Context) (radio.Frame, error) {
 func (r *stationRadio) NoiseFloor() (radio.NoiseFloor, bool) { return r.noise, r.noiseOK }
 func (*stationRadio) NoiseStarved() uint64                   { return 0 }
 func (*stationRadio) ChipStats() (radio.ChipStats, bool)     { return radio.ChipStats{}, false }
-func (r *stationRadio) Transmit(_ context.Context, _ []byte, power int8) (radio.TxReport, error) {
+func (r *stationRadio) Transmit(ctx context.Context, _ []byte, power int8) (radio.TxReport, error) {
 	r.transmits++
+	if r.txStarted != nil {
+		close(r.txStarted)
+	}
+	if r.txRelease != nil {
+		select {
+		case <-ctx.Done():
+			return radio.TxReport{}, ctx.Err()
+		case <-r.txRelease:
+		}
+	}
 	return radio.TxReport{At: time.Now(), Airtime: 100 * time.Millisecond, PowerDBm: power}, nil
 }
 func (r *stationRadio) AssessChannel(context.Context, float64) (bool, error) {
 	r.assesses++
-	return false, nil
+	return false, r.assessErr
 }
 func (*stationRadio) Airtime(int) time.Duration { return 100 * time.Millisecond }
 func (*stationRadio) Close() error              { return nil }
@@ -270,6 +284,9 @@ func TestACKPushConfirmsAnExpectedSend(t *testing.T) {
 	svc.mu.Lock()
 	svc.client, svc.generation = stationSide, 1
 	svc.mu.Unlock()
+	writerCtx, cancelWriter := context.WithCancel(t.Context())
+	defer cancelWriter()
+	go svc.runPushes(writerCtx)
 	frames := make(chan [][]byte, 1)
 	go func() {
 		got := make([][]byte, 0, 2)
@@ -435,6 +452,81 @@ func TestShadowStationConsumesSharedLedgerWithoutKeying(t *testing.T) {
 	}
 	if svc.stats.sent != 1 || svc.stats.sentFlood != 1 || svc.stats.txAir != 100*time.Millisecond {
 		t.Fatalf("shadow station stats = %+v", svc.stats)
+	}
+}
+
+func TestStationReceptionBusyRequeueIsPacedAndKeepsItsBound(t *testing.T) {
+	spec := testSpec(t)
+	spec.TX = station.TXPolicy{
+		Mode: config.TXOnAir, CAD: true, LBTExhausted: config.LBTDrop, QueueDepth: 4,
+	}
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	device := &stationRadio{assessErr: radio.ErrBusyReceiving}
+	svc.rfDevice = device
+	svc.duty = radio.NewAirtimeLedger(time.Hour, nil)
+	packet, err := mesh.BuildAck([]byte{1, 2, 3, 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := emission{packet: packet, correlation: correlation.New(), kind: "station-test"}
+	now := time.Now()
+	svc.transmit(t.Context(), item)
+	if device.assesses != 1 || svc.outbound.len() != 1 {
+		t.Fatalf("paced requeue: assessments %d queue %d", device.assesses, svc.outbound.len())
+	}
+	requeued, ok := svc.outbound.takeUntil(t.Context(), now.Add(time.Second))
+	if !ok || requeued.busySince.IsZero() || !requeued.notBefore.After(now) {
+		t.Fatalf("requeued emission = %+v, ok %t", requeued, ok)
+	}
+
+	requeued.busySince = time.Now().Add(-stationLBTBound - time.Second)
+	svc.transmit(t.Context(), requeued)
+	if device.assesses != 2 || svc.outbound.len() != 0 {
+		t.Fatalf("exhausted reception retry: assessments %d queue %d", device.assesses, svc.outbound.len())
+	}
+}
+
+func TestStartedStationTransmitFinishesAfterSessionCancellation(t *testing.T) {
+	spec := testSpec(t)
+	spec.TX = station.TXPolicy{Mode: config.TXOnAir, QueueDepth: 4}
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	device := &stationRadio{txStarted: make(chan struct{}), txRelease: make(chan struct{})}
+	svc.rfDevice = device
+	svc.duty = radio.NewAirtimeLedger(time.Hour, nil)
+	packet, err := mesh.BuildAck([]byte{1, 2, 3, 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := emission{packet: packet, correlation: correlation.New(), kind: "station-test"}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		svc.transmit(ctx, item)
+		close(done)
+	}()
+	<-device.txStarted
+	cancel()
+	select {
+	case <-done:
+		t.Fatal("started transmit returned before the hardware completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(device.txRelease)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("started transmit did not finish")
+	}
+	if got := svc.duty.Usage(time.Now()); got != 100*time.Millisecond {
+		t.Fatalf("accounted airtime = %s", got)
 	}
 }
 

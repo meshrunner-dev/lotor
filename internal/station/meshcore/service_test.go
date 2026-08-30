@@ -170,6 +170,113 @@ func TestNewCompanionClientReplacesThePreviousOne(t *testing.T) {
 	}
 }
 
+func TestCompanionReplacementStartsANewApplicationSession(t *testing.T) {
+	built, err := build(testSpec(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	firstStation, firstApp := net.Pipe()
+	defer func() {
+		_ = firstStation.Close()
+		_ = firstApp.Close()
+	}()
+	svc.replaceClient(firstStation)
+	svc.mu.Lock()
+	svc.appVersion = protocolVersion
+	svc.sendUnscoped = true
+	svc.sendScope[0] = 1
+	svc.signData = []byte("partial signature input")
+	svc.pending = pendingRequest{kind: pendingStatus, tag: 42}
+	svc.expectedACKs[0] = ackExpectation{crc: 7, used: true}
+	svc.connections[[mesh.PubKeySize]byte{1}] = remoteConnection{keepAlive: time.Minute}
+	svc.contacts[[mesh.PubKeySize]byte{2}] = contactEntry{ephemeral: true}
+	svc.advertPaths[0].pathLen = 1
+	svc.advertPaths[0].path[0] = 1
+	svc.mu.Unlock()
+
+	secondStation, secondApp := net.Pipe()
+	defer func() {
+		_ = secondStation.Close()
+		_ = secondApp.Close()
+	}()
+	svc.replaceClient(secondStation)
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	if svc.appVersion != 0 || svc.sendUnscoped || svc.sendScope != ([16]byte{}) ||
+		svc.signData != nil || svc.pending.kind != pendingNone || svc.expectedACKs[0].used ||
+		len(svc.connections) != 0 || svc.advertPaths[0] != (advertPath{}) {
+		t.Fatalf("application session state crossed replacement: app=%d scope=%x sign=%q pending=%+v",
+			svc.appVersion, svc.sendScope, svc.signData, svc.pending)
+	}
+	if _, exists := svc.contacts[[mesh.PubKeySize]byte{2}]; exists {
+		t.Fatal("ephemeral contact crossed application replacement")
+	}
+}
+
+func TestSilentCompanionCannotBlockRFPushProducer(t *testing.T) {
+	built, err := build(testSpec(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	stationSide, appSide := net.Pipe()
+	defer func() {
+		_ = stationSide.Close()
+		_ = appSide.Close()
+	}()
+	svc.replaceClient(stationSide)
+	writerCtx, cancelWriter := context.WithCancel(t.Context())
+	defer cancelWriter()
+	go svc.runPushes(writerCtx)
+
+	done := make(chan struct{})
+	go func() {
+		for range pushQueueDepth * 2 {
+			svc.push(companion.MessagesWaiting{})
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("silent companion blocked the RF push producer")
+	}
+}
+
+func TestIdentitySnapshotIsSafeDuringCompanionImport(t *testing.T) {
+	built, err := build(testSpec(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	identity, err := mesh.LocalIdentityFromSeed(bytes.Repeat([]byte{19}, mesh.SeedSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := companion.ImportPrivateKey{}
+	copy(command.PrivateKey[:], identity.PrvKey())
+	start := make(chan struct{})
+	done := make(chan struct{}, 2)
+	go func() {
+		<-start
+		for range 1_000 {
+			_ = svc.identitySnapshot().PubKey
+		}
+		done <- struct{}{}
+	}()
+	go func() {
+		<-start
+		for range 100 {
+			_ = svc.handle(t.Context(), command)
+		}
+		done <- struct{}{}
+	}()
+	close(start)
+	<-done
+	<-done
+}
+
 func TestDetachedStationForbidsRepeatingAndKeepsRadioPreferences(t *testing.T) {
 	built, err := build(testSpec(t))
 	if err != nil {
@@ -338,6 +445,58 @@ func TestStationStateWithoutMailboxCorrelationsStillRestores(t *testing.T) {
 type memoryStationState struct {
 	state []byte
 	fail  bool
+}
+
+type blockingStationState struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (*blockingStationState) LoadStationState(context.Context, string) ([]byte, bool, error) {
+	return nil, false, nil
+}
+
+func (b *blockingStationState) SaveStationState(context.Context, string, []byte) error {
+	close(b.started)
+	<-b.release
+	return nil
+}
+
+func TestSlowStationPersistenceDoesNotHoldRuntimeStateLock(t *testing.T) {
+	store := &blockingStationState{started: make(chan struct{}), release: make(chan struct{})}
+	spec := testSpec(t)
+	spec.State = store
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	mutationDone := make(chan []companion.Response, 1)
+	go func() {
+		mutationDone <- svc.handle(t.Context(), companion.SetAdvertName{Name: "Persisting"})
+	}()
+	select {
+	case <-store.started:
+	case <-time.After(time.Second):
+		t.Fatal("station persistence did not start")
+	}
+
+	runtimeDone := make(chan struct{})
+	go func() {
+		_ = svc.Info()
+		svc.AttachRadio("", nil, nil, "")
+		close(runtimeDone)
+	}()
+	select {
+	case <-runtimeDone:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("slow station persistence retained the runtime state lock")
+	}
+	close(store.release)
+	responses := <-mutationDone
+	if len(responses) != 1 || responses[0] != companion.StatusResponse(companion.ResponseOK) {
+		t.Fatalf("persisted mutation responses = %#v", responses)
+	}
 }
 
 func (m *memoryStationState) LoadStationState(context.Context, string) ([]byte, bool, error) {

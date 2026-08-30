@@ -26,21 +26,23 @@ import (
 )
 
 const (
-	protocolName     = "meshcore"
-	protocolVersion  = 13
-	defaultContacts  = 100
-	defaultChannels  = 8
-	defaultMailbox   = 16
-	defaultAirFactor = 1_000
-	maxStationName   = 31
-	maxChannelName   = 31
-	maxChannelSlots  = 255
-	maxContactSlots  = 510
-	maxMailboxSlots  = 4096
-	maxConnectionPIN = math.MaxUint32
-	maxSignData      = 8 * 1024
-	maxConnections   = 16
-	maxAnonContacts  = 8
+	protocolName          = "meshcore"
+	protocolVersion       = 13
+	defaultContacts       = 100
+	defaultChannels       = 8
+	defaultMailbox        = 16
+	defaultAirFactor      = 1_000
+	maxStationName        = 31
+	maxChannelName        = 31
+	maxChannelSlots       = 255
+	maxContactSlots       = 510
+	maxMailboxSlots       = 4096
+	maxConnectionPIN      = math.MaxUint32
+	maxSignData           = 8 * 1024
+	maxConnections        = 16
+	maxAnonContacts       = 8
+	pushQueueDepth        = 64
+	companionWriteTimeout = 5 * time.Second
 )
 
 func init() {
@@ -220,6 +222,7 @@ func build(spec station.Spec) (station.Service, error) {
 		channels: make(map[uint8]channel), contacts: make(map[[mesh.PubKeySize]byte]contactEntry),
 		state: station.StateStarting, stateStore: spec.State, txPolicy: spec.TX, bus: spec.Bus,
 		rfWake: make(chan struct{}, 1), startedAt: time.Now(),
+		pushes:      make(chan companionPush, pushQueueDepth),
 		connections: make(map[[mesh.PubKeySize]byte]remoteConnection),
 	}
 	queueDepth := spec.TX.QueueDepth
@@ -276,6 +279,13 @@ type ackExpectation struct {
 	used bool
 }
 
+type companionPush struct {
+	conn       net.Conn
+	generation uint64
+	payload    []byte
+	corr       correlation.ID
+}
+
 // stationStats are the counters attributable to this virtual station. They do
 // not expose another attachment's traffic when the physical radio is shared.
 type stationStats struct {
@@ -294,6 +304,10 @@ type service struct {
 	log                     *zap.Logger
 	buildDate, buildVersion string
 
+	// stateMu serializes durable mutations. Callers take it before mu, which
+	// lets persistence release mu around SQLite without allowing a second
+	// state transaction to observe or overwrite an in-flight snapshot.
+	stateMu      sync.Mutex
 	mu           sync.Mutex
 	writeMu      sync.Mutex
 	state        station.State
@@ -330,6 +344,7 @@ type service struct {
 	rfWake       chan struct{}
 	rfDevice     radio.Device
 	outbound     *emissionQueue
+	pushes       chan companionPush
 	startedAt    time.Time
 	stats        stationStats
 	signData     []byte
@@ -358,6 +373,11 @@ func (s *service) Run(ctx context.Context) error {
 		defer close(rfDone)
 		s.runRF(rfCtx)
 	}()
+	pushDone := make(chan struct{})
+	go func() {
+		defer close(pushDone)
+		s.runPushes(ctx)
+	}()
 	stop := context.AfterFunc(ctx, func() { s.closeIO() })
 	defer func() {
 		stop()
@@ -367,6 +387,7 @@ func (s *service) Run(ctx context.Context) error {
 			s.setLifecycle(station.StateStopped, nil)
 		}
 		<-rfDone
+		<-pushDone
 	}()
 	for {
 		conn, err := ln.Accept()
@@ -399,6 +420,7 @@ func (s *service) closeIO() {
 func (s *service) replaceClient(conn net.Conn) uint64 {
 	s.mu.Lock()
 	old := s.client
+	s.resetClientSessionLocked()
 	s.generation++
 	generation := s.generation
 	s.client = conn
@@ -420,6 +442,7 @@ func (s *service) serveClient(ctx context.Context, conn net.Conn, generation uin
 		current := s.generation == generation && s.client == conn
 		if current {
 			s.client, s.remote = nil, ""
+			s.resetClientSessionLocked()
 		}
 		s.mu.Unlock()
 		if current {
@@ -499,15 +522,36 @@ func (s *service) writeResponses(conn net.Conn, generation uint64, responses []c
 			s.log.Error("companion response encode", zap.Error(err))
 			return false
 		}
+		if err := conn.SetWriteDeadline(time.Now().Add(companionWriteTimeout)); err != nil {
+			return false
+		}
 		if err := companion.WriteFrame(conn, companion.ToApplication, payload); err != nil {
 			logging.Trace(s.log, "companion response failed",
 				zap.Uint8("code", responseCode(payload)), zap.Error(err))
 			return false
 		}
+		_ = conn.SetWriteDeadline(time.Time{})
 		logging.Trace(s.log, "companion response sent",
 			zap.Uint8("code", responseCode(payload)), zap.Int("bytes", len(payload)))
 	}
 	return true
+}
+
+func (s *service) resetClientSessionLocked() {
+	s.appVersion = 0
+	s.sendScope = [16]byte{}
+	s.sendUnscoped = false
+	s.signData = nil
+	s.pending = pendingRequest{}
+	s.expectedACKs = [8]ackExpectation{}
+	s.nextACK = 0
+	s.connections = make(map[[mesh.PubKeySize]byte]remoteConnection)
+	s.advertPaths = [16]advertPath{}
+	for key, entry := range s.contacts {
+		if entry.ephemeral {
+			delete(s.contacts, key)
+		}
+	}
 }
 
 func (s *service) currentClient(conn net.Conn, generation uint64) bool {
@@ -517,6 +561,8 @@ func (s *service) currentClient(conn net.Conn, generation uint64) bool {
 }
 
 func (s *service) handle(ctx context.Context, cmd companion.Command) []companion.Response {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	s.mu.Lock()
 	if responses, handled := s.handleQuery(cmd); handled {
 		s.mu.Unlock()

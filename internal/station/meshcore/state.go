@@ -309,7 +309,13 @@ func (s *service) persistLocked(ctx context.Context, before persistedState) erro
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := s.stateStore.SaveStationState(ctx, s.name, afterRaw); err != nil {
+	// Every caller owns stateMu before mu. Releasing only mu keeps durable
+	// mutations ordered while allowing Info, RF accounting and manager radio
+	// attachment to proceed during a slow fsync.
+	s.mu.Unlock()
+	err = s.stateStore.SaveStationState(ctx, s.name, afterRaw)
+	s.mu.Lock()
+	if err != nil {
 		oldWaveform := before.Waveform.radio()
 		s.restoreLocked(before)
 		if s.binding != nil && oldWaveform != after.Waveform.radio() {

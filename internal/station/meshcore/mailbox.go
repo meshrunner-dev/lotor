@@ -64,6 +64,8 @@ func (s *service) enqueueMailboxLocked(response companion.Response,
 func (s *service) enqueueContactMailbox(ctx context.Context, publicKey [mesh.PubKeySize]byte,
 	syncSince uint32, response companion.Response,
 ) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	s.mu.Lock()
 	before := s.snapshotLocked()
 	corr := correlationFromContext(ctx)
