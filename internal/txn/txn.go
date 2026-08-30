@@ -11,9 +11,12 @@
 package txn
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 )
+
+type contextKey struct{}
 
 // ShortLen is the number of hex characters displayed and logged.
 const ShortLen = 12
@@ -41,3 +44,23 @@ func (id ID) String() string { return hex.EncodeToString(id[:]) }
 // Short returns the displayed form: the first ShortLen hex characters,
 // a prefix of String so grep finds either from the other.
 func (id ID) Short() string { return id.String()[:ShortLen] }
+
+// IsZero reports whether no transaction was assigned. Production
+// frame paths replace a zero at the first seam; it remains useful to
+// lightweight test devices that do not model that seam themselves.
+func (id ID) IsZero() bool { return id == ID{} }
+
+// WithContext carries a frame transaction through an API whose
+// context already spans the work, notably the radio transmit seam.
+// It is correlation metadata only: cancellation and deadlines remain
+// the caller's.
+func WithContext(ctx context.Context, id ID) context.Context {
+	return context.WithValue(ctx, contextKey{}, id)
+}
+
+// FromContext retrieves frame correlation metadata when the caller
+// supplied it.
+func FromContext(ctx context.Context) (ID, bool) {
+	id, ok := ctx.Value(contextKey{}).(ID)
+	return id, ok && !id.IsZero()
+}

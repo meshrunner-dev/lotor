@@ -345,6 +345,20 @@ func TestNoiseIsVisible(t *testing.T) {
 	}
 }
 
+func TestCorruptWatchLineKeepsItsTransaction(t *testing.T) {
+	var out bytes.Buffer
+	s := session{out: &out}
+	id := txn.New()
+	if err := s.watchEvent(bus.FrameCorrupt{
+		Relay: "meshcore-868", Txn: id, Err: "crc mismatch",
+	}, map[string]string{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, id.Short()) || !strings.Contains(got, "crc mismatch") {
+		t.Errorf("corrupt watch line = %q", got)
+	}
+}
+
 func TestArchivedRelayStaysAddressable(t *testing.T) {
 	// A relay removed from the configuration keeps its archive: the
 	// journal queries accept its name, only the live stream refuses.

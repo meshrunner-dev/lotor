@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/txn"
@@ -22,6 +23,27 @@ func testSentinel(t *testing.T) *Sentinel {
 	}
 	t.Cleanup(func() { _ = s.store.Close() })
 	return s
+}
+
+func TestFailedFrameProjectionKeepsItsTransaction(t *testing.T) {
+	id := txn.New()
+	events := []bus.Event{
+		bus.FrameJudged{Relay: "mc", Txn: id},
+		bus.FrameCorrupt{Relay: "mc", Txn: id},
+		bus.FrameSent{Relay: "mc", Txn: id},
+		bus.TxDropped{Relay: "mc", Txn: id},
+	}
+	for _, event := range events {
+		core, observed := observer.New(zap.DebugLevel)
+		zap.New(core).Warn("failed", frameCorrelation(event)...)
+		fields := observed.All()[0].ContextMap()
+		if fields["relay"] != "mc" || fields["txn"] != id.Short() {
+			t.Errorf("%T correlation = %+v", event, fields)
+		}
+	}
+	if fields := frameCorrelation(bus.NoiseFloor{Relay: "mc"}); fields != nil {
+		t.Errorf("non-frame event correlation = %+v, want none", fields)
+	}
 }
 
 func TestHeardThenJudgedBecomesOneRow(t *testing.T) {

@@ -416,12 +416,36 @@ func (s *Sentinel) recordOutcome(ev bus.Event, err error) {
 	first := s.degraded.CompareAndSwap(false, true)
 	if first || time.Since(s.warnedAt) >= healthLogEvery {
 		s.warnedAt = time.Now()
-		s.log.Warn("journal write failed",
+		fields := make([]zap.Field, 0, 6)
+		fields = append(fields,
 			zap.String("event", fmt.Sprintf("%T", ev)),
 			zap.Uint64("failures", s.failures.Load()),
 			zap.Bool("first", first),
-			zap.Error(err))
+			zap.Error(err),
+		)
+		fields = append(fields, frameCorrelation(ev)...)
+		s.log.Warn("journal write failed", fields...)
 	}
+}
+
+// frameCorrelation keeps a failed journal projection attached to the
+// frame whose story it could not store. Non-frame events deliberately
+// carry no invented transaction.
+func frameCorrelation(ev bus.Event) []zap.Field {
+	var relay, id string
+	switch e := ev.(type) {
+	case bus.FrameJudged:
+		relay, id = e.Relay, e.Txn.Short()
+	case bus.FrameCorrupt:
+		relay, id = e.Relay, e.Txn.Short()
+	case bus.FrameSent:
+		relay, id = e.Relay, e.Txn.Short()
+	case bus.TxDropped:
+		relay, id = e.Relay, e.Txn.Short()
+	default:
+		return nil
+	}
+	return []zap.Field{zap.String("relay", relay), zap.String("txn", id)}
 }
 
 // Health is the journal's condition as outside readers see it.

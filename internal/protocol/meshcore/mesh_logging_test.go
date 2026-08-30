@@ -1,6 +1,7 @@
 package meshcore
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -70,7 +71,9 @@ func TestReceptionLogsKeepTrafficAtDebugAndRFAtTrace(t *testing.T) {
 	e, _, _, _ := txRig(t, "shadow") //nolint:dogsled // the rig supplies an armed engine
 	core, observed := observer.New(logging.TraceLevel)
 	e.log = zap.New(core)
+	id := txn.New()
 	frame := radio.Frame{
+		Txn:     id,
 		Payload: []byte{1, 2, 3}, At: time.Now(), Airtime: 41 * time.Millisecond,
 		RSSI: -91.5, SNR: 7.25, SignalRSSI: -89, FreqErrHz: 123,
 	}
@@ -81,7 +84,8 @@ func TestReceptionLogsKeepTrafficAtDebugAndRFAtTrace(t *testing.T) {
 	if heard.Level != zap.DebugLevel {
 		t.Errorf("frame heard level = %s, want debug", heard.Level)
 	}
-	if fields := heard.ContextMap(); fields["rssi_dbm"] != nil || fields["snr_db"] != nil {
+	if fields := heard.ContextMap(); fields["txn"] != id.Short() ||
+		fields["rssi_dbm"] != nil || fields["snr_db"] != nil {
 		t.Errorf("debug traffic log carries RF measurements: %+v", fields)
 	}
 	measurements := observedOne(t, observed, "rx frame measurements")
@@ -89,9 +93,22 @@ func TestReceptionLogsKeepTrafficAtDebugAndRFAtTrace(t *testing.T) {
 		t.Errorf("RF measurement level = %s, want trace", measurements.Level)
 	}
 	fields := measurements.ContextMap()
-	if fields["rssi_dbm"] != frame.RSSI || fields["snr_db"] != frame.SNR ||
+	if fields["txn"] != id.Short() || fields["rssi_dbm"] != frame.RSSI ||
+		fields["snr_db"] != frame.SNR ||
 		fields["airtime"] != frame.Airtime {
 		t.Errorf("RF measurement fields = %+v", fields)
+	}
+}
+
+func TestTransmitHandsTransactionAcrossTheRadioSeam(t *testing.T) {
+	e, dev, _, _ := txRig(t, "on-air")
+	id := txn.New()
+
+	if _, err := e.key(context.Background(), dev, []byte{1, 2, 3}, id, zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	if dev.lastTxn != id {
+		t.Errorf("radio context txn = %s, want %s", dev.lastTxn, id)
 	}
 }
 

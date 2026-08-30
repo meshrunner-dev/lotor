@@ -1508,7 +1508,7 @@ func (s *session) watchEvent(ev bus.Event, opts map[string]string) error {
 		if v, ok := opts[scopeRelay]; ok && e.Relay != v {
 			return nil
 		}
-		_, err := fmt.Fprintf(s.out, "corrupt reception — %s\r\n", e.Err)
+		_, err := fmt.Fprintf(s.out, "%s  corrupt reception — %s\r\n", e.Txn.Short(), e.Err)
 		return err
 	}
 	return nil

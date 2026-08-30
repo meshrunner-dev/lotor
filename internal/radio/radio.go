@@ -8,8 +8,6 @@
 package radio
 
 import (
-	"meshrunner.dev/lotor/internal/schema"
-
 	"context"
 	"errors"
 	"fmt"
@@ -18,6 +16,9 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"meshrunner.dev/lotor/internal/schema"
+	"meshrunner.dev/lotor/internal/txn"
 )
 
 // Waveform is a relay's channel choice, in protocol-neutral units.
@@ -100,6 +101,11 @@ func (e Envelope) Allows(w Waveform) error {
 
 // Frame is one received transmission.
 type Frame struct {
+	// Txn is assigned where a decoded or corrupt reception first
+	// crosses the device seam, before any frame-specific hardware log.
+	// Devices that cannot assign it may leave it zero; the protocol
+	// engine then assigns the fallback at its own receive boundary.
+	Txn     txn.ID
 	Payload []byte
 	RSSI    float64
 	SNR     float64

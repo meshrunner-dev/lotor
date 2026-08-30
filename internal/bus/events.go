@@ -66,9 +66,12 @@ type FrameJudged struct {
 
 // FrameCorrupt is published for receptions that failed integrity
 // checks — RF noise is traffic too, and silence about it would hide a
-// site's health.
+// site's health. It carries a transaction even though no packet could
+// be parsed: the receive and journal logs still describe one causal
+// event.
 type FrameCorrupt struct {
 	Relay string
+	Txn   txn.ID
 	At    time.Time
 	Err   string
 }

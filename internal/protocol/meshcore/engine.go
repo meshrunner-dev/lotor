@@ -725,9 +725,18 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 			e.judge(dev, frame)
 		case errors.Is(err, radio.ErrCorrupt):
 			e.stats.countCorrupt()
-			e.log.Debug("corrupt reception", zap.Error(err))
+			id := frame.Txn
+			if id.IsZero() {
+				id = txn.New()
+			}
+			at := frame.At
+			if at.IsZero() {
+				at = time.Now()
+			}
+			log := e.log.With(zap.String("txn", id.Short()))
+			log.Debug("corrupt reception", zap.Error(err))
 			e.bus.Publish(bus.FrameCorrupt{
-				Relay: e.relay, At: time.Now(), Err: err.Error(),
+				Relay: e.relay, Txn: id, At: at, Err: err.Error(),
 			})
 		case (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) &&
 			ctx.Err() == nil:
@@ -889,7 +898,10 @@ func (e *engine) observe(rx *reception) {
 // heard logs and publishes one reception, returning the transaction
 // that names it from here on.
 func (e *engine) heard(frame radio.Frame) (txn.ID, *zap.Logger) {
-	id := txn.New()
+	id := frame.Txn
+	if id.IsZero() {
+		id = txn.New()
+	}
 	log := e.log.With(zap.String("txn", id.Short()))
 	log.Debug("frame heard", zap.Int("bytes", len(frame.Payload)))
 	logging.Trace(log, "rx frame measurements",

@@ -808,7 +808,7 @@ func (e *engine) recordEmission(entry txEntry, sent bus.FrameSent, log *zap.Logg
 func (e *engine) keyAndFill(ctx context.Context, dev radio.Device, raw []byte,
 	entry txEntry, sent *bus.FrameSent, log *zap.Logger,
 ) (requeued, radiated bool, err error) {
-	report, err := e.key(ctx, dev, raw, log)
+	report, err := e.key(ctx, dev, raw, entry.origin, log)
 	if errors.Is(err, radio.ErrBusyReceiving) {
 		e.requeue(entry) // a frame landed between assessment and keying
 		return true, false, nil
@@ -823,10 +823,11 @@ func (e *engine) keyAndFill(ctx context.Context, dev radio.Device, raw []byte,
 // reaches the ledger. The detached deadline is generous enough for
 // the frame plus the chip's own timeout, and no longer.
 func (e *engine) key(ctx context.Context, dev radio.Device, raw []byte,
-	log *zap.Logger,
+	origin txn.ID, log *zap.Logger,
 ) (radio.TxReport, error) {
 	budget := 2*dev.Airtime(len(raw)) + time.Second
-	txCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
+	base := txn.WithContext(context.WithoutCancel(ctx), origin)
+	txCtx, cancel := context.WithTimeout(base, budget)
 	defer cancel()
 	deadline, _ := txCtx.Deadline()
 	logging.Trace(log, "tx handed to radio",

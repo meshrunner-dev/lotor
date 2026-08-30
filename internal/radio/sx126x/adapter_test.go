@@ -24,6 +24,7 @@ import (
 
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/radio"
+	"meshrunner.dev/lotor/internal/txn"
 	"meshrunner.dev/pkg/lora"
 	"meshrunner.dev/pkg/lora/sx126x"
 )
@@ -218,10 +219,19 @@ func TestCorruptReceptionIsToldApartFromAFault(t *testing.T) {
 	// A CRC or header error is one frame lost, not a sick radio: the
 	// engine counts it and keeps listening.
 	for _, chipErr := range []error{sx126x.ErrCRC, sx126x.ErrHeader} {
+		core, observed := observer.New(logging.TraceLevel)
 		d := newDevice(&fakeChip{pollErr: chipErr, events: make(chan struct{})})
-		_, err := d.Receive(context.Background())
+		d.log = zap.New(core)
+		frame, err := d.Receive(context.Background())
 		if !errors.Is(err, radio.ErrCorrupt) {
 			t.Errorf("%v became %v, want a corrupt reception", chipErr, err)
+		}
+		if frame.Txn.IsZero() {
+			t.Errorf("%v corrupt reception has no transaction", chipErr)
+		}
+		entries := observed.FilterMessage("rx corrupt frame off the chip").All()
+		if len(entries) != 1 || entries[0].ContextMap()["txn"] != frame.Txn.Short() {
+			t.Errorf("%v corrupt trace = %+v, want txn %s", chipErr, entries, frame.Txn.Short())
 		}
 	}
 	// Anything else is the radio's own trouble, passed through.
@@ -234,11 +244,14 @@ func TestCorruptReceptionIsToldApartFromAFault(t *testing.T) {
 
 func TestAReceivedFrameCrossesTheSeamWhole(t *testing.T) {
 	at := time.Now()
+	core, observed := observer.New(logging.TraceLevel)
 	c := &fakeChip{events: make(chan struct{}), pollFrame: &sx126x.RxFrame{
 		Payload: []byte{1, 2, 3}, RSSI: -92.5, SNR: 7.25,
 		SignalRSSI: -95, FreqErr: 1350, Airtime: 250 * time.Millisecond, At: at,
 	}}
-	f, err := newDevice(c).Receive(context.Background())
+	d := newDevice(c)
+	d.log = zap.New(core)
+	f, err := d.Receive(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,6 +261,13 @@ func TestAReceivedFrameCrossesTheSeamWhole(t *testing.T) {
 	}
 	if !f.At.Equal(at) {
 		t.Errorf("At = %v, want the chip's own %v", f.At, at)
+	}
+	if f.Txn.IsZero() {
+		t.Fatal("received frame crossed the device seam without a transaction")
+	}
+	entries := observed.FilterMessage("rx frame off the chip").All()
+	if len(entries) != 1 || entries[0].ContextMap()["txn"] != f.Txn.Short() {
+		t.Errorf("receive trace = %+v, want txn %s", entries, f.Txn.Short())
 	}
 }
 
@@ -261,12 +281,22 @@ func TestAnEmissionReportsItselfEvenWhenTheRadioThenFalls(t *testing.T) {
 			Duration: 310 * time.Millisecond, PowerDBm: -5},
 		txErr: fault,
 	}
-	rep, err := newDevice(c).Transmit(context.Background(), []byte{1}, -5)
+	core, observed := observer.New(logging.TraceLevel)
+	d := newDevice(c)
+	d.log = zap.New(core)
+	id := txn.New()
+	rep, err := d.Transmit(txn.WithContext(context.Background(), id), []byte{1}, -5)
 	if !errors.Is(err, fault) {
 		t.Errorf("error = %v", err)
 	}
 	if rep.Airtime != 300*time.Millisecond || rep.PowerDBm != -5 || !rep.At.Equal(at) {
 		t.Errorf("report = %+v — the emission must survive the fault", rep)
+	}
+	for _, message := range []string{"tx keying", "tx done — chip handed back to rx"} {
+		entries := observed.FilterMessage(message).All()
+		if len(entries) != 1 || entries[0].ContextMap()["txn"] != id.Short() {
+			t.Errorf("%s trace = %+v, want txn %s", message, entries, id.Short())
+		}
 	}
 	// Nothing radiated is an empty report, and the busy channel still
 	// reads as a busy channel here too.

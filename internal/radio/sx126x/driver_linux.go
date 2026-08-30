@@ -13,6 +13,7 @@ import (
 
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/radio"
+	"meshrunner.dev/lotor/internal/txn"
 	"meshrunner.dev/pkg/lora"
 	"meshrunner.dev/pkg/lora/linux"
 	"meshrunner.dev/pkg/lora/sx126x"
@@ -238,20 +239,25 @@ func (d *device) Receive(ctx context.Context) (radio.Frame, error) {
 		f, err := d.r.Poll()
 		if err != nil {
 			if errors.Is(err, sx126x.ErrCRC) || errors.Is(err, sx126x.ErrHeader) {
-				return radio.Frame{}, fmt.Errorf("%w: %w", radio.ErrCorrupt, err)
+				id := txn.New()
+				logging.Trace(d.log.With(zap.String("txn", id.Short())),
+					"rx corrupt frame off the chip", zap.Error(err))
+				return radio.Frame{Txn: id, At: time.Now()}, fmt.Errorf("%w: %w", radio.ErrCorrupt, err)
 			}
 			return radio.Frame{}, err
 		}
 		if f != nil {
+			id := txn.New()
+			log := d.log.With(zap.String("txn", id.Short()))
 			if logging.On(d.log) {
-				logging.Trace(d.log, "rx frame off the chip",
+				logging.Trace(log, "rx frame off the chip",
 					zap.Int("bytes", len(f.Payload)),
 					zap.Float64("rssi_dbm", f.RSSI), zap.Float64("snr_db", f.SNR),
 					zap.Float64("signal_rssi_dbm", f.SignalRSSI),
 					zap.Float64("freq_err_hz", f.FreqErr),
 					zap.Duration("airtime", f.Airtime))
 			}
-			return mapFrame(f), nil
+			return mapFrame(f, id), nil
 		}
 		now := time.Now()
 		if d.floor.collecting(now) {
@@ -270,8 +276,9 @@ func (d *device) Receive(ctx context.Context) (radio.Frame, error) {
 	}
 }
 
-func mapFrame(f *sx126x.RxFrame) radio.Frame {
+func mapFrame(f *sx126x.RxFrame, id txn.ID) radio.Frame {
 	return radio.Frame{
+		Txn:        id,
 		Payload:    f.Payload,
 		RSSI:       f.RSSI,
 		SNR:        f.SNR,
@@ -342,14 +349,18 @@ func (d *device) Transmit(ctx context.Context, payload []byte, powerDBm int8) (r
 	// the trouble came after — a hand-back that failed on the bus. The
 	// caller needs both: the airtime was radiated and must be charged
 	// whatever happens to the session next.
-	logging.Trace(d.log, "tx keying",
+	log := d.log
+	if id, ok := txn.FromContext(ctx); ok {
+		log = log.With(zap.String("txn", id.Short()))
+	}
+	logging.Trace(log, "tx keying",
 		zap.Int("bytes", len(payload)), zap.Int8("power_dbm", powerDBm))
 	res, err := d.r.Transmit(ctx, payload, powerDBm)
 	if res == nil {
 		return radio.TxReport{}, receptionPending(err)
 	}
 	if logging.On(d.log) {
-		logging.Trace(d.log, "tx done — chip handed back to rx",
+		logging.Trace(log, "tx done — chip handed back to rx",
 			zap.Duration("airtime", res.Airtime), zap.Duration("keyed", res.Duration),
 			zap.NamedError("handback", err))
 	}

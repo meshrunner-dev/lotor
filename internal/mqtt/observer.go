@@ -229,7 +229,7 @@ func (o *Observer) startNeighbors(ctx context.Context, busy *bool, done chan<- s
 		logging.Trace(o.log, "observer payload encoded",
 			zap.String("class", TopicNeighbors), zap.Int("payload_bytes", len(payload)),
 			zap.Int("neighbours", len(entries)), zap.Int("queried", queried))
-		o.publish(TopicNeighbors, 0, payload)
+		o.publish(o.log, TopicNeighbors, 0, payload)
 	}()
 }
 
@@ -239,39 +239,41 @@ func (o *Observer) event(ev bus.Event) {
 		if e.Relay != o.cfg.Relay {
 			return
 		}
+		log := o.log.With(zap.String("txn", e.Txn.Short()))
 		if !o.cfg.RX {
-			o.log.Debug("observer frame ignored",
+			log.Debug("observer frame ignored",
 				zap.String("direction", "rx"), zap.String("reason", "rx-disabled"))
 			return
 		}
 		if len(e.Raw) == 0 {
-			logging.Trace(o.log, "observer bus event ignored",
+			logging.Trace(log, "observer bus event ignored",
 				zap.String("direction", "rx"), zap.String("reason", "empty-frame"))
 			return
 		}
-		o.frame(e.Raw, e.At, true, e.SNR, e.RSSI)
+		o.frame(log, e.Raw, e.At, true, e.SNR, e.RSSI)
 	case bus.FrameSent:
 		// A shadow emission never touched the air; telling a broker
 		// it did would put frames on maps that no antenna radiated.
 		if e.Relay != o.cfg.Relay {
 			return
 		}
+		log := o.log.With(zap.String("txn", e.Txn.Short()))
 		if e.Shadow {
-			o.log.Debug("observer frame ignored",
+			log.Debug("observer frame ignored",
 				zap.String("direction", "tx"), zap.String("reason", "shadow"))
 			return
 		}
 		if len(e.Raw) == 0 {
-			logging.Trace(o.log, "observer bus event ignored",
+			logging.Trace(log, "observer bus event ignored",
 				zap.String("direction", "tx"), zap.String("reason", "empty-frame"))
 			return
 		}
 		if o.cfg.TX == TXOff || o.cfg.TX == "" {
-			o.log.Debug("observer frame ignored",
+			log.Debug("observer frame ignored",
 				zap.String("direction", "tx"), zap.String("reason", "tx-disabled"))
 			return
 		}
-		o.frame(e.Raw, e.At, false, 0, 0)
+		o.frame(log, e.Raw, e.At, false, 0, 0)
 	}
 }
 
@@ -279,28 +281,28 @@ func (o *Observer) event(ev bus.Event) {
 // asks for. A frame that does not parse is not an observer's to
 // describe — the packets contract is an analysis, and the journal
 // already records corruption.
-func (o *Observer) frame(raw []byte, at time.Time, rx bool, snr, rssi float64) {
+func (o *Observer) frame(log *zap.Logger, raw []byte, at time.Time, rx bool, snr, rssi float64) {
 	if !o.cfg.Packets && !o.cfg.Raw {
-		o.log.Debug("observer frame ignored",
+		log.Debug("observer frame ignored",
 			zap.String("direction", direction(rx)), zap.String("reason", "outputs-disabled"))
 		return
 	}
 	pkt, err := meshcore.ParsePacket(raw)
 	if err != nil {
-		o.log.Debug("observer frame ignored",
+		log.Debug("observer frame ignored",
 			zap.String("direction", direction(rx)), zap.String("reason", "invalid-frame"),
 			zap.Int("wire_bytes", len(raw)), zap.Error(err))
 		return
 	}
 	if !rx && o.cfg.TX == TXSelfAdverts && !o.selfAdvert(pkt) {
-		o.filtered("tx-policy", pkt, rx)
+		o.filtered(log, "tx-policy", pkt, rx)
 		return
 	}
 	if o.types != nil && !o.types[pkt.PayloadType().String()] {
-		o.filtered("type-filter", pkt, rx)
+		o.filtered(log, "type-filter", pkt, rx)
 		return
 	}
-	o.log.Debug("observer frame selected",
+	log.Debug("observer frame selected",
 		zap.String("direction", direction(rx)),
 		zap.String("packet_type", pkt.PayloadType().String()),
 		zap.Int("wire_bytes", len(raw)))
@@ -308,23 +310,23 @@ func (o *Observer) frame(raw []byte, at time.Time, rx bool, snr, rssi float64) {
 		payload, err := PacketJSON(raw, pkt, at, rx,
 			o.cfg.Origin, o.cfg.OriginID, snr, rssi)
 		if err != nil {
-			o.log.Warn("observer payload not encoded",
+			log.Warn("observer payload not encoded",
 				zap.String("class", TopicPackets), zap.Error(err))
 		} else {
-			logging.Trace(o.log, "observer payload encoded",
+			logging.Trace(log, "observer payload encoded",
 				zap.String("class", TopicPackets), zap.Int("payload_bytes", len(payload)))
-			o.publish(TopicPackets, 0, payload)
+			o.publish(log, TopicPackets, 0, payload)
 		}
 	}
 	if o.cfg.Raw {
 		payload, err := RawJSON(raw, at, o.cfg.Origin, o.cfg.OriginID)
 		if err != nil {
-			o.log.Warn("observer payload not encoded",
+			log.Warn("observer payload not encoded",
 				zap.String("class", TopicRaw), zap.Error(err))
 		} else {
-			logging.Trace(o.log, "observer payload encoded",
+			logging.Trace(log, "observer payload encoded",
 				zap.String("class", TopicRaw), zap.Int("payload_bytes", len(payload)))
-			o.publish(TopicRaw, 0, payload)
+			o.publish(log, TopicRaw, 0, payload)
 		}
 	}
 }
@@ -367,7 +369,7 @@ func (o *Observer) publishStatus(at time.Time) {
 		zap.String("class", TopicStatus), zap.Int("payload_bytes", len(payload)))
 	// QoS 1, like the reference: the heartbeat is the one message
 	// worth a broker's acknowledgement.
-	o.publish(TopicStatus, 1, payload)
+	o.publish(o.log, TopicStatus, 1, payload)
 }
 
 // retained says whether a message class carries the retain flag: the
@@ -376,13 +378,13 @@ func (o *Observer) retained(class string) bool {
 	return o.cfg.Retain && (class == TopicStatus || class == TopicNeighbors)
 }
 
-func (o *Observer) publish(class string, qos byte, payload []byte) {
+func (o *Observer) publish(log *zap.Logger, class string, qos byte, payload []byte) {
 	topic, err := BuildTopic(o.cfg.Topic, o.cfg.IATA, o.cfg.OriginID, o.cfg.Token, class)
 	if err != nil {
 		o.mu.Lock()
 		o.n.PublishErrors++
 		o.mu.Unlock()
-		o.log.Warn("observer topic refused", zap.String("class", class), zap.Error(err))
+		log.Warn("observer topic refused", zap.String("class", class), zap.Error(err))
 		return
 	}
 	retain := o.retained(class)
@@ -392,11 +394,11 @@ func (o *Observer) publish(class string, qos byte, payload []byte) {
 		o.mu.Lock()
 		o.n.PublishErrors++
 		o.mu.Unlock()
-		o.log.Debug("observer publish failed",
+		log.Debug("observer publish failed",
 			zap.String("class", class), zap.String("topic", topic), zap.Error(err))
 		return
 	}
-	logging.Trace(o.log, "observer broker publish completed",
+	logging.Trace(log, "observer broker publish completed",
 		zap.String("class", class), zap.String("topic", topic),
 		zap.Uint8("qos", qos), zap.Bool("retain", retain),
 		zap.Int("payload_bytes", len(payload)), zap.Duration("elapsed", time.Since(started)),
@@ -405,14 +407,14 @@ func (o *Observer) publish(class string, qos byte, payload []byte) {
 	o.n.Published++
 	o.n.LastPublished = time.Now()
 	o.mu.Unlock()
-	o.log.Debug("observer message published", zap.String("class", class), zap.String("topic", topic))
+	log.Debug("observer message published", zap.String("class", class), zap.String("topic", topic))
 }
 
-func (o *Observer) filtered(reason string, pkt *meshcore.Packet, rx bool) {
+func (o *Observer) filtered(log *zap.Logger, reason string, pkt *meshcore.Packet, rx bool) {
 	o.mu.Lock()
 	o.n.Filtered++
 	o.mu.Unlock()
-	o.log.Debug("observer frame filtered",
+	log.Debug("observer frame filtered",
 		zap.String("direction", direction(rx)), zap.String("reason", reason),
 		zap.String("packet_type", pkt.PayloadType().String()))
 }

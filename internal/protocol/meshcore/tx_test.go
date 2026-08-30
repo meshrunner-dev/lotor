@@ -41,6 +41,7 @@ type fakeDevice struct {
 	// to listening, which is an emission whatever happened after.
 	txFault   error
 	txAirtime time.Duration
+	lastTxn   txn.ID
 }
 
 func newFakeDevice() *fakeDevice {
@@ -86,6 +87,7 @@ func (d *fakeDevice) AssessChannel(context.Context, float64) (bool, error) {
 }
 
 func (d *fakeDevice) Transmit(ctx context.Context, payload []byte, powerDBm int8) (radio.TxReport, error) {
+	d.lastTxn, _ = txn.FromContext(ctx)
 	if d.txEntered != nil {
 		close(d.txEntered)
 		time.Sleep(50 * time.Millisecond) // the caller cancels meanwhile
