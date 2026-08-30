@@ -10,7 +10,6 @@ import (
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/bus"
-	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/txn"
 )
 
@@ -89,6 +88,7 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	// guest mode alone would lock its owner out.
 	if e.p.AdminPassword == "" &&
 		e.p.GuestAccess != guestPassword && e.p.GuestAccess != guestOpen {
+		e.responseSuppressed(origin, "login", "access-closed")
 		return
 	}
 	// No limiter here, deliberately — the reference has none either.
@@ -98,6 +98,7 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	// burst after a restart locked it out for minutes.
 	ts, password, err := meshcore.AnonPassword(plain)
 	if err != nil {
+		e.responseSuppressed(origin, "login", "malformed")
 		return
 	}
 	// A session that does not survive a restart is a session an
@@ -273,6 +274,7 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 	pkt, c, plain := rx.pkt, rx.opened.session, rx.opened.plain
 	ts, args, err := meshcore.UnframeAdmin(plain)
 	if err != nil {
+		e.responseSuppressed(origin, "session", "malformed")
 		return
 	}
 	if ts <= c.lastTimestamp {
@@ -308,13 +310,17 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 	// the client's identical retry was refused as a replay.
 	log := e.log.With(zap.String("txn", origin.Short()))
 	body, answered := e.answerRequest(c, args, e.answerBudget(pkt), log)
-	if len(args) > 0 {
-		logging.Trace(e.log, "session request answered",
-			zap.String("txn", origin.Short()), zap.String("request", reqName(args[0])),
-			zap.Bool("answered", answered), zap.Int("body_bytes", len(body)))
-	}
 	if !answered {
+		request := "empty"
+		if len(args) > 0 {
+			request = reqName(args[0])
+		}
+		e.responseSuppressed(origin, request, "unsupported-or-forbidden")
 		return // nothing to say, but the session lives on
+	}
+	if len(args) > 0 {
+		log.Debug("session request answered",
+			zap.String("request", reqName(args[0])), zap.Int("body_bytes", len(body)))
 	}
 
 	// Every response is tagged with the asker's own timestamp, so a

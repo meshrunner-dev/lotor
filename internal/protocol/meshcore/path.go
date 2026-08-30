@@ -77,7 +77,7 @@ func (e *engine) learnOutPath(c *client, pr *meshcore.PathReturn, origin txn.ID)
 		e.log.Warn("the taught route did not reach the store",
 			zap.String("txn", origin.Short()), zap.Error(err))
 	}
-	e.log.Info("a client taught us its route home",
+	e.log.Debug("a client taught us its route home",
 		zap.String("txn", origin.Short()),
 		zap.String("pubkey", shortKey(c.pubKey[:])),
 		zap.Int("hops", int(pr.PathLen&pathHopCountMask)))

@@ -18,7 +18,6 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
-	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/txn"
 )
 
@@ -136,7 +135,7 @@ func (e *engine) runCommand(rx *reception, origin txn.ID) {
 	if retry {
 		// The reference answers a retry with an empty reply rather
 		// than running the line again: the command already took.
-		e.log.Info("command retried — not run again",
+		e.log.Debug("command retried — not run again",
 			zap.String("txn", origin.Short()), zap.String("command", safeCommandLine(line)))
 	} else {
 		out = e.commands(line, c.pubKey[:])
@@ -144,7 +143,7 @@ func (e *engine) runCommand(rx *reception, origin txn.ID) {
 			zap.String("txn", origin.Short()),
 			zap.String("pubkey", shortKey(c.pubKey[:])),
 			zap.String("command", safeCommandLine(line)))
-		logging.Trace(e.log, "command answered",
+		e.log.Debug("command answered",
 			zap.String("txn", origin.Short()), zap.String("reply", safeCommandReply(line, out)))
 	}
 	if out == "" {
@@ -190,6 +189,7 @@ func (e *engine) ackText(inbound *meshcore.Packet, c *client, plain []byte,
 			meshcore.PayloadTypeAck, meshcore.PayloadVer1)
 		ack.Path, ack.PathLen = c.out.path, c.out.pathLen
 		scope.Scope(ack)
+		e.logReplyRoute(ack, origin, "cmd-ack", "learned", prioDirect)
 		e.enqueueAfter(ack, "cmd-ack", origin, prioDirect, txtAckDelay)
 		return
 	}
@@ -197,6 +197,7 @@ func (e *engine) ackText(inbound *meshcore.Packet, c *client, plain []byte,
 		meshcore.PayloadTypeAck, meshcore.PayloadVer1)
 	ack.SetPathHashSizeAndCount(inbound.PathHashSize(), 0)
 	scope.Scope(ack)
+	e.logReplyRoute(ack, origin, "cmd-ack", "flood", prioFloodReply)
 	e.enqueueAfter(ack, "cmd-ack", origin, prioFloodReply, txtAckDelay)
 }
 
@@ -216,6 +217,7 @@ func (e *engine) replyText(inbound *meshcore.Packet, c *client, plain []byte, or
 			meshcore.PayloadTypeTxtMsg, meshcore.PayloadVer1)
 		pkt.Path, pkt.PathLen = c.out.path, c.out.pathLen
 		scope.Scope(pkt)
+		e.logReplyRoute(pkt, origin, "cmd-resp", "learned", prioDirect)
 		e.enqueueAfter(pkt, "cmd-resp", origin, prioDirect, serverResponseDelay)
 		return
 	}
@@ -223,6 +225,7 @@ func (e *engine) replyText(inbound *meshcore.Packet, c *client, plain []byte, or
 		meshcore.PayloadTypeTxtMsg, meshcore.PayloadVer1)
 	pkt.SetPathHashSizeAndCount(inbound.PathHashSize(), 0)
 	scope.Scope(pkt)
+	e.logReplyRoute(pkt, origin, "cmd-resp", "flood", prioFloodReply)
 	e.enqueueAfter(pkt, "cmd-resp", origin, prioFloodReply, serverResponseDelay)
 }
 

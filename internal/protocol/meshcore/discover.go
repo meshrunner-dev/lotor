@@ -99,9 +99,14 @@ func (e *engine) respondDiscover(dev radio.Device, pkt *meshcore.Packet, origin 
 		return // the verdict parsed it once already
 	}
 	if !req.Filter.Includes(meshcore.AdvTypeRepeater) {
+		e.responseSuppressed(origin, "discover", "filter-miss",
+			zap.Uint8("filter", uint8(req.Filter)))
 		return // the scan is not looking for repeaters
 	}
 	if req.Since != 0 && uint32(e.discoverySince.Unix()) < req.Since {
+		e.responseSuppressed(origin, "discover", "unchanged-since",
+			zap.Uint32("since", req.Since),
+			zap.Time("last_change", e.discoverySince))
 		return // nothing about us changed since the scanner last looked
 	}
 	if !e.limits.discover.allow(time.Now()) {

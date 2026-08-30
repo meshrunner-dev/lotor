@@ -1,9 +1,8 @@
 // Package logging holds the daemon's one addition to zap's ladder: a
-// trace level below debug. The dividing line: debug is an event with
-// a cause an operator can act on — a refusal, a rate limit, a dial
-// that failed, a measurement that converged. Trace is an instrument
-// reading or a state-machine step that speaks only to whoever reads
-// the driver's code — an IRQ edge, a CAD verdict, an LBT retry.
+// trace level below debug. The dividing line: debug follows mesh
+// traffic and the decisions made about it; trace exposes radio,
+// hardware, timing and state-machine detail for developers — an IRQ
+// edge, an RF measurement, a CAD verdict, an LBT retry.
 package logging
 
 import (

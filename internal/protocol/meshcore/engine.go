@@ -23,6 +23,7 @@ import (
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/protocol"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/txn"
@@ -262,6 +263,7 @@ type engine struct {
 	sessionsAsk chan *sessionsOrder
 	wakeMu      sync.Mutex
 	wakeRx      context.CancelFunc
+	wakeReason  string
 	// busySince starts a continuous busy spell and is cleared by the
 	// first clear channel — Dispatcher::cad_busy_start's clock, not
 	// the age of any one frame.
@@ -716,6 +718,7 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 		// pending means no deadline at all.
 		rctx, cancel := e.receiveWindow(ctx)
 		frame, err := dev.Receive(rctx)
+		wakeReason := e.finishReceiveWindow()
 		cancel()
 		switch {
 		case err == nil:
@@ -734,8 +737,10 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 			// turn — which a dry gate has none of: the only order that
 			// reaches it is the snapshot, served at the loop's top.
 			if !e.txEnabled() {
+				logging.Trace(e.log, "rx window yielded", zap.String("reason", wakeReason))
 				continue
 			}
+			logging.Trace(e.log, "rx window yielded", zap.String("reason", wakeReason))
 			if err := e.txPhase(ctx, dev); err != nil {
 				return err
 			}
@@ -763,38 +768,61 @@ func (e *engine) receiveWindow(ctx context.Context) (context.Context, context.Ca
 	defer e.wakeMu.Unlock()
 	var rctx context.Context
 	var cancel context.CancelFunc
-	switch wait, ok := e.txWait(time.Now()); {
+	now := time.Now()
+	var reason string
+	switch {
 	case len(e.sessionsAsk) > 0 || len(e.aclAsk) > 0 || len(e.aclListAsk) > 0 ||
 		len(e.regionAsk) > 0 || len(e.regionSnapAsk) > 0:
-		rctx, cancel = context.WithDeadline(ctx, time.Now())
+		reason = "operator-order"
+		rctx, cancel = context.WithDeadline(ctx, now)
 	case !e.txEnabled():
 		// A dry gate schedules no emission, but a held flood is still
 		// owed its judgement: a hold that only released on the next
 		// reception would stretch with the silence around it.
-		if hw, held := e.heldWait(time.Now()); held {
-			rctx, cancel = context.WithDeadline(ctx, time.Now().Add(hw))
+		if wait, held := e.heldWait(now); held {
+			reason = "held-due"
+			rctx, cancel = context.WithDeadline(ctx, now.Add(wait))
 		} else {
+			reason = "external-wake"
 			rctx, cancel = context.WithCancel(ctx)
 		}
 	case len(e.advertAsk) > 0 || len(e.scopeAsk) > 0 || len(e.sweepAsk) > 0:
-		rctx, cancel = context.WithDeadline(ctx, time.Now())
-	case ok:
-		rctx, cancel = context.WithDeadline(ctx, time.Now().Add(wait))
+		reason = "operator-order"
+		rctx, cancel = context.WithDeadline(ctx, now)
 	default:
-		rctx, cancel = context.WithCancel(ctx)
+		if wait, scheduledReason, scheduled := e.txWake(now); scheduled {
+			reason = scheduledReason
+			rctx, cancel = context.WithDeadline(ctx, now.Add(wait))
+		} else {
+			reason = "external-wake"
+			rctx, cancel = context.WithCancel(ctx)
+		}
 	}
 	e.wakeRx = cancel
+	e.wakeReason = reason
 	return rctx, cancel
 }
 
 // wakeReceiver closes the current receive window so a pending order
 // is served now rather than at the next scheduled duty.
-func (e *engine) wakeReceiver() {
+func (e *engine) wakeReceiver(reason string) {
 	e.wakeMu.Lock()
 	if e.wakeRx != nil {
+		e.wakeReason = reason
 		e.wakeRx()
 	}
 	e.wakeMu.Unlock()
+}
+
+// finishReceiveWindow retires the registered cancel and returns the reason
+// chosen when the window was armed or supplied by whoever woke it.
+func (e *engine) finishReceiveWindow() string {
+	e.wakeMu.Lock()
+	defer e.wakeMu.Unlock()
+	reason := e.wakeReason
+	e.wakeRx = nil
+	e.wakeReason = ""
+	return reason
 }
 
 // passingBy reports whether a direct packet is in transit between
@@ -863,8 +891,8 @@ func (e *engine) observe(rx *reception) {
 func (e *engine) heard(frame radio.Frame) (txn.ID, *zap.Logger) {
 	id := txn.New()
 	log := e.log.With(zap.String("txn", id.Short()))
-	log.Info("frame heard",
-		zap.Int("bytes", len(frame.Payload)),
+	log.Debug("frame heard", zap.Int("bytes", len(frame.Payload)))
+	logging.Trace(log, "rx frame measurements",
 		zap.Float64("rssi_dbm", frame.RSSI),
 		zap.Float64("snr_db", frame.SNR),
 		zap.Float64("signal_rssi_dbm", frame.SignalRSSI),
@@ -879,6 +907,11 @@ func (e *engine) heard(frame radio.Frame) (txn.ID, *zap.Logger) {
 		Raw:     append([]byte(nil), frame.Payload...),
 	})
 	return id, log
+}
+
+func packetHashHex(pkt *meshcore.Packet) string {
+	h := pkt.Hash()
+	return hex.EncodeToString(h[:])
 }
 
 // judgedEvent seeds a verdict event with the reception it is about:
@@ -898,7 +931,7 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 	id, log := e.heard(frame)
 	pkt, err := meshcore.ParsePacket(frame.Payload)
 	if err != nil {
-		log.Info("frame judged", zap.String("verdict", verdictMalformed), zap.Error(err))
+		log.Debug("frame judged", zap.String("verdict", verdictMalformed), zap.Error(err))
 		j := e.judgedEvent(id, frame)
 		j.Verdict = verdictMalformed
 		e.bus.Publish(j)
@@ -910,7 +943,12 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 	// it cannot read must have no effect at all, and an advert
 	// wearing a version we reject was still naming neighbours.
 	if unsupportedVersion(pkt) {
-		log.Info("frame judged", zap.String("verdict", verdictBadVersion))
+		if log.Core().Enabled(zap.DebugLevel) {
+			log.Debug("frame judged", zap.String("verdict", verdictBadVersion),
+				zap.String("packet_hash", packetHashHex(pkt)),
+				zap.Stringer("type", pkt.PayloadType()), zap.Stringer("route", pkt.Route()),
+				zap.Int("hops", pkt.PathHashCount()))
+		}
 		j := e.judgedEvent(id, frame)
 		j.Verdict = verdictBadVersion
 		j.Type, j.Route = pkt.PayloadType().String(), pkt.Route().String()
@@ -923,9 +961,18 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 	// so a better-placed repeater's relay arriving meanwhile turns our
 	// copy into the duplicate it should be.
 	if pkt.IsRouteFlood() {
-		if d := e.rxDelay(frame); d > 0 {
-			log.Debug("flood held by score delay", zap.Duration("hold", d))
-			e.held = append(e.held, heldRx{pkt: pkt, frame: frame, id: id, due: time.Now().Add(d)})
+		if d, score := e.rxDelayAndScore(frame); d > 0 {
+			now := time.Now()
+			if log.Core().Enabled(zap.DebugLevel) {
+				log.Debug("flood judgement deferred",
+					zap.String("packet_hash", packetHashHex(pkt)),
+					zap.Float64("score", score), zap.Duration("hold", d),
+					zap.Time("due", now.Add(d)), zap.Float64("snr_db", frame.SNR),
+					zap.Int("sf", e.p.SpreadingFactor), zap.Duration("airtime", frame.Airtime))
+			}
+			e.held = append(e.held, heldRx{
+				pkt: pkt, frame: frame, id: id, heldAt: now, due: now.Add(d),
+			})
 			return
 		}
 	}
@@ -941,11 +988,14 @@ func (e *engine) process(dev radio.Device, pkt *meshcore.Packet, frame radio.Fra
 	// byte length: hashes are 1-4 bytes wide.
 	hops := pkt.PathHashCount()
 	log := e.log.With(zap.String("txn", id.Short()))
-	log = log.With(
-		zap.Stringer("type", pkt.PayloadType()),
-		zap.Stringer("route", pkt.Route()),
-		zap.Int("hops", hops),
-	)
+	if log.Core().Enabled(zap.DebugLevel) {
+		log = log.With(
+			zap.String("packet_hash", packetHashHex(pkt)),
+			zap.Stringer("type", pkt.PayloadType()),
+			zap.Stringer("route", pkt.Route()),
+			zap.Int("hops", hops),
+		)
+	}
 
 	judged := e.judgedEvent(id, frame)
 	judged.Type = pkt.PayloadType().String()
@@ -965,14 +1015,14 @@ func (e *engine) process(dev radio.Device, pkt *meshcore.Packet, frame radio.Fra
 	// arrival.
 	if verdict, passing := e.passingBy(pkt); passing {
 		e.stats.countHeard(pkt, frame.RSSI, frame.SNR, frame.Airtime, false)
-		log.Info("frame judged", zap.String("verdict", verdict))
+		log.Debug("frame judged", zap.String("verdict", verdict))
 		judged.Verdict = verdict
 		e.bus.Publish(judged)
 		return
 	}
 	if first, dup := e.seen.witness(pkt.Hash(), id, frame.At); dup {
 		e.stats.countHeard(pkt, frame.RSSI, frame.SNR, frame.Airtime, true)
-		log.Info("frame judged",
+		log.Debug("frame judged",
 			zap.String("verdict", verdictDuplicate),
 			zap.String("duplicate_of", first.Short()),
 		)
@@ -991,7 +1041,7 @@ func (e *engine) process(dev radio.Device, pkt *meshcore.Packet, frame radio.Fra
 	if why != "" && judged.Detail == "" {
 		judged.Detail = why
 	}
-	log.Info("frame judged", zap.String("verdict", verdict), zap.String("why", why))
+	log.Debug("frame judged", zap.String("verdict", verdict), zap.String("why", why))
 	e.bus.Publish(judged)
 
 	if e.txEnabled() {

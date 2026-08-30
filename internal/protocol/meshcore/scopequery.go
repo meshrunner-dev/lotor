@@ -106,7 +106,7 @@ func (e *engine) AskScopes(peer []byte) ([]string, error) {
 	default:
 		return nil, errors.New("a scopes question is already in flight — they are asked one at a time")
 	}
-	e.wakeReceiver()
+	e.wakeReceiver("operator-order")
 	// Whether the question left at all comes back first, and only
 	// then does the window mean anything: ErrNoAnswer is the word for
 	// a neighbour that stayed quiet, never for a question this node
@@ -161,7 +161,8 @@ func (e *engine) drainScopeAsk(dev radio.Device, now time.Time) {
 		// Same quiet-channel clause as the sweep: the slot must free
 		// on time even if nothing is heard, or the next question hits
 		// "already in flight" until luck turns the loop.
-		time.AfterFunc(scopeQueryWait+time.Second, e.wakeReceiver)
+		time.AfterFunc(scopeQueryWait+time.Second,
+			func() { e.wakeReceiver("scope-deadline") })
 		q.started.taken()
 		e.log.Info("asking a neighbour for its scopes",
 			zap.String("txn", id.Short()), zap.String("peer", shortKey(q.peer[:])))

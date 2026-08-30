@@ -13,8 +13,11 @@ import (
 	"math"
 	"time"
 
+	"go.uber.org/zap"
+
 	"meshrunner.dev/pkg/meshcore"
 
+	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/txn"
 )
@@ -57,25 +60,34 @@ const (
 // rxDelay is how long one flood reception is held before judgement;
 // zero judges it now.
 func (e *engine) rxDelay(frame radio.Frame) time.Duration {
+	d, _ := e.rxDelayAndScore(frame)
+	return d
+}
+
+// rxDelayAndScore returns both the hold and the reception score that produced
+// it, so the routing decision can be explained without computing the curve a
+// second time only for a log line.
+func (e *engine) rxDelayAndScore(frame radio.Frame) (time.Duration, float64) {
 	base := e.p.RxDelayBase
 	if base <= 0 {
-		return 0
+		return 0, 0
 	}
 	score := packetScore(frame.SNR, e.p.SpreadingFactor, len(frame.Payload))
 	d := time.Duration((math.Pow(base, rxScorePivot-score) - 1) * float64(frame.Airtime))
 	if d < rxDelayFloor {
-		return 0
+		return 0, score
 	}
-	return min(d, rxDelayCap)
+	return min(d, rxDelayCap), score
 }
 
 // heldRx is one flood waiting out its score delay, parsed already —
 // a frame that cannot be read is not worth a place in the queue.
 type heldRx struct {
-	pkt   *meshcore.Packet
-	frame radio.Frame
-	id    txn.ID
-	due   time.Time
+	pkt    *meshcore.Packet
+	frame  radio.Frame
+	id     txn.ID
+	heldAt time.Time
+	due    time.Time
 }
 
 // drainHeld judges every held flood whose delay expired. Engine
@@ -86,6 +98,17 @@ func (e *engine) drainHeld(dev radio.Device, now time.Time) {
 		if now.Before(h.due) {
 			kept = append(kept, h)
 			continue
+		}
+		if logging.On(e.log) {
+			fields := []zap.Field{
+				zap.String("txn", h.id.Short()),
+				zap.Duration("late_by", max(0, now.Sub(h.due))),
+				zap.Int("held_depth", len(e.held)),
+			}
+			if !h.heldAt.IsZero() {
+				fields = append(fields, zap.Duration("held_for", now.Sub(h.heldAt)))
+			}
+			logging.Trace(e.log, "held flood released", fields...)
 		}
 		e.process(dev, h.pkt, h.frame, h.id)
 	}

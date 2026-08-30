@@ -556,7 +556,7 @@ func TestCommandLogsCarryNoSecrets(t *testing.T) {
 		t.Errorf("unknown command leaked its tail: %q", got)
 	}
 	// Replies: a get's answer is the value; an unknown's echo is the
-	// tail again. Both trace as size alone.
+	// tail again. Both log at debug as size alone.
 	if got := safeCommandReply("get guest.password", "> "+canary); strings.Contains(got, canary) {
 		t.Errorf("get reply leaked: %q", got)
 	}

@@ -70,11 +70,7 @@ func (e *engine) Discover() (<-chan Neighbour, time.Time, error) {
 	default:
 		return nil, time.Time{}, errors.New("a scan is already listening")
 	}
-	e.wakeMu.Lock()
-	if e.wakeRx != nil {
-		e.wakeRx() // close the receive window: ask now
-	}
-	e.wakeMu.Unlock()
+	e.wakeReceiver("operator-order") // close the receive window: ask now
 
 	// Wait to hear that it went out. The window returned is the one
 	// the pipeline stamped when it did, not the one guessed here.
@@ -148,7 +144,8 @@ func (e *engine) drainSweepAsk(dev radio.Device, now time.Time) {
 		// The loop only turns when the air says something; on a quiet
 		// channel nothing would close the window on time. Wake the
 		// receiver at the deadline so expiry does not wait for luck.
-		time.AfterFunc(time.Until(s.until)+time.Second, e.wakeReceiver)
+		time.AfterFunc(time.Until(s.until)+time.Second,
+			func() { e.wakeReceiver("scan-deadline") })
 		e.pendingSweep = s
 		s.started.taken()
 		e.log.Info("scanning the neighbourhood",

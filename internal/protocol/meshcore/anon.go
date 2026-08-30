@@ -130,6 +130,8 @@ func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 		return
 	}
 	if !pkt.IsRouteDirect() {
+		e.responseSuppressed(origin, "anonymous", "not-direct",
+			zap.Stringer("route", pkt.Route()), zap.Uint8("kind", req.Kind))
 		return // the reference gates every other anonymous answer on direct
 	}
 	// What each question gets. The clock the reply opens with is
@@ -151,6 +153,8 @@ func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 		text = e.regions.m.ExportNames(meshcore.RegionDenyFlood, false,
 			e.answerBudget(pkt)-anonReplyClockLen+1)
 	default:
+		e.responseSuppressed(origin, "anonymous", "unsupported-request",
+			zap.Uint8("kind", req.Kind))
 		return // a question nobody defined stays unanswered
 	}
 	if !e.limits.anon.allow(time.Now()) {

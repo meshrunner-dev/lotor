@@ -83,6 +83,7 @@ type txEntry struct {
 	kind      string
 	origin    txn.ID
 	priority  int
+	queuedAt  time.Time
 	notBefore time.Time
 }
 
@@ -239,9 +240,10 @@ func (e *engine) enqueue(dev radio.Device, pkt *meshcore.Packet, kind string,
 func (e *engine) enqueueAfter(pkt *meshcore.Packet, kind string, origin txn.ID,
 	priority int, delay time.Duration,
 ) bool {
+	now := time.Now()
 	entry := txEntry{
 		pkt: pkt, kind: kind, origin: origin,
-		priority: priority, notBefore: time.Now().Add(delay),
+		priority: priority, queuedAt: now, notBefore: now.Add(delay),
 	}
 	if !e.queue.push(entry) {
 		e.log.Warn("tx queue full, dropping", zap.String("kind", kind),
@@ -250,6 +252,15 @@ func (e *engine) enqueueAfter(pkt *meshcore.Packet, kind string, origin txn.ID,
 			Relay: e.relay, Txn: origin, At: time.Now(), Reason: "queue-full", Kind: kind,
 		})
 		return false
+	}
+	if e.log.Core().Enabled(zap.DebugLevel) {
+		e.log.Debug("tx queued",
+			zap.String("txn", origin.Short()), zap.String("kind", kind),
+			zap.String("packet_hash", packetHashHex(pkt)),
+			zap.Stringer("type", pkt.PayloadType()), zap.Stringer("route", pkt.Route()),
+			zap.Int("hops", pkt.PathHashCount()), zap.Int("priority", priority),
+			zap.Duration("delay", delay), zap.Time("not_before", entry.notBefore),
+			zap.Bool("shadow", e.paperOnly(pkt)))
 	}
 	return true
 }
@@ -373,27 +384,35 @@ func (e *engine) selfHash(size int) []byte { return e.id.PubKey[:size] }
 // the radio: the earliest of the queue's schedule, the advert clocks
 // and a held flood's release. ok is false when nothing is ever due.
 func (e *engine) txWait(now time.Time) (time.Duration, bool) {
-	var waits []time.Duration
+	wait, _, ok := e.txWake(now)
+	return wait, ok
+}
+
+// txWake is txWait with the reason the receive window needs for its trace.
+// Ties keep the first candidate in pipeline order: queued traffic, a held
+// judgement, then an advert clock.
+func (e *engine) txWake(now time.Time) (time.Duration, string, bool) {
+	var best time.Duration
+	var reason string
+	found := false
+	consider := func(wait time.Duration, why string) {
+		if !found || wait < best {
+			best, reason, found = wait, why, true
+		}
+	}
 	if d, ok := e.queue.nextDue(now); ok {
-		waits = append(waits, d)
+		consider(d, "tx-due")
 	}
 	if d, ok := e.heldWait(now); ok {
-		waits = append(waits, d)
+		consider(d, "held-due")
 	}
 	if !e.nextFloodAdvert.IsZero() {
-		waits = append(waits, max(0, e.nextFloodAdvert.Sub(now)))
+		consider(max(0, e.nextFloodAdvert.Sub(now)), "advert-due")
 	}
 	if !e.nextLocalAdvert.IsZero() {
-		waits = append(waits, max(0, e.nextLocalAdvert.Sub(now)))
+		consider(max(0, e.nextLocalAdvert.Sub(now)), "advert-due")
 	}
-	if len(waits) == 0 {
-		return 0, false
-	}
-	m := waits[0]
-	for _, w := range waits[1:] {
-		m = min(m, w)
-	}
-	return m, true
+	return best, reason, found
 }
 
 // scheduleAdverts seeds the advert clocks the first time the pipeline
@@ -491,7 +510,7 @@ func (e *engine) RequestAdvert(flood bool) error {
 	default:
 		return errors.New("an advert is already pending")
 	}
-	e.wakeReceiver()
+	e.wakeReceiver("operator-order")
 	return o.started.wait("advert")
 }
 
@@ -672,14 +691,16 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	e.drainScopeAsk(dev, time.Now())
 	e.drainSweepAsk(dev, time.Now())
 	e.dueAdverts(dev, time.Now())
-	entry, ok := e.queue.pop(time.Now())
+	now := time.Now()
+	entry, ok := e.queue.pop(now)
 	if !ok {
 		return nil
 	}
+	log := e.log.With(zap.String("txn", entry.origin.Short()), zap.String("kind", entry.kind))
+	e.traceTXSelected(log, entry, now)
 	if !e.admitDuty(dev, entry) {
 		return nil
 	}
-	log := e.log.With(zap.String("txn", entry.origin.Short()), zap.String("kind", entry.kind))
 	outcome, err := e.clearChannel(ctx, dev, log, entry.origin, entry.kind)
 	switch {
 	case err != nil:
@@ -708,7 +729,7 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	if sent.Shadow {
 		sent.At, sent.Airtime = time.Now(), dev.Airtime(len(raw))
 	} else {
-		requeued, radiated, err := e.keyAndFill(ctx, dev, raw, entry, &sent)
+		requeued, radiated, err := e.keyAndFill(ctx, dev, raw, entry, &sent, log)
 		switch {
 		case requeued:
 			return nil
@@ -727,6 +748,20 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	// channel, whether the radio came back healthy afterwards or not.
 	e.recordEmission(entry, sent, log, faulted)
 	return faulted
+}
+
+func (e *engine) traceTXSelected(log *zap.Logger, entry txEntry, now time.Time) {
+	if logging.On(log) {
+		fields := []zap.Field{
+			zap.Int("priority", entry.priority),
+			zap.Duration("late_by", max(0, now.Sub(entry.notBefore))),
+			zap.Int("queue_len", len(e.queue.entries)), zap.Int("queue_cap", e.queue.depth),
+		}
+		if !entry.queuedAt.IsZero() {
+			fields = append(fields, zap.Duration("queued_for", now.Sub(entry.queuedAt)))
+		}
+		logging.Trace(log, "tx selected", fields...)
+	}
 }
 
 // recordEmission is everything a frame that reached the air owes the
@@ -753,9 +788,11 @@ func (e *engine) recordEmission(entry txEntry, sent bus.FrameSent, log *zap.Logg
 		log.Warn("frame sent, then the radio faulted",
 			zap.Duration("airtime", sent.Airtime), zap.Error(faulted))
 	} else {
-		log.Info("frame sent", zap.Bool("shadow", sent.Shadow),
-			zap.Duration("airtime", sent.Airtime), zap.Int8("power_dbm", sent.PowerDBm))
+		log.Debug("frame sent", zap.Bool("shadow", sent.Shadow))
 	}
+	logging.Trace(log, "tx emission accounted",
+		zap.Bool("shadow", sent.Shadow), zap.Duration("airtime", sent.Airtime),
+		zap.Int8("power_dbm", sent.PowerDBm), zap.Bool("faulted", faulted != nil))
 	e.bus.Publish(sent)
 }
 
@@ -769,9 +806,9 @@ func (e *engine) recordEmission(entry txEntry, sent bus.FrameSent, log *zap.Logg
 // failed to go back to listening. As far as the channel and the
 // regulator are concerned that emission happened.
 func (e *engine) keyAndFill(ctx context.Context, dev radio.Device, raw []byte,
-	entry txEntry, sent *bus.FrameSent,
+	entry txEntry, sent *bus.FrameSent, log *zap.Logger,
 ) (requeued, radiated bool, err error) {
-	report, err := e.key(ctx, dev, raw)
+	report, err := e.key(ctx, dev, raw, log)
 	if errors.Is(err, radio.ErrBusyReceiving) {
 		e.requeue(entry) // a frame landed between assessment and keying
 		return true, false, nil
@@ -785,17 +822,29 @@ func (e *engine) keyAndFill(ctx context.Context, dev radio.Device, raw []byte,
 // truncated emission is garbage on the air and its airtime never
 // reaches the ledger. The detached deadline is generous enough for
 // the frame plus the chip's own timeout, and no longer.
-func (e *engine) key(ctx context.Context, dev radio.Device, raw []byte) (radio.TxReport, error) {
+func (e *engine) key(ctx context.Context, dev radio.Device, raw []byte,
+	log *zap.Logger,
+) (radio.TxReport, error) {
 	budget := 2*dev.Airtime(len(raw)) + time.Second
 	txCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancel()
-	return dev.Transmit(txCtx, raw, e.policy.PowerDBm)
+	deadline, _ := txCtx.Deadline()
+	logging.Trace(log, "tx handed to radio",
+		zap.Int("bytes", len(raw)), zap.Int8("power_dbm", e.policy.PowerDBm),
+		zap.Time("deadline", deadline))
+	report, err := dev.Transmit(txCtx, raw, e.policy.PowerDBm)
+	logging.Trace(log, "tx returned from radio",
+		zap.Bool("radiated", err == nil || report.Airtime > 0),
+		zap.Duration("airtime", report.Airtime), zap.Duration("keyed", report.Duration),
+		zap.Int8("power_dbm", report.PowerDBm), zap.Error(err))
+	return report, err
 }
 
 // requeue puts an entry back for the next pass; a queue that filled
 // meanwhile refuses it, counted like any other refusal.
 func (e *engine) requeue(entry txEntry) {
 	now := time.Now()
+	log := e.log.With(zap.String("txn", entry.origin.Short()), zap.String("kind", entry.kind))
 	if e.busySince.IsZero() {
 		e.busySince = now
 	}
@@ -803,8 +852,8 @@ func (e *engine) requeue(entry txEntry) {
 		// Only drop is honourable here: the radio refuses to key over
 		// a reception whatever the policy says, so a site that asked
 		// to transmit anyway waits for the air instead.
-		e.log.Warn("radio busy receiving past the LBT bound, dropping",
-			zap.String("txn", entry.origin.Short()), zap.String("kind", entry.kind))
+		log.Debug("radio busy receiving past the LBT bound, dropping",
+			zap.Duration("busy_for", now.Sub(e.busySince)))
 		e.bus.Publish(bus.TxDropped{
 			Relay: e.relay, Txn: entry.origin, At: now, Reason: "lbt", Kind: entry.kind,
 		})
@@ -814,13 +863,17 @@ func (e *engine) requeue(entry txEntry) {
 	// keeps the same pacing instead of spinning SPI polls against a
 	// chip mid-demodulation. Our own reception completing wakes the
 	// receive loop on its edge either way; only the retry is paced.
-	entry.notBefore = now.Add(
-		lbtRetryNominal/2 + rand.N(lbtRetryNominal)) //nolint:gosec // backoff jitter, not security
+	retry := lbtRetryNominal/2 + rand.N(lbtRetryNominal) //nolint:gosec // backoff jitter, not security
+	entry.notBefore = now.Add(retry)
 	if !e.queue.push(entry) {
 		e.bus.Publish(bus.TxDropped{
 			Relay: e.relay, Txn: entry.origin, At: now, Reason: "queue-full", Kind: entry.kind,
 		})
+		return
 	}
+	logging.Trace(log, "tx requeued for reception",
+		zap.Duration("retry_in", retry), zap.Duration("busy_for", now.Sub(e.busySince)),
+		zap.Int("queue_len", len(e.queue.entries)))
 }
 
 // clearChannel is the LBT wait: bounded retries while the channel is
@@ -830,45 +883,69 @@ func (e *engine) requeue(entry txEntry) {
 func (e *engine) clearChannel(ctx context.Context, dev radio.Device, log *zap.Logger,
 	origin txn.ID, kind string,
 ) (lbtOutcome, error) {
+	started := time.Now()
 	if !e.policy.CAD {
 		// The reference's own default posture: key and let the mesh's
 		// dedup sort out the collisions. The driver still refuses to
 		// key over a reception actually in progress, which is a
 		// hardware guard rather than a politeness.
+		logging.Trace(log, "lbt resolved", zap.String("result", "disabled"),
+			zap.Int("attempts", 0), zap.Duration("elapsed", time.Since(started)))
 		return lbtGo, nil
 	}
 	deadline := time.Now().Add(lbtMaxWait)
+	attempts := 0
 	for {
+		attempts++
 		busy, err := dev.AssessChannel(ctx, e.policy.LBTThresholdDB)
 		switch {
 		case errors.Is(err, radio.ErrBusyReceiving):
+			logging.Trace(log, "lbt resolved", zap.String("result", "reception-pending"),
+				zap.Int("attempts", attempts), zap.Duration("elapsed", time.Since(started)))
 			return lbtRequeue, nil
 		case err != nil:
+			logging.Trace(log, "lbt resolved", zap.String("result", "error"),
+				zap.Int("attempts", attempts), zap.Duration("elapsed", time.Since(started)),
+				zap.Error(err))
 			return lbtDrop, err
 		case !busy:
 			e.busySince = time.Time{} // the air is free; the spell ended
+			logging.Trace(log, "lbt resolved", zap.String("result", "clear"),
+				zap.Int("attempts", attempts), zap.Duration("elapsed", time.Since(started)))
 			return lbtGo, nil
 		}
 		if time.Now().After(deadline) {
-			if e.policy.LBTExhausted == "drop" {
-				log.Warn("channel busy past the LBT bound, dropping")
-				e.bus.Publish(bus.TxDropped{
-					Relay: e.relay, Txn: origin, At: time.Now(), Reason: "lbt", Kind: kind,
-				})
-				return lbtDrop, nil
-			}
-			log.Warn("channel busy past the LBT bound, transmitting anyway")
-			return lbtGo, nil
+			return e.resolveLBTExhaustion(log, origin, kind, attempts, time.Since(started)), nil
 		}
 		retry := lbtRetryNominal/2 + rand.N(lbtRetryNominal) //nolint:gosec // backoff jitter, not security
 		logging.Trace(log, "lbt channel busy — backing off",
-			zap.Duration("retry_in", retry), zap.Duration("bound_left", time.Until(deadline)))
+			zap.Int("attempt", attempts), zap.Duration("retry_in", retry),
+			zap.Duration("bound_left", time.Until(deadline)))
 		select {
 		case <-ctx.Done():
 			return lbtDrop, ctx.Err()
 		case <-time.After(retry):
 		}
 	}
+}
+
+// resolveLBTExhaustion applies the operator's terminal busy-channel policy.
+// A configured drop is ordinary traffic policy and stays at debug; keying a
+// known-busy channel is exceptional and remains an operator-visible warning.
+func (e *engine) resolveLBTExhaustion(log *zap.Logger, origin txn.ID, kind string,
+	attempts int, elapsed time.Duration,
+) lbtOutcome {
+	if e.policy.LBTExhausted == "drop" {
+		log.Debug("channel busy past the LBT bound, dropping",
+			zap.Int("attempts", attempts), zap.Duration("elapsed", elapsed))
+		e.bus.Publish(bus.TxDropped{
+			Relay: e.relay, Txn: origin, At: time.Now(), Reason: "lbt", Kind: kind,
+		})
+		return lbtDrop
+	}
+	log.Warn("channel busy past the LBT bound, transmitting anyway",
+		zap.Int("attempts", attempts), zap.Duration("elapsed", elapsed))
+	return lbtGo
 }
 
 // dropQueued empties the queue, counting what it refuses. A radio
@@ -986,17 +1063,31 @@ func (e *engine) admitDuty(dev radio.Device, entry txEntry) bool {
 		return true
 	}
 	raw := entry.pkt.RawLength()
-	ok, freeAt, never := e.duty.admit(time.Now(), dev.Airtime(raw))
+	now := time.Now()
+	candidate := dev.Airtime(raw)
+	ok, freeAt, never := e.duty.admit(now, candidate)
 	if ok {
 		return true
 	}
-	if never || time.Until(freeAt) > dutyMaxWait {
-		e.log.Warn("duty budget refuses the emission, dropping",
-			zap.String("kind", entry.kind), zap.String("txn", entry.origin.Short()))
+	log := e.log.With(zap.String("kind", entry.kind), zap.String("txn", entry.origin.Short()))
+	retryIn := freeAt.Sub(now)
+	if never || retryIn > dutyMaxWait {
+		if log.Core().Enabled(zap.DebugLevel) {
+			log.Debug("duty budget refuses the emission, dropping",
+				zap.Duration("candidate_airtime", candidate),
+				zap.Duration("used", e.duty.usage(now)), zap.Duration("budget", e.duty.budget),
+				zap.Bool("never", never))
+		}
 		e.bus.Publish(bus.TxDropped{
 			Relay: e.relay, Txn: entry.origin, At: time.Now(), Reason: "duty", Kind: entry.kind,
 		})
 		return false
+	}
+	if log.Core().Enabled(zap.DebugLevel) {
+		log.Debug("tx deferred by duty budget",
+			zap.Duration("candidate_airtime", candidate),
+			zap.Duration("used", e.duty.usage(now)), zap.Duration("budget", e.duty.budget),
+			zap.Time("retry_at", freeAt), zap.Duration("retry_in", retryIn))
 	}
 	entry.notBefore = freeAt
 	if !e.queue.push(entry) {

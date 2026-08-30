@@ -1,10 +1,42 @@
 package meshcore
 
 import (
+	"go.uber.org/zap"
+
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/txn"
 )
+
+// logReplyRoute records the routing decision once the response packet has
+// its final route. Packet enqueue and radio details are logged separately.
+func (e *engine) logReplyRoute(pkt *meshcore.Packet, origin txn.ID,
+	kind, source string, priority int,
+) {
+	if !e.log.Core().Enabled(zap.DebugLevel) {
+		return
+	}
+	e.log.Debug("reply route selected",
+		zap.String("txn", origin.Short()), zap.String("kind", kind),
+		zap.String("route_source", source), zap.Stringer("route", pkt.Route()),
+		zap.Int("hops", pkt.PathHashCount()), zap.Int("priority", priority),
+		zap.Bool("scoped", pkt.HasTransportCodes()))
+}
+
+// responseSuppressed makes an intentional silence visible at debug without
+// promoting mesh traffic or attacker-controlled input to operator alerts.
+func (e *engine) responseSuppressed(origin txn.ID, request, reason string,
+	fields ...zap.Field,
+) {
+	if !e.log.Core().Enabled(zap.DebugLevel) {
+		return
+	}
+	base := make([]zap.Field, 0, len(fields)+3)
+	base = append(base, zap.String("txn", origin.Short()),
+		zap.String("request", request), zap.String("reason", reason))
+	base = append(base, fields...)
+	e.log.Debug("response suppressed", base...)
+}
 
 // routeHome picks the direct route this answer should take, or nil
 // when it has none and must flood.
@@ -78,6 +110,7 @@ func (e *engine) reply(inbound *meshcore.Packet, a answer, origin txn.ID) {
 		}
 		pkt.SetPathHashSizeAndCount(inbound.PathHashSize(), 0)
 		a.scope.Scope(pkt)
+		e.logReplyRoute(pkt, origin, a.kind, "path-return", prioPathReturn)
 		e.enqueueAfter(pkt, a.kind, origin, prioPathReturn, serverResponseDelay)
 		return
 	}
@@ -93,6 +126,11 @@ func (e *engine) reply(inbound *meshcore.Packet, a answer, origin txn.ID) {
 			meshcore.PayloadTypeResponse, meshcore.PayloadVer1)
 		pkt.Path, pkt.PathLen = home.path, home.pathLen
 		a.scope.Scope(pkt)
+		source := "learned"
+		if a.supplied {
+			source = "supplied"
+		}
+		e.logReplyRoute(pkt, origin, a.kind, source, prioDirect)
 		e.enqueueAfter(pkt, a.kind, origin, prioDirect, serverResponseDelay)
 		return
 	}
@@ -100,5 +138,6 @@ func (e *engine) reply(inbound *meshcore.Packet, a answer, origin txn.ID) {
 		meshcore.PayloadTypeResponse, meshcore.PayloadVer1)
 	pkt.SetPathHashSizeAndCount(inbound.PathHashSize(), 0)
 	a.scope.Scope(pkt)
+	e.logReplyRoute(pkt, origin, a.kind, "flood", prioFloodReply)
 	e.enqueueAfter(pkt, a.kind, origin, prioFloodReply, serverResponseDelay)
 }

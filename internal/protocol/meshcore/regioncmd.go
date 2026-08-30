@@ -130,7 +130,7 @@ func (e *engine) RegionCommand(owner, line string) (reply string, handled bool, 
 	default:
 		return "", true, errors.New("a region command is already pending")
 	}
-	e.wakeReceiver()
+	e.wakeReceiver("operator-order")
 	if err := o.done.wait("region command"); err != nil {
 		return "", true, err
 	}
@@ -571,7 +571,7 @@ func (e *engine) Regions() (RegionSnapshot, error) {
 	default:
 		return RegionSnapshot{}, errors.New("a region snapshot is already pending")
 	}
-	e.wakeReceiver()
+	e.wakeReceiver("operator-order")
 	select {
 	case snap := <-o.reply:
 		return snap, nil
