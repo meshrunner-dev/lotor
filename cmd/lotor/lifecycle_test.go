@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/confdb"
@@ -112,6 +114,8 @@ func freeTCPAddr(t *testing.T) string {
 
 func TestCreateMutateAndRemoveDetachedStation(t *testing.T) {
 	m := lifecycleManager(t)
+	core, observed := observer.New(zapcore.DebugLevel)
+	m.log = zap.New(core)
 	addr := freeTCPAddr(t)
 	msg, err := m.Create(context.Background(), confdb.KindStation, "alice",
 		map[string]string{
@@ -155,6 +159,19 @@ func TestCreateMutateAndRemoveDetachedStation(t *testing.T) {
 	}
 	if len(m.StationInfos()) != 0 {
 		t.Fatal("removed station remains visible")
+	}
+	entries := observed.FilterMessage("station configuration changed").All()
+	if len(entries) != 3 {
+		t.Fatalf("station configuration logs = %#v", entries)
+	}
+	wantOperations := []string{"add", "set", "remove"}
+	for i, entry := range entries {
+		fields := entry.ContextMap()
+		if entry.Level != zapcore.DebugLevel || fields["station"] != "alice" ||
+			fields["source"] != "configuration" || fields["principal"] != "test" ||
+			fields["operation"] != wantOperations[i] {
+			t.Errorf("configuration log %d = %#v", i, entry)
+		}
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
 
 	mesh "meshrunner.dev/pkg/meshcore"
@@ -236,7 +237,7 @@ func (s *service) sendRawPacket(command companion.SendRawPacket) []companion.Res
 	return okResponses()
 }
 
-func (s *service) receiveRemoteResponse(packet *mesh.Packet) {
+func (s *service) receiveRemoteResponse(packet *mesh.Packet, correlations ...correlation.ID) {
 	datagram, err := mesh.ParseDatagram(packet.Payload)
 	if err != nil {
 		return
@@ -263,13 +264,15 @@ func (s *service) receiveRemoteResponse(packet *mesh.Packet) {
 		}
 		plain, err := datagram.Open(secret)
 		if err == nil {
-			s.consumeRemoteResponse(contact.info.PublicKey, plain)
+			s.consumeRemoteResponse(contact.info.PublicKey, plain, firstCorrelation(correlations))
 			return
 		}
 	}
 }
 
-func (s *service) consumeRemoteResponse(publicKey [mesh.PubKeySize]byte, plain []byte) {
+func (s *service) consumeRemoteResponse(publicKey [mesh.PubKeySize]byte, plain []byte,
+	corr correlation.ID,
+) {
 	if len(plain) < mesh.AdminTagSize {
 		return
 	}
@@ -308,7 +311,7 @@ func (s *service) consumeRemoteResponse(publicKey [mesh.PubKeySize]byte, plain [
 	}
 	s.mu.Unlock()
 	if response != nil {
-		s.push(response)
+		s.push(response, corr)
 	}
 }
 
@@ -379,7 +382,9 @@ func (s *service) checkConnections() {
 	}
 }
 
-func (s *service) receivePathDiscovery(contact contactEntry, packet *mesh.Packet, path *mesh.PathReturn) bool {
+func (s *service) receivePathDiscovery(contact contactEntry, packet *mesh.Packet, path *mesh.PathReturn,
+	corr correlation.ID,
+) bool {
 	if len(path.Extra) < 4 {
 		return false
 	}
@@ -397,7 +402,7 @@ func (s *service) receivePathDiscovery(contact contactEntry, packet *mesh.Packet
 	body = append(body, path.Path...)
 	body = append(body, packet.PathLen)
 	body = append(body, packet.Path...)
-	s.push(companion.Push{Code: companion.PushPathDiscoveryResponse, Body: body})
+	s.push(companion.Push{Code: companion.PushPathDiscoveryResponse, Body: body}, corr)
 	return true
 }
 
@@ -407,7 +412,7 @@ func (s *service) receiveRaw(packet *mesh.Packet, frame radio.Frame) {
 	}
 	body := make([]byte, 0, 3+len(packet.Payload))
 	body = append(body, byte(snrQuarter(frame.SNR)), byte(int8(frame.RSSI)), 0xff)
-	s.push(companion.Push{Code: companion.PushRawData, Body: append(body, packet.Payload...)})
+	s.push(companion.Push{Code: companion.PushRawData, Body: append(body, packet.Payload...)}, frame.Correlation)
 }
 
 func (s *service) receiveControl(packet *mesh.Packet, frame radio.Frame) {
@@ -416,5 +421,5 @@ func (s *service) receiveControl(packet *mesh.Packet, frame radio.Frame) {
 	}
 	body := make([]byte, 0, 3+len(packet.Payload))
 	body = append(body, byte(snrQuarter(frame.SNR)), byte(int8(frame.RSSI)), packet.PathLen)
-	s.push(companion.Push{Code: companion.PushControlData, Body: append(body, packet.Payload...)})
+	s.push(companion.Push{Code: companion.PushControlData, Body: append(body, packet.Payload...)}, frame.Correlation)
 }

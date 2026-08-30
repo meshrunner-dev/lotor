@@ -4,13 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
+	"meshrunner.dev/lotor/internal/correlation"
+	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/meshcorecfg"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/station"
@@ -219,6 +226,111 @@ func TestAutoAddFlagsAlonePreserveTheHopLimit(t *testing.T) {
 	_ = svc.handle(t.Context(), companion.SetAutoAddConfig{Flags: 8, HasMaxHops: true})
 	if svc.autoHops != 0 {
 		t.Fatalf("explicit zero max hops remained %d", svc.autoHops)
+	}
+}
+
+func TestStationConfigurationMutationsLogAtDebugWithoutValues(t *testing.T) {
+	core, observed := observer.New(logging.TraceLevel)
+	spec := testSpec(t)
+	spec.Log = zap.New(core)
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	responses := svc.handle(t.Context(), companion.SetAdvertName{Name: "Private operator label"})
+	if len(responses) != 1 || responses[0] != companion.StatusResponse(companion.ResponseOK) {
+		t.Fatalf("set name responses = %#v", responses)
+	}
+	entries := observed.FilterMessage("station configuration changed").All()
+	if len(entries) != 1 || entries[0].Level != zapcore.DebugLevel {
+		t.Fatalf("configuration logs = %#v", entries)
+	}
+	fields := entries[0].ContextMap()
+	if fields["source"] != "companion" || fields["command"] != "SetAdvertName" {
+		t.Fatalf("configuration fields = %#v", fields)
+	}
+	if fmt.Sprint(fields) == "" || strings.Contains(fmt.Sprint(fields), "Private operator label") {
+		t.Fatalf("configuration log exposed the value: %#v", fields)
+	}
+}
+
+func TestMailboxTraceCoversEvictionRefusalAndDurableCorrelation(t *testing.T) {
+	core, observed := observer.New(logging.TraceLevel)
+	store := &memoryStationState{}
+	spec := testSpec(t)
+	spec.State = store
+	spec.Log = zap.New(core)
+	spec.Config["mailbox_capacity"] = 1
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	corr := correlation.ID{1, 2, 3, 4, 5, 6}
+	ctx := correlation.WithContext(t.Context(), corr)
+	svc.enqueueMailbox(ctx, companion.ChannelData{Channel: 1, DataType: 1, Data: []byte{1}})
+	svc.enqueueMailbox(ctx, companion.ContactMessageV3{Text: "private"})
+	svc.enqueueMailbox(ctx, companion.ContactMessageV3{Text: "refused"})
+
+	enqueued := observed.FilterMessage("station mailbox item enqueued").All()
+	if len(enqueued) != 2 || enqueued[0].Level != logging.TraceLevel ||
+		enqueued[1].ContextMap()["evicted_channel"] != true {
+		t.Fatalf("mailbox enqueue logs = %#v", enqueued)
+	}
+	refused := observed.FilterMessage("station mailbox item refused").All()
+	if len(refused) != 1 || refused[0].Level != logging.TraceLevel ||
+		refused[0].ContextMap()["reason"] != "full" {
+		t.Fatalf("mailbox refusal logs = %#v", refused)
+	}
+	if got := enqueued[1].ContextMap()["corr"]; got != corr.Short() {
+		t.Fatalf("enqueue correlation = %v, want %s", got, corr.Short())
+	}
+
+	built, err = build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := requireService(t, built)
+	responses := restored.handle(t.Context(), companion.SimpleCommand{Kind: companion.CommandSyncNextMessage})
+	if len(responses) != 1 {
+		t.Fatalf("sync responses = %#v", responses)
+	}
+	delivered := observed.FilterMessage("station mailbox delivered").All()
+	if len(delivered) != 1 || delivered[0].Level != logging.TraceLevel ||
+		delivered[0].ContextMap()["corr"] != corr.Short() {
+		t.Fatalf("mailbox delivery logs = %#v", delivered)
+	}
+}
+
+func TestStationStateWithoutMailboxCorrelationsStillRestores(t *testing.T) {
+	store := &memoryStationState{}
+	spec := testSpec(t)
+	spec.State = store
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireService(t, built).enqueueMailbox(t.Context(), companion.ChannelData{
+		Channel: 1, DataType: 1, Data: []byte{1},
+	})
+	var legacy map[string]json.RawMessage
+	if err := json.Unmarshal(store.state, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	delete(legacy, "mailboxCorrelations")
+	store.state, err = json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	built, err = build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := requireService(t, built)
+	if len(restored.mailbox) != 1 || len(restored.mailboxCorr) != 1 || !restored.mailboxCorr[0].IsZero() {
+		t.Fatalf("legacy mailbox restoration = messages %d correlations %#v",
+			len(restored.mailbox), restored.mailboxCorr)
 	}
 }
 

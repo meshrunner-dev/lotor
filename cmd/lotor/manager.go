@@ -1556,6 +1556,9 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 	if err := m.store.Replace(ctx, kind, name, section, principal, op, change); err != nil {
 		return "", err
 	}
+	if kind == confdb.KindStation {
+		m.logStationConfigMutation(name, op, principal, changeKeys(change))
+	}
 	m.file = next
 
 	if kind == confdb.KindRadio {
@@ -1588,6 +1591,21 @@ func stationRadioOnly(typed map[string]any, unset []string) bool {
 		return true
 	}
 	return len(unset) == 1 && unset[0] == attrRadio
+}
+
+func changeKeys(change map[string]confdb.Change) []string {
+	keys := make([]string, 0, len(change))
+	for key := range change {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func (m *manager) logStationConfigMutation(name, operation, principal string, attributes []string) {
+	m.log.Debug("station configuration changed", zap.String("station", name),
+		zap.String("source", "configuration"), zap.String("operation", operation),
+		zap.String("principal", principal), zap.Strings("attributes", attributes))
 }
 
 // restartRadio replaces the physical owner while keeping station application
@@ -1773,6 +1791,9 @@ func (m *manager) commitCreate(ctx context.Context, next *config.File,
 	}
 	if err := m.store.Replace(ctx, kind, name, section, principal, "add", change); err != nil {
 		return "", err
+	}
+	if kind == confdb.KindStation {
+		m.logStationConfigMutation(name, "add", principal, changeKeys(change))
 	}
 	m.file = next
 	return m.startCreatedObject(kind, name), nil
@@ -2228,6 +2249,9 @@ func (m *manager) Remove(ctx context.Context, kind, name, principal string) (str
 	}
 	if err := m.store.Remove(ctx, kind, name, principal); err != nil {
 		return "", err
+	}
+	if kind == confdb.KindStation {
+		m.logStationConfigMutation(name, "remove", principal, nil)
 	}
 	m.releaseRemovedAirtime(kind, name)
 	m.file = next

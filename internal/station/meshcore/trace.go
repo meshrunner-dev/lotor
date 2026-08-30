@@ -64,7 +64,7 @@ func (s *service) receiveTrace(packet *mesh.Packet, frame radio.Frame) {
 		body = append(body, byte(snr))
 	}
 	body = append(body, byte(snrQuarter(frame.SNR)))
-	s.push(companion.Push{Code: companion.PushTraceData, Body: body})
+	s.push(companion.Push{Code: companion.PushTraceData, Body: body}, frame.Correlation)
 }
 
 func appendUint32(dst []byte, value uint32) []byte {

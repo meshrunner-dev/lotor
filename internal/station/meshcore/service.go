@@ -14,6 +14,7 @@ import (
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/meshcorecfg"
 	"meshrunner.dev/lotor/internal/product"
@@ -288,6 +289,7 @@ type service struct {
 	sendScope    [16]byte
 	sendUnscoped bool
 	mailbox      [][]byte
+	mailboxCorr  []correlation.ID
 	seen         packetRing
 	expectedACKs [8]ackExpectation
 	nextACK      int
@@ -405,6 +407,9 @@ func (s *service) serveClient(ctx context.Context, conn net.Conn, generation uin
 			return
 		}
 		if cmd != nil {
+			logging.Trace(s.log, "companion command received",
+				zap.String("command", companionCommandName(cmd)),
+				zap.Uint8("code", uint8(cmd.Code())))
 			responses = s.handle(ctx, cmd)
 		}
 		if !s.writeResponses(conn, generation, responses) {
@@ -445,6 +450,11 @@ func (s *service) readCommand(conn net.Conn) (companion.Command, []companion.Res
 		if errors.Is(err, companion.ErrUnsupportedVariant) {
 			code = companion.ErrUnsupportedCommand
 		}
+		fields := []zap.Field{zap.Error(err)}
+		if len(frame.Payload) > 0 {
+			fields = append(fields, zap.Uint8("code", frame.Payload[0]))
+		}
+		logging.Trace(s.log, "companion command refused", fields...)
 		return nil, []companion.Response{companion.ErrorResponse{Code: code}}, true
 	}
 }
@@ -462,8 +472,12 @@ func (s *service) writeResponses(conn net.Conn, generation uint64, responses []c
 			return false
 		}
 		if err := companion.WriteFrame(conn, companion.ToApplication, payload); err != nil {
+			logging.Trace(s.log, "companion response failed",
+				zap.Uint8("code", responseCode(payload)), zap.Error(err))
 			return false
 		}
+		logging.Trace(s.log, "companion response sent",
+			zap.Uint8("code", responseCode(payload)), zap.Int("bytes", len(payload)))
 	}
 	return true
 }
@@ -493,6 +507,8 @@ func (s *service) handle(ctx context.Context, cmd companion.Command) []companion
 		s.mu.Unlock()
 		return errorResponses(companion.ErrFileIO)
 	}
+	after := s.snapshotLocked()
+	s.logCompanionMutation(cmd, responses, before, after)
 	dropped := []emission(nil)
 	if lifecycleSucceeded(cmd, responses) {
 		dropped = s.resetRuntimeLocked()
@@ -900,10 +916,14 @@ func (s *service) handleSimple(kind companion.CommandCode) []companion.Response 
 		}}
 	case companion.CommandSyncNextMessage:
 		if len(s.mailbox) == 0 {
+			logging.Trace(s.log, "station mailbox sync empty")
 			return []companion.Response{companion.StatusResponse(companion.ResponseNoMoreMessages)}
 		}
 		response := append([]byte(nil), s.mailbox[0]...)
 		s.mailbox = s.mailbox[1:]
+		if len(s.mailboxCorr) > 0 {
+			s.mailboxCorr = s.mailboxCorr[1:]
+		}
 		return []companion.Response{companion.EncodedResponse{Payload: response}}
 	case companion.CommandGetBatteryAndStorage:
 		return []companion.Response{companion.BatteryAndStorage{}}
@@ -1011,7 +1031,6 @@ func (s *service) Info() station.Info {
 
 func (s *service) AttachRadio(name string, binding *radio.Binding, duty *radio.AirtimeLedger, cause string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.radioName, s.binding, s.duty, s.rfCause = name, binding, duty, cause
 	if name == "" {
 		s.rf = station.RFDetached
@@ -1023,6 +1042,9 @@ func (s *service) AttachRadio(name string, binding *radio.Binding, duty *radio.A
 	case s.rfWake <- struct{}{}:
 	default:
 	}
+	s.mu.Unlock()
+	s.log.Debug("station radio attachment changed", zap.String("radio", name),
+		zap.Bool("attached", binding != nil), zap.String("cause", cause))
 }
 
 func (s *service) RadioDemand() station.RadioDemand {

@@ -326,9 +326,12 @@ statistics and notifications from the same controller fan-out. `FrameSent` and
 and shadow sends remain distinguishable even though both consume the duty
 ledger.
 
-Trace logs belong at the hardware boundary: controller state, chip verdicts,
-airtime, power, and physical outcomes. Debug logs describe traffic and routing
-decisions made by relays or stations.
+Trace logs expose hardware and developer plumbing: controller state, chip
+verdicts, airtime, power and physical outcomes, plus companion framing and
+mailbox operations. Debug logs describe traffic and routing decisions made by
+relays or stations, and successful station configuration mutations. Mailbox
+logs carry the originating frame's `corr` through durable storage so enqueue
+and later delivery remain one searchable story across a daemon restart.
 
 ## Extension rules
 

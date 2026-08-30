@@ -114,8 +114,7 @@ func (s *service) clearRFDevice(device radio.Device) {
 }
 
 func (s *service) processRF(ctx context.Context, frame radio.Frame) {
-	s.recordReception(frame)
-	s.pushRawReception(frame)
+	ctx = s.beginRFReception(ctx, frame)
 	packet, err := mesh.ParsePacket(frame.Payload)
 	if err != nil {
 		s.log.Debug("station frame malformed", zap.String("corr", frame.Correlation.Short()), zap.Error(err))
@@ -137,18 +136,18 @@ func (s *service) processRF(ctx context.Context, frame radio.Frame) {
 		zap.Duration("airtime", frame.Airtime), zap.Int("bytes", len(frame.Payload)))
 	switch packet.PayloadType() {
 	case mesh.PayloadTypeAck:
-		s.receiveACK(packet.Payload)
+		s.receiveACK(packet.Payload, frame.Correlation)
 	case mesh.PayloadTypeMultipart:
 		multipart, err := mesh.ParseMultipart(packet.Payload)
 		if err == nil && multipart.Inner == mesh.PayloadTypeAck {
-			s.receiveACK(multipart.Data)
+			s.receiveACK(multipart.Data, frame.Correlation)
 		}
 	case mesh.PayloadTypeAdvert:
 		s.receiveAdvert(ctx, packet)
 	case mesh.PayloadTypePath:
 		s.receivePath(ctx, packet)
 	case mesh.PayloadTypeResponse:
-		s.receiveRemoteResponse(packet)
+		s.receiveRemoteResponse(packet, frame.Correlation)
 	case mesh.PayloadTypeTxtMsg:
 		s.receiveDirectText(ctx, packet, frame)
 	case mesh.PayloadTypeGrpTxt, mesh.PayloadTypeGrpData:
@@ -162,6 +161,12 @@ func (s *service) processRF(ctx context.Context, frame radio.Frame) {
 	default:
 		return
 	}
+}
+
+func (s *service) beginRFReception(ctx context.Context, frame radio.Frame) context.Context {
+	s.recordReception(frame)
+	s.pushRawReception(frame)
+	return correlation.WithContext(ctx, frame.Correlation)
 }
 
 func (s *service) recordReception(frame radio.Frame) {
@@ -197,7 +202,7 @@ func (s *service) pushRawReception(frame radio.Frame) {
 	body = append(body, byte(snrQuarter(frame.SNR)), byte(int8(math.Round(frame.RSSI))))
 	body = append(body, frame.Payload...)
 	if 1+len(body) <= companion.MaxPayload {
-		s.push(companion.Push{Code: companion.PushLogRXData, Body: body})
+		s.push(companion.Push{Code: companion.PushLogRXData, Body: body}, frame.Correlation)
 	}
 }
 
@@ -217,8 +222,18 @@ func (s *service) receiveAdvert(ctx context.Context, packet *mesh.Packet) {
 		s.log.Error("station advert state failed", zap.Error(err))
 		return
 	}
+	if result.stored {
+		fields := []zap.Field{
+			zap.String("contact", contactPrefix(result.contact.PublicKey)),
+			zap.Bool("created", result.created), zap.Bool("evicted", result.hadEviction),
+		}
+		if corr, ok := correlation.FromContext(ctx); ok {
+			fields = append(fields, zap.String("corr", corr.Short()))
+		}
+		s.log.Debug("station contact advert stored", fields...)
+	}
 	for _, response := range responses {
-		s.push(response)
+		s.push(response, correlationFromContext(ctx))
 	}
 }
 
@@ -387,7 +402,7 @@ func (s *service) sendACK(contact contactEntry, ack []byte) {
 	}
 }
 
-func (s *service) receiveACK(payload []byte) {
+func (s *service) receiveACK(payload []byte, correlations ...correlation.ID) {
 	crc, err := mesh.ParseAck(payload)
 	if err != nil {
 		return
@@ -421,7 +436,7 @@ func (s *service) receiveACK(payload []byte) {
 	body := make([]byte, 0, 8)
 	body = binary.LittleEndian.AppendUint32(body, crc)
 	body = binary.LittleEndian.AppendUint32(body, uint32(min(trip, int64(^uint32(0)))))
-	s.push(companion.Push{Code: companion.PushSendConfirmed, Body: body})
+	s.push(companion.Push{Code: companion.PushSendConfirmed, Body: body}, firstCorrelation(correlations))
 }
 
 func (s *service) receivePath(ctx context.Context, packet *mesh.Packet) {
@@ -448,16 +463,17 @@ func (s *service) receivePath(ctx context.Context, packet *mesh.Packet) {
 		if err != nil {
 			return
 		}
+		corr := correlationFromContext(ctx)
 		if path.ExtraType == uint8(mesh.PayloadTypeResponse) &&
-			s.receivePathDiscovery(candidate, packet, path) {
+			s.receivePathDiscovery(candidate, packet, path, corr) {
 			return
 		}
 		if !s.storeContactPath(ctx, candidate.info.PublicKey, path) {
 			return
 		}
-		s.push(companion.Push{Code: companion.PushPathUpdated, Body: candidate.info.PublicKey[:]})
+		s.push(companion.Push{Code: companion.PushPathUpdated, Body: candidate.info.PublicKey[:]}, corr)
 		if path.ExtraType == uint8(mesh.PayloadTypeAck) {
-			s.receiveACK(path.Extra)
+			s.receiveACK(path.Extra, corr)
 		}
 		if packet.IsRouteFlood() {
 			s.sendReciprocalPath(candidate, packet, path, secret)
@@ -485,6 +501,11 @@ func (s *service) storeContactPath(ctx context.Context, publicKey [mesh.PubKeySi
 		s.log.Error("station contact path persistence failed", zap.Error(err))
 		return false
 	}
+	fields := []zap.Field{zap.String("contact", contactPrefix(publicKey)), zap.Uint8("path_len", path.PathLen)}
+	if corr, ok := correlation.FromContext(ctx); ok {
+		fields = append(fields, zap.String("corr", corr.Short()))
+	}
+	s.log.Debug("station contact path changed", fields...)
 	return true
 }
 
@@ -573,24 +594,35 @@ func snrQuarter(snr float64) int8 {
 func (s *service) enqueueMailbox(ctx context.Context, response companion.Response) {
 	s.mu.Lock()
 	before := s.snapshotLocked()
-	accepted := s.enqueueMailboxLocked(response)
+	result, encodeErr := s.enqueueMailboxLocked(response, correlationFromContext(ctx))
 	var err error
-	if accepted {
+	if result.accepted {
 		err = s.persistLocked(ctx, before)
 	}
 	s.mu.Unlock()
+	if encodeErr != nil {
+		s.log.Error("station mailbox encode failed", zap.Error(encodeErr))
+		return
+	}
 	if err != nil {
 		s.log.Error("station mailbox persistence failed", zap.Error(err))
 		return
 	}
-	if accepted {
-		s.push(companion.MessagesWaiting{})
+	s.logMailboxEnqueue(result)
+	if result.accepted {
+		s.push(companion.MessagesWaiting{}, result.corr)
 	}
 }
 
-func (s *service) push(response companion.Response) {
+func (s *service) push(response companion.Response, correlations ...correlation.ID) {
+	corr := firstCorrelation(correlations)
 	payload, err := companion.MarshalResponse(response)
 	if err != nil {
+		fields := []zap.Field{zap.Error(err)}
+		if !corr.IsZero() {
+			fields = append(fields, zap.String("corr", corr.Short()))
+		}
+		s.log.Error("companion push encode failed", fields...)
 		return
 	}
 	s.mu.Lock()
@@ -604,9 +636,15 @@ func (s *service) push(response companion.Response) {
 	if !s.currentClient(conn, generation) {
 		return
 	}
-	if err := companion.WriteFrame(conn, companion.ToApplication, payload); err != nil {
-		logging.Trace(s.log, "companion push failed", zap.Error(err))
+	fields := []zap.Field{zap.Uint8("code", responseCode(payload)), zap.Int("bytes", len(payload))}
+	if !corr.IsZero() {
+		fields = append(fields, zap.String("corr", corr.Short()))
 	}
+	if err := companion.WriteFrame(conn, companion.ToApplication, payload); err != nil {
+		logging.Trace(s.log, "companion push failed", append(fields, zap.Error(err))...)
+		return
+	}
+	logging.Trace(s.log, "companion push sent", fields...)
 }
 
 func (s *service) runTX(ctx context.Context) {

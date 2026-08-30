@@ -8,6 +8,9 @@ import (
 	"sort"
 	"time"
 
+	"go.uber.org/zap"
+
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
 
 	mesh "meshrunner.dev/pkg/meshcore"
@@ -92,6 +95,7 @@ type persistedState struct {
 	Channels       []persistedChannel `json:"channels,omitempty"`
 	Contacts       []persistedContact `json:"contacts,omitempty"`
 	Mailbox        [][]byte           `json:"mailbox,omitempty"`
+	MailboxCorr    []correlation.ID   `json:"mailboxCorrelations,omitempty"`
 }
 
 func (s *service) snapshotLocked() persistedState {
@@ -106,7 +110,7 @@ func (s *service) snapshotLocked() persistedState {
 		DefaultScope: s.defaultScope, DefaultKey: s.defaultKey,
 		Channels: make([]persistedChannel, 0, len(s.channels)),
 		Contacts: make([]persistedContact, 0, len(s.contacts)),
-		Mailbox:  make([][]byte, len(s.mailbox)),
+		Mailbox:  make([][]byte, len(s.mailbox)), MailboxCorr: append([]correlation.ID(nil), s.mailboxCorr...),
 	}
 	for i := range s.mailbox {
 		state.Mailbox[i] = append([]byte(nil), s.mailbox[i]...)
@@ -171,6 +175,8 @@ func (s *service) restoreLocked(state persistedState) {
 	for i := range state.Mailbox {
 		s.mailbox[i] = append([]byte(nil), state.Mailbox[i]...)
 	}
+	s.mailboxCorr = make([]correlation.ID, len(state.Mailbox))
+	copy(s.mailboxCorr, state.MailboxCorr)
 }
 
 func (s *service) loadState(ctx context.Context) error {
@@ -192,6 +198,8 @@ func (s *service) loadState(ctx context.Context) error {
 		return err
 	}
 	s.restoreLocked(state)
+	s.log.Debug("station state restored", zap.Int("channels", len(state.Channels)),
+		zap.Int("contacts", len(state.Contacts)), zap.Int("mailbox", len(state.Mailbox)))
 	return nil
 }
 
@@ -221,7 +229,7 @@ func (s *service) validateState(state persistedState) error {
 	if err := s.validateContacts(state.Contacts); err != nil {
 		return err
 	}
-	return s.validateMailbox(state.Mailbox)
+	return s.validateMailbox(state.Mailbox, state.MailboxCorr)
 }
 
 func (s *service) validateChannels(channels []persistedChannel) error {
@@ -264,7 +272,7 @@ func (s *service) validateContacts(contacts []persistedContact) error {
 	return nil
 }
 
-func (s *service) validateMailbox(mailbox [][]byte) error {
+func (s *service) validateMailbox(mailbox [][]byte, correlations []correlation.ID) error {
 	if len(mailbox) > s.p.MailboxCap {
 		return fmt.Errorf("meshcore station state: %d mailbox entries exceed capacity %d",
 			len(mailbox), s.p.MailboxCap)
@@ -273,6 +281,12 @@ func (s *service) validateMailbox(mailbox [][]byte) error {
 		if _, err := companion.MarshalResponse(companion.EncodedResponse{Payload: payload}); err != nil {
 			return fmt.Errorf("meshcore station state: invalid mailbox response: %w", err)
 		}
+	}
+	// Version 1 states written before mailbox correlation was introduced
+	// legitimately omit this parallel list. New states keep one id per item.
+	if len(correlations) != 0 && len(correlations) != len(mailbox) {
+		return fmt.Errorf("meshcore station state: %d mailbox correlations for %d entries",
+			len(correlations), len(mailbox))
 	}
 	return nil
 }
