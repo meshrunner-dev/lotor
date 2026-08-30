@@ -736,7 +736,7 @@ func startListeners(ctx context.Context, f *config.File, deps *cli.Deps,
 	}
 	if f.Web != nil {
 		addr := f.Web.Listen
-		wd := webDeps(deps)
+		wd := webDeps(deps, log)
 		producers.Go(func() {
 			if err := web.ListenAndServe(ctx, addr, wd); err != nil {
 				log.Error("web listener failed", zap.Error(err))
@@ -749,9 +749,9 @@ func startListeners(ctx context.Context, f *config.File, deps *cli.Deps,
 // webDeps carves the web UI's read-only view out of the console's
 // seam: the same live views, the same bus, nothing that mutates. The
 // third caller of the one seam, honest about being the least trusted.
-func webDeps(deps *cli.Deps) web.Deps {
+func webDeps(deps *cli.Deps, log *zap.Logger) web.Deps {
 	wd := web.Deps{
-		Log:        deps.Log,
+		Log:        log.Named("web"),
 		Version:    deps.Version,
 		Revision:   deps.Revision,
 		Started:    deps.Started,
@@ -759,9 +759,6 @@ func webDeps(deps *cli.Deps) web.Deps {
 		LiveRelays: deps.LiveRelays,
 		LiveMQTTs:  deps.LiveMQTTs,
 		Bus:        deps.Bus,
-	}
-	if wd.Log != nil {
-		wd.Log = wd.Log.Named("web")
 	}
 	if deps.Sentinel != nil {
 		wd.Health = deps.Sentinel.Health
