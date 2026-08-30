@@ -427,7 +427,7 @@ func TestAReplayedLoginLeavesTheSessionAlone(t *testing.T) {
 	}
 	before := *c
 
-	got := e.admitLogin(peer.PubKey[:], secret, "raccoon", nowTS(400), false, correlation.New())
+	got := e.admitLogin(peer.PubKey[:], secret, "raccoon", nowTS(400), correlation.New())
 	if got != nil {
 		t.Fatal("a replayed login was admitted")
 	}
@@ -444,7 +444,7 @@ func TestAReplayedLoginLeavesTheSessionAlone(t *testing.T) {
 	}
 	// A fresh guest login on the same key still demotes, as the
 	// reference's every-password-rewrites-the-role rule says.
-	if got := e.admitLogin(peer.PubKey[:], secret, "raccoon", nowTS(600), false, correlation.New()); got == nil {
+	if got := e.admitLogin(peer.PubKey[:], secret, "raccoon", nowTS(600), correlation.New()); got == nil {
 		t.Fatal("a fresh guest login was refused")
 	} else if got.perms&permRoleMask != permGuest || got.granted {
 		t.Errorf("a fresh guest login kept %#x granted=%v", got.perms, got.granted)

@@ -114,7 +114,7 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 			zap.String("corr", origin.Short()), zap.Duration("skew", skew))
 		return
 	}
-	c := e.admitLogin(senderPub, secret, password, ts, pkt.IsRouteFlood(), origin)
+	c := e.admitLogin(senderPub, secret, password, ts, origin)
 	if c == nil {
 		return
 	}
@@ -170,7 +170,7 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 // before that same key was promoted, demote the admin it replayed
 // against while being correctly refused.
 func (e *engine) admitLogin(senderPub, secret []byte, password string,
-	ts uint32, flood bool, origin correlation.ID,
+	ts uint32, origin correlation.ID,
 ) *client {
 	live := e.acl.get(senderPub)
 	var c client
@@ -209,19 +209,15 @@ func (e *engine) admitLogin(senderPub, secret []byte, password string,
 		e.log.Debug("login replay refused", zap.String("corr", origin.Short()))
 		return nil
 	}
-	// A login with a password opens a new conversation, and the route
-	// the old one taught belongs to the old one: a companion that
-	// reconfigured itself logs in again precisely because its
-	// situation changed, and an answer sent down the stale route is an
-	// answer it never hears. A flood login drops it too, whatever the
-	// password — the asker itself just said it has no route to us, so
-	// ours to it is suspect. Only a direct blank-password recheck
-	// keeps the route: that is a step inside the conversation, not the
-	// start of one. The reply floods until the client teaches a fresh
-	// route, which is the one cost of never answering into a void.
-	if password != "" || flood {
-		c.out = nil
-	}
+	// The route a client taught survives its next login, whatever the
+	// password, as it does in the reference — ClientACL::putClient
+	// returns a known entry untouched, and only a new one is blanked.
+	// A stale one costs nothing: a client whose route died lost ours
+	// too and logs in flooded, and a flooded question is answered by
+	// path return, which never reads this field; a client that merely
+	// moved replaces it with its next PATH, which onContactPathRecv
+	// takes without condition.
+	//
 	// A successful login is the only operation that reopens an
 	// operator-closed durable session. Refused attempts were composed
 	// on this candidate and leave the live marker untouched.
