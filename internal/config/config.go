@@ -371,7 +371,7 @@ func validateNames(f *File) error {
 		kind  string
 		names []string
 	}{
-		{"relay", keysOf(f.Relays)}, {"radio", keysOf(f.Radios)},
+		{"relay", keysOf(f.Relays)}, {configAttrRadio, keysOf(f.Radios)},
 		{"station", keysOf(f.Stations)},
 		{"sensor", keysOf(f.Sensors)}, {"observer", keysOf(f.MQTT)},
 	} {
@@ -466,6 +466,26 @@ func (f *File) Validate(requireRelays bool) error {
 	if err := validateNames(f); err != nil {
 		return err
 	}
+	if err := validateRelays(f); err != nil {
+		return err
+	}
+	if err := validateStations(f); err != nil {
+		return err
+	}
+	if err := validateRadios(f.Radios); err != nil {
+		return err
+	}
+	if err := validateSensors(f.Sensors); err != nil {
+		return err
+	}
+	f.defaultListeners()
+	if f.Sentinel != nil {
+		return f.Sentinel.validate()
+	}
+	return nil
+}
+
+func validateRelays(f *File) error {
 	owner := make(map[string]string, len(f.Radios))
 	for name, r := range f.Relays {
 		if r.Protocol == "" {
@@ -490,6 +510,10 @@ func (f *File) Validate(requireRelays bool) error {
 		}
 		owner[r.Radio] = name
 	}
+	return nil
+}
+
+func validateStations(f *File) error {
 	listeners := make(map[uint16]string, len(f.Stations))
 	for name, s := range f.Stations {
 		if s.Protocol == "" {
@@ -521,17 +545,14 @@ func (f *File) Validate(requireRelays bool) error {
 			}
 		}
 	}
-	for name, r := range f.Radios {
+	return nil
+}
+
+func validateRadios(radios map[string]Radio) error {
+	for name, r := range radios {
 		if r.Driver == "" {
 			return fmt.Errorf("radio %q: driver is required", name)
 		}
-	}
-	if err := validateSensors(f.Sensors); err != nil {
-		return err
-	}
-	f.defaultListeners()
-	if f.Sentinel != nil {
-		return f.Sentinel.validate()
 	}
 	return nil
 }

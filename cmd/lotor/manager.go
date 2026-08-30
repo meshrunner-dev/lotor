@@ -59,6 +59,7 @@ const (
 	attrTXCAD        = "tx.cad"
 	attrSocket       = "socket"
 	attrName         = "name"
+	identityNew      = "new"
 
 	// sourceConfig is what a singleton's print shows as provenance —
 	// no layering, just the store.
@@ -1054,7 +1055,7 @@ func (m *manager) Mutate(ctx context.Context, kind, name string,
 	// the mesh learns a new node and forgets the paths to the old —
 	// so the minted public key is returned for the console to show.
 	minted := ""
-	if (kind == confdb.KindRelay || kind == confdb.KindStation) && set[attrIdentity] == "new" {
+	if (kind == confdb.KindRelay || kind == confdb.KindStation) && set[attrIdentity] == identityNew {
 		seed, pub, err := mintIdentity()
 		if err != nil {
 			return "", err
@@ -1208,33 +1209,7 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 	m.file = next
 
 	if relayName == "" {
-		switch kind {
-		case confdb.KindStation:
-			m.stopStation(name)
-			m.startStation(m.ctx, name) //nolint:contextcheck // deliberate: daemon lifetime
-			return "applied — station " + name + " restarting", nil
-		case confdb.KindSystem:
-			// Both attributes are read live.
-			m.applyLogLevel()
-			return fmt.Sprintf("applied — this system is now %s, logging at %s",
-				cli.TerminalSafe(m.systemName()), m.liveLevelName()), nil
-		case confdb.KindSentinel, confdb.KindCLI, confdb.KindWeb:
-			return "applied — takes effect when the daemon restarts", nil
-		case confdb.KindUpdate:
-			// check and install read the store live; nothing bounces.
-			return "applied — the next check reads it", nil
-		case confdb.KindSensor:
-			// The part is reopened; no relay is disturbed by it.
-			m.bounceSampler(name)
-			return "applied — sensor " + name, nil
-		case confdb.KindMQTT:
-			m.bounceObserver(name)
-			if next.MQTT[name].Disabled {
-				return "applied — observer " + name + " disabled", nil
-			}
-			return "applied — observer " + name + " reconnecting", nil
-		}
-		return "applied — no running relay uses this yet", nil
+		return m.applyWithoutRelay(kind, name, next), nil
 	}
 	m.stopRelay(relayName)
 	// The successor lives as long as the daemon, not as long as the
@@ -1245,6 +1220,34 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 	// waveform — and must follow the successor.
 	m.bounceObserversOf(relayName)
 	return fmt.Sprintf("applied — relay %s restarting", relayName), nil
+}
+
+func (m *manager) applyWithoutRelay(kind, name string, next *config.File) string {
+	switch kind {
+	case confdb.KindStation:
+		m.stopStation(name)
+		m.startStation(m.ctx, name)
+		return "applied — station " + name + " restarting"
+	case confdb.KindSystem:
+		m.applyLogLevel()
+		return fmt.Sprintf("applied — this system is now %s, logging at %s",
+			cli.TerminalSafe(m.systemName()), m.liveLevelName())
+	case confdb.KindSentinel, confdb.KindCLI, confdb.KindWeb:
+		return "applied — takes effect when the daemon restarts"
+	case confdb.KindUpdate:
+		return "applied — the next check reads it"
+	case confdb.KindSensor:
+		m.bounceSampler(name)
+		return "applied — sensor " + name
+	case confdb.KindMQTT:
+		m.bounceObserver(name)
+		if next.MQTT[name].Disabled {
+			return "applied — observer " + name + " disabled"
+		}
+		return "applied — observer " + name + " reconnecting"
+	default:
+		return "applied — no running relay uses this yet"
+	}
 }
 
 // deepCheck runs the checks the assembly would, minus the hardware:
@@ -1345,28 +1348,8 @@ func (m *manager) commitCreate(ctx context.Context, next *config.File,
 	if err := next.Validate(false); err != nil {
 		return "", err
 	}
-	switch kind {
-	case confdb.KindRelay:
-		rc := next.Relays[name]
-		if err := preflight(name, rc, next.Radios[rc.Radio]); err != nil {
-			return "", err
-		}
-	case confdb.KindStation:
-		if err := checkStationAlone(next.Stations[name]); err != nil {
-			return "", err
-		}
-	case confdb.KindRadio:
-		if err := checkRadioAlone(next.Radios[name]); err != nil {
-			return "", err
-		}
-	case confdb.KindSensor:
-		if err := checkSensorAlone(next.Sensors[name]); err != nil {
-			return "", err
-		}
-	case confdb.KindMQTT:
-		if _, err := resolveMQTTParams(next.MQTT[name]); err != nil {
-			return "", err
-		}
+	if err := checkCreatedObject(next, kind, name); err != nil {
+		return "", err
 	}
 	m.maskSecrets(next, kind, name, change)
 	section, err := objectSection(next, kind, name)
@@ -1377,25 +1360,48 @@ func (m *manager) commitCreate(ctx context.Context, next *config.File,
 		return "", err
 	}
 	m.file = next
+	return m.startCreatedObject(kind, name), nil
+}
+
+func checkCreatedObject(next *config.File, kind, name string) error {
 	switch kind {
 	case confdb.KindRelay:
-		m.startRelay(m.ctx, name) //nolint:contextcheck // deliberate: daemon lifetime
+		rc := next.Relays[name]
+		return preflight(name, rc, next.Radios[rc.Radio])
+	case confdb.KindStation:
+		return checkStationAlone(next.Stations[name])
+	case confdb.KindRadio:
+		return checkRadioAlone(next.Radios[name])
+	case confdb.KindSensor:
+		return checkSensorAlone(next.Sensors[name])
+	case confdb.KindMQTT:
+		_, err := resolveMQTTParams(next.MQTT[name])
+		return err
+	}
+	return nil
+}
+
+func (m *manager) startCreatedObject(kind, name string) string {
+	switch kind {
+	case confdb.KindRelay:
+		m.startRelay(m.ctx, name)
 		// The new relay changes what "the only relay" resolves to: the
 		// observers reading that phrase must follow, now and not at the
 		// next restart.
 		m.reconcileObservers()
-		return fmt.Sprintf("added — relay %s starting", name), nil
+		return fmt.Sprintf("added — relay %s starting", name)
 	case confdb.KindStation:
-		m.startStation(m.ctx, name) //nolint:contextcheck // deliberate: daemon lifetime
-		return fmt.Sprintf("added — station %s listening", name), nil
+		m.startStation(m.ctx, name)
+		return fmt.Sprintf("added — station %s listening", name)
 	case confdb.KindMQTT:
-		m.startObserver(m.ctx, name) //nolint:contextcheck // deliberate: daemon lifetime
-		return fmt.Sprintf("added — observer %s connecting", name), nil
+		m.startObserver(m.ctx, name)
+		return fmt.Sprintf("added — observer %s connecting", name)
 	case confdb.KindSensor:
-		m.startSampler(m.ctx, name) //nolint:contextcheck // deliberate: daemon lifetime
-		return "added — sensor " + name, nil
+		m.startSampler(m.ctx, name)
+		return "added — sensor " + name
+	default:
+		return fmt.Sprintf("added — %s %s", kind, name)
 	}
-	return fmt.Sprintf("added — %s %s", kind, name), nil
 }
 
 // createRelay fills a new relay from its creation line. protocol and
@@ -1424,7 +1430,7 @@ func (m *manager) createRelay(next *config.File, name string,
 		}
 		rest[k] = v
 	}
-	if rest[attrIdentity] == "new" {
+	if rest[attrIdentity] == identityNew {
 		seed, pub, err := mintIdentity()
 		if err != nil {
 			return "", err
@@ -1469,7 +1475,7 @@ func (m *manager) createStation(next *config.File, name string,
 		}
 		rest[k] = v
 	}
-	if rest[attrIdentity] == "new" {
+	if rest[attrIdentity] == identityNew {
 		seed, pub, err := mintIdentity()
 		if err != nil {
 			return "", err
@@ -1854,21 +1860,7 @@ func removeFromFile(next *config.File, kind, name string) (string, error) {
 		delete(next.Stations, name)
 		return fmt.Sprintf("removed — station %s stopped", name), nil
 	case confdb.KindRadio:
-		if _, ok := next.Radios[name]; !ok {
-			return "", fmt.Errorf("no radio %q", name)
-		}
-		for rn, rl := range next.Relays {
-			if rl.Radio == name {
-				return "", fmt.Errorf("relay %q claims this radio — remove it first", rn)
-			}
-		}
-		for stationName, st := range next.Stations {
-			if st.Radio == name {
-				return "", fmt.Errorf("station %q is attached to this radio — detach it first", stationName)
-			}
-		}
-		delete(next.Radios, name)
-		return "removed — radio " + name, nil
+		return removeRadioFromFile(next, name)
 	case confdb.KindSensor:
 		if _, ok := next.Sensors[name]; !ok {
 			return "", fmt.Errorf("no sensor %q", name)
@@ -1894,6 +1886,24 @@ func removeFromFile(next *config.File, kind, name string) (string, error) {
 		return "removed — observer " + name + " disconnected", nil
 	}
 	return "", fmt.Errorf("%q cannot be removed", kind)
+}
+
+func removeRadioFromFile(next *config.File, name string) (string, error) {
+	if _, ok := next.Radios[name]; !ok {
+		return "", fmt.Errorf("no radio %q", name)
+	}
+	for relayName, rl := range next.Relays {
+		if rl.Radio == name {
+			return "", fmt.Errorf("relay %q claims this radio — remove it first", relayName)
+		}
+	}
+	for stationName, st := range next.Stations {
+		if st.Radio == name {
+			return "", fmt.Errorf("station %q is attached to this radio — detach it first", stationName)
+		}
+	}
+	delete(next.Radios, name)
+	return "removed — radio " + name, nil
 }
 
 // mintIdentity draws a fresh node identity: the seed for the store,

@@ -11,12 +11,17 @@ import (
 	"meshrunner.dev/lotor/internal/schema"
 )
 
+const (
+	configAttrRadio  = "radio"
+	configAttrListen = "listen"
+)
+
 // RelayAttrs describes a relay's own structure.
 func RelayAttrs() []schema.Attr {
 	return []schema.Attr{
 		{Name: "protocol", Type: schema.String,
 			Doc: "the protocol this relay speaks (chooses the rest of its attributes)"},
-		{Name: "radio", Type: schema.String,
+		{Name: configAttrRadio, Type: schema.String,
 			Doc: "the radio this relay owns — one owner per radio"},
 		{Name: attrProfile, Type: schema.String,
 			Doc: `the band preset; "custom" starts from nothing`},
@@ -44,9 +49,9 @@ func StationAttrs() []schema.Attr {
 	return []schema.Attr{
 		{Name: "protocol", Type: schema.String,
 			Doc: "the protocol this station speaks (chooses the rest of its attributes)"},
-		{Name: "listen", Type: schema.String,
+		{Name: configAttrListen, Type: schema.String,
 			Doc: "the dedicated companion TCP listener; required and unique"},
-		{Name: "radio", Type: schema.String,
+		{Name: configAttrRadio, Type: schema.String,
 			Doc: "optional radio attachment; empty keeps the station TCP-only"},
 		{Name: attrProfile, Type: schema.String,
 			Doc: `the station preset; "custom" starts from nothing`},

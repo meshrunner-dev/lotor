@@ -36,13 +36,13 @@ func TestDetachedStationAnswersStartupProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := built.(*service)
-	ctx, cancel := context.WithCancel(context.Background())
+	svc := requireService(t, built)
+	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- svc.Run(ctx) }()
 	addr := awaitListener(t, svc)
 
-	conn, err := net.Dial("tcp", addr)
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", addr)
 	if err != nil {
 		cancel()
 		t.Fatal(err)
@@ -88,20 +88,20 @@ func TestNewCompanionClientReplacesThePreviousOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := built.(*service)
-	ctx, cancel := context.WithCancel(context.Background())
+	svc := requireService(t, built)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	go func() { _ = svc.Run(ctx) }()
 	addr := awaitListener(t, svc)
 
-	first, err := net.Dial("tcp", addr)
+	first, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = first.Close() }()
 	_ = exchange(t, first, companion.DeviceQuery{TargetVersion: protocolVersion})
 
-	second, err := net.Dial("tcp", addr)
+	second, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestDetachedStationForbidsRepeatingAndKeepsRadioPreferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := built.(*service)
+	svc := requireService(t, built)
 	responses := svc.handle(companion.SetRadioParams{Repeat: true})
 	wire, _ := companion.MarshalResponse(responses[0])
 	want, _ := companion.MarshalResponse(companion.ErrorResponse{Code: companion.ErrorIllegalArgument})
@@ -145,6 +145,15 @@ func TestDetachedStationForbidsRepeatingAndKeepsRadioPreferences(t *testing.T) {
 		svc.p.SpreadingFactor != 9 || svc.p.CodingRate != 5 {
 		t.Fatalf("radio preferences were not retained: %+v", svc.p.Waveform)
 	}
+}
+
+func requireService(t *testing.T, built station.Service) *service {
+	t.Helper()
+	svc, ok := built.(*service)
+	if !ok {
+		t.Fatalf("built service is %T", built)
+	}
+	return svc
 }
 
 func awaitListener(t *testing.T, svc *service) string {

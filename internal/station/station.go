@@ -21,10 +21,14 @@ import (
 type State string
 
 const (
+	// StateStarting has not opened the application listener yet.
 	StateStarting State = "starting"
-	StateRunning  State = "running"
-	StateError    State = "error"
-	StateStopped  State = "stopped"
+	// StateRunning is accepting companion application connections.
+	StateRunning State = "running"
+	// StateError exposes the listener or service failure cause.
+	StateError State = "error"
+	// StateStopped is terminal after the station context ends.
+	StateStopped State = "stopped"
 )
 
 // RFState deliberately differs from the station lifecycle: a detached or
@@ -32,10 +36,14 @@ const (
 type RFState string
 
 const (
+	// RFDetached means no radio is configured for this station.
 	RFDetached RFState = "detached"
-	RFDown     RFState = "down"
-	RFActive   RFState = "active"
-	RFBlocked  RFState = "blocked"
+	// RFDown means an attachment is configured but unavailable.
+	RFDown RFState = "down"
+	// RFActive means the station may receive and submit emissions.
+	RFActive RFState = "active"
+	// RFBlocked means another consumer owns an incompatible waveform.
+	RFBlocked RFState = "blocked"
 )
 
 // Info is a coherent runtime snapshot.
@@ -57,7 +65,7 @@ type Info struct {
 
 // Service owns one station's listener and protocol state.
 type Service interface {
-	Run(context.Context) error
+	Run(ctx context.Context) error
 	Info() Info
 }
 

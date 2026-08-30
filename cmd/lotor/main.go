@@ -571,73 +571,10 @@ func profileNames(choice string, choices []string,
 func buildKinds() []schema.Kind {
 	kinds := make([]schema.Kind, 0, 9)
 	kinds = append(kinds, []schema.Kind{
-		{
-			Name: confdb.KindRelay, Doc: "one protocol repeater attached to one radio",
-			Attrs:      choiceAttrs(config.RelayAttrs(), attrProtocol, protocol.Registered()),
-			ChoiceAttr: attrProtocol,
-			Contributed: func(choice string) []schema.Attr {
-				b, err := protocol.Lookup(choice)
-				if err != nil {
-					return nil
-				}
-				return b.Schema
-			},
-			Profiles: func(choice string) []string {
-				return profileNames(choice, protocol.Registered(),
-					func(name string) map[string]map[string]any {
-						b, err := protocol.Lookup(name)
-						if err != nil {
-							return nil
-						}
-						return b.Presets
-					})
-			},
-		},
-		{
-			Name: confdb.KindStation, Doc: "one virtual companion identity, with optional RF attachment",
-			Attrs:      choiceAttrs(config.StationAttrs(), attrProtocol, station.Registered()),
-			ChoiceAttr: attrProtocol,
-			Contributed: func(choice string) []schema.Attr {
-				b, err := station.Lookup(choice)
-				if err != nil {
-					return nil
-				}
-				return b.Schema
-			},
-			Profiles: func(choice string) []string {
-				return profileNames(choice, station.Registered(),
-					func(name string) map[string]map[string]any {
-						b, err := station.Lookup(name)
-						if err != nil {
-							return nil
-						}
-						return b.Presets
-					})
-			},
-		},
+		relayKind(),
+		stationKind(),
 		sensorKind(),
-		{
-			Name: confdb.KindRadio, Doc: "one physical transceiver attachment",
-			Attrs:      choiceAttrs(config.RadioAttrs(), attrDriver, radio.Registered()),
-			ChoiceAttr: attrDriver,
-			Contributed: func(choice string) []schema.Attr {
-				d, err := radio.Lookup(choice)
-				if err != nil {
-					return nil
-				}
-				return d.Schema
-			},
-			Profiles: func(choice string) []string {
-				return profileNames(choice, radio.Registered(),
-					func(name string) map[string]map[string]any {
-						d, err := radio.Lookup(name)
-						if err != nil {
-							return nil
-						}
-						return d.Presets
-					})
-			},
-		},
+		radioKind(),
 	}...)
 	kinds = append(kinds, schema.Kind{
 		Name: confdb.KindMQTT, Doc: "observer connections publishing the mesh to MQTT brokers",
@@ -650,6 +587,75 @@ func buildKinds() []schema.Kind {
 		Profiles: func(string) []string { return sortedNames(mqtt.Presets()) },
 	})
 	return append(kinds, singletonKinds()...)
+}
+
+func relayKind() schema.Kind {
+	return schema.Kind{
+		Name: confdb.KindRelay, Doc: "one protocol repeater attached to one radio",
+		Attrs: choiceAttrs(config.RelayAttrs(), attrProtocol, protocol.Registered()), ChoiceAttr: attrProtocol,
+		Contributed: func(choice string) []schema.Attr {
+			builder, err := protocol.Lookup(choice)
+			if err != nil {
+				return nil
+			}
+			return builder.Schema
+		},
+		Profiles: func(choice string) []string {
+			return profileNames(choice, protocol.Registered(), func(name string) map[string]map[string]any {
+				builder, err := protocol.Lookup(name)
+				if err != nil {
+					return nil
+				}
+				return builder.Presets
+			})
+		},
+	}
+}
+
+func stationKind() schema.Kind {
+	return schema.Kind{
+		Name: confdb.KindStation, Doc: "one virtual companion identity, with optional RF attachment",
+		Attrs: choiceAttrs(config.StationAttrs(), attrProtocol, station.Registered()), ChoiceAttr: attrProtocol,
+		Contributed: func(choice string) []schema.Attr {
+			builder, err := station.Lookup(choice)
+			if err != nil {
+				return nil
+			}
+			return builder.Schema
+		},
+		Profiles: func(choice string) []string {
+			return profileNames(choice, station.Registered(), func(name string) map[string]map[string]any {
+				builder, err := station.Lookup(name)
+				if err != nil {
+					return nil
+				}
+				return builder.Presets
+			})
+		},
+	}
+}
+
+func radioKind() schema.Kind {
+	return schema.Kind{
+		Name: confdb.KindRadio, Doc: "one physical transceiver attachment",
+		Attrs: choiceAttrs(config.RadioAttrs(), attrDriver, radio.Registered()), ChoiceAttr: attrDriver,
+		Contributed: func(choice string) []schema.Attr {
+			driver, err := radio.Lookup(choice)
+			if err != nil {
+				return nil
+			}
+			return driver.Schema
+		},
+		Profiles: func(choice string) []string {
+			return profileNames(choice, radio.Registered(), func(name string) map[string]map[string]any {
+				driver, err := radio.Lookup(name)
+				if err != nil {
+					return nil
+				}
+				return driver.Presets
+			})
+		},
+	}
 }
 
 // singletonKinds are the blocks that exist once: no instance step, no
