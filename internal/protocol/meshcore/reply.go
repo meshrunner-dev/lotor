@@ -5,19 +5,19 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
-	"meshrunner.dev/lotor/internal/txn"
+	"meshrunner.dev/lotor/internal/correlation"
 )
 
 // logReplyRoute records the routing decision once the response packet has
 // its final route. Packet enqueue and radio details are logged separately.
-func (e *engine) logReplyRoute(pkt *meshcore.Packet, origin txn.ID,
+func (e *engine) logReplyRoute(pkt *meshcore.Packet, origin correlation.ID,
 	kind, source string, priority int,
 ) {
 	if !e.log.Core().Enabled(zap.DebugLevel) {
 		return
 	}
 	e.log.Debug("reply route selected",
-		zap.String("txn", origin.Short()), zap.String("kind", kind),
+		zap.String("corr", origin.Short()), zap.String("kind", kind),
 		zap.String("route_source", source), zap.Stringer("route", pkt.Route()),
 		zap.Int("hops", pkt.PathHashCount()), zap.Int("priority", priority),
 		zap.Bool("scoped", pkt.HasTransportCodes()))
@@ -25,14 +25,14 @@ func (e *engine) logReplyRoute(pkt *meshcore.Packet, origin txn.ID,
 
 // responseSuppressed makes an intentional silence visible at debug without
 // promoting mesh traffic or attacker-controlled input to operator alerts.
-func (e *engine) responseSuppressed(origin txn.ID, request, reason string,
+func (e *engine) responseSuppressed(origin correlation.ID, request, reason string,
 	fields ...zap.Field,
 ) {
 	if !e.log.Core().Enabled(zap.DebugLevel) {
 		return
 	}
 	base := make([]zap.Field, 0, len(fields)+3)
-	base = append(base, zap.String("txn", origin.Short()),
+	base = append(base, zap.String("corr", origin.Short()),
 		zap.String("request", request), zap.String("reason", reason))
 	base = append(base, fields...)
 	e.log.Debug("response suppressed", base...)
@@ -92,7 +92,7 @@ type answer struct {
 // computed over it. Every reply inherits the hash width the asker's
 // mesh uses: a
 // narrower one collides more often for the repeaters carrying it.
-func (e *engine) reply(inbound *meshcore.Packet, a answer, origin txn.ID) {
+func (e *engine) reply(inbound *meshcore.Packet, a answer, origin correlation.ID) {
 	srcHash := e.id.PubKey[:meshcore.PathHashSize]
 	framed := meshcore.FrameAdmin(a.tag, a.body)
 
@@ -103,7 +103,7 @@ func (e *engine) reply(inbound *meshcore.Packet, a answer, origin txn.ID) {
 			// An answer nobody can compose is an answer nobody
 			// receives, and for an authenticated question the replay
 			// guard is already spent — so the refusal is counted
-			// against its transaction rather than logged and lost.
+			// against its correlation rather than logged and lost.
 			e.abandonKind(origin, "malformed", "answer",
 				"reply too large to compose ("+a.kind+")", err)
 			return

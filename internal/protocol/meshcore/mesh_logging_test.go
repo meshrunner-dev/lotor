@@ -12,9 +12,9 @@ import (
 	meshwire "meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/radio"
-	"meshrunner.dev/lotor/internal/txn"
 )
 
 func observedOne(t *testing.T, logs *observer.ObservedLogs, message string) observer.LoggedEntry {
@@ -26,7 +26,7 @@ func observedOne(t *testing.T, logs *observer.ObservedLogs, message string) obse
 	return entries[0]
 }
 
-func TestNominalRelayLogKeepsOneCausalTransaction(t *testing.T) {
+func TestNominalRelayLogKeepsOneCorrelationChain(t *testing.T) {
 	e, dev, sub, peer := txRig(t, "on-air")
 	core, observed := observer.New(logging.TraceLevel)
 	e.log = zap.New(core)
@@ -58,8 +58,8 @@ func TestNominalRelayLogKeepsOneCausalTransaction(t *testing.T) {
 	}
 	for _, message := range []string{"frame heard", "frame judged", "tx queued", "frame sent"} {
 		entry := observedOne(t, observed, message)
-		if got := entry.ContextMap()["txn"]; got != sent.Txn.Short() {
-			t.Errorf("%s txn = %v, want %s", message, got, sent.Txn.Short())
+		if got := entry.ContextMap()["corr"]; got != sent.Correlation.Short() {
+			t.Errorf("%s corr = %v, want %s", message, got, sent.Correlation.Short())
 		}
 	}
 	if reason := observedOne(t, observed, "rx window yielded").ContextMap()["reason"]; reason != "tx-due" {
@@ -71,10 +71,10 @@ func TestReceptionLogsKeepTrafficAtDebugAndRFAtTrace(t *testing.T) {
 	e, _, _, _ := txRig(t, "shadow") //nolint:dogsled // the rig supplies an armed engine
 	core, observed := observer.New(logging.TraceLevel)
 	e.log = zap.New(core)
-	id := txn.New()
+	id := correlation.New()
 	frame := radio.Frame{
-		Txn:     id,
-		Payload: []byte{1, 2, 3}, At: time.Now(), Airtime: 41 * time.Millisecond,
+		Correlation: id,
+		Payload:     []byte{1, 2, 3}, At: time.Now(), Airtime: 41 * time.Millisecond,
 		RSSI: -91.5, SNR: 7.25, SignalRSSI: -89, FreqErrHz: 123,
 	}
 
@@ -84,7 +84,7 @@ func TestReceptionLogsKeepTrafficAtDebugAndRFAtTrace(t *testing.T) {
 	if heard.Level != zap.DebugLevel {
 		t.Errorf("frame heard level = %s, want debug", heard.Level)
 	}
-	if fields := heard.ContextMap(); fields["txn"] != id.Short() ||
+	if fields := heard.ContextMap(); fields["corr"] != id.Short() ||
 		fields["rssi_dbm"] != nil || fields["snr_db"] != nil {
 		t.Errorf("debug traffic log carries RF measurements: %+v", fields)
 	}
@@ -93,22 +93,22 @@ func TestReceptionLogsKeepTrafficAtDebugAndRFAtTrace(t *testing.T) {
 		t.Errorf("RF measurement level = %s, want trace", measurements.Level)
 	}
 	fields := measurements.ContextMap()
-	if fields["txn"] != id.Short() || fields["rssi_dbm"] != frame.RSSI ||
+	if fields["corr"] != id.Short() || fields["rssi_dbm"] != frame.RSSI ||
 		fields["snr_db"] != frame.SNR ||
 		fields["airtime"] != frame.Airtime {
 		t.Errorf("RF measurement fields = %+v", fields)
 	}
 }
 
-func TestTransmitHandsTransactionAcrossTheRadioSeam(t *testing.T) {
+func TestTransmitHandsCorrelationAcrossTheRadioSeam(t *testing.T) {
 	e, dev, _, _ := txRig(t, "on-air")
-	id := txn.New()
+	id := correlation.New()
 
 	if _, err := e.key(context.Background(), dev, []byte{1, 2, 3}, id, zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
-	if dev.lastTxn != id {
-		t.Errorf("radio context txn = %s, want %s", dev.lastTxn, id)
+	if dev.lastCorrelation != id {
+		t.Errorf("radio context corr = %s, want %s", dev.lastCorrelation, id)
 	}
 }
 
@@ -120,13 +120,13 @@ func TestEmissionLogsKeepTrafficAtDebugAndRadioAccountingAtTrace(t *testing.T) {
 		Header:  meshwire.MakeHeader(meshwire.RouteFlood, meshwire.PayloadTypeAck, meshwire.PayloadVer1),
 		Payload: []byte{1, 2, 3, 4},
 	}
-	id := txn.New()
+	id := correlation.New()
 	entry := txEntry{pkt: pkt, kind: "test", origin: id}
 	sent := bus.FrameSent{
-		Txn: id, Kind: entry.kind, At: time.Now(), Airtime: 37 * time.Millisecond,
+		Correlation: id, Kind: entry.kind, At: time.Now(), Airtime: 37 * time.Millisecond,
 		PowerDBm: -5, Shadow: true,
 	}
-	log := e.log.With(zap.String("txn", id.Short()), zap.String("kind", entry.kind))
+	log := e.log.With(zap.String("corr", id.Short()), zap.String("kind", entry.kind))
 
 	e.recordEmission(entry, sent, log, nil)
 
@@ -156,7 +156,7 @@ func TestTerminalPolicyDropsStayAtDebug(t *testing.T) {
 		Header:  meshwire.MakeHeader(meshwire.RouteFlood, meshwire.PayloadTypeAck, meshwire.PayloadVer1),
 		Payload: []byte{1, 2, 3, 4},
 	}
-	entry := txEntry{pkt: pkt, kind: "test", origin: txn.New()}
+	entry := txEntry{pkt: pkt, kind: "test", origin: correlation.New()}
 
 	if e.admitDuty(dev, entry) {
 		t.Fatal("an emission larger than the whole duty budget was admitted")
@@ -186,7 +186,7 @@ func TestDutyDeferralIsAVisibleDebugDecision(t *testing.T) {
 		Header:  meshwire.MakeHeader(meshwire.RouteFlood, meshwire.PayloadTypeAck, meshwire.PayloadVer1),
 		Payload: []byte{1, 2, 3, 4},
 	}
-	entry := txEntry{pkt: pkt, kind: "test", origin: txn.New()}
+	entry := txEntry{pkt: pkt, kind: "test", origin: correlation.New()}
 
 	if e.admitDuty(dev, entry) {
 		t.Fatal("the full duty budget admitted another emission")
@@ -199,7 +199,7 @@ func TestDutyDeferralIsAVisibleDebugDecision(t *testing.T) {
 		t.Errorf("duty deferral level = %s, want debug", deferred.Level)
 	}
 	fields := deferred.ContextMap()
-	if fields["txn"] != entry.origin.Short() || fields["retry_at"] == nil || fields["retry_in"] == nil {
+	if fields["corr"] != entry.origin.Short() || fields["retry_at"] == nil || fields["retry_in"] == nil {
 		t.Errorf("duty deferral fields = %+v", fields)
 	}
 }
@@ -210,7 +210,7 @@ func TestForcedTransmissionAfterLBTExhaustionRemainsWarn(t *testing.T) {
 	e.log = zap.New(core)
 	e.policy.LBTExhausted = "transmit"
 
-	if got := e.resolveLBTExhaustion(e.log, txn.New(), "test", 9, 4*time.Second); got != lbtGo {
+	if got := e.resolveLBTExhaustion(e.log, correlation.New(), "test", 9, 4*time.Second); got != lbtGo {
 		t.Fatalf("forced LBT outcome = %v", got)
 	}
 	forced := observedOne(t, observed, "channel busy past the LBT bound, transmitting anyway")
@@ -224,7 +224,7 @@ func TestResponseSuppressionAndReplyRoutingAreDebugDecisions(t *testing.T) {
 	e.queue.depth = 8
 	core, observed := observer.New(logging.TraceLevel)
 	e.log = zap.New(core)
-	id := txn.New()
+	id := correlation.New()
 	chatOnly := meshwire.AdvTypeFilter(1 << meshwire.AdvTypeChat)
 	discover, err := meshwire.BuildDiscoverReq(meshwire.DiscoverReq{Filter: chatOnly, Tag: 7})
 	if err != nil {
@@ -236,7 +236,7 @@ func TestResponseSuppressionAndReplyRoutingAreDebugDecisions(t *testing.T) {
 	if suppressed.Level != zap.DebugLevel {
 		t.Errorf("response suppression level = %s, want debug", suppressed.Level)
 	}
-	if fields := suppressed.ContextMap(); fields["txn"] != id.Short() ||
+	if fields := suppressed.ContextMap(); fields["corr"] != id.Short() ||
 		fields["request"] != "discover" || fields["reason"] != "filter-miss" {
 		t.Errorf("response suppression fields = %+v", fields)
 	}
@@ -257,7 +257,7 @@ func TestResponseSuppressionAndReplyRoutingAreDebugDecisions(t *testing.T) {
 		t.Errorf("reply route level = %s, want debug", route.Level)
 	}
 	fields := route.ContextMap()
-	if fields["txn"] != id.Short() || fields["route_source"] != "flood" ||
+	if fields["corr"] != id.Short() || fields["route_source"] != "flood" ||
 		fields["route"] != meshwire.RouteFlood.String() {
 		t.Errorf("reply route fields = %+v", fields)
 	}
@@ -308,7 +308,7 @@ func TestReplyRouteDebugDistinguishesAllSources(t *testing.T) {
 	for _, test := range cases {
 		a := test.answer
 		a.kind = "route-" + test.name
-		e.reply(test.inbound, a, txn.New())
+		e.reply(test.inbound, a, correlation.New())
 	}
 
 	entries := observed.FilterMessage("reply route selected").All()

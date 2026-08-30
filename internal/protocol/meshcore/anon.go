@@ -10,7 +10,7 @@ import (
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/bus"
-	"meshrunner.dev/lotor/internal/txn"
+	"meshrunner.dev/lotor/internal/correlation"
 )
 
 // Anonymous requests, the reference repeater's shape: a stranger who
@@ -116,7 +116,7 @@ func withinBudget(text string, budget int) []byte {
 	return []byte(cut)
 }
 
-func (e *engine) respondAnon(rx *reception, origin txn.ID) {
+func (e *engine) respondAnon(rx *reception, origin correlation.ID) {
 	if rx.opened == nil {
 		return
 	}
@@ -158,9 +158,9 @@ func (e *engine) respondAnon(rx *reception, origin txn.ID) {
 		return // a question nobody defined stays unanswered
 	}
 	if !e.limits.anon.allow(time.Now()) {
-		e.log.Debug("anonymous reply rate-limited", zap.String("txn", origin.Short()))
+		e.log.Debug("anonymous reply rate-limited", zap.String("corr", origin.Short()))
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Txn: origin, At: time.Now(), Reason: reasonRateLimited,
+			Relay: e.relay, Correlation: origin, At: time.Now(), Reason: reasonRateLimited,
 			Kind: "anon-reply",
 		})
 		return

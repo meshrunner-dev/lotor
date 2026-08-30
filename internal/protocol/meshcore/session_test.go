@@ -11,8 +11,8 @@ import (
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
-	"meshrunner.dev/lotor/internal/txn"
 )
 
 // nowTS is where the tests put their clock: the freshness gate reads
@@ -143,7 +143,7 @@ func TestWrongPasswordIsSilence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		e.respondAnon(rxOf(e, pkt), txn.New())
+		e.respondAnon(rxOf(e, pkt), correlation.New())
 	}
 	if n := len(e.queue.entries); n != 0 {
 		t.Fatalf("%d replies queued — wrong or blank passwords must be silence", n)
@@ -282,7 +282,7 @@ func TestAGuesserCannotLockTheOwnerOut(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		e.respondAnon(rxOf(e, pkt), txn.New())
+		e.respondAnon(rxOf(e, pkt), correlation.New())
 	}
 	if n := len(e.queue.entries); n != 0 {
 		t.Fatalf("%d replies to wrong passwords", n)
@@ -293,7 +293,7 @@ func TestAGuesserCannotLockTheOwnerOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.respondAnon(rxOf(e, pkt), txn.New())
+	e.respondAnon(rxOf(e, pkt), correlation.New())
 	if n := len(e.queue.entries); n != 1 {
 		t.Fatalf("%d replies to the right password after a guess burst, want 1", n)
 	}
@@ -311,7 +311,7 @@ func TestARoutedSessionIsNeverCharged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.respondAnon(rxOf(e, pkt), txn.New())
+	e.respondAnon(rxOf(e, pkt), correlation.New())
 	c := e.acl.get(peer.PubKey[:])
 	if c == nil {
 		t.Fatal("no session after login")
@@ -329,7 +329,7 @@ func TestARoutedSessionIsNeverCharged(t *testing.T) {
 		if _, _, handled := e.reqVerdict(rx); !handled {
 			t.Fatal("request not recognised")
 		}
-		e.respondRequest(rx, txn.New())
+		e.respondRequest(rx, correlation.New())
 	}
 	if n := len(e.queue.entries) - served; n != sessionLimitMax+4 {
 		t.Fatalf("%d answers down the taught route, want all %d", n, sessionLimitMax+4)
@@ -388,7 +388,7 @@ func TestKeepAliveKeepsTheSessionAlive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.respondAnon(rxOf(e, pkt), txn.New())
+	e.respondAnon(rxOf(e, pkt), correlation.New())
 
 	c := e.acl.get(peer.PubKey[:])
 	if c == nil {
@@ -401,7 +401,7 @@ func TestKeepAliveKeepsTheSessionAlive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.respondRequest(rxOf(e, req), txn.New())
+	e.respondRequest(rxOf(e, req), correlation.New())
 
 	if again := e.acl.get(peer.PubKey[:]); again == nil {
 		t.Fatal("the session was retired")
@@ -501,7 +501,7 @@ func TestAFreshLoginDropsTheRouteTheOldConversationTaught(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.respondAnon(rxOf(e, pkt), txn.New())
+	e.respondAnon(rxOf(e, pkt), correlation.New())
 	// Every login installs a fresh session object in the table's
 	// place — the composed-then-installed discipline a replayed login
 	// must not be able to short-circuit — so the route is read back
@@ -520,7 +520,7 @@ func TestAFreshLoginDropsTheRouteTheOldConversationTaught(t *testing.T) {
 	if pkt, err = meshcore.ParsePacket(frame.Payload); err != nil {
 		t.Fatal(err)
 	}
-	e.respondAnon(rxOf(e, pkt), txn.New())
+	e.respondAnon(rxOf(e, pkt), correlation.New())
 	if session().out != nil {
 		t.Error("the stale route survived the new login")
 	}
@@ -539,7 +539,7 @@ func TestAFreshLoginDropsTheRouteTheOldConversationTaught(t *testing.T) {
 	if pkt, err = meshcore.ParsePacket(frame.Payload); err != nil {
 		t.Fatal(err)
 	}
-	e.respondAnon(rxOf(e, pkt), txn.New())
+	e.respondAnon(rxOf(e, pkt), correlation.New())
 	if session().out == nil {
 		t.Error("a recheck dropped the route it should stand on")
 	}
@@ -550,7 +550,7 @@ func TestAFreshLoginDropsTheRouteTheOldConversationTaught(t *testing.T) {
 	if pkt, err = meshcore.ParsePacket(frame.Payload); err != nil {
 		t.Fatal(err)
 	}
-	e.respondAnon(rxOf(e, pkt), txn.New())
+	e.respondAnon(rxOf(e, pkt), correlation.New())
 	if session().out != nil {
 		t.Error("a flood login kept a route it must rediscover")
 	}
@@ -675,7 +675,7 @@ func TestAnEmptyAdminPasswordGrantsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.respondAnon(rxOf(e, pkt), txn.New())
+	e.respondAnon(rxOf(e, pkt), correlation.New())
 	if n := len(e.queue.entries); n != 0 {
 		t.Fatalf("an empty password earned %d replies", n)
 	}

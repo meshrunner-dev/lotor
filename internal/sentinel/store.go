@@ -24,7 +24,7 @@ const MemoryJournal = ":memory:"
 // fail its open rather than reach the migration that saves it.
 const schemaTables = `
 CREATE TABLE IF NOT EXISTS frames (
-	txn          TEXT PRIMARY KEY,
+	corr          TEXT PRIMARY KEY,
 	relay        TEXT NOT NULL,
 	at_ms        INTEGER NOT NULL,
 	bytes        INTEGER NOT NULL,
@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS noise_floor (
 CREATE TABLE IF NOT EXISTS tx (
 	at_ms      INTEGER NOT NULL,
 	relay      TEXT NOT NULL,
-	txn        TEXT NOT NULL,
+	corr       TEXT NOT NULL,
 	kind       TEXT NOT NULL,
 	airtime_ms REAL NOT NULL,
 	power_dbm  INTEGER NOT NULL,
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS tx (
 CREATE TABLE IF NOT EXISTS tx_drop_events (
 	at_ms  INTEGER NOT NULL,
 	relay  TEXT NOT NULL,
-	txn    TEXT NOT NULL,
+	corr   TEXT NOT NULL,
 	reason TEXT NOT NULL,
 	kind   TEXT NOT NULL DEFAULT ''
 );
@@ -128,8 +128,8 @@ CREATE INDEX IF NOT EXISTS frames_ptype ON frames(ptype);
 CREATE INDEX IF NOT EXISTS frames_verdict ON frames(verdict);
 CREATE INDEX IF NOT EXISTS relay_states_at ON relay_states(at_ms);
 CREATE INDEX IF NOT EXISTS observer_states_at ON observer_states(at_ms);
-CREATE INDEX IF NOT EXISTS tx_txn ON tx(txn);
-CREATE INDEX IF NOT EXISTS tx_drop_events_txn ON tx_drop_events(txn);
+CREATE INDEX IF NOT EXISTS tx_corr ON tx(corr);
+CREATE INDEX IF NOT EXISTS tx_drop_events_corr ON tx_drop_events(corr);
 CREATE INDEX IF NOT EXISTS tx_drop_events_at ON tx_drop_events(at_ms);
 CREATE INDEX IF NOT EXISTS tx_at ON tx(at_ms);
 CREATE INDEX IF NOT EXISTS metrics_raw_key ON metrics_raw(series, relay, at_ms);
@@ -137,7 +137,7 @@ CREATE INDEX IF NOT EXISTS metrics_raw_key ON metrics_raw(series, relay, at_ms);
 
 // Frame is one journalled reception, judgement included once it lands.
 type Frame struct {
-	Txn         string
+	Correlation string
 	Relay       string
 	At          time.Time
 	Bytes       int
@@ -323,6 +323,9 @@ var grafts = map[string][]graft{
 // migrate brings a journal created by an earlier schema up to date,
 // idempotently.
 func migrate(ctx context.Context, db *sql.DB) error {
+	if err := migrateCorrelationColumns(ctx, db); err != nil {
+		return err
+	}
 	for table, cols := range grafts {
 		present, err := tableColumns(ctx, db, table)
 		if err != nil {
@@ -337,6 +340,41 @@ func migrate(ctx context.Context, db *sql.DB) error {
 				return fmt.Errorf("graft %s.%s: %w", table, c.column, err)
 			}
 		}
+	}
+	return nil
+}
+
+// migrateCorrelationColumns retires the old radio-ambiguous label
+// while preserving every journalled causal chain. These literals are
+// the sole remaining use of the legacy vocabulary: they identify the
+// schema an older binary actually wrote.
+func migrateCorrelationColumns(ctx context.Context, db *sql.DB) error {
+	const legacyColumn = "txn"
+	for _, table := range []string{"frames", "tx", "tx_drop_events"} {
+		present, err := tableColumns(ctx, db, table)
+		if err != nil {
+			return err
+		}
+		switch {
+		case present["corr"] && present[legacyColumn]:
+			return fmt.Errorf("%s has both corr and legacy %s columns", table, legacyColumn)
+		case present["corr"]:
+			continue
+		case present[legacyColumn]:
+			if _, err := db.ExecContext(ctx,
+				fmt.Sprintf(`ALTER TABLE %s RENAME COLUMN %s TO corr`, table, legacyColumn)); err != nil {
+				return fmt.Errorf("rename %s.%s to corr: %w", table, legacyColumn, err)
+			}
+		default:
+			return fmt.Errorf("%s has no correlation column", table)
+		}
+	}
+	// SQLite updates an index definition when its column is renamed,
+	// but not the index's own name. Drop those historical names before
+	// schemaIndexes creates their corr-labelled replacements.
+	if _, err := db.ExecContext(ctx,
+		`DROP INDEX IF EXISTS tx_txn; DROP INDEX IF EXISTS tx_drop_events_txn;`); err != nil {
+		return fmt.Errorf("drop legacy correlation indexes: %w", err)
 	}
 	return nil
 }
@@ -367,11 +405,11 @@ func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]boo
 // reception — the two halves of the old heard/judged pair.
 func (s *store) insertObserved(ctx context.Context, f Frame) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO frames (txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms,
+		`INSERT OR REPLACE INTO frames (corr, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms,
 		        signal_dbm, freq_err_hz, ptype, route, scope, path_len, verdict, duplicate_of,
 		        node, pubkey, detail)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		f.Txn, f.Relay, f.At.UnixMilli(), f.Bytes, f.RSSI, f.SNR,
+		f.Correlation, f.Relay, f.At.UnixMilli(), f.Bytes, f.RSSI, f.SNR,
 		float64(f.Airtime)/float64(time.Millisecond), f.SignalRSSI, f.FreqErrHz,
 		f.Type, f.Route, f.Scope, f.PathLen, f.Verdict, f.DuplicateOf,
 		f.Node, f.PubKey, f.Detail)
@@ -680,8 +718,8 @@ func (s *store) prune(ctx context.Context, now time.Time,
 	}
 	if maxFrames > 0 {
 		if _, err := s.db.ExecContext(ctx,
-			`DELETE FROM frames WHERE txn IN (
-			   SELECT txn FROM frames ORDER BY at_ms DESC LIMIT -1 OFFSET ?)`,
+			`DELETE FROM frames WHERE corr IN (
+			   SELECT corr FROM frames ORDER BY at_ms DESC LIMIT -1 OFFSET ?)`,
 			maxFrames); err != nil {
 			return err
 		}
@@ -693,13 +731,14 @@ func (s *store) prune(ctx context.Context, now time.Time,
 	return err
 }
 
-// FrameQuery filters RecentFrames; zero values mean "any". The txn
-// prefix — the short displayed form of an id — finds its full rows.
+// FrameQuery filters RecentFrames; zero values mean "any". The
+// correlation prefix — the short displayed form of an id — finds its
+// full rows.
 type FrameQuery struct {
-	TxnPrefix string
-	Relay     string
-	Type      string
-	Verdict   string
+	CorrelationPrefix string
+	Relay             string
+	Type              string
+	Verdict           string
 	// Since and Until bound the window; zero means unbounded on that
 	// side. Both are inclusive: a frame stamped exactly on the edge
 	// was asked for.
@@ -714,9 +753,9 @@ type FrameQuery struct {
 // "matching" means. Every fragment is a literal; values ride in args.
 func (fq FrameQuery) query(base string) (string, []any) {
 	q, args := base, []any{}
-	if fq.TxnPrefix != "" {
-		lo, hi := prefixRange(fq.TxnPrefix)
-		q += ` AND txn >= ? AND txn < ?`
+	if fq.CorrelationPrefix != "" {
+		lo, hi := prefixRange(fq.CorrelationPrefix)
+		q += ` AND corr >= ? AND corr < ?`
 		args = append(args, lo, hi)
 	}
 	if fq.Relay != "" {
@@ -744,9 +783,9 @@ func (fq FrameQuery) query(base string) (string, []any) {
 
 // RecentFrames returns the newest matching frames, newest first.
 // Filtering happens in SQL: a busy channel cannot starve a filtered
-// view, and the txn prefix is an index range, not a LIKE.
+// view, and the correlation prefix is an index range, not a LIKE.
 func (s *store) RecentFrames(ctx context.Context, fq FrameQuery) ([]Frame, error) {
-	q, args := fq.query(`SELECT txn, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms, signal_dbm, freq_err_hz,
+	q, args := fq.query(`SELECT corr, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms, signal_dbm, freq_err_hz,
 	             ptype, route, scope, path_len, verdict, duplicate_of, node, pubkey, detail
 	      FROM frames WHERE 1=1`)
 	q += ` ORDER BY at_ms DESC LIMIT ?`
@@ -763,7 +802,7 @@ func (s *store) RecentFrames(ctx context.Context, fq FrameQuery) ([]Frame, error
 		var f Frame
 		var atMS int64
 		var airtimeMS float64
-		if err := rows.Scan(&f.Txn, &f.Relay, &atMS, &f.Bytes, &f.RSSI, &f.SNR,
+		if err := rows.Scan(&f.Correlation, &f.Relay, &atMS, &f.Bytes, &f.RSSI, &f.SNR,
 			&airtimeMS, &f.SignalRSSI, &f.FreqErrHz,
 			&f.Type, &f.Route, &f.Scope, &f.PathLen, &f.Verdict, &f.DuplicateOf,
 			&f.Node, &f.PubKey, &f.Detail); err != nil {
@@ -835,12 +874,12 @@ func (s *store) Nodes(ctx context.Context) ([]Node, error) {
 	return out, rows.Err()
 }
 
-// Chain returns a transaction's frames and its whole duplicate
+// Chain returns a correlation's frames and its whole duplicate
 // family: the chain is resolved to its root first — the original
 // every duplicate points at — then the root and all its duplicates
 // are returned, siblings included, whichever member was asked about.
-func (s *store) Chain(ctx context.Context, txnPrefix string) ([]Frame, error) {
-	own, err := s.RecentFrames(ctx, FrameQuery{TxnPrefix: txnPrefix, Limit: 16})
+func (s *store) Chain(ctx context.Context, correlationPrefix string) ([]Frame, error) {
+	own, err := s.RecentFrames(ctx, FrameQuery{CorrelationPrefix: correlationPrefix, Limit: 16})
 	if err != nil || len(own) == 0 {
 		return own, err
 	}
@@ -848,8 +887,8 @@ func (s *store) Chain(ctx context.Context, txnPrefix string) ([]Frame, error) {
 	var out []Frame
 	add := func(frames []Frame) {
 		for _, f := range frames {
-			if !seen[f.Txn] {
-				seen[f.Txn] = true
+			if !seen[f.Correlation] {
+				seen[f.Correlation] = true
 				out = append(out, f)
 			}
 		}
@@ -857,7 +896,7 @@ func (s *store) Chain(ctx context.Context, txnPrefix string) ([]Frame, error) {
 	for _, f := range own {
 		root := f
 		if f.DuplicateOf != "" {
-			orig, err := s.RecentFrames(ctx, FrameQuery{TxnPrefix: f.DuplicateOf, Limit: 1})
+			orig, err := s.RecentFrames(ctx, FrameQuery{CorrelationPrefix: f.DuplicateOf, Limit: 1})
 			if err != nil {
 				return nil, err
 			}
@@ -866,7 +905,7 @@ func (s *store) Chain(ctx context.Context, txnPrefix string) ([]Frame, error) {
 			}
 		}
 		add([]Frame{root})
-		dups, err := s.duplicatesOf(ctx, root.Txn[:min(len(root.Txn), 12)])
+		dups, err := s.duplicatesOf(ctx, root.Correlation[:min(len(root.Correlation), 12)])
 		if err != nil {
 			return nil, err
 		}
@@ -878,25 +917,25 @@ func (s *store) Chain(ctx context.Context, txnPrefix string) ([]Frame, error) {
 
 func (s *store) duplicatesOf(ctx context.Context, short string) ([]Frame, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT txn FROM frames WHERE duplicate_of = ? ORDER BY at_ms`, short)
+		`SELECT corr FROM frames WHERE duplicate_of = ? ORDER BY at_ms`, short)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var txns []string
+	var correlations []string
 	for rows.Next() {
 		var t string
 		if err := rows.Scan(&t); err != nil {
 			return nil, err
 		}
-		txns = append(txns, t)
+		correlations = append(correlations, t)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	var out []Frame
-	for _, t := range txns {
-		f, err := s.RecentFrames(ctx, FrameQuery{TxnPrefix: t, Limit: 1})
+	for _, t := range correlations {
+		f, err := s.RecentFrames(ctx, FrameQuery{CorrelationPrefix: t, Limit: 1})
 		if err != nil {
 			return nil, err
 		}
@@ -1037,7 +1076,7 @@ type Sent struct {
 // recordSent journals one emission and the sliding-hour metric derived
 // from it in one transaction. A ledger row without its metric — or a
 // metric without the ledger row that proves it — is not a valid event.
-func (s *store) recordSent(ctx context.Context, at time.Time, relay, txn, kind string,
+func (s *store) recordSent(ctx context.Context, at time.Time, relay, correlationID, kind string,
 	airtime time.Duration, powerDBm int8, shadow bool, window time.Duration,
 ) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -1046,9 +1085,9 @@ func (s *store) recordSent(ctx context.Context, at time.Time, relay, txn, kind s
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO tx (at_ms, relay, txn, kind, airtime_ms, power_dbm, shadow)
+		`INSERT INTO tx (at_ms, relay, corr, kind, airtime_ms, power_dbm, shadow)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		at.UnixMilli(), relay, txn, kind,
+		at.UnixMilli(), relay, correlationID, kind,
 		float64(airtime)/float64(time.Millisecond), powerDBm, shadow); err != nil {
 		return err
 	}
@@ -1058,15 +1097,15 @@ func (s *store) recordSent(ctx context.Context, at time.Time, relay, txn, kind s
 	return tx.Commit()
 }
 
-// SentFor lists the emissions of one transaction, oldest first. The
+// SentFor lists the emissions of one correlation, oldest first. The
 // argument is a prefix — the short form an operator reads in a log
 // line addresses its rows, exactly as it does for receptions, and a
 // full id is simply a prefix of itself.
-func (s *store) SentFor(ctx context.Context, txn string) ([]Sent, error) {
-	lo, hi := prefixRange(txn)
+func (s *store) SentFor(ctx context.Context, correlationPrefix string) ([]Sent, error) {
+	lo, hi := prefixRange(correlationPrefix)
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT at_ms, relay, kind, airtime_ms, power_dbm, shadow
-		 FROM tx WHERE txn >= ? AND txn < ? ORDER BY at_ms`, lo, hi)
+		 FROM tx WHERE corr >= ? AND corr < ? ORDER BY at_ms`, lo, hi)
 	if err != nil {
 		return nil, err
 	}
@@ -1114,19 +1153,19 @@ func (s *store) TxSince(ctx context.Context, since time.Time) ([]Sent, error) {
 // recordTxDrop tallies one refused emission by reason — bounded rows,
 // like the corrupt tally.
 // recordTxDrop journals one refused emission — the event with its
-// transaction, and the by-reason tally — in one transaction, so the
+// correlation, and the by-reason tally — in one transaction, so the
 // aggregate can never disagree with the events it summarises. The
-// events answer "what happened to txn X"; the tally answers "what
+// events answer "what happened to corr X"; the tally answers "what
 // does this site lose to".
-func (s *store) recordTxDrop(ctx context.Context, at time.Time, relay, txn, reason, kind string) error {
+func (s *store) recordTxDrop(ctx context.Context, at time.Time, relay, correlationID, reason, kind string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO tx_drop_events (at_ms, relay, txn, reason, kind) VALUES (?, ?, ?, ?, ?)`,
-		at.UnixMilli(), relay, txn, reason, kind); err != nil {
+		`INSERT INTO tx_drop_events (at_ms, relay, corr, reason, kind) VALUES (?, ?, ?, ?, ?)`,
+		at.UnixMilli(), relay, correlationID, reason, kind); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -1141,20 +1180,20 @@ func (s *store) recordTxDrop(ctx context.Context, at time.Time, relay, txn, reas
 
 // TxDropEvent is one refused emission, as the journal remembers it.
 type TxDropEvent struct {
-	At     time.Time
-	Relay  string
-	Txn    string
-	Reason string
-	Kind   string
+	At          time.Time
+	Relay       string
+	Correlation string
+	Reason      string
+	Kind        string
 }
 
-// DropsFor lists the refusals recorded under one transaction prefix,
+// DropsFor lists the refusals recorded under one correlation prefix,
 // oldest first — the missing half of the heard → judged → sent chain.
-func (s *store) DropsFor(ctx context.Context, txnPrefix string) ([]TxDropEvent, error) {
-	lo, hi := prefixRange(txnPrefix)
+func (s *store) DropsFor(ctx context.Context, correlationPrefix string) ([]TxDropEvent, error) {
+	lo, hi := prefixRange(correlationPrefix)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT at_ms, relay, txn, reason, kind FROM tx_drop_events
-		  WHERE txn >= ? AND txn < ? ORDER BY at_ms`, lo, hi)
+		`SELECT at_ms, relay, corr, reason, kind FROM tx_drop_events
+		  WHERE corr >= ? AND corr < ? ORDER BY at_ms`, lo, hi)
 	if err != nil {
 		return nil, err
 	}
@@ -1163,7 +1202,7 @@ func (s *store) DropsFor(ctx context.Context, txnPrefix string) ([]TxDropEvent, 
 	for rows.Next() {
 		var e TxDropEvent
 		var at int64
-		if err := rows.Scan(&at, &e.Relay, &e.Txn, &e.Reason, &e.Kind); err != nil {
+		if err := rows.Scan(&at, &e.Relay, &e.Correlation, &e.Reason, &e.Kind); err != nil {
 			return nil, err
 		}
 		e.At = time.UnixMilli(at)

@@ -111,7 +111,7 @@ func TestVerdicts(t *testing.T) {
 	}
 }
 
-func TestDuplicateChainsToFirstTransaction(t *testing.T) {
+func TestDuplicateChainsToFirstCorrelation(t *testing.T) {
 	e, sub := testEngine(t)
 
 	e.judge(newFakeDevice(), frame(floodAdvert))
@@ -124,9 +124,9 @@ func TestDuplicateChainsToFirstTransaction(t *testing.T) {
 	if judged[1].Verdict != "duplicate" {
 		t.Fatalf("second copy verdict = %q", judged[1].Verdict)
 	}
-	if judged[1].DuplicateOf != judged[0].Txn.Short() {
-		t.Errorf("duplicate_of = %q, want the first transaction %q",
-			judged[1].DuplicateOf, judged[0].Txn.Short())
+	if judged[1].DuplicateOf != judged[0].Correlation.Short() {
+		t.Errorf("duplicate_of = %q, want the first correlation %q",
+			judged[1].DuplicateOf, judged[0].Correlation.Short())
 	}
 }
 

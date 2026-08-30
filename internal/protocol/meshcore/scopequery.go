@@ -14,8 +14,8 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
-	"meshrunner.dev/lotor/internal/txn"
 )
 
 // scopeQueryWait bounds how long an answer may take. The responder
@@ -151,7 +151,7 @@ func (e *engine) drainScopeAsk(dev radio.Device, now time.Time) {
 		// The slot is taken only once the question is really queued:
 		// holding it for a dropped question blocks the next one for a
 		// window nothing ever opened.
-		id := txn.New()
+		id := correlation.New()
 		if !e.enqueue(dev, pkt, "scope-req", id, prioDirect, 0) {
 			q.started.refused(errors.New(
 				"the outbound queue is full — the question never left"))
@@ -165,7 +165,7 @@ func (e *engine) drainScopeAsk(dev radio.Device, now time.Time) {
 			func() { e.wakeReceiver("scope-deadline") })
 		q.started.taken()
 		e.log.Info("asking a neighbour for its scopes",
-			zap.String("txn", id.Short()), zap.String("peer", shortKey(q.peer[:])))
+			zap.String("corr", id.Short()), zap.String("peer", shortKey(q.peer[:])))
 	default:
 	}
 }

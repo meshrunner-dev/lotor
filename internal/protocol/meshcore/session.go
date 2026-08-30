@@ -10,7 +10,7 @@ import (
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/bus"
-	"meshrunner.dev/lotor/internal/txn"
+	"meshrunner.dev/lotor/internal/correlation"
 )
 
 // Client sessions, the reference repeater's shape. A companion logs in
@@ -79,7 +79,7 @@ const (
 // respondLogin answers a password attempt. Unlike the other anonymous
 // questions this one is served whatever the inbound route — a
 // companion that has not found a path yet floods it.
-func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, origin txn.ID) {
+func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, origin correlation.ID) {
 	pkt := rx.pkt
 	// Named permissively or not at all: an access mode nobody resolved
 	// is a door nobody opened. The admin word is its own door, though:
@@ -110,7 +110,7 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	// which is the part the reference's RTC-less nodes cannot afford.
 	if skew := time.Since(time.Unix(int64(ts), 0)); skew > loginMaxSkew || skew < -loginMaxSkew {
 		e.log.Debug("login refused: stale or future timestamp",
-			zap.String("txn", origin.Short()), zap.Duration("skew", skew))
+			zap.String("corr", origin.Short()), zap.Duration("skew", skew))
 		return
 	}
 	c := e.admitLogin(senderPub, secret, password, ts, pkt.IsRouteFlood(), origin)
@@ -122,7 +122,7 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	// from, and its retry refused as a replay.
 	body, err := loginReply(c)
 	if err != nil {
-		e.log.Warn("login reply abandoned", zap.String("txn", origin.Short()), zap.Error(err))
+		e.log.Warn("login reply abandoned", zap.String("corr", origin.Short()), zap.Error(err))
 		return
 	}
 
@@ -134,7 +134,7 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	// it, so the very frame that opened it opens it again.
 	if err := e.acl.put(c); err != nil {
 		e.log.Warn("login refused: the session table would not take it",
-			zap.String("txn", origin.Short()),
+			zap.String("corr", origin.Short()),
 			zap.String("pubkey", shortKey(c.pubKey[:])), zap.Error(err))
 		return
 	}
@@ -143,7 +143,7 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	if c.isAdmin() {
 		role = "admin"
 	}
-	e.log.Info(role+" logged in", zap.String("txn", origin.Short()),
+	e.log.Info(role+" logged in", zap.String("corr", origin.Short()),
 		zap.String("pubkey", shortKey(c.pubKey[:])))
 	// A login reply echoes no tag: the reference puts its own clock in
 	// that position, so the frame's timestamp is the clock and the
@@ -169,7 +169,7 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 // before that same key was promoted, demote the admin it replayed
 // against while being correctly refused.
 func (e *engine) admitLogin(senderPub, secret []byte, password string,
-	ts uint32, flood bool, origin txn.ID,
+	ts uint32, flood bool, origin correlation.ID,
 ) *client {
 	live := e.acl.get(senderPub)
 	var c client
@@ -201,11 +201,11 @@ func (e *engine) admitLogin(senderPub, secret []byte, password string,
 		c.granted = false
 		c.secret = secret
 	default:
-		e.log.Debug("login refused", zap.String("txn", origin.Short()))
+		e.log.Debug("login refused", zap.String("corr", origin.Short()))
 		return nil
 	}
 	if ts <= c.lastTimestamp {
-		e.log.Debug("login replay refused", zap.String("txn", origin.Short()))
+		e.log.Debug("login replay refused", zap.String("corr", origin.Short()))
 		return nil
 	}
 	// A login with a password opens a new conversation, and the route
@@ -267,7 +267,7 @@ func (e *engine) openReq(pkt *meshcore.Packet) (*client, []byte) {
 }
 
 // respondRequest serves one authenticated request.
-func (e *engine) respondRequest(rx *reception, origin txn.ID) {
+func (e *engine) respondRequest(rx *reception, origin correlation.ID) {
 	if rx.opened == nil || rx.opened.session == nil {
 		return
 	}
@@ -278,7 +278,7 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 		return
 	}
 	if ts <= c.lastTimestamp {
-		e.log.Debug("request replay refused", zap.String("txn", origin.Short()))
+		e.log.Debug("request replay refused", zap.String("corr", origin.Short()))
 		return
 	}
 	// The budget charges only the answers that flood — the reference
@@ -287,7 +287,7 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 	// every answer cross the whole mesh. One that did costs a single
 	// directed emission, and flows as freely as the reference lets it.
 	if c.out == nil && !c.asks.allow(time.Now()) {
-		e.log.Debug("session rate-limited — flood answers", zap.String("txn", origin.Short()))
+		e.log.Debug("session rate-limited — flood answers", zap.String("corr", origin.Short()))
 		e.dropRateLimited(origin)
 		return
 	}
@@ -308,7 +308,7 @@ func (e *engine) respondRequest(rx *reception, origin txn.ID) {
 	// and discovering the route afterwards produced answers that
 	// could not be sealed — with the replay guard already spent, so
 	// the client's identical retry was refused as a replay.
-	log := e.log.With(zap.String("txn", origin.Short()))
+	log := e.log.With(zap.String("corr", origin.Short()))
 	body, answered := e.answerRequest(c, args, e.answerBudget(pkt), log)
 	if !answered {
 		request := "empty"
@@ -396,9 +396,9 @@ func (e *engine) queueLen() int {
 }
 
 // dropRateLimited counts a refusal that never became a packet.
-func (e *engine) dropRateLimited(origin txn.ID) {
+func (e *engine) dropRateLimited(origin correlation.ID) {
 	e.bus.Publish(bus.TxDropped{
-		Relay: e.relay, Txn: origin, At: time.Now(), Reason: reasonRateLimited,
+		Relay: e.relay, Correlation: origin, At: time.Now(), Reason: reasonRateLimited,
 		Kind: "answer",
 	})
 }
@@ -406,10 +406,10 @@ func (e *engine) dropRateLimited(origin txn.ID) {
 // storeRefused reports work abandoned because the replay guard could
 // not be made durable. Serving it anyway would leave the mesh with an
 // answer this node cannot promise not to give twice.
-func (e *engine) storeRefused(origin txn.ID, what string, err error) {
+func (e *engine) storeRefused(origin correlation.ID, what string, err error) {
 	e.log.Warn("session store refused the replay guard — "+what+" not served",
-		zap.String("txn", origin.Short()), zap.Error(err))
+		zap.String("corr", origin.Short()), zap.Error(err))
 	e.bus.Publish(bus.TxDropped{
-		Relay: e.relay, Txn: origin, At: time.Now(), Reason: "session-store", Kind: "answer",
+		Relay: e.relay, Correlation: origin, At: time.Now(), Reason: "session-store", Kind: "answer",
 	})
 }

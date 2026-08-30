@@ -61,7 +61,7 @@ func (e *engine) telemetryBody(permMask byte, budget int) []byte {
 }
 
 // telemetryBodyLogged is the production path's form: the caller hands
-// down the transaction-enriched logger of the request being answered.
+// down the correlation-enriched logger of the request being answered.
 // The plain wrapper above keeps the codec independently testable.
 func (e *engine) telemetryBodyLogged(log *zap.Logger, permMask byte, budget int) []byte {
 	// Bounded to the route this answer will travel, before anything

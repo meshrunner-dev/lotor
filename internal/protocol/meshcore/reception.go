@@ -3,8 +3,8 @@ package meshcore
 import (
 	"meshrunner.dev/pkg/meshcore"
 
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
-	"meshrunner.dev/lotor/internal/txn"
 )
 
 // reception is one frame decoded exactly once.
@@ -19,7 +19,7 @@ import (
 type reception struct {
 	pkt   *meshcore.Packet
 	frame radio.Frame
-	id    txn.ID
+	id    correlation.ID
 
 	// advert is the announcement this packet carries, parsed and
 	// signature-checked; nil unless ok is true.

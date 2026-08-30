@@ -19,8 +19,8 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
-	"meshrunner.dev/lotor/internal/txn"
 )
 
 // sweepWindow is how long answers are collected, the reference's own
@@ -132,7 +132,7 @@ func (e *engine) drainSweepAsk(dev radio.Device, now time.Time) {
 		// Nothing is opened until the question is really queued: a
 		// window published for a scan that was dropped is a minute of
 		// empty listening, and it blocks every other scan meanwhile.
-		id := txn.New()
+		id := correlation.New()
 		if !e.enqueue(dev, pkt, "discover-req", id, prioDirect, 0) {
 			s.refuse(errors.New("the outbound queue is full — the scan never left"))
 			return
@@ -149,7 +149,7 @@ func (e *engine) drainSweepAsk(dev radio.Device, now time.Time) {
 		e.pendingSweep = s
 		s.started.taken()
 		e.log.Info("scanning the neighbourhood",
-			zap.String("txn", id.Short()), zap.Duration("window", sweepWindow))
+			zap.String("corr", id.Short()), zap.Duration("window", sweepWindow))
 	default:
 	}
 }

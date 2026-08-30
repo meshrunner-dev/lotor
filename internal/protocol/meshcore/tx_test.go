@@ -16,9 +16,9 @@ import (
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/protocol"
 	"meshrunner.dev/lotor/internal/radio"
-	"meshrunner.dev/lotor/internal/txn"
 )
 
 // fakeDevice scripts receptions and records transmissions. Frames
@@ -39,9 +39,9 @@ type fakeDevice struct {
 	// txFault is returned beside the report: with txAirtime non-zero
 	// it is the chip that signalled TxDone and then failed to go back
 	// to listening, which is an emission whatever happened after.
-	txFault   error
-	txAirtime time.Duration
-	lastTxn   txn.ID
+	txFault         error
+	txAirtime       time.Duration
+	lastCorrelation correlation.ID
 }
 
 func newFakeDevice() *fakeDevice {
@@ -87,7 +87,7 @@ func (d *fakeDevice) AssessChannel(context.Context, float64) (bool, error) {
 }
 
 func (d *fakeDevice) Transmit(ctx context.Context, payload []byte, powerDBm int8) (radio.TxReport, error) {
-	d.lastTxn, _ = txn.FromContext(ctx)
+	d.lastCorrelation, _ = correlation.FromContext(ctx)
 	if d.txEntered != nil {
 		close(d.txEntered)
 		time.Sleep(50 * time.Millisecond) // the caller cancels meanwhile
@@ -188,7 +188,7 @@ const rxTestSNR = 8
 // responder directly. Running the verdict first is what fills the
 // reception's opened envelope — the same order production uses.
 func rxOf(e *engine, pkt *meshcore.Packet) *reception {
-	rx := &reception{pkt: pkt, id: txn.New(),
+	rx := &reception{pkt: pkt, id: correlation.New(),
 		frame: radio.Frame{At: time.Now(), SNR: rxTestSNR}}
 	e.verdict(rx)
 	return rx
@@ -260,7 +260,7 @@ func TestQueueRefusesTheOverflow(t *testing.T) {
 	// No engine loop: enqueue directly, depth is 2.
 	for range 3 {
 		pkt, _ := meshcore.BuildAdvert(peer, time.Now(), &meshcore.AdvertData{Name: "p"})
-		e.enqueue(dev, pkt, "relay-flood", txn.New(), 1, 0)
+		e.enqueue(dev, pkt, "relay-flood", correlation.New(), 1, 0)
 	}
 	deadline := time.After(time.Second)
 	for {
@@ -554,7 +554,7 @@ func TestSessionRestartClearsTheQueue(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		e.queue.push(txEntry{pkt: pkt, kind: "relay-flood", origin: txn.New(),
+		e.queue.push(txEntry{pkt: pkt, kind: "relay-flood", origin: correlation.New(),
 			priority: 1, notBefore: time.Now().Add(time.Hour)})
 	}
 	runEngine(t, e, dev) // Run clears what the previous session left
@@ -654,7 +654,7 @@ func TestAbandonedRelayIsCounted(t *testing.T) {
 		if !ok || d.Reason != "malformed" {
 			t.Fatalf("event = %+v, want a malformed drop", ev)
 		}
-		if d.Txn.Short() == (txn.ID{}).Short() {
+		if d.Correlation.Short() == (correlation.ID{}).Short() {
 			t.Error("the drop does not name its reception")
 		}
 	default:
@@ -732,7 +732,7 @@ func TestRadioFaultCountsTheLostEmission(t *testing.T) {
 				if d.Reason != "tx-failed" {
 					t.Fatalf("dropped for %q, want tx-failed", d.Reason)
 				}
-				if d.Txn.Short() == (txn.ID{}).Short() {
+				if d.Correlation.Short() == (correlation.ID{}).Short() {
 					t.Error("the drop does not name its reception")
 				}
 				return
@@ -979,8 +979,8 @@ func TestMultipartUnwrapsToOneAck(t *testing.T) {
 		pkt.SetPathHashSizeAndCount(1, 2)
 		return pkt
 	}
-	e.forwardMultipart(build(1), txn.New())
-	e.forwardMultipart(build(0), txn.New()) // second copy of the same ACK
+	e.forwardMultipart(build(1), correlation.New())
+	e.forwardMultipart(build(0), correlation.New()) // second copy of the same ACK
 
 	if n := len(e.queue.entries); n != 1 {
 		t.Fatalf("%d forwards queued, want the copies collapsed to 1", n)
@@ -1055,7 +1055,7 @@ func TestRequeueIsPacedNotImmediate(t *testing.T) {
 	e, _, sub, _ := txRig(t, "shadow")
 	defer sub.Close()
 	before := time.Now()
-	e.requeue(txEntry{kind: "relay-flood", origin: txn.New()})
+	e.requeue(txEntry{kind: "relay-flood", origin: correlation.New()})
 	entry := e.queue.entries[0]
 	wait := entry.notBefore.Sub(before)
 	if wait < lbtRetryNominal/2 || wait > lbtRetryNominal*3/2+50*time.Millisecond {
@@ -1069,7 +1069,7 @@ func TestRequeueAgesOutUnderTheDropPolicy(t *testing.T) {
 	e, _, sub, _ := txRig(t, "on-air")
 	e.policy.LBTExhausted = "drop"
 	e.busySince = time.Now().Add(-lbtMaxWait - time.Second)
-	e.requeue(txEntry{kind: "relay-flood", origin: txn.New()})
+	e.requeue(txEntry{kind: "relay-flood", origin: correlation.New()})
 
 	if n := len(e.queue.entries); n != 0 {
 		t.Errorf("the aged entry was requeued anyway (%d in the queue)", n)
@@ -1091,7 +1091,7 @@ func TestRequeueKeepsWaitingUnderTheTransmitPolicy(t *testing.T) {
 	e, _, _, _ := txRig(t, "on-air") //nolint:dogsled // the rig answers four things; this needs one
 	e.policy.LBTExhausted = "transmit"
 	e.busySince = time.Now().Add(-lbtMaxWait - time.Second)
-	e.requeue(txEntry{kind: "relay-flood", origin: txn.New()})
+	e.requeue(txEntry{kind: "relay-flood", origin: correlation.New()})
 	if len(e.queue.entries) != 1 {
 		t.Fatal("the entry was dropped under a transmit policy")
 	}
@@ -1100,18 +1100,18 @@ func TestRequeueKeepsWaitingUnderTheTransmitPolicy(t *testing.T) {
 func TestABusySpellStartsOnceAndEndsOnAClearChannel(t *testing.T) {
 	e, dev, _, _ := txRig(t, "on-air")
 	e.policy.LBTExhausted = "drop"
-	e.requeue(txEntry{kind: "relay-flood", origin: txn.New()})
+	e.requeue(txEntry{kind: "relay-flood", origin: correlation.New()})
 	started := e.busySince
 	if started.IsZero() {
 		t.Fatal("the first refusal did not start the spell")
 	}
-	e.requeue(txEntry{kind: "relay-flood", origin: txn.New()})
+	e.requeue(txEntry{kind: "relay-flood", origin: correlation.New()})
 	if !e.busySince.Equal(started) {
 		t.Errorf("a second refusal restarted the spell: %v then %v", started, e.busySince)
 	}
 	// A clear channel ends it, so sparse refusals never accumulate
 	// into a drop the way a continuous spell does.
-	if _, err := e.clearChannel(context.Background(), dev, zap.NewNop(), txn.New(), "test"); err != nil {
+	if _, err := e.clearChannel(context.Background(), dev, zap.NewNop(), correlation.New(), "test"); err != nil {
 		t.Fatalf("clearChannel: %v", err)
 	}
 	if !e.busySince.IsZero() {
@@ -1178,7 +1178,7 @@ func TestAFullQueueRefusesTheOrdersItDrops(t *testing.T) {
 	e.enqueueAfter(&meshcore.Packet{
 		Header:  meshcore.MakeHeader(meshcore.RouteDirect, meshcore.PayloadTypeAck, meshcore.PayloadVer1),
 		Payload: []byte{1, 2, 3, 4},
-	}, "filler", txn.New(), prioDirect, time.Hour)
+	}, "filler", correlation.New(), prioDirect, time.Hour)
 
 	floodClock, localClock := e.nextFloodAdvert, e.nextLocalAdvert
 	o := &advertOrder{kind: "advert-local", started: newAck()}
@@ -1301,7 +1301,7 @@ func TestAFrameRadiatedThenFaultedIsCountedOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := txn.New()
+	id := correlation.New()
 	e.enqueueAfter(pkt, "advert-flood", id, prioDirect, 0)
 
 	err = e.txPhase(context.Background(), dev)
@@ -1321,7 +1321,7 @@ func TestAFrameRadiatedThenFaultedIsCountedOnce(t *testing.T) {
 		t.Error("the duty ledger lost the airtime")
 	}
 	// Witnessed too: our own words must not come back as a stranger's.
-	if _, dup := e.seen.witness(pkt.Hash(), txn.New(), time.Now()); !dup {
+	if _, dup := e.seen.witness(pkt.Hash(), correlation.New(), time.Now()); !dup {
 		t.Error("the emission was never witnessed — its echo would be re-flooded")
 	}
 	// And exactly one journal line for it.
@@ -1395,7 +1395,7 @@ func TestTheCADKnobIsADeclaredDivergence(t *testing.T) {
 	log := zap.NewNop()
 
 	// On — this node's default — the busy channel is waited out.
-	outcome, err := e.clearChannel(context.Background(), dev, log, txn.New(), "test")
+	outcome, err := e.clearChannel(context.Background(), dev, log, correlation.New(), "test")
 	if err != nil || outcome != lbtGo {
 		t.Fatalf("outcome %v err %v", outcome, err)
 	}
@@ -1407,7 +1407,7 @@ func TestTheCADKnobIsADeclaredDivergence(t *testing.T) {
 	// radio at all, and the frame is keyed straight away.
 	e.policy.CAD = false
 	dev.busy = 3
-	outcome, err = e.clearChannel(context.Background(), dev, log, txn.New(), "test")
+	outcome, err = e.clearChannel(context.Background(), dev, log, correlation.New(), "test")
 	if err != nil || outcome != lbtGo {
 		t.Fatalf("with CAD off: outcome %v err %v", outcome, err)
 	}

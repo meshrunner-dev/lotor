@@ -17,9 +17,9 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/radio"
-	"meshrunner.dev/lotor/internal/txn"
 )
 
 // snrThresholds is the least SNR at which each spreading factor —
@@ -85,7 +85,7 @@ func (e *engine) rxDelayAndScore(frame radio.Frame) (time.Duration, float64) {
 type heldRx struct {
 	pkt    *meshcore.Packet
 	frame  radio.Frame
-	id     txn.ID
+	id     correlation.ID
 	heldAt time.Time
 	due    time.Time
 }
@@ -101,7 +101,7 @@ func (e *engine) drainHeld(dev radio.Device, now time.Time) {
 		}
 		if logging.On(e.log) {
 			fields := []zap.Field{
-				zap.String("txn", h.id.Short()),
+				zap.String("corr", h.id.Short()),
 				zap.Duration("late_by", max(0, now.Sub(h.due))),
 				zap.Int("held_depth", len(e.held)),
 			}

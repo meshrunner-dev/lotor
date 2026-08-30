@@ -18,7 +18,7 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
-	"meshrunner.dev/lotor/internal/txn"
+	"meshrunner.dev/lotor/internal/correlation"
 )
 
 // commandMaxReply bounds one answer: the reference's reply buffer is
@@ -79,14 +79,14 @@ func (e *engine) openText(pkt *meshcore.Packet) (*client, []byte) {
 // then the reference's retry semantics — a repeat of the newest
 // timestamp is the client asking again for an answer it missed, and
 // re-running the command would apply a mutation twice.
-func (e *engine) runCommand(rx *reception, origin txn.ID) {
+func (e *engine) runCommand(rx *reception, origin correlation.ID) {
 	if rx.opened == nil || rx.opened.session == nil || rx.opened.text == nil || e.commands == nil {
 		return
 	}
 	pkt, c, plain, text := rx.pkt, rx.opened.session, rx.opened.plain, rx.opened.text
 	ts := uint32(text.Timestamp.Unix())
 	if ts < c.lastTimestamp {
-		e.log.Debug("command replay refused", zap.String("txn", origin.Short()))
+		e.log.Debug("command replay refused", zap.String("corr", origin.Short()))
 		return
 	}
 	retry := ts == c.lastTimestamp
@@ -94,7 +94,7 @@ func (e *engine) runCommand(rx *reception, origin txn.ID) {
 	// answer: an admin at the end of a taught route is the person
 	// this node exists to obey, not an amplification risk.
 	if c.out == nil && !c.asks.allow(time.Now()) {
-		e.log.Debug("command rate-limited — flood answers", zap.String("txn", origin.Short()))
+		e.log.Debug("command rate-limited — flood answers", zap.String("corr", origin.Short()))
 		e.dropRateLimited(origin)
 		return
 	}
@@ -136,15 +136,15 @@ func (e *engine) runCommand(rx *reception, origin txn.ID) {
 		// The reference answers a retry with an empty reply rather
 		// than running the line again: the command already took.
 		e.log.Debug("command retried — not run again",
-			zap.String("txn", origin.Short()), zap.String("command", safeCommandLine(line)))
+			zap.String("corr", origin.Short()), zap.String("command", safeCommandLine(line)))
 	} else {
 		out = e.commands(line, c.pubKey[:])
 		e.log.Info("command from the air",
-			zap.String("txn", origin.Short()),
+			zap.String("corr", origin.Short()),
 			zap.String("pubkey", shortKey(c.pubKey[:])),
 			zap.String("command", safeCommandLine(line)))
 		e.log.Debug("command answered",
-			zap.String("txn", origin.Short()), zap.String("reply", safeCommandReply(line, out)))
+			zap.String("corr", origin.Short()), zap.String("reply", safeCommandReply(line, out)))
 	}
 	if out == "" {
 		return
@@ -172,7 +172,7 @@ const txtAckDelay = 200 * time.Millisecond
 // the timestamp, the flags and the text exactly — never the cipher's
 // padding, which the sender never hashed either.
 func (e *engine) ackText(inbound *meshcore.Packet, c *client, plain []byte,
-	text *meshcore.TextPlaintext, origin txn.ID,
+	text *meshcore.TextPlaintext, origin correlation.ID,
 ) {
 	end := 5 + len(text.Text)
 	if end > len(plain) {
@@ -180,7 +180,7 @@ func (e *engine) ackText(inbound *meshcore.Packet, c *client, plain []byte,
 	}
 	ack, err := meshcore.BuildTextAck(plain[:end], c.pubKey[:])
 	if err != nil {
-		e.log.Warn("command ack build failed", zap.String("txn", origin.Short()), zap.Error(err))
+		e.log.Warn("command ack build failed", zap.String("corr", origin.Short()), zap.Error(err))
 		return
 	}
 	scope := e.replyScope(&reception{pkt: inbound})
@@ -203,12 +203,12 @@ func (e *engine) ackText(inbound *meshcore.Packet, c *client, plain []byte,
 
 // replyText sends one command's output back as a text message, down
 // the route the admin taught when there is one.
-func (e *engine) replyText(inbound *meshcore.Packet, c *client, plain []byte, origin txn.ID) {
+func (e *engine) replyText(inbound *meshcore.Packet, c *client, plain []byte, origin correlation.ID) {
 	pkt, err := meshcore.BuildDatagram(meshcore.PayloadTypeTxtMsg,
 		c.pubKey[:meshcore.PathHashSize], e.id.PubKey[:meshcore.PathHashSize],
 		c.secret, plain)
 	if err != nil {
-		e.log.Warn("command reply build failed", zap.String("txn", origin.Short()), zap.Error(err))
+		e.log.Warn("command reply build failed", zap.String("corr", origin.Short()), zap.Error(err))
 		return
 	}
 	scope := e.replyScope(&reception{pkt: inbound})

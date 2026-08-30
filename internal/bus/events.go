@@ -3,18 +3,18 @@ package bus
 import (
 	"time"
 
-	"meshrunner.dev/lotor/internal/txn"
+	"meshrunner.dev/lotor/internal/correlation"
 )
 
 // FrameHeard is published for every frame a relay's radio delivers,
 // before any protocol judgement.
 type FrameHeard struct {
-	Relay string
-	Txn   txn.ID
-	At    time.Time
-	Bytes int
-	RSSI  float64
-	SNR   float64
+	Relay       string
+	Correlation correlation.ID
+	At          time.Time
+	Bytes       int
+	RSSI        float64
+	SNR         float64
 	// SignalRSSI is the despread signal's own power; below the noise
 	// floor the plain RSSI mostly measures the noise.
 	SignalRSSI float64
@@ -34,9 +34,9 @@ type FrameHeard struct {
 // longer leave a row forever without its verdict, or a verdict
 // without its reception.
 type FrameJudged struct {
-	Relay   string
-	Txn     txn.ID
-	Verdict string
+	Relay       string
+	Correlation correlation.ID
+	Verdict     string
 	// The reception the verdict is about, as FrameHeard carried it.
 	At         time.Time
 	Bytes      int
@@ -45,7 +45,7 @@ type FrameJudged struct {
 	SignalRSSI float64
 	FreqErrHz  float64
 	Airtime    time.Duration
-	// DuplicateOf links a suppressed frame to the transaction that
+	// DuplicateOf links a suppressed frame to the correlation that
 	// carried the first copy, so log chains can be followed.
 	DuplicateOf string
 	// Wire identity, protocol vocabulary; empty on malformed frames.
@@ -66,25 +66,26 @@ type FrameJudged struct {
 
 // FrameCorrupt is published for receptions that failed integrity
 // checks — RF noise is traffic too, and silence about it would hide a
-// site's health. It carries a transaction even though no packet could
+// site's health. It carries a correlation even though no packet could
 // be parsed: the receive and journal logs still describe one causal
 // event.
 type FrameCorrupt struct {
-	Relay string
-	Txn   txn.ID
-	At    time.Time
-	Err   string
+	Relay       string
+	Correlation correlation.ID
+	At          time.Time
+	Err         string
 }
 
 // FrameSent is one emission — real, or shadow-journalled by a relay
-// whose gate stops short of keying. Txn links a relayed frame to the
-// reception it answers; originated traffic (adverts) carries its own.
+// whose gate stops short of keying. Correlation links a relayed frame
+// to the reception it answers; originated traffic (adverts) carries
+// its own.
 type FrameSent struct {
-	Relay    string
-	Txn      txn.ID
-	At       time.Time
-	Airtime  time.Duration
-	PowerDBm int8
+	Relay       string
+	Correlation correlation.ID
+	At          time.Time
+	Airtime     time.Duration
+	PowerDBm    int8
 	// Kind names what was sent: relay-flood, relay-direct,
 	// relay-trace, advert-flood, advert-local.
 	Kind string
@@ -99,10 +100,10 @@ type FrameSent struct {
 // TxDropped is an emission the pipeline gave up on, with its reason:
 // queue-full, duty, lbt (when the site chose drop), tx-failed.
 type TxDropped struct {
-	Relay  string
-	Txn    txn.ID
-	At     time.Time
-	Reason string
+	Relay       string
+	Correlation correlation.ID
+	At          time.Time
+	Reason      string
 	// Kind names what was refused — the queue entry's kind, or the
 	// would-be answer's for refusals that never composed a packet.
 	// Empty when the pipeline gave up before it knew.

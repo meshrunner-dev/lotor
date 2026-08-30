@@ -9,7 +9,7 @@ import (
 
 // The window selectors: how frames picks a slice of the journal.
 // Relative and absolute do not overlap — last reaches back from now,
-// since and until name moments, around centres on one transaction —
+// since and until name moments, around centres on one correlation —
 // so each word keeps one meaning and the combinations that would
 // blur them are refused.
 const (
@@ -56,7 +56,7 @@ func parseMoment(text string, now time.Time) (time.Time, error) {
 }
 
 // frameSelectors is one frames line's answer to "which slice": the
-// window edges, the count, and the transaction still to be resolved
+// window edges, the count, and the correlation still to be resolved
 // against the journal.
 type frameSelectors struct {
 	since, until time.Time

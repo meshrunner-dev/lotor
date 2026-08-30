@@ -75,11 +75,11 @@ func TestTheWindowSelectsAndTheCapConfesses(t *testing.T) {
 	if out := run(t, deps, "frames until=2000-01-01"); !strings.Contains(out, "no frames match") {
 		t.Errorf("a window before the journal matched it:\n%s", out)
 	}
-	// around= centres on the transaction it names.
+	// around= centres on the correlation it names.
 	if out := run(t, deps, "frames around="+orig.Short()[:6]+" span=1h"); !strings.Contains(out, "duplicate") {
 		t.Errorf("the window around a frame missed its duplicate:\n%s", out)
 	}
-	if out := run(t, deps, "frames around=ffffff"); !strings.Contains(out, "no transaction starts with") {
+	if out := run(t, deps, "frames around=ffffff"); !strings.Contains(out, "no correlation starts with") {
 		t.Errorf("an unknown anchor was not refused:\n%s", out)
 	}
 	// A capped window owes its reader the total.

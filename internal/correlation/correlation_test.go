@@ -1,4 +1,4 @@
-package txn
+package correlation
 
 import (
 	"context"
@@ -24,23 +24,23 @@ func TestIDsAreDistinct(t *testing.T) {
 	for range 1000 {
 		id := New()
 		if seen[id] {
-			t.Fatal("duplicate transaction id")
+			t.Fatal("duplicate correlation id")
 		}
 		seen[id] = true
 	}
 }
 
-func TestTransactionCrossesAContextBoundary(t *testing.T) {
+func TestCorrelationCrossesAContextBoundary(t *testing.T) {
 	id := New()
 	ctx := WithContext(context.Background(), id)
 	got, ok := FromContext(ctx)
 	if !ok || got != id {
-		t.Fatalf("context transaction = %s, %v; want %s, true", got, ok, id)
+		t.Fatalf("context correlation = %s, %v; want %s, true", got, ok, id)
 	}
 	if _, ok := FromContext(context.Background()); ok {
-		t.Fatal("an empty context invented a transaction")
+		t.Fatal("an empty context invented a correlation")
 	}
 	if _, ok := FromContext(WithContext(context.Background(), ID{})); ok {
-		t.Fatal("a zero transaction became valid correlation")
+		t.Fatal("a zero identifier became valid correlation")
 	}
 }

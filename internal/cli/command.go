@@ -344,7 +344,7 @@ func framesCommand() *command {
 		},
 		detail: []string{
 			"frames [last=<n|span>] [since=<moment>] [until=<moment>] [relay=] [type=] [verdict=]",
-			"frames around=<txn-prefix> [span=<duration>] [relay=] [type=] [verdict=]",
+			"frames around=<corr-prefix> [span=<duration>] [relay=] [type=] [verdict=]",
 			"frames watch [relay=<name>] [type=<type>] [verdict=<verdict>]",
 			"a moment is written the way the views write one: 00:52,",
 			"00:52:18, or \"2026-08-27 23:00\" — a bare clock means its",
@@ -359,7 +359,7 @@ func framesCommand() *command {
 				values: (*session).frameVerdicts},
 			{name: optSince, valued: true, doc: "from this moment on"},
 			{name: optUntil, valued: true, doc: "up to this moment"},
-			{name: optAround, valued: true, doc: "the window around one transaction, by id prefix"},
+			{name: optAround, valued: true, doc: "the window around one correlation, by id prefix"},
 			{name: optSpan, valued: true, doc: "how far around, each side (default 1m)"},
 			{name: optWatch, doc: docWatch},
 		},
@@ -372,10 +372,10 @@ func journalCommands() []*command {
 	return []*command{
 		framesCommand(),
 		{
-			name:  "txn",
-			forms: []form{{"txn <prefix>", "one transaction and its chain"}},
-			takes: &positional{name: "prefix", doc: "a transaction id, or enough of one"},
-			run:   (*session).txn,
+			name:  "corr",
+			forms: []form{{"corr <prefix>", "one correlation and its causal chain"}},
+			takes: &positional{name: "prefix", doc: "a correlation id, or enough of one"},
+			run:   (*session).corr,
 		},
 		{
 			name:   "nodes",

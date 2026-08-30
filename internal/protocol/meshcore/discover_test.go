@@ -7,8 +7,8 @@ import (
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
-	"meshrunner.dev/lotor/internal/txn"
 )
 
 func TestRateLimiterKeepsTheReferenceShape(t *testing.T) {
@@ -82,7 +82,7 @@ func TestScanRespectsPrefixOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.respondDiscover(dev, pkt, txn.New(), 8)
+	e.respondDiscover(dev, pkt, correlation.New(), 8)
 	if len(e.queue.entries) != 1 {
 		t.Fatalf("%d entries queued", len(e.queue.entries))
 	}
@@ -103,7 +103,7 @@ func TestScanForOthersStaysUnanswered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.respondDiscover(dev, pkt, txn.New(), 8)
+	e.respondDiscover(dev, pkt, correlation.New(), 8)
 
 	future, err := meshcore.BuildDiscoverReq(meshcore.DiscoverReq{
 		Filter: meshcore.RepeaterFilter(), Tag: 8,
@@ -112,7 +112,7 @@ func TestScanForOthersStaysUnanswered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.respondDiscover(dev, future, txn.New(), 8)
+	e.respondDiscover(dev, future, correlation.New(), 8)
 
 	if n := len(e.queue.entries); n != 0 {
 		t.Fatalf("%d answers queued — the filter or the since gate leaked", n)
@@ -129,7 +129,7 @@ func TestScanFloodIsRateLimited(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		e.respondDiscover(dev, pkt, txn.New(), 8)
+		e.respondDiscover(dev, pkt, correlation.New(), 8)
 	}
 	if n := len(e.queue.entries); n != discoverLimitMax {
 		t.Fatalf("%d answers queued, want the cap %d", n, discoverLimitMax)

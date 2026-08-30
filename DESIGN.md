@@ -201,12 +201,12 @@ says so at startup — traceability includes configuration.
 ## Traceability
 
 - **Zap**, structured logging everywhere, context enriched as frames
-  cross layers: `relay=… radio=… txn=…`.
-- **Every frame heard gets a transaction ID** carried by every log line
+  cross layers: `relay=… radio=… corr=…`.
+- **Every frame heard gets a correlation ID** carried by every log line
   that concerns it. IDs are generated OpenTelemetry-compatible
   (128-bit trace id) but displayed truncated (8–12 hex chars) and
   greppable by prefix. Relations are structured fields:
-  `txn=a3f9c210 duplicate_of=8e01bb42` — grep one, find the other,
+  `corr=a3f9c210 duplicate_of=8e01bb42` — grep one, find the other,
   follow the chain. A future OTel exporter is a mapping, not a
   migration.
 - **Metrics** live in an in-RAM registry, with optional periodic
@@ -309,7 +309,7 @@ sit between collecting a frame and the transmit that answers it.
 
 **Duty cycle.** Every emission, real or shadow, leaves a ledger row in
 the journal: instant, airtime, frequency, applied power, type, and the
-transaction it relays. Enforcement is a sliding one-hour window whose
+correlation it carries. Enforcement is a sliding one-hour window whose
 percentage comes from the band preset, overridable. At saturation,
 candidates wait in the same priority order until a deadline, then drop,
 counted. The cap is never exceeded, for anyone. The gauge shows in
@@ -324,9 +324,9 @@ traffic except the adverts a repeater owes the mesh:
 admin responses — the stats the telemetry already gathers — come
 later, as their own protocol work.
 
-**Traceability.** `FrameSent` carries the origin transaction, instant,
+**Traceability.** `FrameSent` carries the origin correlation, instant,
 airtime and applied power; `TxDropped` carries its reason (queue,
-duty, channel when drop is chosen). The journal links them, and `txn`
+duty, channel when drop is chosen). The journal links them, and `corr`
 shows the full life: heard → judged → sent. Shadow entries are marked
 as such — they are the audit trail that earns `on-air`.
 

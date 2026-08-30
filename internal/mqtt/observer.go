@@ -239,7 +239,7 @@ func (o *Observer) event(ev bus.Event) {
 		if e.Relay != o.cfg.Relay {
 			return
 		}
-		log := o.log.With(zap.String("txn", e.Txn.Short()))
+		log := o.log.With(zap.String("corr", e.Correlation.Short()))
 		if !o.cfg.RX {
 			log.Debug("observer frame ignored",
 				zap.String("direction", "rx"), zap.String("reason", "rx-disabled"))
@@ -257,7 +257,7 @@ func (o *Observer) event(ev bus.Event) {
 		if e.Relay != o.cfg.Relay {
 			return
 		}
-		log := o.log.With(zap.String("txn", e.Txn.Short()))
+		log := o.log.With(zap.String("corr", e.Correlation.Short()))
 		if e.Shadow {
 			log.Debug("observer frame ignored",
 				zap.String("direction", "tx"), zap.String("reason", "shadow"))

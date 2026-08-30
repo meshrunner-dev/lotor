@@ -20,7 +20,7 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
-	"meshrunner.dev/lotor/internal/txn"
+	"meshrunner.dev/lotor/internal/correlation"
 )
 
 // pathVerdict judges a PATH addressed to us. It is ours to read only
@@ -64,7 +64,7 @@ const pathHopCountMask = 63
 // newest one wins outright: a client that moved is the reason it sent
 // a second, and preferring the older would pin the answer to the route
 // it just left.
-func (e *engine) learnOutPath(c *client, pr *meshcore.PathReturn, origin txn.ID) {
+func (e *engine) learnOutPath(c *client, pr *meshcore.PathReturn, origin correlation.ID) {
 	c.out = &outPath{
 		pathLen: pr.PathLen,
 		path:    append([]byte(nil), pr.Path...),
@@ -75,10 +75,10 @@ func (e *engine) learnOutPath(c *client, pr *meshcore.PathReturn, origin txn.ID)
 	// trouble costs the next answer a flood, never a replay.
 	if err := e.acl.save(c); err != nil {
 		e.log.Warn("the taught route did not reach the store",
-			zap.String("txn", origin.Short()), zap.Error(err))
+			zap.String("corr", origin.Short()), zap.Error(err))
 	}
 	e.log.Debug("a client taught us its route home",
-		zap.String("txn", origin.Short()),
+		zap.String("corr", origin.Short()),
 		zap.String("pubkey", shortKey(c.pubKey[:])),
 		zap.Int("hops", int(pr.PathLen&pathHopCountMask)))
 }

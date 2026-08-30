@@ -12,11 +12,11 @@ import (
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/relay"
 	"meshrunner.dev/lotor/internal/schema"
 	"meshrunner.dev/lotor/internal/sentinel"
-	"meshrunner.dev/lotor/internal/txn"
 )
 
 type script struct {
@@ -134,15 +134,15 @@ func testKinds() []schema.Kind {
 	}
 }
 
-// seed journals one advert and its duplicate, returning both txns.
-func seed(t *testing.T, deps Deps) (orig, dup txn.ID) {
+// seed journals one advert and its duplicate, returning both correlations.
+func seed(t *testing.T, deps Deps) (orig, dup correlation.ID) {
 	t.Helper()
 	ctx := context.Background()
-	orig, dup = txn.New(), txn.New()
+	orig, dup = correlation.New(), correlation.New()
 	// The judged event carries the reception whole — the journal's
 	// one archive event since the atomic contract.
-	judgedAt := func(id txn.ID, rssi float64) bus.FrameJudged {
-		return bus.FrameJudged{Relay: "meshcore-868", Txn: id, At: time.Now(),
+	judgedAt := func(id correlation.ID, rssi float64) bus.FrameJudged {
+		return bus.FrameJudged{Relay: "meshcore-868", Correlation: id, At: time.Now(),
 			Bytes: 132, RSSI: rssi, SNR: 8.5, Airtime: 1295 * time.Millisecond}
 	}
 	judged := judgedAt(orig, -69)
@@ -247,7 +247,7 @@ func TestFramesAndChain(t *testing.T) {
 	deps := testDeps(t)
 	orig, dup := seed(t, deps)
 
-	out := run(t, deps, "frames", "txn "+dup.Short()[:4])
+	out := run(t, deps, "frames", "corr "+dup.Short()[:4])
 	for _, want := range []string{
 		`"Radio-Club" (repeater)`,
 		"duplicate → " + orig.Short(),
@@ -276,12 +276,12 @@ func TestErrorsAreOneLiners(t *testing.T) {
 	out := run(t, deps,
 		"nope",
 		"frames relay=meshcore-433",
-		"txn ffff",
+		"corr ffff",
 	)
 	for _, want := range []string{
 		`error: unknown command "nope"`,
 		`error: no relay "meshcore-433" (relays: meshcore-868)`,
-		`error: no transaction matching "ffff"`,
+		`error: no correlation matching "ffff"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("transcript lacks %q:\n%s", want, out)
@@ -345,12 +345,12 @@ func TestNoiseIsVisible(t *testing.T) {
 	}
 }
 
-func TestCorruptWatchLineKeepsItsTransaction(t *testing.T) {
+func TestCorruptWatchLineKeepsItsCorrelation(t *testing.T) {
 	var out bytes.Buffer
 	s := session{out: &out}
-	id := txn.New()
+	id := correlation.New()
 	if err := s.watchEvent(bus.FrameCorrupt{
-		Relay: "meshcore-868", Txn: id, Err: "crc mismatch",
+		Relay: "meshcore-868", Correlation: id, Err: "crc mismatch",
 	}, map[string]string{}); err != nil {
 		t.Fatal(err)
 	}
@@ -364,9 +364,9 @@ func TestArchivedRelayStaysAddressable(t *testing.T) {
 	// journal queries accept its name, only the live stream refuses.
 	deps := testDeps(t)
 	ctx := context.Background()
-	id := txn.New()
+	id := correlation.New()
 	deps.Sentinel.Process(ctx, bus.FrameJudged{
-		Relay: "meshcore-433", Txn: id, At: time.Now(), Bytes: 20, RSSI: -90, SNR: 5,
+		Relay: "meshcore-433", Correlation: id, At: time.Now(), Bytes: 20, RSSI: -90, SNR: 5,
 		Verdict: "would-relay-flood", Type: "ADVERT", Route: "FLOOD"})
 	deps.Sentinel.Process(ctx, bus.NoiseFloor{
 		Relay: "meshcore-433", At: time.Now(), DBm: -101})
@@ -447,19 +447,19 @@ func TestTXModeIsShown(t *testing.T) {
 
 func TestOriginatedEmissionIsAddressable(t *testing.T) {
 	// An advert has no reception behind it; the operator still reads
-	// its txn in a log line and must be able to look it up.
+	// its corr in a log line and must be able to look it up.
 	deps := testDeps(t)
-	id := txn.New()
+	id := correlation.New()
 	deps.Sentinel.Process(context.Background(), bus.FrameSent{
-		Relay: "meshcore-868", Txn: id, At: time.Now(), Kind: "advert-flood",
+		Relay: "meshcore-868", Correlation: id, At: time.Now(), Kind: "advert-flood",
 		Airtime: 1164 * time.Millisecond, PowerDBm: -5, Shadow: true,
 	})
-	out := run(t, deps, "txn "+id.Short())
+	out := run(t, deps, "corr "+id.Short())
 	if !strings.Contains(out, "originated") || !strings.Contains(out, "advert-flood") ||
 		!strings.Contains(out, "(shadow)") {
 		t.Errorf("originated emission unreachable:\n%s", out)
 	}
-	if bad := run(t, deps, "txn ffffffff"); !strings.Contains(bad, "no transaction matching") {
+	if bad := run(t, deps, "corr ffffffff"); !strings.Contains(bad, "no correlation matching") {
 		t.Errorf("an unknown prefix should still say so:\n%s", bad)
 	}
 }
@@ -508,7 +508,7 @@ func TestNodesAdmitsAnUnmeasuredRSSI(t *testing.T) {
 	// too good.
 	deps := testDeps(t)
 	deps.Sentinel.Process(context.Background(), bus.FrameJudged{
-		Relay: "meshcore-868", Txn: txn.New(), At: time.Now(),
+		Relay: "meshcore-868", Correlation: correlation.New(), At: time.Now(),
 		Verdict: "would-relay-flood",
 		Type:    "ADVERT", Route: "FLOOD", Node: "Ghost", PubKey: "aabbccddeeff",
 	})

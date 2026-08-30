@@ -7,7 +7,7 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
-	"meshrunner.dev/lotor/internal/txn"
+	"meshrunner.dev/lotor/internal/correlation"
 )
 
 func TestAskingANeighbourItsScopes(t *testing.T) {
@@ -115,7 +115,7 @@ func TestAStrangersAnswerIsNotOurs(t *testing.T) {
 	if e.pendingScope == nil {
 		t.Fatal("our own question was retired by a stranger's answer")
 	}
-	_ = txn.New()
+	_ = correlation.New()
 }
 
 func TestASecondQuestionIsRefusedNotSwallowed(t *testing.T) {

@@ -9,8 +9,8 @@ import (
 	zapobserver "go.uber.org/zap/zaptest/observer"
 
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
-	"meshrunner.dev/lotor/internal/txn"
 )
 
 func mqttObservedOne(t *testing.T, logs *zapobserver.ObservedLogs, message string) zapobserver.LoggedEntry {
@@ -26,13 +26,13 @@ func TestObserverLogsTrafficAtDebugAndBrokerCompletionAtTrace(t *testing.T) {
 	raw, _ := advertFrame(t)
 	core, observed := zapobserver.New(logging.TraceLevel)
 	rec := &recorder{}
-	id := txn.New()
+	id := correlation.New()
 	o := New(Config{
 		Instance: "paris", Relay: "mc", IATA: "PAR", Topic: DefaultTopic,
 		RX: true, Packets: true, OriginID: "feed",
 	}, rec, zap.New(core).With(zap.String("observer", "paris")))
 
-	o.event(bus.FrameHeard{Relay: "mc", Txn: id, At: time.Now(), Raw: raw})
+	o.event(bus.FrameHeard{Relay: "mc", Correlation: id, At: time.Now(), Raw: raw})
 
 	traffic := mqttObservedOne(t, observed, "observer frame selected")
 	if traffic.Level != zap.DebugLevel {
@@ -63,8 +63,8 @@ func TestObserverLogsTrafficAtDebugAndBrokerCompletionAtTrace(t *testing.T) {
 		t.Errorf("broker completion exposes message content: %+v", fields)
 	}
 	for _, entry := range observed.All() {
-		if got := entry.ContextMap()["txn"]; got != id.Short() {
-			t.Errorf("%q txn = %v, want %s", entry.Message, got, id.Short())
+		if got := entry.ContextMap()["corr"]; got != id.Short() {
+			t.Errorf("%q corr = %v, want %s", entry.Message, got, id.Short())
 		}
 	}
 }
@@ -73,13 +73,13 @@ func TestFailedPublicationDoesNotClaimBrokerCompletion(t *testing.T) {
 	raw, _ := advertFrame(t)
 	core, observed := zapobserver.New(logging.TraceLevel)
 	rec := &recorder{fail: true}
-	id := txn.New()
+	id := correlation.New()
 	o := New(Config{
 		Relay: "mc", IATA: "PAR", Topic: DefaultTopic,
 		RX: true, Packets: true, OriginID: "feed",
 	}, rec, zap.New(core))
 
-	o.event(bus.FrameHeard{Relay: "mc", Txn: id, At: time.Now(), Raw: raw})
+	o.event(bus.FrameHeard{Relay: "mc", Correlation: id, At: time.Now(), Raw: raw})
 
 	if got := observed.FilterMessage("observer broker publish completed").Len(); got != 0 {
 		t.Fatalf("broker completion logs = %d, want none after failure", got)
@@ -88,21 +88,21 @@ func TestFailedPublicationDoesNotClaimBrokerCompletion(t *testing.T) {
 	if failed.Level != zap.DebugLevel {
 		t.Errorf("publish failure level = %s, want debug", failed.Level)
 	}
-	if got := failed.ContextMap()["txn"]; got != id.Short() {
-		t.Errorf("publish failure txn = %v, want %s", got, id.Short())
+	if got := failed.ContextMap()["corr"]; got != id.Short() {
+		t.Errorf("publish failure corr = %v, want %s", got, id.Short())
 	}
 }
 
 func TestDebugLevelHidesBrokerCompletionDetail(t *testing.T) {
 	raw, _ := advertFrame(t)
 	core, observed := zapobserver.New(zapcore.DebugLevel)
-	id := txn.New()
+	id := correlation.New()
 	o := New(Config{
 		Relay: "mc", IATA: "PAR", Topic: DefaultTopic,
 		RX: true, Packets: true, OriginID: "feed",
 	}, &recorder{}, zap.New(core))
 
-	o.event(bus.FrameHeard{Relay: "mc", Txn: id, At: time.Now(), Raw: raw})
+	o.event(bus.FrameHeard{Relay: "mc", Correlation: id, At: time.Now(), Raw: raw})
 
 	if observed.FilterMessage("observer frame selected").Len() != 1 {
 		t.Fatal("debug traffic log is missing")
@@ -111,58 +111,58 @@ func TestDebugLevelHidesBrokerCompletionDetail(t *testing.T) {
 		t.Fatalf("trace broker completion logs at debug = %d, want none", got)
 	}
 	selected := mqttObservedOne(t, observed, "observer frame selected")
-	if got := selected.ContextMap()["txn"]; got != id.Short() {
-		t.Errorf("selected frame txn = %v, want %s", got, id.Short())
+	if got := selected.ContextMap()["corr"]; got != id.Short() {
+		t.Errorf("selected frame corr = %v, want %s", got, id.Short())
 	}
 }
 
-func TestObserverFrameDecisionsNeverLoseTheirTransaction(t *testing.T) {
+func TestObserverFrameDecisionsNeverLoseTheirCorrelation(t *testing.T) {
 	raw, _ := advertFrame(t)
 	tests := []struct {
 		name  string
 		cfg   Config
-		event func(txn.ID) bus.Event
+		event func(correlation.ID) bus.Event
 	}{
 		{
 			name: "rx disabled",
 			cfg:  Config{Relay: "mc"},
-			event: func(id txn.ID) bus.Event {
-				return bus.FrameHeard{Relay: "mc", Txn: id, Raw: raw}
+			event: func(id correlation.ID) bus.Event {
+				return bus.FrameHeard{Relay: "mc", Correlation: id, Raw: raw}
 			},
 		},
 		{
 			name: "empty rx",
 			cfg:  Config{Relay: "mc", RX: true},
-			event: func(id txn.ID) bus.Event {
-				return bus.FrameHeard{Relay: "mc", Txn: id}
+			event: func(id correlation.ID) bus.Event {
+				return bus.FrameHeard{Relay: "mc", Correlation: id}
 			},
 		},
 		{
 			name: "invalid rx",
 			cfg:  Config{Relay: "mc", RX: true, Packets: true},
-			event: func(id txn.ID) bus.Event {
-				return bus.FrameHeard{Relay: "mc", Txn: id, Raw: []byte{1}}
+			event: func(id correlation.ID) bus.Event {
+				return bus.FrameHeard{Relay: "mc", Correlation: id, Raw: []byte{1}}
 			},
 		},
 		{
 			name: "type filtered",
 			cfg:  Config{Relay: "mc", RX: true, Packets: true, Types: []string{"REQ"}},
-			event: func(id txn.ID) bus.Event {
-				return bus.FrameHeard{Relay: "mc", Txn: id, Raw: raw}
+			event: func(id correlation.ID) bus.Event {
+				return bus.FrameHeard{Relay: "mc", Correlation: id, Raw: raw}
 			},
 		},
 		{
 			name: "shadow tx",
 			cfg:  Config{Relay: "mc", TX: TXAll, Packets: true},
-			event: func(id txn.ID) bus.Event {
-				return bus.FrameSent{Relay: "mc", Txn: id, Raw: raw, Shadow: true}
+			event: func(id correlation.ID) bus.Event {
+				return bus.FrameSent{Relay: "mc", Correlation: id, Raw: raw, Shadow: true}
 			},
 		},
 		{
 			name: "tx disabled",
 			cfg:  Config{Relay: "mc", Packets: true},
-			event: func(id txn.ID) bus.Event {
-				return bus.FrameSent{Relay: "mc", Txn: id, Raw: raw}
+			event: func(id correlation.ID) bus.Event {
+				return bus.FrameSent{Relay: "mc", Correlation: id, Raw: raw}
 			},
 		},
 	}
@@ -170,7 +170,7 @@ func TestObserverFrameDecisionsNeverLoseTheirTransaction(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			core, observed := zapobserver.New(logging.TraceLevel)
 			o := New(test.cfg, &recorder{}, zap.New(core))
-			id := txn.New()
+			id := correlation.New()
 
 			o.event(test.event(id))
 
@@ -179,8 +179,8 @@ func TestObserverFrameDecisionsNeverLoseTheirTransaction(t *testing.T) {
 				t.Fatal("frame decision was not logged")
 			}
 			for _, entry := range entries {
-				if got := entry.ContextMap()["txn"]; got != id.Short() {
-					t.Errorf("%q txn = %v, want %s", entry.Message, got, id.Short())
+				if got := entry.ContextMap()["corr"]; got != id.Short() {
+					t.Errorf("%q corr = %v, want %s", entry.Message, got, id.Short())
 				}
 			}
 		})

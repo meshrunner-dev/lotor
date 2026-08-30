@@ -22,9 +22,9 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/radio"
-	"meshrunner.dev/lotor/internal/txn"
 	"meshrunner.dev/pkg/lora"
 	"meshrunner.dev/pkg/lora/sx126x"
 )
@@ -226,12 +226,12 @@ func TestCorruptReceptionIsToldApartFromAFault(t *testing.T) {
 		if !errors.Is(err, radio.ErrCorrupt) {
 			t.Errorf("%v became %v, want a corrupt reception", chipErr, err)
 		}
-		if frame.Txn.IsZero() {
-			t.Errorf("%v corrupt reception has no transaction", chipErr)
+		if frame.Correlation.IsZero() {
+			t.Errorf("%v corrupt reception has no correlation", chipErr)
 		}
 		entries := observed.FilterMessage("rx corrupt frame off the chip").All()
-		if len(entries) != 1 || entries[0].ContextMap()["txn"] != frame.Txn.Short() {
-			t.Errorf("%v corrupt trace = %+v, want txn %s", chipErr, entries, frame.Txn.Short())
+		if len(entries) != 1 || entries[0].ContextMap()["corr"] != frame.Correlation.Short() {
+			t.Errorf("%v corrupt trace = %+v, want corr %s", chipErr, entries, frame.Correlation.Short())
 		}
 	}
 	// Anything else is the radio's own trouble, passed through.
@@ -262,12 +262,12 @@ func TestAReceivedFrameCrossesTheSeamWhole(t *testing.T) {
 	if !f.At.Equal(at) {
 		t.Errorf("At = %v, want the chip's own %v", f.At, at)
 	}
-	if f.Txn.IsZero() {
-		t.Fatal("received frame crossed the device seam without a transaction")
+	if f.Correlation.IsZero() {
+		t.Fatal("received frame crossed the device seam without a correlation")
 	}
 	entries := observed.FilterMessage("rx frame off the chip").All()
-	if len(entries) != 1 || entries[0].ContextMap()["txn"] != f.Txn.Short() {
-		t.Errorf("receive trace = %+v, want txn %s", entries, f.Txn.Short())
+	if len(entries) != 1 || entries[0].ContextMap()["corr"] != f.Correlation.Short() {
+		t.Errorf("receive trace = %+v, want corr %s", entries, f.Correlation.Short())
 	}
 }
 
@@ -284,8 +284,8 @@ func TestAnEmissionReportsItselfEvenWhenTheRadioThenFalls(t *testing.T) {
 	core, observed := observer.New(logging.TraceLevel)
 	d := newDevice(c)
 	d.log = zap.New(core)
-	id := txn.New()
-	rep, err := d.Transmit(txn.WithContext(context.Background(), id), []byte{1}, -5)
+	id := correlation.New()
+	rep, err := d.Transmit(correlation.WithContext(context.Background(), id), []byte{1}, -5)
 	if !errors.Is(err, fault) {
 		t.Errorf("error = %v", err)
 	}
@@ -294,8 +294,8 @@ func TestAnEmissionReportsItselfEvenWhenTheRadioThenFalls(t *testing.T) {
 	}
 	for _, message := range []string{"tx keying", "tx done — chip handed back to rx"} {
 		entries := observed.FilterMessage(message).All()
-		if len(entries) != 1 || entries[0].ContextMap()["txn"] != id.Short() {
-			t.Errorf("%s trace = %+v, want txn %s", message, entries, id.Short())
+		if len(entries) != 1 || entries[0].ContextMap()["corr"] != id.Short() {
+			t.Errorf("%s trace = %+v, want corr %s", message, entries, id.Short())
 		}
 	}
 	// Nothing radiated is an empty report, and the busy channel still

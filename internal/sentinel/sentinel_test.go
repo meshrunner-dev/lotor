@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"meshrunner.dev/lotor/internal/bus"
-	"meshrunner.dev/lotor/internal/txn"
+	"meshrunner.dev/lotor/internal/correlation"
 )
 
 func testSentinel(t *testing.T) *Sentinel {
@@ -25,19 +25,19 @@ func testSentinel(t *testing.T) *Sentinel {
 	return s
 }
 
-func TestFailedFrameProjectionKeepsItsTransaction(t *testing.T) {
-	id := txn.New()
+func TestFailedFrameProjectionKeepsItsCorrelation(t *testing.T) {
+	id := correlation.New()
 	events := []bus.Event{
-		bus.FrameJudged{Relay: "mc", Txn: id},
-		bus.FrameCorrupt{Relay: "mc", Txn: id},
-		bus.FrameSent{Relay: "mc", Txn: id},
-		bus.TxDropped{Relay: "mc", Txn: id},
+		bus.FrameJudged{Relay: "mc", Correlation: id},
+		bus.FrameCorrupt{Relay: "mc", Correlation: id},
+		bus.FrameSent{Relay: "mc", Correlation: id},
+		bus.TxDropped{Relay: "mc", Correlation: id},
 	}
 	for _, event := range events {
 		core, observed := observer.New(zap.DebugLevel)
 		zap.New(core).Warn("failed", frameCorrelation(event)...)
 		fields := observed.All()[0].ContextMap()
-		if fields["relay"] != "mc" || fields["txn"] != id.Short() {
+		if fields["relay"] != "mc" || fields["corr"] != id.Short() {
 			t.Errorf("%T correlation = %+v", event, fields)
 		}
 	}
@@ -52,12 +52,12 @@ func TestHeardThenJudgedBecomesOneRow(t *testing.T) {
 	// its verdict or a verdict without its reception. FrameHeard is
 	// the live feed and is not journalled at all.
 	s := testSentinel(t)
-	id := txn.New()
+	id := correlation.New()
 	at := time.Now()
 
-	s.Process(context.Background(), bus.FrameHeard{Relay: "meshcore-868", Txn: id, At: at})
+	s.Process(context.Background(), bus.FrameHeard{Relay: "meshcore-868", Correlation: id, At: at})
 	s.Process(context.Background(), bus.FrameJudged{
-		Relay: "meshcore-868", Txn: id, At: at,
+		Relay: "meshcore-868", Correlation: id, At: at,
 		Bytes: 132, RSSI: -69, SNR: 8.5, SignalRSSI: -74, FreqErrHz: 112,
 		Airtime: 1295 * time.Millisecond,
 		Verdict: "would-relay-flood", Type: "ADVERT", Route: "FLOOD", PathLen: 6,
@@ -72,7 +72,7 @@ func TestHeardThenJudgedBecomesOneRow(t *testing.T) {
 		t.Fatalf("%d rows, want 1", len(frames))
 	}
 	f := frames[0]
-	if f.Txn != id.String() || f.Verdict != "would-relay-flood" ||
+	if f.Correlation != id.String() || f.Verdict != "would-relay-flood" ||
 		f.Type != "ADVERT" || f.Route != "FLOOD" || f.PathLen != 6 ||
 		f.Bytes != 132 || f.RSSI != -69 || f.SignalRSSI != -74 || f.FreqErrHz != 112 ||
 		f.Node != "Wanadoo" || f.PubKey != "de1234567890" || f.Detail != "repeater" {
@@ -80,27 +80,27 @@ func TestHeardThenJudgedBecomesOneRow(t *testing.T) {
 	}
 }
 
-func TestShortPrefixFindsItsTransaction(t *testing.T) {
+func TestShortPrefixFindsItsCorrelation(t *testing.T) {
 	s := testSentinel(t)
-	id := txn.New()
-	s.Process(context.Background(), bus.FrameJudged{Relay: "r", Txn: id, At: time.Now()})
-	s.Process(context.Background(), bus.FrameJudged{Relay: "r", Txn: txn.New(), At: time.Now()})
+	id := correlation.New()
+	s.Process(context.Background(), bus.FrameJudged{Relay: "r", Correlation: id, At: time.Now()})
+	s.Process(context.Background(), bus.FrameJudged{Relay: "r", Correlation: correlation.New(), At: time.Now()})
 
-	frames, err := s.RecentFrames(context.Background(), FrameQuery{TxnPrefix: id.Short(), Limit: 10})
+	frames, err := s.RecentFrames(context.Background(), FrameQuery{CorrelationPrefix: id.Short(), Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(frames) != 1 || frames[0].Txn != id.String() {
+	if len(frames) != 1 || frames[0].Correlation != id.String() {
 		t.Fatalf("prefix search = %+v", frames)
 	}
 }
 
 func TestRetentionPrunes(t *testing.T) {
 	s := testSentinel(t)
-	old := txn.New()
-	fresh := txn.New()
-	s.Process(context.Background(), bus.FrameJudged{Relay: "r", Txn: old, At: time.Now().Add(-2 * time.Hour)})
-	s.Process(context.Background(), bus.FrameJudged{Relay: "r", Txn: fresh, At: time.Now()})
+	old := correlation.New()
+	fresh := correlation.New()
+	s.Process(context.Background(), bus.FrameJudged{Relay: "r", Correlation: old, At: time.Now().Add(-2 * time.Hour)})
+	s.Process(context.Background(), bus.FrameJudged{Relay: "r", Correlation: fresh, At: time.Now()})
 
 	if err := s.store.prune(context.Background(), time.Now(), time.Hour, 0, 0); err != nil {
 		t.Fatal(err)
@@ -109,7 +109,7 @@ func TestRetentionPrunes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(frames) != 1 || frames[0].Txn != fresh.String() {
+	if len(frames) != 1 || frames[0].Correlation != fresh.String() {
 		t.Fatalf("after prune = %+v", frames)
 	}
 }
@@ -308,10 +308,10 @@ func TestCorruptReceptionsAreTallied(t *testing.T) {
 
 func TestOrphanJudgementIsRecovered(t *testing.T) {
 	s := testSentinel(t)
-	id := txn.New()
+	id := correlation.New()
 	// The heard event was dropped by the bus; only the judgement lands.
 	s.Process(context.Background(), bus.FrameJudged{
-		Relay: "meshcore-868", Txn: id,
+		Relay: "meshcore-868", Correlation: id,
 		Verdict: "would-relay-flood", Type: "ADVERT", Route: "FLOOD",
 	})
 
@@ -327,11 +327,11 @@ func TestOrphanJudgementIsRecovered(t *testing.T) {
 
 func TestRedeliveredHeardPreservesJudgement(t *testing.T) {
 	s := testSentinel(t)
-	id := txn.New()
-	heard := bus.FrameHeard{Relay: "r", Txn: id, At: time.Now(), Bytes: 10}
+	id := correlation.New()
+	heard := bus.FrameHeard{Relay: "r", Correlation: id, At: time.Now(), Bytes: 10}
 	s.Process(context.Background(), heard)
 	s.Process(context.Background(), bus.FrameJudged{
-		Relay: "r", Txn: id, Verdict: "would-relay-flood", Type: "GRP_TXT", Route: "FLOOD",
+		Relay: "r", Correlation: id, Verdict: "would-relay-flood", Type: "GRP_TXT", Route: "FLOOD",
 	})
 	s.Process(context.Background(), heard) // redelivery must not blank the verdict
 
@@ -346,14 +346,14 @@ func TestRedeliveredHeardPreservesJudgement(t *testing.T) {
 
 func TestChainFindsSiblingsFromADuplicate(t *testing.T) {
 	s := testSentinel(t)
-	root, dupA, dupB := txn.New(), txn.New(), txn.New()
+	root, dupA, dupB := correlation.New(), correlation.New(), correlation.New()
 	for _, ev := range []bus.Event{
-		bus.FrameHeard{Relay: "r", Txn: root, At: time.Now()},
-		bus.FrameJudged{Relay: "r", Txn: root, Verdict: "would-relay-flood"},
-		bus.FrameHeard{Relay: "r", Txn: dupA, At: time.Now()},
-		bus.FrameJudged{Relay: "r", Txn: dupA, Verdict: "duplicate", DuplicateOf: root.Short()},
-		bus.FrameHeard{Relay: "r", Txn: dupB, At: time.Now()},
-		bus.FrameJudged{Relay: "r", Txn: dupB, Verdict: "duplicate", DuplicateOf: root.Short()},
+		bus.FrameHeard{Relay: "r", Correlation: root, At: time.Now()},
+		bus.FrameJudged{Relay: "r", Correlation: root, Verdict: "would-relay-flood"},
+		bus.FrameHeard{Relay: "r", Correlation: dupA, At: time.Now()},
+		bus.FrameJudged{Relay: "r", Correlation: dupA, Verdict: "duplicate", DuplicateOf: root.Short()},
+		bus.FrameHeard{Relay: "r", Correlation: dupB, At: time.Now()},
+		bus.FrameJudged{Relay: "r", Correlation: dupB, Verdict: "duplicate", DuplicateOf: root.Short()},
 	} {
 		s.Process(context.Background(), ev)
 	}
@@ -365,9 +365,9 @@ func TestChainFindsSiblingsFromADuplicate(t *testing.T) {
 	}
 	got := map[string]bool{}
 	for _, f := range chain {
-		got[f.Txn] = true
+		got[f.Correlation] = true
 	}
-	for _, want := range []txn.ID{root, dupA, dupB} {
+	for _, want := range []correlation.ID{root, dupA, dupB} {
 		if !got[want.String()] {
 			t.Errorf("chain misses %s (have %d members)", want.Short(), len(chain))
 		}
@@ -376,14 +376,14 @@ func TestChainFindsSiblingsFromADuplicate(t *testing.T) {
 
 func TestNodesDirectoryIsAdvertOnly(t *testing.T) {
 	s := testSentinel(t)
-	adv, ctl := txn.New(), txn.New()
+	adv, ctl := correlation.New(), correlation.New()
 	for _, ev := range []bus.Event{
-		bus.FrameHeard{Relay: "r", Txn: adv, At: time.Now()},
-		bus.FrameJudged{Relay: "r", Txn: adv, Verdict: "would-relay-flood",
+		bus.FrameHeard{Relay: "r", Correlation: adv, At: time.Now()},
+		bus.FrameJudged{Relay: "r", Correlation: adv, Verdict: "would-relay-flood",
 			Type: "ADVERT", Node: "Wanadoo", PubKey: "de247e12757f", Detail: "repeater"},
-		bus.FrameHeard{Relay: "r", Txn: ctl, At: time.Now()},
+		bus.FrameHeard{Relay: "r", Correlation: ctl, At: time.Now()},
 		// A hostile or legacy row: a non-advert frame carrying a key.
-		bus.FrameJudged{Relay: "r", Txn: ctl, Verdict: "heard-zero-hop",
+		bus.FrameJudged{Relay: "r", Correlation: ctl, Verdict: "heard-zero-hop",
 			Type: "CONTROL", PubKey: "attacker00000", Detail: "discovery response"},
 	} {
 		s.Process(context.Background(), ev)
@@ -401,14 +401,14 @@ func TestNodesDirectoryIsAdvertOnly(t *testing.T) {
 func TestTxLedgerAndDrops(t *testing.T) {
 	s := testSentinel(t)
 	ctx := context.Background()
-	id := txn.New()
+	id := correlation.New()
 	at := time.Now()
 	s.Process(ctx, bus.FrameSent{
-		Relay: "meshcore-868", Txn: id, At: at, Kind: "relay-flood",
+		Relay: "meshcore-868", Correlation: id, At: at, Kind: "relay-flood",
 		Airtime: 1200 * time.Millisecond, PowerDBm: -5, Shadow: true,
 	})
-	s.Process(ctx, bus.TxDropped{Relay: "meshcore-868", Txn: id, At: at, Reason: "lbt"})
-	s.Process(ctx, bus.TxDropped{Relay: "meshcore-868", Txn: txn.New(), At: at, Reason: "lbt"})
+	s.Process(ctx, bus.TxDropped{Relay: "meshcore-868", Correlation: id, At: at, Reason: "lbt"})
+	s.Process(ctx, bus.TxDropped{Relay: "meshcore-868", Correlation: correlation.New(), At: at, Reason: "lbt"})
 
 	sent, err := s.SentFor(ctx, id.String())
 	if err != nil {
@@ -442,7 +442,7 @@ func TestSentEventAndAirtimeWindowCommitTogether(t *testing.T) {
 	ctx := context.Background()
 	at := time.Now()
 	s.Process(ctx, bus.FrameSent{
-		Relay: "r", Txn: txn.New(), At: at, Kind: "first", Airtime: time.Second,
+		Relay: "r", Correlation: correlation.New(), At: at, Kind: "first", Airtime: time.Second,
 	})
 	if _, err := s.store.db.ExecContext(ctx, `
 		CREATE TRIGGER fail_tx_airtime BEFORE INSERT ON metrics_raw
@@ -451,7 +451,7 @@ func TestSentEventAndAirtimeWindowCommitTogether(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Process(ctx, bus.FrameSent{
-		Relay: "r", Txn: txn.New(), At: at.Add(time.Second), Kind: "failed", Airtime: 2 * time.Second,
+		Relay: "r", Correlation: correlation.New(), At: at.Add(time.Second), Kind: "failed", Airtime: 2 * time.Second,
 	})
 	if len(s.txWindows["r"]) != 1 {
 		t.Fatalf("failed write advanced RAM window to %d emissions", len(s.txWindows["r"]))
@@ -460,7 +460,7 @@ func TestSentEventAndAirtimeWindowCommitTogether(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Process(ctx, bus.FrameSent{
-		Relay: "r", Txn: txn.New(), At: at.Add(2 * time.Second), Kind: "third", Airtime: 4 * time.Second,
+		Relay: "r", Correlation: correlation.New(), At: at.Add(2 * time.Second), Kind: "third", Airtime: 4 * time.Second,
 	})
 
 	var txRows, metricRows int
@@ -493,7 +493,7 @@ func TestOpenPrunesBeforeItSubscribes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := st.insertObserved(ctx, Frame{
-		Txn: txn.New().String(), Relay: "r", At: time.Now().Add(-2 * time.Hour),
+		Correlation: correlation.New().String(), Relay: "r", At: time.Now().Add(-2 * time.Hour),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +526,7 @@ func TestMigrateGraftsEveryColumnAddedSince(t *testing.T) {
 	}
 	if _, err := old.ExecContext(context.Background(), `
 		CREATE TABLE frames (
-			txn TEXT PRIMARY KEY, relay TEXT NOT NULL, at_ms INTEGER NOT NULL,
+			corr TEXT PRIMARY KEY, relay TEXT NOT NULL, at_ms INTEGER NOT NULL,
 			bytes INTEGER NOT NULL, rssi_dbm REAL NOT NULL, snr_db REAL NOT NULL,
 			airtime_ms REAL NOT NULL);
 		CREATE TABLE noise_floor (
@@ -561,7 +561,7 @@ func TestMigrateGraftsEveryColumnAddedSince(t *testing.T) {
 	// And the grafted journal takes today's writes.
 	s := &Sentinel{store: st}
 	s.Process(ctx, bus.FrameJudged{
-		Relay: "r", Txn: txn.New(), At: time.Now(), SignalRSSI: -70, FreqErrHz: 12})
+		Relay: "r", Correlation: correlation.New(), At: time.Now(), SignalRSSI: -70, FreqErrHz: 12})
 	s.Process(ctx, bus.NoiseFloor{Relay: "r", At: time.Now(), DBm: -100, SpreadDB: 3})
 	frames, err := st.RecentFrames(ctx, FrameQuery{Limit: 5})
 	if err != nil || len(frames) != 1 || frames[0].SignalRSSI != -70 {
@@ -569,22 +569,104 @@ func TestMigrateGraftsEveryColumnAddedSince(t *testing.T) {
 	}
 }
 
-func TestDropsKeepTheirTransaction(t *testing.T) {
-	// The chain's missing half: a refusal is findable by its txn, and
+func TestMigrateRenamesLegacyCorrelationColumns(t *testing.T) {
+	// These names describe the on-disk schema of an already deployed
+	// binary. They deliberately are the only test-side occurrences of
+	// the retired vocabulary.
+	const legacyColumn = "txn"
+	const legacyFrame = "0123456789abcdef0123456789abcdef"
+	path := t.TempDir() + "/legacy-correlation.db"
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.ExecContext(context.Background(), `
+		CREATE TABLE frames (
+			txn TEXT PRIMARY KEY, relay TEXT NOT NULL, at_ms INTEGER NOT NULL,
+			bytes INTEGER NOT NULL, rssi_dbm REAL NOT NULL, snr_db REAL NOT NULL,
+			airtime_ms REAL NOT NULL);
+		CREATE TABLE tx (
+			at_ms INTEGER NOT NULL, relay TEXT NOT NULL, txn TEXT NOT NULL,
+			kind TEXT NOT NULL, airtime_ms REAL NOT NULL,
+			power_dbm INTEGER NOT NULL, shadow INTEGER NOT NULL);
+		CREATE TABLE tx_drop_events (
+			at_ms INTEGER NOT NULL, relay TEXT NOT NULL, txn TEXT NOT NULL,
+			reason TEXT NOT NULL, kind TEXT NOT NULL DEFAULT '');
+		CREATE INDEX tx_txn ON tx(txn);
+		CREATE INDEX tx_drop_events_txn ON tx_drop_events(txn);
+		INSERT INTO frames VALUES ('0123456789abcdef0123456789abcdef', 'r', 1000, 12, -80, 4, 25);
+		INSERT INTO tx VALUES (2000, 'r', '0123456789abcdef0123456789abcdef', 'relay', 30, 10, 0);
+		INSERT INTO tx_drop_events VALUES (3000, 'r', '0123456789abcdef0123456789abcdef', 'duty', 'reply');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	st, err := openStore(ctx, path)
+	if err != nil {
+		t.Fatalf("opening journal with legacy correlation columns: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	for _, table := range []string{"frames", "tx", "tx_drop_events"} {
+		cols, err := tableColumns(ctx, st.db, table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !cols["corr"] || cols[legacyColumn] {
+			t.Errorf("%s columns after migration = %+v", table, cols)
+		}
+	}
+	frames, err := st.RecentFrames(ctx, FrameQuery{CorrelationPrefix: legacyFrame[:12], Limit: 2})
+	if err != nil || len(frames) != 1 || frames[0].Correlation != legacyFrame {
+		t.Fatalf("migrated frames = %+v, %v", frames, err)
+	}
+	sent, err := st.SentFor(ctx, legacyFrame[:12])
+	if err != nil || len(sent) != 1 || sent[0].Kind != "relay" {
+		t.Fatalf("migrated transmissions = %+v, %v", sent, err)
+	}
+	drops, err := st.DropsFor(ctx, legacyFrame[:12])
+	if err != nil || len(drops) != 1 || drops[0].Correlation != legacyFrame {
+		t.Fatalf("migrated drops = %+v, %v", drops, err)
+	}
+
+	for index, want := range map[string]bool{
+		"tx_corr":             true,
+		"tx_drop_events_corr": true,
+		"tx_txn":              false,
+		"tx_drop_events_txn":  false,
+	} {
+		var n int
+		if err := st.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, index,
+		).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if got := n == 1; got != want {
+			t.Errorf("index %s present = %v, want %v", index, got, want)
+		}
+	}
+}
+
+func TestDropsKeepTheirCorrelation(t *testing.T) {
+	// The chain's missing half: a refusal is findable by its corr, and
 	// the by-reason tally moves in the same transaction.
 	s := testSentinel(t)
 	ctx := context.Background()
-	id := txn.New()
+	id := correlation.New()
 	at := time.Now()
-	s.Process(ctx, bus.TxDropped{Relay: "r", Txn: id, At: at, Reason: "duty", Kind: "relay-flood"})
-	s.Process(ctx, bus.TxDropped{Relay: "r", Txn: txn.New(), At: at, Reason: "duty", Kind: "advert-flood"})
+	s.Process(ctx, bus.TxDropped{Relay: "r", Correlation: id, At: at, Reason: "duty", Kind: "relay-flood"})
+	s.Process(ctx, bus.TxDropped{Relay: "r", Correlation: correlation.New(), At: at, Reason: "duty", Kind: "advert-flood"})
 
 	events, err := s.DropsFor(ctx, id.Short())
 	if err != nil || len(events) != 1 {
 		t.Fatalf("DropsFor = %+v, %v", events, err)
 	}
 	e := events[0]
-	if e.Txn != id.String() || e.Reason != "duty" || e.Kind != "relay-flood" ||
+	if e.Correlation != id.String() || e.Reason != "duty" || e.Kind != "relay-flood" ||
 		e.At.UnixMilli() != at.UnixMilli() {
 		t.Errorf("event = %+v", e)
 	}
@@ -611,7 +693,7 @@ func TestJournalHealthTellsTheStoryOnce(t *testing.T) {
 	_ = s.store.Close() // every write now fails
 
 	for range 100 {
-		s.Process(ctx, bus.FrameJudged{Relay: "r", Txn: txn.New(), At: time.Now()})
+		s.Process(ctx, bus.FrameJudged{Relay: "r", Correlation: correlation.New(), At: time.Now()})
 	}
 	h := s.Health()
 	if h.Healthy || h.Failures != 100 || h.LastErr == "" || h.LastFailAt.IsZero() {

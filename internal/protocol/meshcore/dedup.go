@@ -5,7 +5,7 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
-	"meshrunner.dev/lotor/internal/txn"
+	"meshrunner.dev/lotor/internal/correlation"
 )
 
 // referenceCapacity mirrors the reference's packet-hash ring
@@ -17,7 +17,7 @@ const referenceCapacity = 128 + 32
 // the reference's way — a fixed-capacity ring, oldest evicted first —
 // with an optional time bound on top for operators who want one
 // (DedupTTL: zero means capacity-only, the reference's behaviour).
-// Each entry keeps the transaction that carried the first copy so log
+// Each entry keeps the correlation that carried the first copy so log
 // chains can point at it.
 type seenTable struct {
 	ttl     time.Duration
@@ -30,8 +30,8 @@ type seenTable struct {
 }
 
 type seenEntry struct {
-	txn txn.ID
-	at  time.Time
+	correlation correlation.ID
+	at          time.Time
 	// slot is this hash's position in the ring, so eviction and
 	// re-insertion stay in step.
 	slot int
@@ -49,14 +49,14 @@ func newSeenTable(ttl time.Duration, maxEntries int) *seenTable {
 	}
 }
 
-// witness records the hash if it is new and returns the transaction of
+// witness records the hash if it is new and returns the correlation of
 // the first copy otherwise. A hit does not refresh the entry: the
 // reference's ring ages by insertions, so refreshing would let a
 // steady echo keep itself alive forever.
-func (t *seenTable) witness(h [meshcore.MaxHashSize]byte, id txn.ID, now time.Time) (txn.ID, bool) {
+func (t *seenTable) witness(h [meshcore.MaxHashSize]byte, id correlation.ID, now time.Time) (correlation.ID, bool) {
 	if e, ok := t.entries[h]; ok {
 		if t.ttl <= 0 || now.Sub(e.at) < t.ttl {
-			return e.txn, true
+			return e.correlation, true
 		}
 		// Expired by the operator's TTL: drop it and record afresh.
 		delete(t.entries, h)
@@ -70,6 +70,6 @@ func (t *seenTable) witness(h [meshcore.MaxHashSize]byte, id txn.ID, now time.Ti
 	}
 	t.order[slot] = h
 	t.next = (slot + 1) % t.max
-	t.entries[h] = seenEntry{txn: id, at: now, slot: slot}
-	return txn.ID{}, false
+	t.entries[h] = seenEntry{correlation: id, at: now, slot: slot}
+	return correlation.ID{}, false
 }

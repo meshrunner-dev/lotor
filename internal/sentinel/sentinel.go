@@ -137,9 +137,9 @@ func (s *Sentinel) CountFrames(ctx context.Context, fq FrameQuery) (int, error) 
 // Nodes lists the directory the mesh writes about itself.
 func (s *Sentinel) Nodes(ctx context.Context) ([]Node, error) { return s.store.Nodes(ctx) }
 
-// Chain returns a transaction and everything duplicate-linked to it.
-func (s *Sentinel) Chain(ctx context.Context, txnPrefix string) ([]Frame, error) {
-	return s.store.Chain(ctx, txnPrefix)
+// Chain returns a correlation and everything duplicate-linked to it.
+func (s *Sentinel) Chain(ctx context.Context, correlationPrefix string) ([]Frame, error) {
+	return s.store.Chain(ctx, correlationPrefix)
 }
 
 // VerdictCounts sums a relay's judgements by verdict.
@@ -210,9 +210,9 @@ func (s *Sentinel) TxAirtimeHistory(ctx context.Context, relay string, since tim
 	return s.store.MetricHistory(ctx, "tx_airtime", relay, since)
 }
 
-// SentFor lists the emissions answering one transaction, oldest first.
-func (s *Sentinel) SentFor(ctx context.Context, txn string) ([]Sent, error) {
-	return s.store.SentFor(ctx, txn)
+// SentFor lists the emissions answering one correlation, oldest first.
+func (s *Sentinel) SentFor(ctx context.Context, correlationPrefix string) ([]Sent, error) {
+	return s.store.SentFor(ctx, correlationPrefix)
 }
 
 // TxDrops lists the emission-refusal tallies, most recent first.
@@ -220,10 +220,10 @@ func (s *Sentinel) TxDrops(ctx context.Context) ([]TxDrop, error) {
 	return s.store.TxDrops(ctx)
 }
 
-// DropsFor lists the refusals recorded under one transaction prefix —
+// DropsFor lists the refusals recorded under one correlation prefix —
 // the missing half of the heard → judged → sent chain.
-func (s *Sentinel) DropsFor(ctx context.Context, txnPrefix string) ([]TxDropEvent, error) {
-	return s.store.DropsFor(ctx, txnPrefix)
+func (s *Sentinel) DropsFor(ctx context.Context, correlationPrefix string) ([]TxDropEvent, error) {
+	return s.store.DropsFor(ctx, correlationPrefix)
 }
 
 // StateHistory interleaves recent relay and observer lifecycle
@@ -350,7 +350,7 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 		// nothing — never a row stranded halfway. FrameHeard stays on
 		// the bus for the live consumers and is not journalled.
 		err = s.store.insertObserved(ctx, Frame{
-			Txn: e.Txn.String(), Relay: e.Relay, At: e.At,
+			Correlation: e.Correlation.String(), Relay: e.Relay, At: e.At,
 			Bytes: e.Bytes, RSSI: e.RSSI, SNR: e.SNR,
 			SignalRSSI: e.SignalRSSI, FreqErrHz: e.FreqErrHz,
 			Airtime: e.Airtime,
@@ -366,7 +366,7 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 		err = s.store.insertMetric(ctx, "noise_starved", e.Relay, e.At, float64(e.Aborted))
 	case bus.FrameSent:
 		window, next := s.nextTxWindow(e.Relay, e.At, e.Airtime)
-		if err = s.store.recordSent(ctx, e.At, e.Relay, e.Txn.String(), e.Kind,
+		if err = s.store.recordSent(ctx, e.At, e.Relay, e.Correlation.String(), e.Kind,
 			e.Airtime, e.PowerDBm, e.Shadow, window); err == nil {
 			if s.txWindows == nil {
 				s.txWindows = map[string][]txStamp{}
@@ -374,7 +374,7 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 			s.txWindows[e.Relay] = next
 		}
 	case bus.TxDropped:
-		err = s.store.recordTxDrop(ctx, e.At, e.Relay, e.Txn.String(), e.Reason, e.Kind)
+		err = s.store.recordTxDrop(ctx, e.At, e.Relay, e.Correlation.String(), e.Reason, e.Kind)
 	case bus.RelayState:
 		err = s.store.insertRelayState(ctx, e.At, e.Relay, e.State, e.Err)
 	case bus.ObserverState:
@@ -430,22 +430,22 @@ func (s *Sentinel) recordOutcome(ev bus.Event, err error) {
 
 // frameCorrelation keeps a failed journal projection attached to the
 // frame whose story it could not store. Non-frame events deliberately
-// carry no invented transaction.
+// carry no invented correlation.
 func frameCorrelation(ev bus.Event) []zap.Field {
 	var relay, id string
 	switch e := ev.(type) {
 	case bus.FrameJudged:
-		relay, id = e.Relay, e.Txn.Short()
+		relay, id = e.Relay, e.Correlation.Short()
 	case bus.FrameCorrupt:
-		relay, id = e.Relay, e.Txn.Short()
+		relay, id = e.Relay, e.Correlation.Short()
 	case bus.FrameSent:
-		relay, id = e.Relay, e.Txn.Short()
+		relay, id = e.Relay, e.Correlation.Short()
 	case bus.TxDropped:
-		relay, id = e.Relay, e.Txn.Short()
+		relay, id = e.Relay, e.Correlation.Short()
 	default:
 		return nil
 	}
-	return []zap.Field{zap.String("relay", relay), zap.String("txn", id)}
+	return []zap.Field{zap.String("relay", relay), zap.String("corr", id)}
 }
 
 // Health is the journal's condition as outside readers see it.

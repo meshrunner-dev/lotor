@@ -9,8 +9,8 @@ import (
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
-	"meshrunner.dev/lotor/internal/txn"
 )
 
 // Discovery answering, the reference repeater's shape: at most four
@@ -93,7 +93,7 @@ func (e *engine) controlVerdict(rx *reception) (string, string) {
 // of the inbound link. The name is not in this packet by design; it
 // travels in the signed advert, which is why a discoverable repeater
 // also announces itself.
-func (e *engine) respondDiscover(dev radio.Device, pkt *meshcore.Packet, origin txn.ID, snr float64) {
+func (e *engine) respondDiscover(dev radio.Device, pkt *meshcore.Packet, origin correlation.ID, snr float64) {
 	req, err := meshcore.ParseDiscoverReq(pkt)
 	if err != nil {
 		return // the verdict parsed it once already
@@ -111,9 +111,9 @@ func (e *engine) respondDiscover(dev radio.Device, pkt *meshcore.Packet, origin 
 	}
 	if !e.limits.discover.allow(time.Now()) {
 		// Debug, not Warn: the volume here is attacker-controlled.
-		e.log.Debug("discovery response rate-limited", zap.String("txn", origin.Short()))
+		e.log.Debug("discovery response rate-limited", zap.String("corr", origin.Short()))
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Txn: origin, At: time.Now(), Reason: reasonRateLimited,
+			Relay: e.relay, Correlation: origin, At: time.Now(), Reason: reasonRateLimited,
 			Kind: "discover-response",
 		})
 		return
@@ -126,7 +126,7 @@ func (e *engine) respondDiscover(dev radio.Device, pkt *meshcore.Packet, origin 
 	}, req.PrefixOnly)
 	if err != nil {
 		e.log.Warn("discovery response build failed",
-			zap.String("txn", origin.Short()), zap.Error(err))
+			zap.String("corr", origin.Short()), zap.Error(err))
 		return
 	}
 	e.enqueue(dev, resp, "discover-resp", origin, prioDirect, discoverDelayWiden*e.p.txDelayFactor())

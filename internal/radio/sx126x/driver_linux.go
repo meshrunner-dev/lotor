@@ -11,9 +11,9 @@ import (
 
 	"go.uber.org/zap"
 
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/radio"
-	"meshrunner.dev/lotor/internal/txn"
 	"meshrunner.dev/pkg/lora"
 	"meshrunner.dev/pkg/lora/linux"
 	"meshrunner.dev/pkg/lora/sx126x"
@@ -239,16 +239,16 @@ func (d *device) Receive(ctx context.Context) (radio.Frame, error) {
 		f, err := d.r.Poll()
 		if err != nil {
 			if errors.Is(err, sx126x.ErrCRC) || errors.Is(err, sx126x.ErrHeader) {
-				id := txn.New()
-				logging.Trace(d.log.With(zap.String("txn", id.Short())),
+				id := correlation.New()
+				logging.Trace(d.log.With(zap.String("corr", id.Short())),
 					"rx corrupt frame off the chip", zap.Error(err))
-				return radio.Frame{Txn: id, At: time.Now()}, fmt.Errorf("%w: %w", radio.ErrCorrupt, err)
+				return radio.Frame{Correlation: id, At: time.Now()}, fmt.Errorf("%w: %w", radio.ErrCorrupt, err)
 			}
 			return radio.Frame{}, err
 		}
 		if f != nil {
-			id := txn.New()
-			log := d.log.With(zap.String("txn", id.Short()))
+			id := correlation.New()
+			log := d.log.With(zap.String("corr", id.Short()))
 			if logging.On(d.log) {
 				logging.Trace(log, "rx frame off the chip",
 					zap.Int("bytes", len(f.Payload)),
@@ -276,16 +276,16 @@ func (d *device) Receive(ctx context.Context) (radio.Frame, error) {
 	}
 }
 
-func mapFrame(f *sx126x.RxFrame, id txn.ID) radio.Frame {
+func mapFrame(f *sx126x.RxFrame, id correlation.ID) radio.Frame {
 	return radio.Frame{
-		Txn:        id,
-		Payload:    f.Payload,
-		RSSI:       f.RSSI,
-		SNR:        f.SNR,
-		SignalRSSI: f.SignalRSSI,
-		FreqErrHz:  f.FreqErr,
-		Airtime:    f.Airtime,
-		At:         f.At,
+		Correlation: id,
+		Payload:     f.Payload,
+		RSSI:        f.RSSI,
+		SNR:         f.SNR,
+		SignalRSSI:  f.SignalRSSI,
+		FreqErrHz:   f.FreqErr,
+		Airtime:     f.Airtime,
+		At:          f.At,
 	}
 }
 
@@ -350,8 +350,8 @@ func (d *device) Transmit(ctx context.Context, payload []byte, powerDBm int8) (r
 	// caller needs both: the airtime was radiated and must be charged
 	// whatever happens to the session next.
 	log := d.log
-	if id, ok := txn.FromContext(ctx); ok {
-		log = log.With(zap.String("txn", id.Short()))
+	if id, ok := correlation.FromContext(ctx); ok {
+		log = log.With(zap.String("corr", id.Short()))
 	}
 	logging.Trace(log, "tx keying",
 		zap.Int("bytes", len(payload)), zap.Int8("power_dbm", powerDBm))

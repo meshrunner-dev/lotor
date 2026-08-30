@@ -457,7 +457,7 @@ func (s *session) frames(ctx context.Context, in input) error {
 	}
 	tb := s.table()
 	for _, f := range slices.Backward(frames) { // oldest first, like a log
-		tb.row(f.At.Format("15:04:05"), f.Txn[:12], f.Type,
+		tb.row(f.At.Format("15:04:05"), f.Correlation[:12], f.Type,
 			fmt.Sprintf("%s /%d", f.Route, f.PathLen), verdictWithChain(f), who(f))
 	}
 	if err := tb.flush(s.out); err != nil {
@@ -499,19 +499,19 @@ func (s *session) confessCap(ctx context.Context, sen *sentinel.Sentinel,
 	}
 }
 
-// resolveAround turns a transaction prefix into the window either
+// resolveAround turns a correlation prefix into the window either
 // side of the moment it was heard.
 func (s *session) resolveAround(ctx context.Context, sen *sentinel.Sentinel, w *frameSelectors) error {
-	anchors, err := sen.RecentFrames(ctx, sentinel.FrameQuery{TxnPrefix: w.aroundPrefix, Limit: 2})
+	anchors, err := sen.RecentFrames(ctx, sentinel.FrameQuery{CorrelationPrefix: w.aroundPrefix, Limit: 2})
 	if err != nil {
 		return err
 	}
 	switch len(anchors) {
 	case 0:
-		return fmt.Errorf("no transaction starts with %q", w.aroundPrefix)
+		return fmt.Errorf("no correlation starts with %q", w.aroundPrefix)
 	case 1:
 	default:
-		return fmt.Errorf("%q names more than one transaction — give more of it", w.aroundPrefix)
+		return fmt.Errorf("%q names more than one correlation — give more of it", w.aroundPrefix)
 	}
 	span := w.span
 	if span == 0 {
@@ -539,10 +539,10 @@ func who(f sentinel.Frame) string {
 	}
 }
 
-func (s *session) txn(ctx context.Context, in input) error {
+func (s *session) corr(ctx context.Context, in input) error {
 	args := in.pos
 	if len(args) != 1 {
-		return errors.New("usage: txn <prefix>")
+		return errors.New("usage: corr <prefix>")
 	}
 	sen, err := s.needSentinel()
 	if err != nil {
@@ -556,11 +556,11 @@ func (s *session) txn(ctx context.Context, in input) error {
 		// Nothing was heard under this id — but the daemon's own
 		// adverts are emissions with no reception behind them, and an
 		// operator reading one in a log line must be able to look it up.
-		return s.originatedTxn(ctx, sen, args[0])
+		return s.originatedCorrelation(ctx, sen, args[0])
 	}
 	for _, f := range chain {
 		fmt.Fprintf(s.out, "%s  heard %s  %d B  %.0f dBm  snr %.1f  signal %.0f dBm  Δf %+.0f Hz  airtime %s\r\n",
-			f.Txn[:12], f.At.Format("15:04:05"), f.Bytes, f.RSSI, f.SNR,
+			f.Correlation[:12], f.At.Format("15:04:05"), f.Bytes, f.RSSI, f.SNR,
 			f.SignalRSSI, f.FreqErrHz, f.Airtime)
 		scope := ""
 		if f.Scope != "" {
@@ -572,16 +572,16 @@ func (s *session) txn(ctx context.Context, in input) error {
 			fmt.Fprintf(s.out, " — %s", w)
 		}
 		fmt.Fprint(s.out, "\r\n")
-		// The transaction's full life: what the pipeline sent for it —
+		// The correlation's full life: what the pipeline sent for it —
 		// and what it gave up on, which is an outcome too: a reception
 		// judged worth relaying that then dropped on duty must not
 		// read as leading nowhere.
-		sent, err := sen.SentFor(ctx, f.Txn)
+		sent, err := sen.SentFor(ctx, f.Correlation)
 		if err != nil {
 			return err
 		}
 		s.printSent(sent)
-		drops, err := sen.DropsFor(ctx, f.Txn)
+		drops, err := sen.DropsFor(ctx, f.Correlation)
 		if err != nil {
 			return err
 		}
@@ -590,10 +590,10 @@ func (s *session) txn(ctx context.Context, in input) error {
 	return nil
 }
 
-// originatedTxn renders a transaction the daemon started itself, or
-// reports that nothing anywhere carries the prefix. An origination
-// that only ever DROPPED is still a transaction with a story.
-func (s *session) originatedTxn(ctx context.Context, sen *sentinel.Sentinel, prefix string) error {
+// originatedCorrelation renders a correlation the daemon started
+// itself, or reports that nothing anywhere carries the prefix. An
+// origination that only ever DROPPED still has a causal story.
+func (s *session) originatedCorrelation(ctx context.Context, sen *sentinel.Sentinel, prefix string) error {
 	sent, err := sen.SentFor(ctx, prefix)
 	if err != nil {
 		return err
@@ -603,7 +603,7 @@ func (s *session) originatedTxn(ctx context.Context, sen *sentinel.Sentinel, pre
 		return err
 	}
 	if len(sent) == 0 && len(drops) == 0 {
-		return fmt.Errorf("no transaction matching %q", prefix)
+		return fmt.Errorf("no correlation matching %q", prefix)
 	}
 	fmt.Fprint(s.out, "originated — no reception behind it\r\n")
 	s.printSent(sent)
@@ -611,7 +611,7 @@ func (s *session) originatedTxn(ctx context.Context, sen *sentinel.Sentinel, pre
 	return nil
 }
 
-// printSent renders a transaction's emissions.
+// printSent renders a correlation's emissions.
 func (s *session) printSent(sent []sentinel.Sent) {
 	for _, t := range sent {
 		shadow := ""
@@ -623,7 +623,7 @@ func (s *session) printSent(sent []sentinel.Sent) {
 	}
 }
 
-// printDrops renders a transaction's refused emissions.
+// printDrops renders a correlation's refused emissions.
 func (s *session) printDrops(drops []sentinel.TxDropEvent) {
 	for _, d := range drops {
 		kind := d.Kind
@@ -1508,7 +1508,7 @@ func (s *session) watchEvent(ev bus.Event, opts map[string]string) error {
 		if v, ok := opts[scopeRelay]; ok && e.Relay != v {
 			return nil
 		}
-		_, err := fmt.Fprintf(s.out, "%s  corrupt reception — %s\r\n", e.Txn.Short(), e.Err)
+		_, err := fmt.Fprintf(s.out, "%s  corrupt reception — %s\r\n", e.Correlation.Short(), e.Err)
 		return err
 	}
 	return nil
@@ -1529,7 +1529,7 @@ func watchMatch(j bus.FrameJudged, opts map[string]string) bool {
 
 func watchLine(j bus.FrameJudged) string {
 	line := fmt.Sprintf("%s  %s %s /%d  %s",
-		j.Txn.Short(), j.Type, j.Route, j.PathLen, j.Verdict)
+		j.Correlation.Short(), j.Type, j.Route, j.PathLen, j.Verdict)
 	if j.DuplicateOf != "" {
 		line += " → " + j.DuplicateOf
 	}

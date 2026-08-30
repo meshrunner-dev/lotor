@@ -23,10 +23,10 @@ import (
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/protocol"
 	"meshrunner.dev/lotor/internal/radio"
-	"meshrunner.dev/lotor/internal/txn"
 	"meshrunner.dev/lotor/internal/version"
 )
 
@@ -725,18 +725,18 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 			e.judge(dev, frame)
 		case errors.Is(err, radio.ErrCorrupt):
 			e.stats.countCorrupt()
-			id := frame.Txn
+			id := frame.Correlation
 			if id.IsZero() {
-				id = txn.New()
+				id = correlation.New()
 			}
 			at := frame.At
 			if at.IsZero() {
 				at = time.Now()
 			}
-			log := e.log.With(zap.String("txn", id.Short()))
+			log := e.log.With(zap.String("corr", id.Short()))
 			log.Debug("corrupt reception", zap.Error(err))
 			e.bus.Publish(bus.FrameCorrupt{
-				Relay: e.relay, Txn: id, At: at, Err: err.Error(),
+				Relay: e.relay, Correlation: id, At: at, Err: err.Error(),
 			})
 		case (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) &&
 			ctx.Err() == nil:
@@ -895,14 +895,14 @@ func (e *engine) observe(rx *reception) {
 	}
 }
 
-// heard logs and publishes one reception, returning the transaction
+// heard logs and publishes one reception, returning the correlation
 // that names it from here on.
-func (e *engine) heard(frame radio.Frame) (txn.ID, *zap.Logger) {
-	id := frame.Txn
+func (e *engine) heard(frame radio.Frame) (correlation.ID, *zap.Logger) {
+	id := frame.Correlation
 	if id.IsZero() {
-		id = txn.New()
+		id = correlation.New()
 	}
-	log := e.log.With(zap.String("txn", id.Short()))
+	log := e.log.With(zap.String("corr", id.Short()))
 	log.Debug("frame heard", zap.Int("bytes", len(frame.Payload)))
 	logging.Trace(log, "rx frame measurements",
 		zap.Float64("rssi_dbm", frame.RSSI),
@@ -912,7 +912,7 @@ func (e *engine) heard(frame radio.Frame) (txn.ID, *zap.Logger) {
 		zap.Duration("airtime", frame.Airtime),
 	)
 	e.bus.Publish(bus.FrameHeard{
-		Relay: e.relay, Txn: id, At: frame.At,
+		Relay: e.relay, Correlation: id, At: frame.At,
 		Bytes: len(frame.Payload), RSSI: frame.RSSI, SNR: frame.SNR,
 		SignalRSSI: frame.SignalRSSI, FreqErrHz: frame.FreqErrHz,
 		Airtime: frame.Airtime,
@@ -929,9 +929,9 @@ func packetHashHex(pkt *meshcore.Packet) string {
 // judgedEvent seeds a verdict event with the reception it is about:
 // the journal archives on this one event, so it must carry everything
 // FrameHeard measured.
-func (e *engine) judgedEvent(id txn.ID, frame radio.Frame) bus.FrameJudged {
+func (e *engine) judgedEvent(id correlation.ID, frame radio.Frame) bus.FrameJudged {
 	return bus.FrameJudged{
-		Relay: e.relay, Txn: id, At: frame.At,
+		Relay: e.relay, Correlation: id, At: frame.At,
 		Bytes: len(frame.Payload), RSSI: frame.RSSI, SNR: frame.SNR,
 		SignalRSSI: frame.SignalRSSI, FreqErrHz: frame.FreqErrHz,
 		Airtime: frame.Airtime,
@@ -995,11 +995,11 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 // the verdict schedules. Everything before it already happened at
 // reception — the audit heard the frame when the air carried it, not
 // when the hold released it.
-func (e *engine) process(dev radio.Device, pkt *meshcore.Packet, frame radio.Frame, id txn.ID) {
+func (e *engine) process(dev radio.Device, pkt *meshcore.Packet, frame radio.Frame, id correlation.ID) {
 	// PathLen is the hop count the path descriptor declares, not its
 	// byte length: hashes are 1-4 bytes wide.
 	hops := pkt.PathHashCount()
-	log := e.log.With(zap.String("txn", id.Short()))
+	log := e.log.With(zap.String("corr", id.Short()))
 	if log.Core().Enabled(zap.DebugLevel) {
 		log = log.With(
 			zap.String("packet_hash", packetHashHex(pkt)),

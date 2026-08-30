@@ -10,8 +10,8 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
-	"meshrunner.dev/lotor/internal/txn"
 )
 
 // teachPath builds the PATH a client sends to say how to reach it: a
@@ -52,7 +52,7 @@ func drive(t *testing.T, e *engine, f radio.Frame) string {
 	rx := rxOf(e, pkt)
 	v, _ := e.verdict(rx)
 	if v == verdictAnon {
-		e.respondAnon(rx, txn.New())
+		e.respondAnon(rx, correlation.New())
 	}
 	return v
 }
@@ -146,7 +146,7 @@ func TestRouteHomeIsLearnedAndTheNewestWins(t *testing.T) {
 	}
 }
 
-func TestRouteLearningLogKeepsTheFrameTransaction(t *testing.T) {
+func TestRouteLearningLogKeepsTheFrameCorrelation(t *testing.T) {
 	e, _, _, peer := txRig(t, "shadow")
 	c := guestIn(t, e, peer)
 	core, observed := observer.New(zapcore.DebugLevel)
@@ -165,8 +165,8 @@ func TestRouteLearningLogKeepsTheFrameTransaction(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("route logs = %+v", observed.All())
 	}
-	if got := entries[0].ContextMap()["txn"]; got != rx.id.Short() {
-		t.Errorf("txn field = %v, want %s", got, rx.id.Short())
+	if got := entries[0].ContextMap()["corr"]; got != rx.id.Short() {
+		t.Errorf("corr field = %v, want %s", got, rx.id.Short())
 	}
 }
 

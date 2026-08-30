@@ -9,8 +9,8 @@ import (
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
-	"meshrunner.dev/lotor/internal/txn"
 )
 
 // anonAsk builds a companion's anonymous question: an ANON_REQ sealed to
@@ -82,7 +82,7 @@ func TestAnonRepliesAreRateLimited(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		e.respondAnon(rxOf(e, pkt), txn.New())
+		e.respondAnon(rxOf(e, pkt), correlation.New())
 	}
 	if n := len(e.queue.entries); n != anonLimitMax {
 		t.Fatalf("%d replies queued, want the cap %d", n, anonLimitMax)
@@ -135,7 +135,7 @@ func TestUnreadableAnonTrafficRoutesOn(t *testing.T) {
 		t.Fatalf("verdict = %q, want anon-request", v)
 	}
 	before := len(e.queue.entries)
-	e.respondAnon(rxOf(e, pkt), txn.New())
+	e.respondAnon(rxOf(e, pkt), correlation.New())
 	if len(e.queue.entries) != before {
 		t.Fatal("a flooded owner request was answered — the reference gates on direct")
 	}

@@ -2,7 +2,7 @@
 // nothing about its transport (telnet today, SSH someday, a pipe in
 // tests). Commands speak the design's vocabulary — relay, radio,
 // sentinel, config — and v1 is read-only. Prefixes are keys: the short
-// displayed form of a transaction or public key addresses its rows.
+// displayed form of a correlation or public key addresses its rows.
 package cli
 
 import (
