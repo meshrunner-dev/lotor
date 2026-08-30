@@ -1,0 +1,172 @@
+package meshcore
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"time"
+
+	"meshrunner.dev/lotor/internal/radio"
+)
+
+const persistedStateVersion = 1
+
+type persistedChannel struct {
+	Index  uint8    `json:"index"`
+	Name   string   `json:"name"`
+	Secret [16]byte `json:"secret"`
+}
+
+type persistedWaveform struct {
+	FrequencyHz     uint32 `json:"frequencyHz"`
+	SpreadingFactor int    `json:"spreadingFactor"`
+	BandwidthHz     int    `json:"bandwidthHz"`
+	CodingRate      int    `json:"codingRate"`
+	Preamble        int    `json:"preamble"`
+	SyncWord        byte   `json:"syncWord"`
+	CRC             bool   `json:"crc"`
+}
+
+func persistWaveform(w radio.Waveform) persistedWaveform {
+	return persistedWaveform{
+		FrequencyHz: w.FrequencyHz, SpreadingFactor: w.SpreadingFactor,
+		BandwidthHz: w.BandwidthHz, CodingRate: w.CodingRate, Preamble: w.Preamble,
+		SyncWord: w.SyncWord, CRC: w.CRC,
+	}
+}
+
+func (w persistedWaveform) radio() radio.Waveform {
+	return radio.Waveform{
+		FrequencyHz: w.FrequencyHz, SpreadingFactor: w.SpreadingFactor,
+		BandwidthHz: w.BandwidthHz, CodingRate: w.CodingRate, Preamble: w.Preamble,
+		SyncWord: w.SyncWord, CRC: w.CRC,
+	}
+}
+
+// persistedState contains only preferences the companion protocol may own.
+// Configuration remains authoritative for identity, capacity and regulatory
+// policy; the application cannot rewrite those through this blob.
+type persistedState struct {
+	Version int `json:"version"`
+
+	Waveform      persistedWaveform  `json:"waveform"`
+	TXPowerDBm    int8               `json:"txPowerDbm"`
+	NodeName      string             `json:"nodeName"`
+	NodeLat       float64            `json:"nodeLat"`
+	NodeLon       float64            `json:"nodeLon"`
+	PIN           uint64             `json:"pin"`
+	MultiACKs     int                `json:"multiAcks"`
+	AdvertLoc     int                `json:"advertLocPolicy"`
+	TelemetryMode int                `json:"telemetryMode"`
+	ManualContact bool               `json:"manualAddContacts"`
+	PathHashMode  int                `json:"pathHashMode"`
+	ClockDelta    int64              `json:"clockDeltaNs"`
+	AutoFlags     uint8              `json:"autoAddFlags"`
+	AutoHops      uint8              `json:"autoAddMaxHops"`
+	DefaultScope  string             `json:"defaultScope"`
+	DefaultKey    [16]byte           `json:"defaultScopeKey"`
+	Channels      []persistedChannel `json:"channels,omitempty"`
+}
+
+func (s *service) snapshotLocked() persistedState {
+	state := persistedState{
+		Version: persistedStateVersion, Waveform: persistWaveform(s.p.Waveform), TXPowerDBm: s.p.TXPowerDBm,
+		NodeName: s.p.NodeName, NodeLat: s.p.NodeLat, NodeLon: s.p.NodeLon, PIN: s.p.PIN,
+		MultiACKs: s.p.MultiACKs, AdvertLoc: s.p.AdvertLoc, TelemetryMode: s.p.TelemetryMode,
+		ManualContact: s.p.ManualContacts, PathHashMode: s.p.PathHashMode,
+		ClockDelta: int64(s.clockDelta), AutoFlags: s.autoFlags, AutoHops: s.autoHops,
+		DefaultScope: s.defaultScope, DefaultKey: s.defaultKey,
+		Channels: make([]persistedChannel, 0, len(s.channels)),
+	}
+	for index, ch := range s.channels {
+		state.Channels = append(state.Channels, persistedChannel{Index: index, Name: ch.name, Secret: ch.secret})
+	}
+	sort.Slice(state.Channels, func(i, j int) bool { return state.Channels[i].Index < state.Channels[j].Index })
+	return state
+}
+
+func (s *service) restoreLocked(state persistedState) {
+	s.p.Waveform, s.p.TXPowerDBm = state.Waveform.radio(), state.TXPowerDBm
+	s.p.NodeName, s.p.NodeLat, s.p.NodeLon = state.NodeName, state.NodeLat, state.NodeLon
+	s.p.PIN, s.p.MultiACKs = state.PIN, state.MultiACKs
+	s.p.AdvertLoc, s.p.TelemetryMode = state.AdvertLoc, state.TelemetryMode
+	s.p.ManualContacts, s.p.PathHashMode = state.ManualContact, state.PathHashMode
+	s.clockDelta = time.Duration(state.ClockDelta)
+	s.autoFlags, s.autoHops = state.AutoFlags, state.AutoHops
+	s.defaultScope, s.defaultKey = state.DefaultScope, state.DefaultKey
+	s.channels = make(map[uint8]channel, len(state.Channels))
+	for _, item := range state.Channels {
+		s.channels[item.Index] = channel{name: item.Name, secret: item.Secret}
+	}
+}
+
+func (s *service) loadState(ctx context.Context) error {
+	if s.stateStore == nil {
+		return nil
+	}
+	raw, exists, err := s.stateStore.LoadStationState(ctx, s.name)
+	if err != nil || !exists {
+		return err
+	}
+	var state persistedState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return fmt.Errorf("meshcore station state: %w", err)
+	}
+	if state.Version != persistedStateVersion {
+		return fmt.Errorf("meshcore station state: version %d, want %d", state.Version, persistedStateVersion)
+	}
+	check := s.p
+	check.Waveform, check.TXPowerDBm = state.Waveform.radio(), state.TXPowerDBm
+	check.NodeName, check.NodeLat, check.NodeLon = state.NodeName, state.NodeLat, state.NodeLon
+	check.PIN, check.MultiACKs = state.PIN, state.MultiACKs
+	check.AdvertLoc, check.TelemetryMode = state.AdvertLoc, state.TelemetryMode
+	check.ManualContacts, check.PathHashMode = state.ManualContact, state.PathHashMode
+	if err := validateAir(check); err != nil {
+		return fmt.Errorf("meshcore station state: %w", err)
+	}
+	if err := validatePreferences(check); err != nil {
+		return fmt.Errorf("meshcore station state: %w", err)
+	}
+	seen := make(map[uint8]struct{}, len(state.Channels))
+	for _, item := range state.Channels {
+		if int(item.Index) >= s.p.MaxChannels || len(item.Name) > maxChannelName {
+			return fmt.Errorf("meshcore station state: invalid channel %d", item.Index)
+		}
+		if _, duplicate := seen[item.Index]; duplicate {
+			return fmt.Errorf("meshcore station state: duplicate channel %d", item.Index)
+		}
+		seen[item.Index] = struct{}{}
+	}
+	s.restoreLocked(state)
+	return nil
+}
+
+func (s *service) persistLocked(ctx context.Context, before persistedState) error {
+	if s.stateStore == nil {
+		return nil
+	}
+	after := s.snapshotLocked()
+	beforeRaw, err := json.Marshal(before)
+	if err != nil {
+		return err
+	}
+	afterRaw, err := json.Marshal(after)
+	if err != nil {
+		return err
+	}
+	if string(beforeRaw) == string(afterRaw) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := s.stateStore.SaveStationState(ctx, s.name, afterRaw); err != nil {
+		oldWaveform := before.Waveform.radio()
+		s.restoreLocked(before)
+		if s.binding != nil && oldWaveform != after.Waveform.radio() {
+			_ = s.binding.SetWaveform(oldWaveform)
+		}
+		return err
+	}
+	return nil
+}

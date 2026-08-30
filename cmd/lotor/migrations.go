@@ -80,7 +80,15 @@ func storeMigrations() []confdb.Migration {
 			"for: a name the console cannot spell is renamed, references and " +
 			"runtime state following it",
 		Run: migrateInstanceNames,
-	}, aclDurabilityMigration()}
+	}, aclDurabilityMigration(), stationStateMigration()}
+}
+
+func stationStateMigration() confdb.Migration {
+	return confdb.Migration{
+		To:  14,
+		Doc: "virtual station companion preferences gain a protocol-owned durable home",
+		Run: func(context.Context, *sql.Tx) error { return nil },
+	}
 }
 
 func aclDurabilityMigration() confdb.Migration {

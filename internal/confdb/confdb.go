@@ -98,6 +98,11 @@ CREATE TABLE IF NOT EXISTS regions_meta(
   default_id     INTEGER NOT NULL CHECK(default_id BETWEEN 0 AND 65535),
   wildcard_flags INTEGER NOT NULL CHECK(wildcard_flags BETWEEN 0 AND 3)
 );
+CREATE TABLE IF NOT EXISTS station_state(
+  station    TEXT PRIMARY KEY,
+  state      BLOB NOT NULL,
+  updated_at TEXT NOT NULL
+);
 INSERT INTO meta(key, value) VALUES('schema_version', '1')
   ON CONFLICT(key) DO NOTHING;
 `
@@ -462,7 +467,7 @@ func fileObjects(f *config.File) []importObject {
 // what the file says.
 func purgeRuntimeState(ctx context.Context, tx *sql.Tx) error {
 	for _, stmt := range []string{
-		"DELETE FROM acl", "DELETE FROM regions", "DELETE FROM regions_meta",
+		"DELETE FROM acl", "DELETE FROM regions", "DELETE FROM regions_meta", "DELETE FROM station_state",
 	} {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return err
@@ -570,6 +575,11 @@ func (s *Store) Remove(ctx context.Context, kind, name, principal string) error 
 			if _, err := tx.ExecContext(ctx, stmt, name); err != nil {
 				return err
 			}
+		}
+	}
+	if kind == KindStation {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM station_state WHERE station = ?", name); err != nil {
+			return err
 		}
 	}
 	diff, err := json.Marshal(map[string]Change{"object": {Old: json.RawMessage(s.maskRaw(attrs))}})

@@ -182,7 +182,12 @@ func build(spec station.Spec) (station.Service, error) {
 	s := &service{
 		name: spec.Name, listen: spec.Listen, radioName: spec.Radio,
 		p: p, id: id, log: log, buildVersion: spec.Build.Version,
-		channels: make(map[uint8]channel), state: station.StateStarting,
+		channels: make(map[uint8]channel), state: station.StateStarting, stateStore: spec.State,
+	}
+	loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.loadState(loadCtx); err != nil {
+		return nil, err
 	}
 	if spec.Build.SourceTime.IsZero() {
 		s.buildDate = "local build"
@@ -232,6 +237,7 @@ type service struct {
 	mailbox      []companion.Response
 	binding      *radio.Binding
 	rfCause      string
+	stateStore   station.StateStore
 }
 
 func (s *service) Run(ctx context.Context) error {
@@ -321,7 +327,7 @@ func (s *service) serveClient(ctx context.Context, conn net.Conn, generation uin
 			return
 		}
 		if cmd != nil {
-			responses = s.handle(cmd)
+			responses = s.handle(ctx, cmd)
 		}
 		if !s.writeResponses(conn, generation, responses) {
 			return
@@ -375,13 +381,19 @@ func (s *service) currentClient(conn net.Conn, generation uint64) bool {
 	return s.client == conn && s.generation == generation
 }
 
-func (s *service) handle(cmd companion.Command) []companion.Response {
+func (s *service) handle(ctx context.Context, cmd companion.Command) []companion.Response {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if responses, handled := s.handleQuery(cmd); handled {
 		return responses
 	}
-	return s.handleMutation(cmd)
+	before := s.snapshotLocked()
+	responses := s.handleMutation(cmd)
+	if err := s.persistLocked(ctx, before); err != nil {
+		s.log.Error("companion state persistence failed", zap.Error(err))
+		return errorResponses(companion.ErrorFileIO)
+	}
+	return responses
 }
 
 func (s *service) handleQuery(cmd companion.Command) ([]companion.Response, bool) {
@@ -622,6 +634,12 @@ func (s *service) AttachRadio(name string, binding *radio.Binding, cause string)
 	} else {
 		s.rf = station.RFDown
 	}
+}
+
+func (s *service) RadioWaveform() radio.Waveform {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.p.Waveform
 }
 
 func (s *service) setLifecycle(state station.State, err error) {

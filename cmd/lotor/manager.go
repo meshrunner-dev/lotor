@@ -760,7 +760,7 @@ func (m *manager) startStation(ctx context.Context, name string) {
 	svc, err := builder.Build(station.Spec{
 		Name: name, Protocol: sc.Protocol, Listen: sc.Listen, Radio: sc.Radio,
 		Config: cfg, Log: m.log.Named("station").With(zap.String("station", name)),
-		Build: buildInfo,
+		Build: buildInfo, State: m.store,
 	})
 	if err != nil {
 		m.log.Error("station assembly failed", zap.String("station", name), zap.Error(err))
@@ -833,6 +833,9 @@ func (m *manager) attachStationRadio(name string, h *managedStation,
 	if err != nil {
 		attacher.AttachRadio(sc.Radio, nil, err.Error())
 		return
+	}
+	if requester, ok := h.service.(station.RadioRequester); ok {
+		waveform = requester.RadioWaveform()
 	}
 	binding, err := controller.Bind(name, radio.RoleStation, waveform)
 	if err != nil {

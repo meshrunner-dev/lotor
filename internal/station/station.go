@@ -76,6 +76,21 @@ type RadioAttacher interface {
 	AttachRadio(name string, binding *radio.Binding, cause string)
 }
 
+// RadioRequester exposes the live protocol-owned waveform. It may differ from
+// the configuration default after a companion application changed its radio
+// parameters and that preference survived a daemon restart.
+type RadioRequester interface {
+	RadioWaveform() radio.Waveform
+}
+
+// StateStore is the protocol-neutral durable home for one station's mutable
+// companion state. The payload is owned and versioned by the protocol
+// implementation; the configuration store only guarantees atomic bytes.
+type StateStore interface {
+	LoadStationState(ctx context.Context, station string) ([]byte, bool, error)
+	SaveStationState(ctx context.Context, station string, state []byte) error
+}
+
 // Spec is the protocol-neutral structure resolved before a protocol builder
 // sees its contributed configuration.
 type Spec struct {
@@ -86,6 +101,7 @@ type Spec struct {
 	Config   map[string]any
 	Log      *zap.Logger
 	Build    version.Info
+	State    StateStore
 }
 
 // Builder constructs and validates one station protocol implementation.
