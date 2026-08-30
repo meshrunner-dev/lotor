@@ -152,7 +152,7 @@ func (s *service) restoreLocked(state persistedState) {
 	s.clockDelta = time.Duration(state.ClockDelta)
 	s.autoFlags, s.autoHops = state.AutoFlags, state.AutoHops
 	s.defaultScope, s.defaultKey = state.DefaultScope, state.DefaultKey
-	s.channels = make(map[uint8]channel, len(state.Channels))
+	s.channels = factoryChannels()
 	for _, item := range state.Channels {
 		s.channels[item.Index] = channel{name: item.Name, secret: item.Secret}
 	}

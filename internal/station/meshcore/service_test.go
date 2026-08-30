@@ -94,6 +94,55 @@ func TestDetachedStationAnswersStartupProtocol(t *testing.T) {
 	}
 }
 
+func TestChannelEnumerationExposesEmptySlotsBeforeSet(t *testing.T) {
+	built, err := build(testSpec(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+
+	responses := svc.handle(t.Context(), companion.GetChannel{Index: 0})
+	if len(responses) != 1 {
+		t.Fatalf("public channel response = %#v", responses)
+	}
+	public, ok := responses[0].(companion.ChannelInfo)
+	if !ok {
+		t.Fatalf("public channel response = %#v", responses)
+	}
+	wantPublic := mesh.NewPublicChannel()
+	if public.Index != 0 || public.Name != "Public" || !bytes.Equal(public.Secret[:], wantPublic.Secret[:16]) {
+		t.Fatalf("public channel = %+v", public)
+	}
+
+	responses = svc.handle(t.Context(), companion.GetChannel{Index: 1})
+	if len(responses) != 1 {
+		t.Fatalf("empty channel response = %#v", responses)
+	}
+	empty, ok := responses[0].(companion.ChannelInfo)
+	if !ok || empty.Index != 1 || empty.Name != "" || empty.Secret != ([16]byte{}) {
+		t.Fatalf("empty channel response = %#v", responses)
+	}
+
+	secret := [16]byte{1, 2, 3}
+	responses = svc.handle(t.Context(), companion.SetChannel{Index: 1, Name: "#szer", Secret: secret})
+	if len(responses) != 1 || responses[0] != companion.StatusResponse(companion.ResponseOK) {
+		t.Fatalf("set channel response = %#v", responses)
+	}
+	responses = svc.handle(t.Context(), companion.GetChannel{Index: 1})
+	if len(responses) != 1 {
+		t.Fatalf("stored channel response = %#v", responses)
+	}
+	got, ok := responses[0].(companion.ChannelInfo)
+	if !ok || got.Name != "#szer" || got.Secret != secret {
+		t.Fatalf("stored channel response = %#v", responses)
+	}
+
+	responses = svc.handle(t.Context(), companion.GetChannel{Index: uint8(svc.p.MaxChannels)})
+	if len(responses) != 1 || responses[0] != (companion.ErrorResponse{Code: companion.ErrNotFound}) {
+		t.Fatalf("out-of-range channel response = %#v", responses)
+	}
+}
+
 func TestAttachedStationUsesPhysicalPowerEnvelopeWhileRadioIsDown(t *testing.T) {
 	built, err := build(testSpec(t))
 	if err != nil {
@@ -669,7 +718,8 @@ func TestFactoryResetRestoresConfiguredStateAndPersistsIt(t *testing.T) {
 	if svc.p.NodeName != "Alice" || svc.p.Waveform != configuredWaveform || svc.id.PubKey != configuredKey {
 		t.Fatalf("factory state = name %q waveform %+v key %x", svc.p.NodeName, svc.p.Waveform, svc.id.PubKey[:6])
 	}
-	if len(svc.channels) != 0 || len(svc.contacts) != 0 || len(svc.mailbox) != 0 ||
+	if len(svc.channels) != 1 || svc.channels[0].name != "Public" ||
+		len(svc.contacts) != 0 || len(svc.mailbox) != 0 ||
 		svc.defaultScope != "" || svc.stats.sent != 0 || svc.appVersion != 0 ||
 		svc.pending.kind != pendingNone || svc.signData != nil || svc.sendUnscoped || svc.outbound.len() != 0 {
 		t.Fatalf("factory reset left state behind: channels %d contacts %d mailbox %d scope %q stats %+v",
@@ -682,7 +732,8 @@ func TestFactoryResetRestoresConfiguredStateAndPersistsIt(t *testing.T) {
 	}
 	restored := requireService(t, built)
 	if restored.p.NodeName != "Alice" || restored.p.Waveform != configuredWaveform ||
-		restored.id.PubKey != configuredKey || len(restored.channels) != 0 || len(restored.mailbox) != 0 {
+		restored.id.PubKey != configuredKey || len(restored.channels) != 1 ||
+		restored.channels[0].name != "Public" || len(restored.mailbox) != 0 {
 		t.Fatalf("persisted factory state = name %q waveform %+v key %x channels %d mailbox %d",
 			restored.p.NodeName, restored.p.Waveform, restored.id.PubKey[:6],
 			len(restored.channels), len(restored.mailbox))

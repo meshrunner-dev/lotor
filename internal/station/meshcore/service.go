@@ -219,7 +219,7 @@ func build(spec station.Spec) (station.Service, error) {
 	s := &service{
 		name: spec.Name, listen: spec.Listen, radioName: spec.Radio,
 		p: p, id: id, log: log, buildVersion: spec.Build.Version,
-		channels: make(map[uint8]channel), contacts: make(map[[mesh.PubKeySize]byte]contactEntry),
+		channels: factoryChannels(), contacts: make(map[[mesh.PubKeySize]byte]contactEntry),
 		state: station.StateStarting, stateStore: spec.State, txPolicy: spec.TX, bus: spec.Bus,
 		rfWake: make(chan struct{}, 1), startedAt: time.Now(),
 		pushes:      make(chan companionPush, pushQueueDepth),
@@ -263,6 +263,16 @@ func build(spec station.Spec) (station.Service, error) {
 type channel struct {
 	name   string
 	secret [16]byte
+}
+
+// factoryChannels mirrors companion_radio: every fresh node starts with the
+// well-known Public channel in slot zero. Persisted slots are overlaid later,
+// so an application can still replace or clear it explicitly.
+func factoryChannels() map[uint8]channel {
+	public := mesh.NewPublicChannel()
+	var secret [16]byte
+	copy(secret[:], public.Secret)
+	return map[uint8]channel{0: {name: "Public", secret: secret}}
 }
 
 type contactEntry struct {
@@ -940,10 +950,14 @@ func (s *service) setRadioPower(power int8) []companion.Response {
 }
 
 func (s *service) getChannel(index uint8) []companion.Response {
-	ch, exists := s.channels[index]
-	if !exists || int(index) >= s.p.MaxChannels {
+	if int(index) >= s.p.MaxChannels {
 		return errorResponses(companion.ErrNotFound)
 	}
+	// The reference exposes its fixed array, including unused zero-value
+	// slots. Mobile companions enumerate those slots before selecting one for
+	// SetChannel, so an absent sparse-map entry is an empty ChannelInfo rather
+	// than NotFound.
+	ch := s.channels[index]
 	return []companion.Response{companion.ChannelInfo{Index: index, Name: ch.name, Secret: ch.secret}}
 }
 
