@@ -405,16 +405,18 @@ func adminSession(t *testing.T, e *engine, peer *meshcore.LocalIdentity, ts uint
 }
 
 func TestOnlyCommandSubtypesReachTheMutationDoor(t *testing.T) {
-	// The MAC says who is speaking; the flags byte says what they
-	// meant. Only an explicit command is an order; neither ordinary
-	// conversation nor CLI output is executable input.
+	// The MAC says who is speaking; the flags byte says which dialect
+	// asked. The three the reference runs are commands here too — its
+	// companions have used all three across releases, and refusing
+	// the older two would lock the field out. A signed text is not
+	// among them, and neither is a subtype nobody defines.
 	cases := []struct {
 		name    string
 		txtType uint8
 		command bool
 	}{
-		{"plain", meshcore.TxtTypePlain, false},
-		{"cli data", meshcore.TxtTypeCLIData, false},
+		{"plain", meshcore.TxtTypePlain, true},
+		{"cli data", meshcore.TxtTypeCLIData, true},
 		{"signed plain", meshcore.TxtTypeSignedPlain, false},
 		{"cli command", meshcore.TxtTypeCLICommand, true},
 		{"unknown subtype", 9, false},
@@ -530,4 +532,65 @@ func TestCommandLogsCarryNoSecrets(t *testing.T) {
 	if got := safeCommandReply("blah "+canary, canary); strings.Contains(got, canary) {
 		t.Errorf("unknown reply leaked: %q", got)
 	}
+}
+
+func TestALegacyCommandIsAcknowledgedEvenOnRetry(t *testing.T) {
+	// The reference acknowledges a plain-subtype command line before
+	// it judges whether the line is a retry, and only that subtype:
+	// the ACK is what tells a legacy client its command arrived, and
+	// a retry earning neither ACK nor reply leaves it asking for ever.
+	// The newer subtypes are owed none and must not get one.
+	for _, c := range []struct {
+		name    string
+		txtType uint8
+		acks    int
+	}{
+		{"plain", meshcore.TxtTypePlain, 1},
+		{"cli data", meshcore.TxtTypeCLIData, 0},
+		{"cli command", meshcore.TxtTypeCLICommand, 0},
+	} {
+		e, _, _, peer := txRig(t, "on-air")
+		e.queue.depth = 8
+		e.AttachCommands(func(string, []byte) string { return "OK" })
+		adminSession(t, e, peer, nowTS(0))
+
+		at := time.Unix(int64(nowTS(10)), 0)
+		first := rxOf(e, typedCommandPacket(t, e.id, peer, at, c.txtType, "ver"))
+		if v, _ := e.verdict(first); v != verdictCommand {
+			t.Fatalf("%s: verdict %q, want a command", c.name, v)
+		}
+		e.runCommand(first, first.id)
+		if acks := kindsQueued(e, "cmd-ack"); acks != c.acks {
+			t.Errorf("%s: %d acks queued, want %d", c.name, acks, c.acks)
+		}
+		if n := kindsQueued(e, "cmd-resp"); n != 1 {
+			t.Errorf("%s: %d replies queued, want 1", c.name, n)
+		}
+
+		// The same timestamp again: the line must not run twice, and
+		// the answer is silence — but a client owed an ACK gets it.
+		e.queue.entries = nil
+		again := rxOf(e, typedCommandPacket(t, e.id, peer, at, c.txtType, "ver"))
+		if v, _ := e.verdict(again); v != verdictCommand {
+			t.Fatalf("%s: retry verdict %q", c.name, v)
+		}
+		e.runCommand(again, again.id)
+		if n := kindsQueued(e, "cmd-resp"); n != 0 {
+			t.Errorf("%s: a retry queued %d replies, want none", c.name, n)
+		}
+		if acks := kindsQueued(e, "cmd-ack"); acks != c.acks {
+			t.Errorf("%s: retry queued %d acks, want %d", c.name, acks, c.acks)
+		}
+	}
+}
+
+// kindsQueued counts the entries of one kind waiting in the queue.
+func kindsQueued(e *engine, kind string) int {
+	n := 0
+	for _, entry := range e.queue.entries {
+		if entry.kind == kind {
+			n++
+		}
+	}
+	return n
 }
