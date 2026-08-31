@@ -1,0 +1,58 @@
+# Live reload: air rebuilds the daemon and restarts it whenever a
+# watched file changes. Reach it through `task dev`, which prepares
+# the bench first — running air directly against a machine with no
+# .dev/ database starts a daemon with nothing configured.
+#
+# The web assets are embedded in the binary, so editing one is a Go
+# build like any other. That is affordable here — a full rebuild lands
+# in well under a second — and it buys the property that matters: what
+# a browser loads is what a release would serve, never a
+# filesystem-only variant that behaves differently once embedded.
+
+root = "."
+tmp_dir = ".dev/tmp"
+
+[build]
+  cmd = "go build -o ./.dev/tmp/lotor ./cmd/lotor"
+  bin = "./.dev/tmp/lotor"
+  args_bin = ["run", "--db", ".dev/lotor.db", "--log-level", "debug"]
+
+  # Assets are watched alongside the source they are compiled into.
+  include_ext = ["go", "html", "css", "js"]
+  exclude_regex = ["_test\\.go"]
+  exclude_dir = [".dev", ".git", "bin", "dist", "contrib", "docs", "testdata"]
+
+  # Two edits a heartbeat apart are one rebuild. Below ~200 ms an
+  # editor's atomic save (write, rename) can fire twice on its own.
+  delay = 300
+
+  # A build that fails leaves the previous daemon serving. Losing the
+  # page you are looking at because of a typo elsewhere is the fastest
+  # way to lose the thread of a design.
+  stop_on_error = true
+
+  # The instance lock is held by the running process and released when
+  # it dies, so the old daemon must be gone before the new one binds.
+  # SIGINT gets it the bounded shutdown it knows how to do; the delay
+  # is the ceiling, not the wait.
+  send_interrupt = true
+  kill_delay = "2s"
+
+[misc]
+  clean_on_exit = false
+
+[screen]
+  clear_on_rebuild = true
+
+# Comfort only, and optional: air can serve the daemon behind a proxy
+# that injects a reload script into the HTML, so a browser refreshes
+# itself once the rebuilt daemon is up and shows a build failure
+# instead of staying stale. The event stream survives the detour —
+# /events flushes on the same cadence through it. app_port must be the
+# port config.DefaultWebListen names; the proxy port is free. The
+# daemon's own port stays open and unmodified, which is where to look
+# when judging what a release actually serves.
+[proxy]
+  enabled = true
+  proxy_port = 8697
+  app_port = 8696

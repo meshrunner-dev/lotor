@@ -108,3 +108,20 @@ tasks:
           echo "build is not reproducible: $ha != $hb"; exit 1
         fi
         echo "reproducible: $ha"
+
+  dev:
+    desc: "Live reload: a hardware-free daemon that rebuilds and restarts on every edit"
+    cmds:
+      - ./scripts/dev-bench.sh
+      - air
+
+  dev:console:
+    desc: Open the console of the running bench (a second terminal)
+    interactive: true
+    cmds:
+      - go run ./cmd/lotor console .dev/console.sock
+
+  dev:reset:
+    desc: Discard the bench — its database, its generated configuration and its identities
+    cmds:
+      - rm -rf .dev
