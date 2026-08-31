@@ -92,7 +92,6 @@ func (s *service) receiveRF(ctx context.Context, device radio.Device) error {
 		frame, err := device.Receive(ctx)
 		if errors.Is(err, radio.ErrCorrupt) {
 			s.recordCorruptReception(frame)
-			s.pushRawReception(frame)
 			logging.Trace(s.log, "station radio corrupt reception",
 				zap.String("corr", frame.Correlation.Short()), zap.Error(err))
 			continue
@@ -189,8 +188,8 @@ func (s *service) recordCorruptReception(frame radio.Frame) {
 	defer s.mu.Unlock()
 	s.stats.receiveErrors++
 	s.stats.rxAir += max(time.Duration(0), frame.Airtime)
-	s.stats.lastRSSIDBm = int8(max(float64(math.MinInt8), min(float64(math.MaxInt8), math.Trunc(frame.RSSI))))
-	s.stats.lastSNRx4 = int8(mesh.EncodeSNR(frame.SNR))
+	// lastRSSI and lastSNR hold the last frame a demodulator produced;
+	// a CRC refusal has no measurement of its own to contribute.
 }
 
 func (s *service) recordReceivedRoute(packet *mesh.Packet) {

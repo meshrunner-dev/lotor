@@ -838,3 +838,62 @@ func TestHandedOverFrameKeepsItsPushButNotTheAirAccount(t *testing.T) {
 		}
 	}
 }
+
+// A CRC refusal is traffic, not a reception: it earns its place in
+// the error tally and nowhere else. The reference gates logRxRaw on a
+// payload it could read, and the measurement it would report belongs
+// to the last frame a demodulator actually produced.
+func TestCorruptReceptionCountsWithoutPushOrMeasurement(t *testing.T) {
+	spec := testSpec(t)
+	spec.TX = station.TXPolicy{Mode: config.TXShadow, QueueDepth: 4}
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	svc.rfDevice = &stationRadio{}
+	svc.duty = radio.NewAirtimeLedger(time.Hour, nil)
+
+	stationSide, appSide := net.Pipe()
+	defer stationSide.Close()
+	defer appSide.Close()
+	svc.mu.Lock()
+	svc.client, svc.generation = stationSide, 1
+	svc.mu.Unlock()
+	writerCtx, cancelWriter := context.WithCancel(t.Context())
+	defer cancelWriter()
+	go svc.runPushes(writerCtx)
+
+	// One real reception, to leave a measurement worth keeping.
+	heard, err := mesh.BuildAck([]byte{1, 2, 3, 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := heard.MarshalBinary()
+	svc.processRF(t.Context(), radio.Frame{Payload: raw, SNR: 5.5, RSSI: -87})
+	if frame, err := companion.ReadFrame(appSide, companion.ToApplication); err != nil ||
+		frame.Payload[0] != byte(companion.PushLogRXData) {
+		t.Fatalf("the demodulated frame owed a raw push: %v", err)
+	}
+
+	// Then a CRC refusal, as the driver reports one: no payload, no
+	// measurement, no airtime.
+	svc.recordCorruptReception(radio.Frame{})
+
+	svc.mu.Lock()
+	errs, rssi, snr := svc.stats.receiveErrors, svc.stats.lastRSSIDBm, svc.stats.lastSNRx4
+	svc.mu.Unlock()
+	if errs != 1 {
+		t.Fatalf("receiveErrors = %d, want the refusal counted", errs)
+	}
+	if want := int8(mesh.EncodeSNR(5.5)); rssi != -87 || snr != want {
+		t.Fatalf("last measurement = %d dBm / %d, want the demodulated frame's -87 / %d",
+			rssi, snr, want)
+	}
+	if err := appSide.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if extra, err := companion.ReadFrame(appSide, companion.ToApplication); err == nil {
+		t.Fatalf("the CRC refusal pushed % X", extra.Payload)
+	}
+}
