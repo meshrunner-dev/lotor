@@ -759,3 +759,82 @@ func TestAFloodedLoginIsAnsweredInsideThePathReturn(t *testing.T) {
 		t.Fatalf("stored path = %+v", c)
 	}
 }
+
+// A frame a peer on our controller handed us never touched the
+// demodulator, so its zero measurements must not become the station's
+// last reading. It still earns its raw push: applications date a
+// contact from that log, and withholding it froze the "last seen" of
+// the relay sharing our antenna.
+func TestHandedOverFrameKeepsItsPushButNotTheAirAccount(t *testing.T) {
+	spec := testSpec(t)
+	spec.TX = station.TXPolicy{Mode: config.TXShadow, QueueDepth: 4}
+	built, err := build(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := requireService(t, built)
+	svc.rfDevice = &stationRadio{}
+	svc.duty = radio.NewAirtimeLedger(time.Hour, nil)
+
+	stationSide, appSide := net.Pipe()
+	defer stationSide.Close()
+	defer appSide.Close()
+	svc.mu.Lock()
+	svc.client, svc.generation = stationSide, 1
+	svc.mu.Unlock()
+	writerCtx, cancelWriter := context.WithCancel(t.Context())
+	defer cancelWriter()
+	go svc.runPushes(writerCtx)
+
+	// A real reception first, to leave a reading worth protecting.
+	advert, err := mesh.BuildAck([]byte{9, 9, 9, 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	heard, _ := advert.MarshalBinary()
+	svc.processRF(t.Context(), radio.Frame{Payload: heard, SNR: 5.5, RSSI: -87, Airtime: time.Second})
+
+	svc.mu.Lock()
+	rssiAfterAir, snrAfterAir, airAfterAir := svc.stats.lastRSSIDBm, svc.stats.lastSNRx4, svc.stats.rxAir
+	svc.mu.Unlock()
+	if rssiAfterAir != -87 {
+		t.Fatalf("last rssi after a real reception = %d, want -87", rssiAfterAir)
+	}
+
+	// Then the same shape arriving from the peer beside us.
+	relayed, err := mesh.BuildAck([]byte{7, 7, 7, 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := relayed.MarshalBinary()
+	svc.processRF(t.Context(), radio.Frame{Payload: raw, Binding: "relay:mc", Airtime: time.Second})
+
+	svc.mu.Lock()
+	rssi, snr, air := svc.stats.lastRSSIDBm, svc.stats.lastSNRx4, svc.stats.rxAir
+	received := svc.stats.received
+	svc.mu.Unlock()
+	// Counted as a packet: StatsPackets counts frames, and
+	// receivedFlood/receivedDirect count this one whatever we do here.
+	if received != 2 {
+		t.Fatalf("received = %d, want both frames counted", received)
+	}
+	if rssi != rssiAfterAir || snr != snrAfterAir {
+		t.Fatalf("hand-over moved the last reading to rssi %d snr %d, want %d/%d",
+			rssi, snr, rssiAfterAir, snrAfterAir)
+	}
+	if air != airAfterAir {
+		t.Fatalf("hand-over spent %s of receive airtime, want %s", air, airAfterAir)
+	}
+
+	// Both frames reached the application as raw receptions: the one
+	// off the air, and the one handed to us.
+	for i, what := range []string{"the demodulated frame", "the handed-over frame"} {
+		frame, err := companion.ReadFrame(appSide, companion.ToApplication)
+		if err != nil {
+			t.Fatalf("push %d (%s): %v", i+1, what, err)
+		}
+		if frame.Payload[0] != byte(companion.PushLogRXData) {
+			t.Fatalf("push %d (%s) = % X, want a raw reception log", i+1, what, frame.Payload)
+		}
+	}
+}

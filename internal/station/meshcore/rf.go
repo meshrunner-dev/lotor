@@ -164,6 +164,8 @@ func (s *service) processRF(ctx context.Context, frame radio.Frame) {
 
 func (s *service) beginRFReception(ctx context.Context, frame radio.Frame) context.Context {
 	s.recordReception(frame)
+	// Handed-over frames included: applications date a contact from
+	// this log, and PUSH_CODE_ADVERT carries no time.
 	s.pushRawReception(frame)
 	return correlation.WithContext(ctx, frame.Correlation)
 }
@@ -172,6 +174,11 @@ func (s *service) recordReception(frame radio.Frame) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stats.received++
+	if frame.Binding != "" {
+		// Handed over by a peer: a packet, counted as one, but the
+		// antenna did nothing. StatsRadio is the antenna's account.
+		return
+	}
 	s.stats.rxAir += max(time.Duration(0), frame.Airtime)
 	s.stats.lastRSSIDBm = int8(max(float64(math.MinInt8), min(float64(math.MaxInt8), math.Trunc(frame.RSSI))))
 	s.stats.lastSNRx4 = int8(mesh.EncodeSNR(frame.SNR))
