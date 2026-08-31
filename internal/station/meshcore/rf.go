@@ -175,7 +175,9 @@ func (s *service) recordReception(frame radio.Frame) {
 	s.stats.received++
 	if frame.Binding != "" {
 		// Handed over by a peer: a packet, counted as one, but the
-		// antenna did nothing. StatsRadio is the antenna's account.
+		// antenna did nothing. StatsRadio is the antenna's account,
+		// and the airtime went on transmitting — already counted by
+		// the binding that keyed the chip.
 		return
 	}
 	s.stats.rxAir += max(time.Duration(0), frame.Airtime)
