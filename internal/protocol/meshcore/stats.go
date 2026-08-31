@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"meshrunner.dev/pkg/meshcore"
+
+	"meshrunner.dev/lotor/internal/radio"
 )
 
 // Stats is a repeater's own reception and transmission tally — the
@@ -32,13 +34,22 @@ type StatsSnapshot struct {
 	LastRSSI, LastSNR     float64
 }
 
-// countHeard records one reception: its route, airtime, and the RSSI
-// and SNR the radio measured — the "last heard" the status reports.
-func (s *Stats) countHeard(pkt *meshcore.Packet, rssi, snr float64, airtime time.Duration, dup bool) {
+// countHeard records one reception: its route, its airtime, and the
+// RSSI and SNR the radio measured — the "last heard" the status
+// reports.
+//
+// A frame handed over by a binding beside us on the controller was
+// never demodulated. It is a reception and counts as one, but its
+// measurements are the zero value: taking them would answer a
+// companion's status query with a reading nobody took, and every
+// advert our own station composes would blank the last one.
+func (s *Stats) countHeard(pkt *meshcore.Packet, frame radio.Frame, dup bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.LastRSSI, s.LastSNR = rssi, snr
-	s.RxAirtime += airtime
+	if frame.Binding == "" {
+		s.LastRSSI, s.LastSNR = frame.RSSI, frame.SNR
+		s.RxAirtime += frame.Airtime
+	}
 	// The reference counts a reception by its route whether or not a
 	// copy came before it, and keeps the duplicate tallies alongside
 	// rather than instead: a companion reads the dup ratio from both.

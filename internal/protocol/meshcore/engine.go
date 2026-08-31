@@ -1115,14 +1115,14 @@ func (e *engine) process(dev radio.Device, pkt *meshcore.Packet, frame radio.Fra
 	// exactly that way, judged in transit and deduplicated on
 	// arrival.
 	if verdict, passing := e.passingBy(pkt); passing {
-		e.stats.countHeard(pkt, frame.RSSI, frame.SNR, frame.Airtime, false)
+		e.stats.countHeard(pkt, frame, false)
 		log.Debug("frame judged", zap.String("verdict", verdict))
 		judged.Verdict = verdict
 		e.bus.Publish(judged)
 		return
 	}
 	if first, dup := e.seen.witness(pkt.Hash(), id, frame.At); dup {
-		e.stats.countHeard(pkt, frame.RSSI, frame.SNR, frame.Airtime, true)
+		e.stats.countHeard(pkt, frame, true)
 		log.Debug("frame judged",
 			zap.String("verdict", verdictDuplicate),
 			zap.String("duplicate_of", first.Short()),
@@ -1132,7 +1132,7 @@ func (e *engine) process(dev radio.Device, pkt *meshcore.Packet, frame radio.Fra
 		return
 	}
 
-	e.stats.countHeard(pkt, frame.RSSI, frame.SNR, frame.Airtime, false)
+	e.stats.countHeard(pkt, frame, false)
 	// Past the duplicate gate: a replayed advert is not fresh evidence
 	// that its sender is still there.
 	e.observe(rx)
