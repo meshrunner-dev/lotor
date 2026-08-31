@@ -576,3 +576,69 @@ func awaitPendingOperations(t *testing.T, c *Controller, want int) {
 	}
 	t.Fatalf("pending operations did not reach %d", want)
 }
+
+// The hand-over exists for what only we can tell a peer, and must
+// stay out of what the peer already heard for itself.
+func TestControllerCarriesComposedEmissionButNotAForward(t *testing.T) {
+	dev := newControllerFakeDevice()
+	c, _ := controllerRig(t, dev)
+	w := Waveform{FrequencyHz: 869_618_000, SpreadingFactor: 8, BandwidthHz: 62_500, CodingRate: 8}
+	relayBinding, err := c.Bind("mc", RoleRelay, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stationBinding, err := c.Bind("alice", RoleStation, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitController(t, c)
+	awaitBinding(t, relayBinding)
+	relay, err := relayBinding.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	station, err := stationBinding.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	forwarder, ok := relay.(Forwarder)
+	if !ok {
+		t.Fatal("a controller port must be able to forward without handing over")
+	}
+
+	// The forward goes first: if it were carried, it would be the
+	// frame the station reads below, and the assertion on the
+	// composed payload would catch it.
+	if _, err := forwarder.TransmitForwarded(context.Background(), []byte("relayed"), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.Transmit(context.Background(), []byte("composed"), 1); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	frame, err := station.Receive(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(frame.Payload) != "composed" {
+		t.Fatalf("station heard %q, want only the composed emission", frame.Payload)
+	}
+	if frame.Binding != "relay:mc" {
+		t.Fatalf("binding = %q, want relay:mc", frame.Binding)
+	}
+	// And nothing else is waiting behind it.
+	short, cancelShort := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelShort()
+	if extra, err := station.Receive(short); err == nil {
+		t.Fatalf("station also heard %q", extra.Payload)
+	}
+
+	// Both emissions still reached the air, in order.
+	dev.mu.Lock()
+	order := append([]string(nil), dev.order...)
+	dev.mu.Unlock()
+	if want := []string{"relayed", "composed"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("physical order = %v, want %v", order, want)
+	}
+}

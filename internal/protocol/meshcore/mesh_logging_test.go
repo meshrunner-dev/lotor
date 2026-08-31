@@ -104,7 +104,8 @@ func TestTransmitHandsCorrelationAcrossTheRadioSeam(t *testing.T) {
 	e, dev, _, _ := txRig(t, "on-air")
 	id := correlation.New()
 
-	if _, err := e.key(context.Background(), dev, []byte{1, 2, 3}, id, zap.NewNop()); err != nil {
+	if _, err := e.key(context.Background(), dev, []byte{1, 2, 3},
+		txEntry{origin: id}, zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
 	if dev.lastCorrelation != id {

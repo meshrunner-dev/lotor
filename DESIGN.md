@@ -158,23 +158,35 @@ Physical operations are serialized by the controller. Relay operations
 have strict priority; station operations are served round-robin by
 station. Inside a station, the MeshCore dispatcher priority is honoured
 (the smaller numeric value wins) and equal priorities remain FIFO; an
-emission scheduled for the future never blocks one already due. A physical reception is
-broadcast to the relay and every active station binding, and so is one
-binding's emission to its peers: a half-duplex chip cannot hear itself,
-so bindings on one controller would otherwise be the only nodes in the
-mesh deaf to each other, and a station could not log into the relay
-sharing its antenna. Such a frame names its emitting binding and
-carries no measurements — nothing demodulated it, and a fabricated
-signal would travel on into relay scores and neighbour tables. The
-relay reads what is addressed to it as always and refuses to re-flood
+emission scheduled for the future never blocks one already due.
+
+A physical reception is broadcast to the relay and every active
+station binding, and so is an emission a binding **composes**: a
+half-duplex chip cannot hear itself, so bindings on one controller
+would otherwise be the only nodes in the mesh deaf to each other. One
+it merely forwards is not carried — the peers heard the original off
+this same chip, and a retransmission hashes identically to it, so the
+copy could only be deduplicated on arrival. A transiting trace is the
+exception, its hash covering its path length: the copy carrying our
+hop is not the one they heard.
+
+Such a frame names its emitting binding and carries no measurements —
+nothing demodulated it, and a fabricated signal would travel on into
+relay scores and neighbour tables. Whatever describes the antenna
+therefore ignores it; whatever counts packets does not, since one
+arrived.
+
+The relay reads what is addressed to it as always and refuses to re-flood
 what a peer sent: the original left through the same antenna, so
 relaying would spend the shared duty ledger twice to reach nobody new.
 A direct packet is untouched — a path naming us is a request, not a
 shout. The reference has no such case, having never two identities on
-one radio. Station RX
-queues are bounded and lossy so a stalled companion can never stall the
-relay; the relay's receive door remains lossless. Every station uses the
-same physical duty ledger as the relay and its peers. `shadow` is
+one radio.
+
+Station RX queues are bounded and lossy so a stalled companion can
+never stall the relay; the relay's receive door remains lossless.
+Every station uses the same physical duty ledger as the relay and its
+peers. `shadow` is
 deliberately capacity-realistic: it does not key the chip, but reserves
 and commits the airtime it would have consumed. Admission is reserved
 atomically across producers before LBT and committed with measured

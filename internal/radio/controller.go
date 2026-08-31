@@ -956,17 +956,27 @@ func (p *controllerPort) operation(ctx context.Context, operation *radioOperatio
 }
 
 func (p *controllerPort) Transmit(ctx context.Context, payload []byte, powerDBm int8) (TxReport, error) {
+	return p.transmit(ctx, payload, powerDBm, true)
+}
+
+// TransmitForwarded is Transmit for a packet this node is only
+// passing on; see Forwarder for why the peers are not told.
+func (p *controllerPort) TransmitForwarded(ctx context.Context, payload []byte, powerDBm int8) (TxReport, error) {
+	return p.transmit(ctx, payload, powerDBm, false)
+}
+
+func (p *controllerPort) transmit(ctx context.Context, payload []byte, powerDBm int8, handOver bool) (TxReport, error) {
 	raw := append([]byte(nil), payload...)
 	result, err := p.operation(ctx, &radioOperation{run: func(dev Device) operationResult {
 		report, err := dev.Transmit(ctx, raw, powerDBm)
 		return operationResult{report: report, err: err}
 	}})
-	if err == nil {
-		// The peers were transmitting with us and heard nothing. Not
-		// under the caller's context: a transmit whose context died
-		// while the chip was already keying still went out and still
-		// paid the duty ledger, and the peers must hear what the mesh
-		// heard. Nothing here blocks, so detaching costs no lifetime.
+	if err == nil && handOver {
+		// The chip was keying, so the peers sharing it heard nothing.
+		// The caller's context is dropped deliberately: a transmit
+		// cancelled mid-key still went out and still paid the duty
+		// ledger, so the peers must hear what the mesh heard.
+		// handOver never blocks.
 		p.binding.controller.handOver(context.WithoutCancel(ctx), p, raw)
 	}
 	return result.report, err

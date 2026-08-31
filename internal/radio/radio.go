@@ -215,6 +215,27 @@ type Device interface {
 	Close() error
 }
 
+// Forwarder is the optional half of a Device that separates an
+// emission this node composed from one it is only passing on. The
+// distinction exists for the bindings sharing an antenna, and only
+// for them: a peer heard the original off this very chip before we
+// repeated it, and a repetition hashes the same as its original, so
+// handing it over delivers nothing and is deduplicated on arrival.
+// What we compose ourselves never crossed the air at all, and the
+// hand-over is the only way a peer can learn it.
+//
+// A Device that does not implement this is assumed to have no peers
+// to spare — true of every driver, and of the controller port only
+// because nothing wraps it. A decorator that forwarded Device without
+// forwarding this would quietly restore the hand-over it is meant to
+// withhold, and say so nowhere.
+type Forwarder interface {
+	// TransmitForwarded keys the radio for a packet this node
+	// relays rather than originates. On the air it is Transmit; it
+	// differs only in withholding the hand-over.
+	TransmitForwarded(ctx context.Context, payload []byte, powerDBm int8) (TxReport, error)
+}
+
 // Driver opens devices from a resolved configuration and publishes
 // the hardware presets its boards are known by. Inspect validates a
 // configuration and reports its envelope without touching hardware —

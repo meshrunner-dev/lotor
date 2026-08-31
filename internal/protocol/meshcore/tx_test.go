@@ -1498,3 +1498,36 @@ func TestTwoAdvertsInOneSecondWouldHashAlike(t *testing.T) {
 		t.Error("adverts a second apart hash alike")
 	}
 }
+
+// The hand-over rule rests on a retransmission hashing like its
+// original, so the peer's dedup absorbs it. That holds for every
+// packet type but one: a trace's hash covers its path length, so the
+// copy carrying our hop is new to the peer and must be carried.
+func TestOnlyATraceRetransmissionIsNewToAPeer(t *testing.T) {
+	ordinary, err := meshcore.BuildAck([]byte{1, 2, 3, 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := ordinary.Hash()
+	if err := ordinary.AppendPathHash([]byte{0xAB}); err != nil {
+		t.Fatal(err)
+	}
+	if ordinary.Hash() != before {
+		t.Fatalf("an ordinary retransmission changed hash %x -> %x — "+
+			"withholding it from a peer would now lose the packet",
+			before, ordinary.Hash())
+	}
+
+	trace, err := meshcore.BuildTrace(0x2A2A2A2A, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeTrace := trace.Hash()
+	if err := trace.AppendTraceHop(6); err != nil {
+		t.Fatal(err)
+	}
+	if trace.Hash() == beforeTrace {
+		t.Fatalf("a trace retransmission kept hash %x — then it is a duplicate "+
+			"like the others, and relay-trace should stop being carried", beforeTrace)
+	}
+}

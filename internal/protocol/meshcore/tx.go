@@ -83,6 +83,11 @@ type txEntry struct {
 	priority  int
 	queuedAt  time.Time
 	notBefore time.Time
+	// forwarded marks a packet we are passing on rather than
+	// composing. It changes nothing on the air; it withholds the
+	// hand-over to the bindings sharing this antenna, which already
+	// heard the original. See radio.Forwarder.
+	forwarded bool
 }
 
 // txQueue is the bounded outbound queue: entries wait out notBefore,
@@ -234,24 +239,53 @@ func (e *engine) paperOnly(pkt *meshcore.Packet) bool {
 func (e *engine) enqueue(dev radio.Device, pkt *meshcore.Packet, kind string,
 	origin correlation.ID, priority int, jitterFactor float64,
 ) bool {
+	return e.schedule(dev, pkt, kind, origin, priority, jitterFactor, false)
+}
+
+// enqueueForward is enqueue for a packet we are passing on: scheduled
+// identically, marked so the emission stays off the hand-over. Nobody
+// waits on a forward, so its refusal is the journal's alone.
+func (e *engine) enqueueForward(dev radio.Device, pkt *meshcore.Packet, kind string,
+	origin correlation.ID, priority int, jitterFactor float64,
+) {
+	e.schedule(dev, pkt, kind, origin, priority, jitterFactor, true)
+}
+
+func (e *engine) schedule(dev radio.Device, pkt *meshcore.Packet, kind string,
+	origin correlation.ID, priority int, jitterFactor float64, forwarded bool,
+) bool {
 	delay := time.Duration(0)
 	if jitterFactor > 0 {
 		air := dev.Airtime(pkt.RawLength())
 		span := max(time.Duration(5*jitterFactor*float64(air)), time.Millisecond)
 		delay = rand.N(span) //nolint:gosec // desync jitter, not security
 	}
-	return e.enqueueAfter(pkt, kind, origin, priority, delay)
+	return e.scheduleAfter(pkt, kind, origin, priority, delay, forwarded)
 }
 
 // enqueueAfter schedules one emission a fixed delay out, publishing
 // the drop when the queue refuses.
 func (e *engine) enqueueAfter(pkt *meshcore.Packet, kind string, origin correlation.ID,
 	priority int, delay time.Duration,
+) {
+	e.scheduleAfter(pkt, kind, origin, priority, delay, false)
+}
+
+// enqueueForwardAfter is enqueueAfter for a packet we are passing on.
+func (e *engine) enqueueForwardAfter(pkt *meshcore.Packet, kind string, origin correlation.ID,
+	priority int, delay time.Duration,
+) {
+	e.scheduleAfter(pkt, kind, origin, priority, delay, true)
+}
+
+func (e *engine) scheduleAfter(pkt *meshcore.Packet, kind string, origin correlation.ID,
+	priority int, delay time.Duration, forwarded bool,
 ) bool {
 	now := time.Now()
 	entry := txEntry{
 		pkt: pkt, kind: kind, origin: origin,
 		priority: priority, queuedAt: now, notBefore: now.Add(delay),
+		forwarded: forwarded,
 	}
 	if !e.queue.push(entry) {
 		e.log.Warn("tx queue full, dropping", zap.String("kind", kind),
@@ -286,7 +320,7 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict string) {
 			return
 		}
 		// Priority = distance: the hop count with our hash appended.
-		e.enqueue(dev, &cp, "relay-flood", origin, cp.PathHashCount(), e.p.txDelayFactor())
+		e.enqueueForward(dev, &cp, "relay-flood", origin, cp.PathHashCount(), e.p.txDelayFactor())
 	case verdictRelayDirect:
 		if cp.PayloadType() == meshcore.PayloadTypeMultipart {
 			e.forwardMultipart(&cp, origin)
@@ -303,7 +337,7 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict string) {
 		if cp.PayloadType() == meshcore.PayloadTypeAck {
 			jitter = 0
 		}
-		e.enqueue(dev, &cp, "relay-direct", origin, prioDirect, jitter)
+		e.enqueueForward(dev, &cp, "relay-direct", origin, prioDirect, jitter)
 	case verdictDiscover:
 		e.respondDiscover(dev, pkt, origin, snr)
 	case verdictAnon:
@@ -320,6 +354,11 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict string) {
 			e.abandonKind(origin, "malformed", "relay-trace", "trace path could not grow", err)
 			return
 		}
+		// Carried to the peers, unlike every other retransmission: a
+		// trace's hash covers its path length, so the copy we send
+		// with our hop appended is not the one they heard, and their
+		// dedup will not absorb it. It is the only forward that tells
+		// a peer something the air did not.
 		e.enqueue(dev, &cp, "relay-trace", origin, prioTrace, e.p.directTxDelayFactor())
 	}
 }
@@ -381,7 +420,7 @@ func (e *engine) forwardMultipart(cp *meshcore.Packet, origin correlation.ID) {
 	// included: dropping the scope mid-relay would strand the answer
 	// outside the mesh that asked for it.
 	ack.InheritRouting(stripped)
-	e.enqueueAfter(ack, "relay-ack", origin, prioDirect,
+	e.enqueueForwardAfter(ack, "relay-ack", origin, prioDirect,
 		time.Duration(mp.Remaining+1)*300*time.Millisecond)
 }
 
@@ -820,7 +859,7 @@ func (e *engine) recordEmission(entry txEntry, sent bus.FrameSent, log *zap.Logg
 func (e *engine) keyAndFill(ctx context.Context, dev radio.Device, raw []byte,
 	entry txEntry, sent *bus.FrameSent, log *zap.Logger,
 ) (requeued, radiated bool, err error) {
-	report, err := e.key(ctx, dev, raw, entry.origin, log)
+	report, err := e.key(ctx, dev, raw, entry, log)
 	if errors.Is(err, radio.ErrBusyReceiving) {
 		e.requeue(entry) // a frame landed between assessment and keying
 		return true, false, nil
@@ -835,22 +874,38 @@ func (e *engine) keyAndFill(ctx context.Context, dev radio.Device, raw []byte,
 // reaches the ledger. The detached deadline is generous enough for
 // the frame plus the chip's own timeout, and no longer.
 func (e *engine) key(ctx context.Context, dev radio.Device, raw []byte,
-	origin correlation.ID, log *zap.Logger,
+	entry txEntry, log *zap.Logger,
 ) (radio.TxReport, error) {
 	budget := 2*dev.Airtime(len(raw)) + time.Second
-	base := correlation.WithContext(context.WithoutCancel(ctx), origin)
+	base := correlation.WithContext(context.WithoutCancel(ctx), entry.origin)
 	txCtx, cancel := context.WithTimeout(base, budget)
 	defer cancel()
 	deadline, _ := txCtx.Deadline()
 	logging.Trace(log, "tx handed to radio",
 		zap.Int("bytes", len(raw)), zap.Int8("power_dbm", e.policy.PowerDBm),
-		zap.Time("deadline", deadline))
-	report, err := dev.Transmit(txCtx, raw, e.policy.PowerDBm)
+		zap.Bool("forwarded", entry.forwarded), zap.Time("deadline", deadline))
+	report, err := e.keyDevice(txCtx, dev, raw, entry.forwarded)
 	logging.Trace(log, "tx returned from radio",
 		zap.Bool("radiated", err == nil || report.Airtime > 0),
 		zap.Duration("airtime", report.Airtime), zap.Duration("keyed", report.Duration),
 		zap.Int8("power_dbm", report.PowerDBm), zap.Error(err))
 	return report, err
+}
+
+// keyDevice picks how the emission crosses the radio seam; see
+// radio.Forwarder for which emissions reach the bindings beside us. A
+// device without that half keys a forward as an ordinary emission,
+// costing at worst the duplicate the distinction spares — and a device
+// with no peers has none to spare.
+func (e *engine) keyDevice(ctx context.Context, dev radio.Device, raw []byte,
+	forwarded bool,
+) (radio.TxReport, error) {
+	if forwarded {
+		if fwd, ok := dev.(radio.Forwarder); ok {
+			return fwd.TransmitForwarded(ctx, raw, e.policy.PowerDBm)
+		}
+	}
+	return dev.Transmit(ctx, raw, e.policy.PowerDBm)
 }
 
 // requeue puts an entry back for the next pass; a queue that filled
