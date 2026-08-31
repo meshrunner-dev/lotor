@@ -231,9 +231,9 @@ type Web struct {
 }
 
 // DefaultWebListen is where the web UI listens when the block is
-// present but silent on the address. 8695 after 869.5 MHz — the band
+// present but silent on the address. 8696 after 869.5 MHz — the band
 // this daemon spends its life on.
-const DefaultWebListen = "127.0.0.1:8695"
+const DefaultWebListen = "127.0.0.1:8696"
 
 // ConsoleSocket resolves the local console's socket path; empty means
 // disabled. The default holds even without a cli block — the local

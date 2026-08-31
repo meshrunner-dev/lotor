@@ -76,7 +76,7 @@ func sample() *config.File {
 			MaxFrames: 100000,
 		},
 		CLI: &config.CLI{Listen: "127.0.0.1:2323", Socket: &socket},
-		Web: &config.Web{Listen: "127.0.0.1:8695"},
+		Web: &config.Web{Listen: "127.0.0.1:8696"},
 	}
 }
 

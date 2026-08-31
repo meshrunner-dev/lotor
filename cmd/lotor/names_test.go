@@ -240,7 +240,7 @@ func TestNameMigrationLeavesSingletonKeysAlone(t *testing.T) {
 		{confdb.KindCLI, config.CLI{Listen: "127.0.0.1:2323"}},
 		{confdb.KindSentinel, config.Sentinel{Journal: ":memory:", Retention: time.Hour}},
 		{confdb.KindUpdate, config.Update{Channel: "dev"}},
-		{confdb.KindWeb, config.Web{Listen: "127.0.0.1:8695"}},
+		{confdb.KindWeb, config.Web{Listen: "127.0.0.1:8696"}},
 	}
 	for _, one := range old {
 		if err := s.Replace(ctx, one.kind, "", one.section, "test", "set", nil); err != nil {
