@@ -702,3 +702,60 @@ func TestDryStationRejectsTransmissionWithAnApplicationTerminalError(t *testing.
 		t.Fatalf("dry send refusal fields = %#v", fields)
 	}
 }
+
+func TestAFloodedLoginIsAnsweredInsideThePathReturn(t *testing.T) {
+	// A question this station flooded comes back as a path return: the
+	// route home and the answer travel in one packet, the answer as
+	// its extra. Reading only the route left the client waiting for a
+	// reply that had already arrived, and its retry then succeeded
+	// down the freshly learnt route — a login that worked on the
+	// second attempt and never on the first.
+	svc := testRFService(t)
+	peer := testPeer(t, 23)
+	addPeer(t, svc, peer, 0, nil)
+	secret, err := peer.SharedSecret(svc.id.PubKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.handle(t.Context(), companion.SendLogin{
+		PublicKey: peer.PubKey, Password: "raccoon",
+	})
+	takeEmission(t, svc)
+
+	app := attachApplication(t, svc)
+	loginReply, err := mesh.FrameLoginReply(mesh.LoginReply{
+		Clock: 0x11223344, Result: mesh.LoginOK, KeepAlive: 2,
+		IsAdmin: true, Permissions: 0x05, FirmwareLevel: 13,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := mesh.BuildPathReturn(svc.id.PubKey[:mesh.PathHashSize],
+		peer.PubKey[:mesh.PathHashSize], secret, 1, []byte{4},
+		byte(mesh.PayloadTypeResponse), loginReply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := packet.MarshalBinary()
+	// The RX log and the path update reach the application first; the
+	// answer is the one that matters and must not be among the ones
+	// that never come.
+	pushes := readPushesAfter(t, app, 3,
+		func() { svc.processRF(t.Context(), radio.Frame{Payload: raw}) })
+	want := append([]byte{byte(companion.PushLoginSuccess), 1}, peer.PubKey[:6]...)
+	want = append(want, 0x44, 0x33, 0x22, 0x11, 0x05, 13)
+	found := false
+	for _, push := range pushes {
+		if bytes.Equal(push, want) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no login push among %d; got % X, want % X", len(pushes), pushes, want)
+	}
+	// The route the same packet taught must be kept too: the answer
+	// must not cost the client the way home it came with.
+	if c := svc.contacts[peer.PubKey].info; c.PathLen != 1 || c.Path[0] != 4 {
+		t.Fatalf("stored path = %+v", c)
+	}
+}

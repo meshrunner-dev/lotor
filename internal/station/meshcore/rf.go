@@ -466,6 +466,14 @@ func (s *service) receivePath(ctx context.Context, packet *mesh.Packet) {
 		if path.ExtraType == uint8(mesh.PayloadTypeAck) {
 			s.receiveACK(path.Extra, corr)
 		}
+		// A question we flooded is answered inside the path return
+		// that teaches the way back, so the answer arrives as this
+		// packet's extra rather than as a response of its own. Route
+		// learnt first, then the answer: the reply may set the client
+		// asking again, and it should ask down the fresh route.
+		if path.ExtraType == uint8(mesh.PayloadTypeResponse) {
+			s.consumeRemoteResponse(candidate.info.PublicKey, path.Extra, corr)
+		}
 		if packet.IsRouteFlood() {
 			s.sendReciprocalPath(identity, candidate, packet, path, secret)
 		}
