@@ -75,22 +75,22 @@ tasks:
   build:
     desc: Build the daemon into ./bin, through the one shared recipe
     cmds:
-      - ./scripts/build -o bin/lotor
+      - ./scripts/build.sh -o bin/lotor
 
   build:arm64:
     desc: Cross-compile the daemon for a 64-bit ARM board
     cmds:
-      - ./scripts/build -o bin/lotor-arm64 -goos linux -goarch arm64
+      - ./scripts/build.sh -o bin/lotor-arm64 -goos linux -goarch arm64
 
   build:arm:
     desc: Cross-compile the daemon for a 32-bit ARM board (Cortex-A7 and up)
     cmds:
-      - ./scripts/build -o bin/lotor-arm -goos linux -goarch arm -goarm 7
+      - ./scripts/build.sh -o bin/lotor-arm -goos linux -goarch arm -goarm 7
 
   build:info:
     desc: Build then print the binary's own account of itself
     cmds:
-      - ./scripts/build -o bin/lotor
+      - ./scripts/build.sh -o bin/lotor
       - go version -m bin/lotor
       - bin/lotor version
 
@@ -100,8 +100,8 @@ tasks:
       - |
         a="$(mktemp -d)"; b="$(mktemp -d)"
         trap 'rm -rf "$a" "$b"' EXIT
-        ./scripts/build -o "$a/lotor" -goos linux -goarch arm64
-        ./scripts/build -o "$b/lotor" -goos linux -goarch arm64
+        ./scripts/build.sh -o "$a/lotor" -goos linux -goarch arm64
+        ./scripts/build.sh -o "$b/lotor" -goos linux -goarch arm64
         ha="$(sha256sum "$a/lotor" | cut -d' ' -f1)"
         hb="$(sha256sum "$b/lotor" | cut -d' ' -f1)"
         if [ "$ha" != "$hb" ]; then

@@ -64,7 +64,7 @@ jobs:
         run: |
           for t in arm64 amd64 arm; do
             goarm=""; [ "$t" = "arm" ] && goarm="7"
-            ./scripts/build -o "${RUNNER_TEMP}/repro_${t}" -version "$VERSION" \
+            ./scripts/build.sh -o "${RUNNER_TEMP}/repro_${t}" -version "$VERSION" \
               -goos linux -goarch "$t" -goarm "$goarm"
           done
       - uses: actions/download-artifact@v4

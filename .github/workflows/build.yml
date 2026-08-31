@@ -1,7 +1,7 @@
 # The one build every channel shares: a matrix of platforms, the
 # version stamped into the binary, artifacts handed back to whichever
 # workflow called. Channels differ in what they do with the result,
-# never in how it was built — the recipe is scripts/build, the same
+# never in how it was built — the recipe is scripts/build.sh, the same
 # one `task build` runs on a laptop, and every binary is verified
 # against its own embedded metadata before it leaves.
 name: build
@@ -71,7 +71,7 @@ jobs:
         if: matrix.goarch == 'amd64'
         run: |
           canary="${RUNNER_TEMP}/canary"
-          ./scripts/build -o "$canary" -version 9.9.9-canary
+          ./scripts/build.sh -o "$canary" -version 9.9.9-canary
           ./.github/scripts/verify-binary.sh "$canary" "9.9.9-canary" \
             "$(git rev-parse HEAD)" "linux" "amd64" ""
           if ./.github/scripts/verify-binary.sh "$canary" "8.8.8-wrong" \
@@ -81,7 +81,7 @@ jobs:
           rm "$canary"
       - name: Build
         run: |
-          ./scripts/build -o "${{ steps.meta.outputs.slug }}_${{ matrix.goos }}_${{ matrix.goarch }}" \
+          ./scripts/build.sh -o "${{ steps.meta.outputs.slug }}_${{ matrix.goos }}_${{ matrix.goarch }}" \
             -version "${{ inputs.version }}" \
             -goos "${{ matrix.goos }}" -goarch "${{ matrix.goarch }}" \
             -goarm "${{ matrix.goarm }}"

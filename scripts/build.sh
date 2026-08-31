@@ -4,8 +4,8 @@
 # no wall clock, no CGO, trimmed paths, native VCS stamping that FAILS
 # if the data exists but cannot be embedded.
 #
-#   scripts/build -o bin/lotor [-version 1.2.3] [-tags lean]
-#                 [-goos linux] [-goarch arm64] [-goarm 7] [pkg]
+#   scripts/build.sh -o bin/lotor [-version 1.2.3] [-tags lean]
+#                    [-goos linux] [-goarch arm64] [-goarm 7] [pkg]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
