@@ -824,7 +824,7 @@ func (m *manager) startStation(ctx context.Context, name string) {
 	}
 	svc, err := builder.Build(station.Spec{
 		Name: name, Protocol: sc.Protocol, Listen: sc.Listen, Radio: sc.Radio,
-		Config: cfg, Log: m.log.Named("station").With(zap.String("station", name)),
+		Config: cfg, Log: m.log.With(zap.String("station", name)),
 		Build: buildInfo, State: m.store, TX: stationPolicy(sc), Bus: m.bus,
 	})
 	if err != nil {

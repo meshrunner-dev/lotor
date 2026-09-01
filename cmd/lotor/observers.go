@@ -445,7 +445,7 @@ func (m *manager) startObserver(ctx context.Context, name string) {
 	if !ok {
 		return
 	}
-	log := m.log.Named("mqtt").With(zap.String("observer", name))
+	log := m.log.With(zap.String("observer", name))
 	if mq.Disabled {
 		delete(m.obsCause, name)
 		log.Info("observer disabled — not started")
@@ -525,7 +525,7 @@ func (m *manager) stopObserver(name string) {
 	if !ok {
 		return
 	}
-	log := m.log.Named("mqtt").With(zap.String("observer", name))
+	log := m.log.With(zap.String("observer", name))
 	logging.Trace(log, "observer stopping", zap.String("relay", h.relay))
 	if h.live != nil {
 		// When Close returns, no callback of this incarnation is
@@ -552,7 +552,7 @@ func (m *manager) reconcileObservers() {
 		if mq.Disabled {
 			continue
 		}
-		log := m.log.Named("mqtt").With(zap.String("observer", name))
+		log := m.log.With(zap.String("observer", name))
 		var target string
 		p, err := resolveMQTTParams(mq)
 		if err == nil {

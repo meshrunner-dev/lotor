@@ -36,7 +36,7 @@ func (m *manager) startSampler(ctx context.Context, name string) {
 	if !ok {
 		return
 	}
-	log := m.log.Named("sensor").With(zap.String("sensor", name))
+	log := m.log.With(zap.String("sensor", name))
 	drv, err := sensor.Lookup(sn.Driver)
 	if err != nil {
 		log.Error("sensor not started", zap.Error(err))
@@ -100,7 +100,7 @@ func (m *manager) stopSampler(name string) bool {
 	m.viewMu.Lock()
 	delete(m.sensorViews, name)
 	m.viewMu.Unlock()
-	log := m.log.Named("sensor").With(zap.String("sensor", name))
+	log := m.log.With(zap.String("sensor", name))
 	select {
 	case <-h.done:
 		log.Info("sensor stopped")
@@ -123,7 +123,7 @@ func (m *manager) stopSampler(name string) bool {
 // exits.
 func (m *manager) bounceSampler(name string) {
 	if !m.stopSampler(name) {
-		m.log.Named("sensor").Warn("sensor reopened while the old one still holds the bus",
+		m.log.Warn("sensor reopened while the old one still holds the bus",
 			zap.String("sensor", name))
 	}
 	m.startSampler(m.ctx, name)

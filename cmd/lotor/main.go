@@ -788,7 +788,7 @@ func consoleDeps(mgr *manager, b *bus.Bus, sen *sentinel.Sentinel) cli.Deps {
 		LiveSensors:  mgr.SensorInfos,
 		LiveMQTTs:    mgr.MQTTInfos,
 		History:      mgr.History,
-		Log:          mgr.log.Named("cli"),
+		Log:          mgr.log,
 		LiveTraces:   mgr.Traces,
 		Layers:       mgr.Layers,
 		Mutate:       mgr.Mutate,
@@ -809,7 +809,7 @@ func startSentinel(ctx, journalCtx context.Context, f *config.File,
 		return nil, nil //nolint:nilnil // absence is the configured mode, not a fault
 	}
 	sent, err := sentinel.Open(ctx, f.Sentinel.Journal, f.Sentinel.Retention,
-		f.Sentinel.MetricsRetention, f.Sentinel.MaxFrames, b, log.Named("sentinel"))
+		f.Sentinel.MetricsRetention, f.Sentinel.MaxFrames, b, log)
 	if err != nil {
 		return nil, fmt.Errorf("sentinel: %w", err)
 	}
@@ -830,7 +830,7 @@ func startListeners(ctx context.Context, f *config.File, deps *cli.Deps,
 		d := *deps
 		d.Privilege = cli.ReadOnly
 		producers.Go(func() {
-			if err := cli.ServeTelnet(ctx, addr, d, log.Named("cli")); err != nil {
+			if err := cli.ServeTelnet(ctx, addr, d, log); err != nil {
 				log.Error("cli listener failed", zap.Error(err))
 			}
 		})
@@ -852,7 +852,7 @@ func startListeners(ctx context.Context, f *config.File, deps *cli.Deps,
 // third caller of the one seam, honest about being the least trusted.
 func webDeps(deps *cli.Deps, log *zap.Logger) web.Deps {
 	wd := web.Deps{
-		Log:        log.Named("web"),
+		Log:        log,
 		Version:    deps.Version,
 		Revision:   deps.Revision,
 		Started:    deps.Started,
