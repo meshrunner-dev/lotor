@@ -47,8 +47,9 @@ func TestACLDurabilityMigrationDropsGuestsAndConstrainsTheTable(t *testing.T) {
 	if err := store.Migrate(ctx, storeMigrations()); err != nil {
 		t.Fatal(err)
 	}
-	if shape, err := store.Shape(ctx); err != nil || shape != 14 {
-		t.Fatalf("shape = %d, %v; want 14", shape, err)
+	// Lifted all the way to the newest shape this binary writes.
+	if shape, err := store.Shape(ctx); err != nil || shape != shapeCeiling() {
+		t.Fatalf("shape = %d, %v; want %d", shape, err, shapeCeiling())
 	}
 	rows, err := store.LoadACL(ctx, "mc")
 	if err != nil {
