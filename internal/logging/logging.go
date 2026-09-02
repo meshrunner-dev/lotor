@@ -37,12 +37,11 @@ func LevelName(l zapcore.Level) string {
 const levelWidth = 5
 
 // EncodeLevel renders the ladder for the console encoder — trace by
-// its name, not zap's Level(-2) — padded so the level is a column
-// rather than a word. The console encoder joins its parts with a
-// single space, which is not enough on its own: "info" and "trace"
-// would push the caller to different offsets on consecutive lines,
-// and a reader scanning down for the errors would have nothing
-// straight to scan along.
+// its name, not zap's Level(-2) — padded to the longest word in it.
+// Padded because a tab stop is not a fixed thing: at the terminal's
+// eight columns every level reaches the same one either way, but a
+// pager or an editor set to four would split them, and the padding is
+// what keeps the column straight wherever the line is read.
 func EncodeLevel(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 	name := LevelName(l)
 	for len(name) < levelWidth {

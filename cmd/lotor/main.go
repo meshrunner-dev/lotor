@@ -1783,10 +1783,13 @@ func newLogger(level string) (*zap.Logger, zap.AtomicLevel, error) {
 	cfg.DisableStacktrace = true
 	cfg.EncoderConfig.EncodeTime = logging.EncodeTime
 	cfg.EncoderConfig.EncodeLevel = logging.EncodeLevel
-	// A tab jumps to the next eight-column stop, so "info" and "trace"
-	// dig the same hole at different widths and nothing lines up. One
-	// space, and the padding in EncodeLevel does the aligning.
-	cfg.EncoderConfig.ConsoleSeparator = " "
+	// A tab, which lands the caller, the message and the fields on
+	// column stops: the parts of a line that vary in width are the ones
+	// worth aligning, and a terminal does that for free. It costs
+	// little at the head now that the clock is fifteen characters and
+	// the level is padded — two columns, where the old timestamp and
+	// an unpadded level cost twenty.
+	cfg.EncoderConfig.ConsoleSeparator = "\t"
 	log, err := cfg.Build()
 	return log, atomic, err
 }

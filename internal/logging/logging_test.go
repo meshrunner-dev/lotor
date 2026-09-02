@@ -51,7 +51,8 @@ func TestTraceRendersByName(t *testing.T) {
 	EncodeLevel(TraceLevel, &enc)
 	EncodeLevel(zapcore.WarnLevel, &enc)
 	// Padded, because the level is a column: the shorter words carry
-	// the difference so the caller after them starts at one offset.
+	// the difference so what follows starts at one offset whatever a
+	// tab stop is worth.
 	if got := strings.Join(enc, ","); got != "trace,warn " {
 		t.Errorf("rendered %q", got)
 	}
