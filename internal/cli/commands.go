@@ -16,6 +16,7 @@ import (
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/product"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/relay"
@@ -524,7 +525,7 @@ func (s *session) frames(ctx context.Context, in input) error {
 	tb := s.table()
 	for _, f := range slices.Backward(frames) { // oldest first, like a log
 		tb.row(f.At.Format("15:04:05"), f.Correlation[:12], f.Type,
-			fmt.Sprintf("%s /%d", f.Route, f.PathLen), verdictWithChain(f), who(f))
+			fmt.Sprintf("%s /%d", f.Route, f.PathLen), verdictWithChain(f), frameContext(f))
 	}
 	if err := tb.flush(s.out); err != nil {
 		return err
@@ -605,6 +606,21 @@ func who(f sentinel.Frame) string {
 	}
 }
 
+func frameContext(f sentinel.Frame) string {
+	parts := make([]string, 0, 2)
+	if from := who(f); from != "" {
+		parts = append(parts, from)
+	}
+	if f.Binding != "" {
+		local := "hand-over from " + f.Binding
+		if f.CausedBy != "" {
+			local += " caused by " + f.CausedBy[:min(len(f.CausedBy), correlation.ShortLen)]
+		}
+		parts = append(parts, local)
+	}
+	return strings.Join(parts, " — ")
+}
+
 func (s *session) correlation(ctx context.Context, in input) error {
 	args := in.pos
 	if len(args) != 1 {
@@ -625,9 +641,18 @@ func (s *session) correlation(ctx context.Context, in input) error {
 		return s.originatedCorrelation(ctx, sen, args[0])
 	}
 	for _, f := range chain {
-		fmt.Fprintf(s.out, "%s  heard %s  %d B  %.0f dBm  snr %.1f  signal %.0f dBm  Δf %+.0f Hz  airtime %s\r\n",
-			f.Correlation[:12], f.At.Format("15:04:05"), f.Bytes, f.RSSI, f.SNR,
-			f.SignalRSSI, f.FreqErrHz, f.Airtime)
+		if f.Binding == "" {
+			fmt.Fprintf(s.out, "%s  heard %s  %d B  %.0f dBm  snr %.1f  signal %.0f dBm  Δf %+.0f Hz  airtime %s\r\n",
+				f.Correlation[:12], f.At.Format("15:04:05"), f.Bytes, f.RSSI, f.SNR,
+				f.SignalRSSI, f.FreqErrHz, f.Airtime)
+		} else {
+			fmt.Fprintf(s.out, "%s  handed over %s  %d B  from %s",
+				f.Correlation[:12], f.At.Format("15:04:05"), f.Bytes, f.Binding)
+			if f.CausedBy != "" {
+				fmt.Fprintf(s.out, "  caused by %s", f.CausedBy[:min(len(f.CausedBy), correlation.ShortLen)])
+			}
+			fmt.Fprint(s.out, "\r\n")
+		}
 		scope := ""
 		if f.Scope != "" {
 			scope = " scope " + f.Scope
@@ -652,6 +677,13 @@ func (s *session) correlation(ctx context.Context, in input) error {
 			return err
 		}
 		s.printDrops(drops)
+		if f.CausedBy != "" {
+			sent, err := sen.SentFor(ctx, f.CausedBy)
+			if err != nil {
+				return err
+			}
+			s.printSent(sent)
+		}
 	}
 	return nil
 }
@@ -1730,6 +1762,12 @@ func watchLine(j bus.FrameJudged) string {
 		j.Correlation.Short(), j.Type, j.Route, j.PathLen, j.Verdict)
 	if j.DuplicateOf != "" {
 		line += " → " + j.DuplicateOf
+	}
+	if j.Binding != "" {
+		line += "  hand-over from " + j.Binding
+		if !j.CausedBy.IsZero() {
+			line += " caused by " + j.CausedBy.Short()
+		}
 	}
 	switch {
 	case j.Node != "":

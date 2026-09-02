@@ -242,6 +242,17 @@ func (o *Observer) event(ev bus.Event) {
 			return
 		}
 		log := o.log.With(zap.String("corr", e.Correlation.Short()))
+		if !e.HasRFMeasurements() {
+			fields := []zap.Field{
+				zap.String("direction", "rx"), zap.String("reason", "local-hand-over"),
+				zap.String("binding", e.Binding),
+			}
+			if !e.CausedBy.IsZero() {
+				fields = append(fields, zap.String("caused_by", e.CausedBy.Short()))
+			}
+			log.Debug("observer frame ignored", fields...)
+			return
+		}
 		if !o.cfg.RX {
 			log.Debug("observer frame ignored",
 				zap.String("direction", "rx"), zap.String("reason", "rx-disabled"))

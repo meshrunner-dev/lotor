@@ -122,9 +122,20 @@ type Frame struct {
 	// nothing about any link, so a reader that wants one asks here
 	// first.
 	Binding string
-	Airtime time.Duration
-	At      time.Time
+	// CausedBy is the correlation of the composed emission that the
+	// controller handed to its peers. Correlation still identifies this
+	// reception: one emitted fact and the peers' reception of it are two
+	// distinct steps whose causal link must remain queryable. It is zero
+	// for frames received from the air.
+	CausedBy correlation.ID
+	Airtime  time.Duration
+	At       time.Time
 }
+
+// HasRFMeasurements reports whether the frame came from a demodulator.
+// A locally handed-over frame is real traffic, but its zero-valued radio
+// fields are absence markers rather than measurements.
+func (f Frame) HasRFMeasurements() bool { return f.Binding == "" }
 
 // ChipStats are the transceiver's own reception counters — an
 // independent second opinion on the daemon's tallies.

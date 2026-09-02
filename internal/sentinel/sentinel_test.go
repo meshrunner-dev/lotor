@@ -80,6 +80,41 @@ func TestHeardThenJudgedBecomesOneRow(t *testing.T) {
 	}
 }
 
+func TestLocalHandOverKeepsProvenanceAndCausalCorrelation(t *testing.T) {
+	s := testSentinel(t)
+	id, cause := correlation.New(), correlation.New()
+	s.Process(context.Background(), bus.FrameJudged{
+		Relay: "mc", Correlation: id, Binding: "station:alice", CausedBy: cause,
+		At: time.Now(), Bytes: 42, RSSI: -40, FreqErrHz: 120,
+		Type: "ADVERT", PubKey: "abc123", Verdict: "heard-on-our-own-radio",
+	})
+
+	frames, err := s.RecentFrames(context.Background(), FrameQuery{Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 1 || frames[0].Binding != "station:alice" ||
+		frames[0].CausedBy != cause.String() {
+		t.Fatalf("journalled hand-over = %+v", frames)
+	}
+	chain, err := s.Chain(context.Background(), cause.Short())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chain) != 1 || chain[0].Correlation != id.String() {
+		t.Fatalf("causal chain = %+v", chain)
+	}
+	// Even defensive non-zero values on a local event are not RF
+	// measurements and must not enter node quality or drift.
+	nodes, err := s.Nodes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].HasRSSI || nodes[0].DriftHz != 0 {
+		t.Fatalf("node RF summary consumed hand-over values: %+v", nodes)
+	}
+}
+
 func TestShortPrefixFindsItsCorrelation(t *testing.T) {
 	s := testSentinel(t)
 	id := correlation.New()
@@ -545,7 +580,7 @@ func TestMigrateGraftsEveryColumnAddedSince(t *testing.T) {
 	defer func() { _ = st.Close() }()
 
 	for table, want := range map[string][]string{
-		"frames":      {"node", "pubkey", "detail", "signal_dbm", "freq_err_hz"},
+		"frames":      {"node", "pubkey", "detail", "signal_dbm", "freq_err_hz", "binding", "caused_by"},
 		"noise_floor": {"spread_db"},
 	} {
 		cols, err := tableColumns(ctx, st.db, table)

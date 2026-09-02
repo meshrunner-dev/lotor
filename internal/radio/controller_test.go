@@ -23,6 +23,9 @@ type controllerFakeDevice struct {
 	holdStart  chan struct{}
 	configured int
 	closed     int
+	txReport   *TxReport
+	txErr      error
+	txCorr     correlation.ID
 }
 
 func newControllerFakeDevice() *controllerFakeDevice {
@@ -54,17 +57,22 @@ func (*controllerFakeDevice) ChipStats() (ChipStats, bool)   { return ChipStats{
 func (*controllerFakeDevice) Airtime(bytes int) time.Duration {
 	return time.Duration(bytes) * time.Millisecond
 }
-func (d *controllerFakeDevice) Transmit(_ context.Context, payload []byte, power int8) (TxReport, error) {
+func (d *controllerFakeDevice) Transmit(ctx context.Context, payload []byte, power int8) (TxReport, error) {
 	word := string(payload)
 	d.mu.Lock()
 	d.order = append(d.order, word)
 	hold, started := d.hold, d.holdStart
+	d.txCorr, _ = correlation.FromContext(ctx)
+	report, txErr := d.txReport, d.txErr
 	d.mu.Unlock()
 	if word == "hold" && hold != nil {
 		close(started)
 		<-hold
 	}
-	return TxReport{At: time.Now(), Airtime: d.Airtime(len(payload)), PowerDBm: power}, nil
+	if report != nil {
+		return *report, txErr
+	}
+	return TxReport{At: time.Now(), Airtime: d.Airtime(len(payload)), PowerDBm: power}, txErr
 }
 func (*controllerFakeDevice) AssessChannel(context.Context, float64) (bool, error) {
 	return false, nil
@@ -612,7 +620,8 @@ func TestControllerCarriesComposedEmissionButNotAForward(t *testing.T) {
 	if _, err := forwarder.TransmitForwarded(context.Background(), []byte("relayed"), 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := relay.Transmit(context.Background(), []byte("composed"), 1); err != nil {
+	origin := correlation.New()
+	if _, err := relay.Transmit(correlation.WithContext(context.Background(), origin), []byte("composed"), 1); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -627,6 +636,12 @@ func TestControllerCarriesComposedEmissionButNotAForward(t *testing.T) {
 	if frame.Binding != "relay:mc" {
 		t.Fatalf("binding = %q, want relay:mc", frame.Binding)
 	}
+	if frame.CausedBy != origin {
+		t.Fatalf("caused by = %s, want %s", frame.CausedBy, origin)
+	}
+	if frame.Correlation == origin || frame.Correlation.IsZero() {
+		t.Fatalf("reception correlation = %s, want a distinct non-zero id", frame.Correlation)
+	}
 	// And nothing else is waiting behind it.
 	short, cancelShort := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancelShort()
@@ -640,5 +655,58 @@ func TestControllerCarriesComposedEmissionButNotAForward(t *testing.T) {
 	dev.mu.Unlock()
 	if want := []string{"relayed", "composed"}; !reflect.DeepEqual(order, want) {
 		t.Fatalf("physical order = %v, want %v", order, want)
+	}
+}
+
+func TestControllerHandsOverFrameThatRadiatedBeforeHandBackFailure(t *testing.T) {
+	handBackErr := errors.New("failed to return to receive")
+	dev := newControllerFakeDevice()
+	dev.txReport = &TxReport{At: time.Now(), Airtime: 17 * time.Millisecond, PowerDBm: 4}
+	dev.txErr = handBackErr
+	c, _ := controllerRig(t, dev)
+	w := Waveform{FrequencyHz: 869_618_000, SpreadingFactor: 8, BandwidthHz: 62_500, CodingRate: 8}
+	relayBinding, err := c.Bind("mc", RoleRelay, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stationBinding, err := c.Bind("alice", RoleStation, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitController(t, c)
+	awaitBinding(t, relayBinding)
+	relay, err := relayBinding.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	station, err := stationBinding.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := correlation.New()
+	report, err := relay.Transmit(correlation.WithContext(context.Background(), origin), []byte("radiated"), 4)
+	if !errors.Is(err, handBackErr) || report.Airtime != 17*time.Millisecond {
+		t.Fatalf("transmit = %+v, %v", report, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	frame, err := station.Receive(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(frame.Payload) != "radiated" || frame.Binding != "relay:mc" || frame.CausedBy != origin {
+		t.Fatalf("handed frame = %+v", frame)
+	}
+
+	dev.mu.Lock()
+	dev.txReport = &TxReport{}
+	dev.mu.Unlock()
+	if _, err := relay.Transmit(context.Background(), []byte("not-radiated"), 4); !errors.Is(err, handBackErr) {
+		t.Fatalf("non-radiated transmit error = %v", err)
+	}
+	short, cancelShort := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelShort()
+	if extra, err := station.Receive(short); err == nil {
+		t.Fatalf("station received non-radiated frame %q", extra.Payload)
 	}
 }

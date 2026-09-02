@@ -957,7 +957,7 @@ func (e *engine) Neighbours() []Neighbour {
 // The SNR recorded is ours: how well WE hear THEM.
 func (e *engine) observe(rx *reception) {
 	pkt := rx.pkt
-	if e.neighbours == nil || pkt.PathHashCount() != 0 {
+	if e.neighbours == nil || pkt.PathHashCount() != 0 || !rx.frame.HasRFMeasurements() {
 		return
 	}
 	switch pkt.PayloadType() {
@@ -992,16 +992,25 @@ func (e *engine) heard(frame radio.Frame) (correlation.ID, *zap.Logger) {
 		id = correlation.New()
 	}
 	log := e.log.With(zap.String("corr", id.Short()))
-	log.Debug("frame heard", zap.Int("bytes", len(frame.Payload)))
-	logging.Trace(log, "rx frame measurements",
-		zap.Float64("rssi_dbm", frame.RSSI),
-		zap.Float64("snr_db", frame.SNR),
-		zap.Float64("signal_rssi_dbm", frame.SignalRSSI),
-		zap.Float64("freq_err_hz", frame.FreqErrHz),
-		zap.Duration("airtime", frame.Airtime),
-	)
+	if frame.HasRFMeasurements() {
+		log.Debug("frame heard", zap.Int("bytes", len(frame.Payload)))
+		logging.Trace(log, "rx frame measurements",
+			zap.Float64("rssi_dbm", frame.RSSI),
+			zap.Float64("snr_db", frame.SNR),
+			zap.Float64("signal_rssi_dbm", frame.SignalRSSI),
+			zap.Float64("freq_err_hz", frame.FreqErrHz),
+			zap.Duration("airtime", frame.Airtime),
+		)
+	} else {
+		fields := []zap.Field{zap.Int("bytes", len(frame.Payload)), zap.String("binding", frame.Binding)}
+		if !frame.CausedBy.IsZero() {
+			fields = append(fields, zap.String("caused_by", frame.CausedBy.Short()))
+		}
+		log.Debug("frame handed over", fields...)
+		logging.Trace(log, "local frame hand-over", fields[1:]...)
+	}
 	e.bus.Publish(bus.FrameHeard{
-		Relay: e.relay, Correlation: id, At: frame.At,
+		Relay: e.relay, Correlation: id, Binding: frame.Binding, CausedBy: frame.CausedBy, At: frame.At,
 		Bytes: len(frame.Payload), RSSI: frame.RSSI, SNR: frame.SNR,
 		SignalRSSI: frame.SignalRSSI, FreqErrHz: frame.FreqErrHz,
 		Airtime: frame.Airtime,
@@ -1020,7 +1029,7 @@ func packetHashHex(pkt *meshcore.Packet) string {
 // FrameHeard measured.
 func (e *engine) judgedEvent(id correlation.ID, frame radio.Frame) bus.FrameJudged {
 	return bus.FrameJudged{
-		Relay: e.relay, Correlation: id, At: frame.At,
+		Relay: e.relay, Correlation: id, Binding: frame.Binding, CausedBy: frame.CausedBy, At: frame.At,
 		Bytes: len(frame.Payload), RSSI: frame.RSSI, SNR: frame.SNR,
 		SignalRSSI: frame.SignalRSSI, FreqErrHz: frame.FreqErrHz,
 		Airtime: frame.Airtime,

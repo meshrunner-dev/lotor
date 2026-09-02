@@ -174,7 +174,9 @@ Such a frame names its emitting binding and carries no measurements —
 nothing demodulated it, and a fabricated signal would travel on into
 relay scores and neighbour tables. Whatever describes the antenna
 therefore ignores it; whatever counts packets does not, since one
-arrived.
+arrived. Its reception correlation is distinct from, and causally linked
+to, the emitting frame's correlation: logs and the journal can follow both
+steps without pretending they were one operation.
 
 The relay reads what is addressed to it as always and refuses to re-flood
 what a peer sent: the original left through the same antenna, so

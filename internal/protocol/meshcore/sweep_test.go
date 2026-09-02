@@ -88,6 +88,40 @@ func TestOurOwnAnswerIsNotANeighbour(t *testing.T) {
 	}
 }
 
+func TestLocalAnswerIsNotAnRFNeighbour(t *testing.T) {
+	e, _, _, peer := txRig(t, "shadow")
+	pending := &sweep{
+		tag: 7, until: time.Now().Add(time.Minute),
+		found: make(chan Neighbour, 1),
+		seen:  map[[meshcore.PubKeySize]byte]bool{},
+	}
+	resp, err := meshcore.BuildDiscoverResp(meshcore.DiscoverResp{
+		NodeType: meshcore.AdvTypeRepeater, SNR: 6, Tag: 7, PubKey: peer.PubKey[:],
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rx := rxOf(e, resp)
+	rx.frame.Binding = "station:alice"
+	e.pendingSweep = pending
+	if verdict, _, handled := e.sweepAnswer(rx); !handled || verdict != verdictDiscoverAnswer {
+		t.Fatalf("local answer = %q, handled %t", verdict, handled)
+	}
+	if len(e.Neighbours()) != 0 {
+		t.Fatal("a local hand-over became an RF neighbour")
+	}
+}
+
+func TestLocalAdvertIsNotAnRFNeighbour(t *testing.T) {
+	e, _, _, peer := txRig(t, "shadow")
+	frame := peerAdvert(t, peer, time.Now())
+	frame.Binding = "station:alice"
+	e.judge(newFakeDevice(), frame)
+	if len(e.Neighbours()) != 0 {
+		t.Fatal("a local advert hand-over became an RF neighbour")
+	}
+}
+
 func TestASecondScanIsRefusedNotSilentlyEmptied(t *testing.T) {
 	e, dev, _, _ := txRig(t, "on-air")
 	runEngine(t, e, dev)

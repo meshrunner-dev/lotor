@@ -214,7 +214,10 @@ queue, so a zero TCP window cannot stop that station's RF processing either.
 The driver assigns a correlation identifier when a reception first crosses the
 hardware seam. The same `radio.Frame` and correlation then reach every logical
 consumer, allowing logs and bus events to describe their different decisions
-about one on-air fact.
+about one on-air fact. A controller-local hand-over receives its own reception
+correlation and carries `caused_by`, the correlation of the composed emission,
+plus the emitting binding. Its RF fields are explicitly absent: their zero
+values are never measurements.
 
 Noise floor and chip counters are measured and cached by the physical device.
 Logical ports only read that cache. The relay monitor mirrors selected values
@@ -264,6 +267,10 @@ protocol queue → shared duty reservation → optional LBT/CAD
 If a receive is pending when CAD is requested, the driver may return
 `ErrBusyReceiving`; the protocol layer decides when to requeue. Hardware errors
 return through the logical operation and do not create a second physical owner.
+`TxReport.Airtime > 0` is the unambiguous radiated boundary: a driver may return
+that report with an error when transmission completed but restoring receive
+mode failed. Such a frame is accounted and handed to co-located bindings just
+like any other radiated composed emission; a zero-airtime failure is not.
 
 ### TX modes
 
@@ -336,11 +343,13 @@ Logs should identify the physical and logical dimensions independently:
 - `corr` for the frame lineage.
 
 The bus follows the same distinction. The relay pipeline publishes
-`FrameHeard` and `FrameJudged`; stations update their own companion-facing
-statistics and notifications from the same controller fan-out. `FrameSent` and
-`TxDropped` identify either producer through their source kind and source. Real
-and shadow sends remain distinguishable even though both consume the duty
-ledger.
+`FrameHeard` and `FrameJudged`, including the emitting binding and causal
+correlation for a local hand-over; stations update their own companion-facing
+statistics and notifications from the same controller fan-out. The sentinel
+stores that provenance and never presents a hand-over's zero RF fields as
+measurements. `FrameSent` and `TxDropped` identify either producer through their
+source kind and source. Real and shadow sends remain distinguishable even though
+both consume the duty ledger.
 
 Trace logs expose hardware and developer plumbing: controller state, chip
 verdicts, airtime, power and physical outcomes, plus companion framing and

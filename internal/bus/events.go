@@ -27,11 +27,15 @@ func ArchiveSourceKey(kind, name, legacyRelay string) string {
 	return strings.TrimSuffix(kind, "/") + "/" + name
 }
 
-// FrameHeard is published for every frame a relay's radio delivers,
-// before any protocol judgement.
+// FrameHeard is published for every frame delivered to a relay before any
+// protocol judgement. Binding is empty for a physical reception; otherwise
+// it names the co-located emitter whose composed frame the controller handed
+// over without inventing RF measurements.
 type FrameHeard struct {
 	Relay       string
 	Correlation correlation.ID
+	Binding     string
+	CausedBy    correlation.ID
 	At          time.Time
 	Bytes       int
 	RSSI        float64
@@ -42,21 +46,27 @@ type FrameHeard struct {
 	// FreqErrHz is the sender's carrier offset — a per-node crystal
 	// health signal once averaged over its frames.
 	FreqErrHz float64
-	// Raw is the frame as it came off the air, whole. Observers
-	// republish it; the journal ignores it.
+	// Raw is the delivered frame, whole. Observers republish only
+	// physical receptions; the journal ignores the bytes.
 	Raw     []byte
 	Airtime time.Duration
 }
 
-// FrameJudged is the protocol engine's verdict on a heard frame —
+// HasRFMeasurements reports whether a demodulator produced this event's
+// radio fields. Local hand-overs carry zero values by design.
+func (e FrameHeard) HasRFMeasurements() bool { return e.Binding == "" }
+
+// FrameJudged is the protocol engine's verdict on a delivered frame —
 // and the journal's whole record of it: it carries the reception's
-// own measurements, so the archive lands in ONE event. FrameHeard
+// provenance and any measurements, so the archive lands in ONE event. FrameHeard
 // remains the live feed; a backpressure drop of either event can no
 // longer leave a row forever without its verdict, or a verdict
 // without its reception.
 type FrameJudged struct {
 	Relay       string
 	Correlation correlation.ID
+	Binding     string
+	CausedBy    correlation.ID
 	Verdict     string
 	// The reception the verdict is about, as FrameHeard carried it.
 	At         time.Time
@@ -84,6 +94,10 @@ type FrameJudged struct {
 	PubKey string
 	Detail string
 }
+
+// HasRFMeasurements reports whether a demodulator produced this event's
+// radio fields. Local hand-overs carry zero values by design.
+func (e FrameJudged) HasRFMeasurements() bool { return e.Binding == "" }
 
 // FrameCorrupt is published for receptions that failed integrity
 // checks — RF noise is traffic too, and silence about it would hide a

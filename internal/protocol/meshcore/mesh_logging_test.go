@@ -100,6 +100,46 @@ func TestReceptionLogsKeepTrafficAtDebugAndRFAtTrace(t *testing.T) {
 	}
 }
 
+func TestHandOverLogsAndEventsKeepProvenanceWithoutRFMeasurements(t *testing.T) {
+	e, _, sub, _ := txRig(t, "shadow")
+	core, observed := observer.New(logging.TraceLevel)
+	e.log = zap.New(core)
+	id, cause := correlation.New(), correlation.New()
+	frame := radio.Frame{
+		Correlation: id, CausedBy: cause, Binding: "station:alice",
+		Payload: []byte{1, 2, 3}, At: time.Now(),
+	}
+
+	e.heard(frame)
+
+	handed := observedOne(t, observed, "frame handed over")
+	fields := handed.ContextMap()
+	if handed.Level != zap.DebugLevel || fields["corr"] != id.Short() ||
+		fields["binding"] != "station:alice" || fields["caused_by"] != cause.Short() {
+		t.Errorf("hand-over traffic fields = %+v", fields)
+	}
+	if got := observed.FilterMessage("rx frame measurements").Len(); got != 0 {
+		t.Fatalf("hand-over produced %d RF measurement logs", got)
+	}
+	if observedOne(t, observed, "local frame hand-over").Level != logging.TraceLevel {
+		t.Error("hand-over plumbing is not trace")
+	}
+
+	select {
+	case ev := <-sub.C:
+		heard, ok := ev.(bus.FrameHeard)
+		if !ok || heard.Binding != frame.Binding || heard.CausedBy != cause || heard.HasRFMeasurements() {
+			t.Fatalf("heard event = %#v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no FrameHeard event")
+	}
+	judged := e.judgedEvent(id, frame)
+	if judged.Binding != frame.Binding || judged.CausedBy != cause || judged.HasRFMeasurements() {
+		t.Fatalf("judged event = %+v", judged)
+	}
+}
+
 func TestTransmitHandsCorrelationAcrossTheRadioSeam(t *testing.T) {
 	e, dev, _, _ := txRig(t, "on-air")
 	id := correlation.New()

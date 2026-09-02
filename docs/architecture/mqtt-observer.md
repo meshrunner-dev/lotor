@@ -240,16 +240,24 @@ cannot turn a previously accepted configuration into an invalid one.
 The internal bus is the observer seam. Each observer subscribes with a bounded
 256-event buffer and selects events belonging to its configured relay:
 
-- `FrameHeard` provides the relay's RF receptions, with SNR, RSSI, raw bytes and
-  a correlation identifier;
+- `FrameHeard` provides frames delivered to the relay, including explicit
+  provenance; only events with no emitting binding are RF receptions with SNR
+  and RSSI and are eligible for RX publication;
 - `FrameSent` provides actual relay emissions;
-- station-originated emissions are not relay emissions and are excluded;
+- station-originated emissions and their controller-local hand-over to the
+  relay are not relay RX or TX and are excluded;
 - shadow emissions are excluded because they never went on the air;
 - dropped or refused transmissions are not presented as sent frames.
 
 Consequently `tx=all` means all actual emissions from the watched relay, not
 all producers sharing its radio. `tx=self-adverts` publishes only adverts whose
 embedded identity is the watched relay's own key.
+
+This distinction matters on a shared radio. A hand-over contains real MeshCore
+traffic but no demodulator measurement; publishing it as RX would duplicate the
+station's emission under the relay identity and fabricate `0` RSSI/SNR. Its
+binding and `caused_by` correlation remain available to logs and the journal
+instead.
 
 The observer parses selected frames with `meshrunner.dev/pkg/meshcore`, applies
 the payload-type filter, builds JSON and publishes synchronously with a bounded

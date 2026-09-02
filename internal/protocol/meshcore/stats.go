@@ -46,7 +46,7 @@ type StatsSnapshot struct {
 func (s *Stats) countHeard(pkt *meshcore.Packet, frame radio.Frame, dup bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if frame.Binding == "" {
+	if frame.HasRFMeasurements() {
 		s.LastRSSI, s.LastSNR = frame.RSSI, frame.SNR
 		s.RxAirtime += frame.Airtime
 	}

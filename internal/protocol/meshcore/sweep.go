@@ -165,6 +165,9 @@ func (e *engine) sweepAnswer(rx *reception) (verdict, why string, handled bool) 
 	if err != nil || resp.Tag != s.tag {
 		return "", "", false
 	}
+	if !rx.frame.HasRFMeasurements() {
+		return verdictDiscoverAnswer, rx.frame.Binding + " answered on our own radio", true
+	}
 	if resp.NodeType != meshcore.AdvTypeRepeater || len(resp.PubKey) != meshcore.PubKeySize {
 		return verdictDiscoverAnswer, "an answer we cannot use", true
 	}

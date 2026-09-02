@@ -186,3 +186,29 @@ func TestObserverFrameDecisionsNeverLoseTheirCorrelation(t *testing.T) {
 		})
 	}
 }
+
+func TestObserverDoesNotMisclassifyLocalHandOverAsRelayRX(t *testing.T) {
+	raw, _ := advertFrame(t)
+	core, observed := zapobserver.New(logging.TraceLevel)
+	rec := &recorder{}
+	o := New(Config{
+		Relay: "mc", IATA: "PAR", Topic: DefaultTopic, RX: true, Packets: true, Raw: true,
+	}, rec, zap.New(core))
+	id, cause := correlation.New(), correlation.New()
+
+	o.event(bus.FrameHeard{
+		Relay: "mc", Correlation: id, Binding: "station:alice", CausedBy: cause,
+		At: time.Now(), Raw: raw,
+	})
+
+	if got := rec.count(); got != 0 {
+		t.Fatalf("local hand-over published %d broker messages", got)
+	}
+	ignored := mqttObservedOne(t, observed, "observer frame ignored")
+	fields := ignored.ContextMap()
+	if fields["corr"] != id.Short() || fields["direction"] != "rx" ||
+		fields["reason"] != "local-hand-over" || fields["binding"] != "station:alice" ||
+		fields["caused_by"] != cause.Short() {
+		t.Errorf("ignored hand-over fields = %+v", fields)
+	}
+}

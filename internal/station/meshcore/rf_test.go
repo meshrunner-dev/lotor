@@ -14,6 +14,7 @@ import (
 
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/correlation"
+	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/station"
 
@@ -22,13 +23,14 @@ import (
 )
 
 type stationRadio struct {
-	transmits int
-	assesses  int
-	noise     radio.NoiseFloor
-	noiseOK   bool
-	assessErr error
-	txStarted chan struct{}
-	txRelease chan struct{}
+	transmits     int
+	assesses      int
+	noise         radio.NoiseFloor
+	noiseOK       bool
+	assessErr     error
+	txStarted     chan struct{}
+	txRelease     chan struct{}
+	txCorrelation correlation.ID
 }
 
 func (*stationRadio) Envelope() radio.Envelope {
@@ -45,6 +47,7 @@ func (*stationRadio) NoiseStarved() uint64                   { return 0 }
 func (*stationRadio) ChipStats() (radio.ChipStats, bool)     { return radio.ChipStats{}, false }
 func (r *stationRadio) Transmit(ctx context.Context, _ []byte, power int8) (radio.TxReport, error) {
 	r.transmits++
+	r.txCorrelation, _ = correlation.FromContext(ctx)
 	if r.txStarted != nil {
 		close(r.txStarted)
 	}
@@ -532,6 +535,9 @@ func TestStartedStationTransmitFinishesAfterSessionCancellation(t *testing.T) {
 	if got := svc.duty.Usage(time.Now()); got != 100*time.Millisecond {
 		t.Fatalf("accounted airtime = %s", got)
 	}
+	if device.txCorrelation != item.correlation {
+		t.Fatalf("radio context correlation = %s, want %s", device.txCorrelation, item.correlation)
+	}
 }
 
 func TestStationStatsStayLocalToTheAttachment(t *testing.T) {
@@ -766,7 +772,9 @@ func TestAFloodedLoginIsAnsweredInsideThePathReturn(t *testing.T) {
 // contact from that log, and withholding it froze the "last seen" of
 // the relay sharing our antenna.
 func TestHandedOverFrameKeepsItsPushButNotTheAirAccount(t *testing.T) {
+	core, observed := observer.New(logging.TraceLevel)
 	spec := testSpec(t)
+	spec.Log = zap.New(core)
 	spec.TX = station.TXPolicy{Mode: config.TXShadow, QueueDepth: 4}
 	built, err := build(spec)
 	if err != nil {
@@ -807,7 +815,11 @@ func TestHandedOverFrameKeepsItsPushButNotTheAirAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ := relayed.MarshalBinary()
-	svc.processRF(t.Context(), radio.Frame{Payload: raw, Binding: "relay:mc", Airtime: time.Second})
+	cause := correlation.New()
+	svc.processRF(t.Context(), radio.Frame{
+		Correlation: correlation.New(), CausedBy: cause,
+		Payload: raw, Binding: "relay:mc", Airtime: time.Second,
+	})
 
 	svc.mu.Lock()
 	rssi, snr, air := svc.stats.lastRSSIDBm, svc.stats.lastSNRx4, svc.stats.rxAir
@@ -824,6 +836,14 @@ func TestHandedOverFrameKeepsItsPushButNotTheAirAccount(t *testing.T) {
 	}
 	if air != airAfterAir {
 		t.Fatalf("hand-over spent %s of receive airtime, want %s", air, airAfterAir)
+	}
+	if got := observed.FilterMessage("station radio reception").Len(); got != 1 {
+		t.Fatalf("radio reception logs = %d, want only the demodulated frame", got)
+	}
+	handed := observed.FilterMessage("station frame handed over").All()
+	if len(handed) != 1 || handed[0].ContextMap()["binding"] != "relay:mc" ||
+		handed[0].ContextMap()["caused_by"] != cause.Short() {
+		t.Fatalf("station hand-over log = %+v", handed)
 	}
 
 	// Both frames reached the application as raw receptions: the one

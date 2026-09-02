@@ -482,6 +482,33 @@ func TestOriginatedEmissionIsAddressable(t *testing.T) {
 	}
 }
 
+func TestLocalHandOverIsRenderedWithoutInventedRFMeasurements(t *testing.T) {
+	deps := testDeps(t)
+	cause, received := correlation.New(), correlation.New()
+	deps.Sentinel.Process(context.Background(), bus.FrameSent{
+		SourceKind: bus.SourceStation, Source: "alice", Correlation: cause,
+		At: time.Now(), Kind: "channel-text", Airtime: 100 * time.Millisecond, PowerDBm: 10,
+	})
+	deps.Sentinel.Process(context.Background(), bus.FrameJudged{
+		Relay: "meshcore-868", Correlation: received, Binding: "station:alice", CausedBy: cause,
+		At: time.Now(), Bytes: 32, Type: "GRP_TXT", Route: "FLOOD",
+		Verdict: "heard-on-our-own-radio",
+	})
+
+	listed := run(t, deps, "frames")
+	if !strings.Contains(listed, "hand-over from station:alice caused by "+cause.Short()) {
+		t.Errorf("frame listing loses local provenance:\n%s", listed)
+	}
+	detail := run(t, deps, "correlation "+cause.Short())
+	if !strings.Contains(detail, "handed over") || !strings.Contains(detail, "from station:alice") ||
+		!strings.Contains(detail, "caused by "+cause.Short()) || !strings.Contains(detail, "station/alice") {
+		t.Errorf("causal hand-over is not traceable:\n%s", detail)
+	}
+	if strings.Contains(detail, " dBm  snr") || strings.Contains(detail, "snr 0.0") {
+		t.Errorf("hand-over rendered absent RF values as measurements:\n%s", detail)
+	}
+}
+
 func TestLifecycleHistoryIsReachable(t *testing.T) {
 	deps := testDeps(t)
 	at := time.Now()

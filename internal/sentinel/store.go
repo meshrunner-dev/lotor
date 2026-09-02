@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS frames (
 	airtime_ms   REAL NOT NULL,
 	signal_dbm   REAL NOT NULL DEFAULT 0,
 	freq_err_hz  REAL NOT NULL DEFAULT 0,
+	binding      TEXT NOT NULL DEFAULT '',
+	caused_by    TEXT NOT NULL DEFAULT '',
 	ptype        TEXT NOT NULL DEFAULT '',
 	route        TEXT NOT NULL DEFAULT '',
 	scope        TEXT NOT NULL DEFAULT '',
@@ -121,6 +123,7 @@ CREATE TABLE IF NOT EXISTS metrics_daily (
 const schemaIndexes = `CREATE INDEX IF NOT EXISTS frames_at ON frames(at_ms);
 CREATE INDEX IF NOT EXISTS frames_pubkey ON frames(pubkey, at_ms);
 CREATE INDEX IF NOT EXISTS frames_dup ON frames(duplicate_of);
+CREATE INDEX IF NOT EXISTS frames_caused_by ON frames(caused_by);
 -- The two columns a reader filters frames by. Both hold a handful of
 -- distinct words over a journal that only grows, so the index is what
 -- keeps "which words are there" a question worth asking at all.
@@ -145,6 +148,12 @@ type Frame struct {
 	SNR         float64
 	SignalRSSI  float64
 	FreqErrHz   float64
+	// Binding and CausedBy distinguish a controller-local hand-over from
+	// an RF reception and link it back to the emission that caused it.
+	// Empty Binding means the radio measurements above came from a
+	// demodulator; a hand-over's zero values are absence markers.
+	Binding     string
+	CausedBy    string
 	Airtime     time.Duration
 	Type        string
 	Route       string
@@ -314,6 +323,8 @@ var grafts = map[string][]graft{
 		{"detail", ddlText},
 		{"signal_dbm", ddlReal},
 		{"freq_err_hz", ddlReal},
+		{"binding", ddlText},
+		{"caused_by", ddlText},
 	},
 	"noise_floor": {
 		{"spread_db", ddlReal},
@@ -406,11 +417,12 @@ func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]boo
 func (s *store) insertObserved(ctx context.Context, f Frame) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR REPLACE INTO frames (corr, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms,
-		        signal_dbm, freq_err_hz, ptype, route, scope, path_len, verdict, duplicate_of,
-		        node, pubkey, detail)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		        signal_dbm, freq_err_hz, binding, caused_by, ptype, route, scope, path_len,
+		        verdict, duplicate_of, node, pubkey, detail)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		f.Correlation, f.Relay, f.At.UnixMilli(), f.Bytes, f.RSSI, f.SNR,
 		float64(f.Airtime)/float64(time.Millisecond), f.SignalRSSI, f.FreqErrHz,
+		f.Binding, f.CausedBy,
 		f.Type, f.Route, f.Scope, f.PathLen, f.Verdict, f.DuplicateOf,
 		f.Node, f.PubKey, f.Detail)
 	return err
@@ -786,7 +798,7 @@ func (fq FrameQuery) query(base string) (string, []any) {
 // view, and the correlation prefix is an index range, not a LIKE.
 func (s *store) RecentFrames(ctx context.Context, fq FrameQuery) ([]Frame, error) {
 	q, args := fq.query(`SELECT corr, relay, at_ms, bytes, rssi_dbm, snr_db, airtime_ms, signal_dbm, freq_err_hz,
-	             ptype, route, scope, path_len, verdict, duplicate_of, node, pubkey, detail
+	             binding, caused_by, ptype, route, scope, path_len, verdict, duplicate_of, node, pubkey, detail
 	      FROM frames WHERE 1=1`)
 	q += ` ORDER BY at_ms DESC LIMIT ?`
 	args = append(args, fq.Limit)
@@ -804,6 +816,7 @@ func (s *store) RecentFrames(ctx context.Context, fq FrameQuery) ([]Frame, error
 		var airtimeMS float64
 		if err := rows.Scan(&f.Correlation, &f.Relay, &atMS, &f.Bytes, &f.RSSI, &f.SNR,
 			&airtimeMS, &f.SignalRSSI, &f.FreqErrHz,
+			&f.Binding, &f.CausedBy,
 			&f.Type, &f.Route, &f.Scope, &f.PathLen, &f.Verdict, &f.DuplicateOf,
 			&f.Node, &f.PubKey, &f.Detail); err != nil {
 			return nil, err
@@ -823,8 +836,9 @@ type Node struct {
 	Heard    int
 	LastAt   time.Time
 	BestRSSI float64
-	// HasRSSI is false when every row for this node came from a
-	// judgement whose reception was lost: there is no measurement.
+	// HasRSSI is false when every row for this node either came from a
+	// local hand-over or a judgement whose reception was lost: neither
+	// carries a measurement.
 	HasRSSI bool
 	// DriftHz averages the carrier offset of the node's frames whose
 	// reception measured one: its crystal's health, in hertz.
@@ -845,8 +859,8 @@ func (s *store) Nodes(ctx context.Context) ([]Node, error) {
 		       (SELECT detail FROM frames n WHERE n.pubkey = f.pubkey
 		          AND n.ptype = 'ADVERT' AND n.detail != '' ORDER BY n.at_ms DESC LIMIT 1),
 		       COUNT(*), MAX(f.at_ms),
-		       MAX(CASE WHEN f.rssi_dbm != 0 THEN f.rssi_dbm END),
-	       AVG(CASE WHEN f.freq_err_hz != 0 THEN f.freq_err_hz END)
+		       MAX(CASE WHEN f.binding = '' AND f.rssi_dbm != 0 THEN f.rssi_dbm END),
+	       AVG(CASE WHEN f.binding = '' AND f.freq_err_hz != 0 THEN f.freq_err_hz END)
 		FROM frames f WHERE f.pubkey != '' AND f.ptype = 'ADVERT'
 		GROUP BY f.pubkey ORDER BY MAX(f.at_ms) DESC`)
 	if err != nil {
@@ -874,14 +888,22 @@ func (s *store) Nodes(ctx context.Context) ([]Node, error) {
 	return out, rows.Err()
 }
 
-// Chain returns a correlation's frames and its whole duplicate
-// family: the chain is resolved to its root first — the original
-// every duplicate points at — then the root and all its duplicates
-// are returned, siblings included, whichever member was asked about.
+// Chain returns a correlation's frames, locally caused receptions, and whole
+// duplicate family. A composed emission and the reception handed to a
+// co-located relay use distinct correlations; caused_by keeps that causal edge
+// queryable from the emitting side as well as visible on the receiving side.
 func (s *store) Chain(ctx context.Context, correlationPrefix string) ([]Frame, error) {
 	own, err := s.RecentFrames(ctx, FrameQuery{CorrelationPrefix: correlationPrefix, Limit: 16})
-	if err != nil || len(own) == 0 {
-		return own, err
+	if err != nil {
+		return nil, err
+	}
+	caused, err := s.causedBy(ctx, correlationPrefix)
+	if err != nil {
+		return nil, err
+	}
+	own = append(own, caused...)
+	if len(own) == 0 {
+		return nil, nil
 	}
 	seen := map[string]bool{}
 	var out []Frame
@@ -911,6 +933,36 @@ func (s *store) Chain(ctx context.Context, correlationPrefix string) ([]Frame, e
 		}
 		add(dups)
 		add([]Frame{f})
+	}
+	return out, nil
+}
+
+func (s *store) causedBy(ctx context.Context, prefix string) ([]Frame, error) {
+	lo, hi := prefixRange(prefix)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT corr FROM frames WHERE caused_by >= ? AND caused_by < ? ORDER BY at_ms`, lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var correlations []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		correlations = append(correlations, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []Frame
+	for _, id := range correlations {
+		frames, err := s.RecentFrames(ctx, FrameQuery{CorrelationPrefix: id, Limit: 1})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, frames...)
 	}
 	return out, nil
 }

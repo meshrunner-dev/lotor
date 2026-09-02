@@ -349,12 +349,16 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 		// verdict, so a backpressure drop loses a whole frame or
 		// nothing — never a row stranded halfway. FrameHeard stays on
 		// the bus for the live consumers and is not journalled.
+		causedBy := ""
+		if !e.CausedBy.IsZero() {
+			causedBy = e.CausedBy.String()
+		}
 		err = s.store.insertObserved(ctx, Frame{
 			Correlation: e.Correlation.String(), Relay: e.Relay, At: e.At,
 			Bytes: e.Bytes, RSSI: e.RSSI, SNR: e.SNR,
 			SignalRSSI: e.SignalRSSI, FreqErrHz: e.FreqErrHz,
-			Airtime: e.Airtime,
-			Type:    e.Type, Route: e.Route, Scope: e.Scope, PathLen: e.PathLen,
+			Binding: e.Binding, CausedBy: causedBy, Airtime: e.Airtime,
+			Type: e.Type, Route: e.Route, Scope: e.Scope, PathLen: e.PathLen,
 			Verdict: e.Verdict, DuplicateOf: e.DuplicateOf,
 			Node: e.Node, PubKey: e.PubKey, Detail: e.Detail,
 		})

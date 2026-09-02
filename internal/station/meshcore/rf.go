@@ -126,12 +126,7 @@ func (s *service) processRF(ctx context.Context, frame radio.Frame) {
 		s.log.Debug("station frame duplicate", zap.String("corr", frame.Correlation.Short()))
 		return
 	}
-	s.log.Debug("station frame received", zap.String("corr", frame.Correlation.Short()),
-		zap.String("type", packet.PayloadType().String()), zap.String("route", packet.Route().String()))
-	logging.Trace(s.log, "station radio reception",
-		zap.String("corr", frame.Correlation.Short()), zap.Float64("rssi_dbm", frame.RSSI),
-		zap.Float64("snr_db", frame.SNR), zap.Float64("frequency_error_hz", frame.FreqErrHz),
-		zap.Duration("airtime", frame.Airtime), zap.Int("bytes", len(frame.Payload)))
+	s.logReception(frame, packet)
 	switch packet.PayloadType() {
 	case mesh.PayloadTypeAck:
 		s.receiveACK(packet.Payload, frame.Correlation)
@@ -161,6 +156,31 @@ func (s *service) processRF(ctx context.Context, frame radio.Frame) {
 	}
 }
 
+func (s *service) logReception(frame radio.Frame, packet *mesh.Packet) {
+	trafficFields := []zap.Field{
+		zap.String("corr", frame.Correlation.Short()),
+		zap.String("type", packet.PayloadType().String()), zap.String("route", packet.Route().String()),
+	}
+	if frame.HasRFMeasurements() {
+		s.log.Debug("station frame received", trafficFields...)
+		logging.Trace(s.log, "station radio reception",
+			zap.String("corr", frame.Correlation.Short()), zap.Float64("rssi_dbm", frame.RSSI),
+			zap.Float64("snr_db", frame.SNR), zap.Float64("frequency_error_hz", frame.FreqErrHz),
+			zap.Duration("airtime", frame.Airtime), zap.Int("bytes", len(frame.Payload)))
+	} else {
+		trafficFields = append(trafficFields, zap.String("binding", frame.Binding))
+		localFields := []zap.Field{
+			zap.String("corr", frame.Correlation.Short()), zap.String("binding", frame.Binding),
+		}
+		if !frame.CausedBy.IsZero() {
+			trafficFields = append(trafficFields, zap.String("caused_by", frame.CausedBy.Short()))
+			localFields = append(localFields, zap.String("caused_by", frame.CausedBy.Short()))
+		}
+		s.log.Debug("station frame handed over", trafficFields...)
+		logging.Trace(s.log, "station local frame hand-over", localFields...)
+	}
+}
+
 func (s *service) beginRFReception(ctx context.Context, frame radio.Frame) context.Context {
 	s.recordReception(frame)
 	// Handed-over frames included: applications date a contact from
@@ -173,7 +193,7 @@ func (s *service) recordReception(frame radio.Frame) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stats.received++
-	if frame.Binding != "" {
+	if !frame.HasRFMeasurements() {
 		// Handed over by a peer: a packet, counted as one, but the
 		// antenna did nothing. StatsRadio is the antenna's account,
 		// and the airtime went on transmitting — already counted by
@@ -742,7 +762,8 @@ func (s *service) transmit(ctx context.Context, item emission) {
 	at, actualAir, actualPower := time.Now(), airtime, power
 	var txErr error
 	if !shadow {
-		txCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*airtime+time.Second)
+		txBase := correlation.WithContext(context.WithoutCancel(ctx), item.correlation)
+		txCtx, cancel := context.WithTimeout(txBase, 2*airtime+time.Second)
 		report, err := device.Transmit(txCtx, raw, power)
 		cancel()
 		txErr = err

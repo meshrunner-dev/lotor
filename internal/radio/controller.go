@@ -597,6 +597,7 @@ func (c *Controller) configurationVersion() uint64 {
 // would travel on into relay scores and neighbour tables.
 func (c *Controller) handOver(ctx context.Context, from *controllerPort, payload []byte) {
 	b := from.binding
+	causedBy, _ := correlation.FromContext(ctx)
 	c.broadcastExcept(ctx, from, receiveResult{frame: Frame{
 		// Its own correlation, as any reception gets at the device
 		// seam: the peers judging it are not the goroutine that sent
@@ -604,6 +605,7 @@ func (c *Controller) handOver(ctx context.Context, from *controllerPort, payload
 		Correlation: correlation.New(),
 		Payload:     append([]byte(nil), payload...),
 		Binding:     bindingKey(b.role, b.name),
+		CausedBy:    causedBy,
 		At:          time.Now(),
 	}})
 }
@@ -971,11 +973,13 @@ func (p *controllerPort) transmit(ctx context.Context, payload []byte, powerDBm 
 		report, err := dev.Transmit(ctx, raw, powerDBm)
 		return operationResult{report: report, err: err}
 	}})
-	if err == nil && handOver {
+	if handOver && (err == nil || result.report.Airtime > 0) {
 		// The chip was keying, so the peers sharing it heard nothing.
 		// The caller's context is dropped deliberately: a transmit
 		// cancelled mid-key still went out and still paid the duty
 		// ledger, so the peers must hear what the mesh heard.
+		// A report carrying airtime means the frame radiated even when
+		// the driver's hand-back to receive subsequently failed.
 		// handOver never blocks.
 		p.binding.controller.handOver(context.WithoutCancel(ctx), p, raw)
 	}
