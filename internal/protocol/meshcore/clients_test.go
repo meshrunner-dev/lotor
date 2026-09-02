@@ -15,18 +15,18 @@ import (
 func TestSessionSnapshotCarriesTheRouteButNeverTheSecret(t *testing.T) {
 	a := newACL(nil)
 	now := time.Now()
-	with := &client{secret: []byte("derived"), lastActive: now, active: true}
-	with.pubKey[0] = 0xBB
-	with.out = &outPath{pathLen: 2, path: []byte{0x4f, 0xa2}, learned: now}
-	without := &client{secret: []byte("derived"), lastActive: now, active: true}
-	without.pubKey[0] = 0xCC
-	idle := &client{lastActive: now.Add(-2 * sessionIdle), active: true}
-	idle.pubKey[0] = 0xDD
-	a.put(with)
-	a.put(without)
-	a.put(idle)
+	with := &client{Secret: []byte("derived"), LastActive: now, Active: true}
+	with.PubKey[0] = 0xBB
+	with.Out = &outPath{PathLen: 2, Path: []byte{0x4f, 0xa2}, Learned: now}
+	without := &client{Secret: []byte("derived"), LastActive: now, Active: true}
+	without.PubKey[0] = 0xCC
+	idle := &client{LastActive: now.Add(-2 * sessionIdle), Active: true}
+	idle.PubKey[0] = 0xDD
+	a.Put(with)
+	a.Put(without)
+	a.Put(idle)
 
-	rows := a.sessions()
+	rows := a.Sessions()
 	if len(rows) != 3 {
 		t.Fatalf("snapshot holds %d rows, want 3 — expiry belongs to the engine clock", len(rows))
 	}
@@ -44,12 +44,12 @@ func TestSessionSnapshotCarriesTheRouteButNeverTheSecret(t *testing.T) {
 	}
 	// A read must not change what it reads: even an overdue entry is
 	// left for the engine clock to retire.
-	if _, ok := a.by[idle.pubKey]; !ok {
+	if _, ok := a.By[idle.PubKey]; !ok {
 		t.Error("the snapshot retired an entry")
 	}
 	// And the copy is a copy: bending it must not bend the table.
 	rows[0].Path = append(rows[0].Path, 0xFF)
-	if with.out != nil && len(with.out.path) != 2 {
+	if with.Out != nil && len(with.Out.Path) != 2 {
 		t.Error("the snapshot shares the table's bytes")
 	}
 }
@@ -80,18 +80,18 @@ func TestClientExpiryPublishesOneCoherentGeneration(t *testing.T) {
 	e, sub := testEngine(t)
 	now := time.Now()
 	guest := &client{
-		pubKey: aclKey(0x11), perms: permGuest,
-		active: true, lastActive: now.Add(-sessionIdle),
+		PubKey: aclKey(0x11), Perms: permGuest,
+		Active: true, LastActive: now.Add(-sessionIdle),
 	}
 	durable := &client{
-		pubKey: aclKey(0x22), perms: permReadOnly, granted: true,
-		active: true, lastActive: now.Add(-sessionIdle),
+		PubKey: aclKey(0x22), Perms: permReadOnly, Granted: true,
+		Active: true, LastActive: now.Add(-sessionIdle),
 	}
-	durable.out = &outPath{pathLen: 1, path: []byte{0xaa}, learned: now}
-	if err := e.acl.put(guest); err != nil {
+	durable.Out = &outPath{PathLen: 1, Path: []byte{0xaa}, Learned: now}
+	if err := e.acl.Put(guest); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.acl.put(durable); err != nil {
+	if err := e.acl.Put(durable); err != nil {
 		t.Fatal(err)
 	}
 	e.publishClientView(time.Time{}, false)
@@ -107,14 +107,14 @@ func TestClientExpiryPublishesOneCoherentGeneration(t *testing.T) {
 	if after.Generation != before.Generation+1 {
 		t.Fatalf("generation %d after %d", after.Generation, before.Generation)
 	}
-	if len(after.Sessions) != 0 || len(after.Access) != 1 || after.Access[0].PubKey != durable.pubKey {
+	if len(after.Sessions) != 0 || len(after.Access) != 1 || after.Access[0].PubKey != durable.PubKey {
 		t.Fatalf("expired view = %+v", after)
 	}
-	if e.acl.get(guest.pubKey[:]) != nil {
+	if e.acl.Get(guest.PubKey[:]) != nil {
 		t.Fatal("the expired guest kept its live credential")
 	}
-	kept := e.acl.get(durable.pubKey[:])
-	if kept == nil || kept.active || kept.out == nil {
+	kept := e.acl.Get(durable.PubKey[:])
+	if kept == nil || kept.Active || kept.Out == nil {
 		t.Fatalf("durable principal was removed or damaged: %+v", kept)
 	}
 
@@ -143,9 +143,9 @@ func TestClientExpiryPublishesOneCoherentGeneration(t *testing.T) {
 func TestDryGateSchedulesClientExpiry(t *testing.T) {
 	e, _ := testEngine(t)
 	now := time.Now()
-	e.acl.by[aclKey(0x44)] = &client{
-		pubKey: aclKey(0x44), active: true,
-		lastActive: now.Add(-sessionIdle).Add(50 * time.Millisecond),
+	e.acl.By[aclKey(0x44)] = &client{
+		PubKey: aclKey(0x44), Active: true,
+		LastActive: now.Add(-sessionIdle).Add(50 * time.Millisecond),
 	}
 
 	wait, reason, scheduled := e.receiveStateWake(now)
@@ -166,9 +166,9 @@ func TestAnswersFitTheRouteTheyWillTravel(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := range maxClients {
-		if err := e.acl.put(&client{
-			pubKey: aclKey(byte(i)), perms: permReadWrite, granted: true,
-			lastActive: time.Now(),
+		if err := e.acl.Put(&client{
+			PubKey: aclKey(byte(i)), Perms: permReadWrite, Granted: true,
+			LastActive: time.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}

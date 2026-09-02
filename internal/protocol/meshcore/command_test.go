@@ -395,11 +395,11 @@ func adminSession(t *testing.T, e *engine, peer *meshcore.LocalIdentity, ts uint
 		t.Fatal(err)
 	}
 	c := &client{
-		pubKey: peer.PubKey, secret: secret, perms: permAdmin, granted: true,
-		lastTimestamp: ts, lastActive: time.Now(),
-		asks: rateLimiter{max: 6, window: time.Minute},
+		PubKey: peer.PubKey, Secret: secret, Perms: permAdmin, Granted: true,
+		LastTimestamp: ts, LastActive: time.Now(),
+		Asks: rateLimiter{Max: 6, Window: time.Minute},
 	}
-	if err := e.acl.put(c); err != nil {
+	if err := e.acl.Put(c); err != nil {
 		t.Fatal(err)
 	}
 }

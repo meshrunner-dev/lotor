@@ -11,6 +11,7 @@ import (
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/correlation"
+	"meshrunner.dev/lotor/internal/meshcorehost"
 )
 
 // Anonymous requests, the reference repeater's shape: a stranger who
@@ -41,33 +42,25 @@ const (
 // the reference marks it do-not-retransmit the moment decryption
 // succeeds.
 func (e *engine) anonVerdict(rx *reception) (verdict, why string, handled bool) {
-	d, err := meshcore.ParseAnonDatagram(rx.pkt.Payload)
-	if err != nil {
+	a, short, ok := meshcorehost.OpenAnon(e.id, rx.pkt.Payload)
+	if short {
 		// The reference releases an incomplete anon packet unrouted.
 		return verdictIgnored, "anon request too short", true
 	}
-	if e.id == nil || d.DestHash[0] != e.id.PubKey[0] {
+	if !ok {
 		return "", "", false
-	}
-	secret, err := e.id.SharedSecret(d.SenderPub)
-	if err != nil {
-		return "", "", false
-	}
-	plain, err := d.Open(secret)
-	if err != nil {
-		return "", "", false // a failed MAC routes on, unread
 	}
 	// What this cost — one scalar multiplication and a MAC sweep — is
 	// kept for the answer rather than paid again.
-	req, err := meshcore.ParseAnonRequest(plain)
+	req, err := meshcore.ParseAnonRequest(a.Plain)
 	if errors.Is(err, meshcore.ErrIsLogin) {
-		rx.opened = &opened{sender: d.SenderPub, secret: secret, plain: plain}
+		rx.opened = &opened{sender: a.Sender, secret: a.Secret, plain: a.Plain}
 		return verdictAnon, "login request", true
 	}
 	if err != nil {
 		return verdictIgnored, "anon request truncated", true
 	}
-	rx.opened = &opened{sender: d.SenderPub, secret: secret, plain: plain, req: req}
+	rx.opened = &opened{sender: a.Sender, secret: a.Secret, plain: a.Plain, req: req}
 	switch req.Kind {
 	case meshcore.AnonReqOwner:
 		return verdictAnon, "owner request — the name behind the key", true
@@ -157,7 +150,7 @@ func (e *engine) respondAnon(rx *reception, origin correlation.ID) {
 			zap.Uint8("kind", req.Kind))
 		return // a question nobody defined stays unanswered
 	}
-	if !e.limits.anon.allow(time.Now()) {
+	if !e.limits.anon.Allow(time.Now()) {
 		e.log.Debug("anonymous reply rate-limited", zap.String("corr", origin.Short()))
 		e.bus.Publish(bus.TxDropped{
 			Relay: e.relay, Correlation: origin, At: time.Now(), Reason: reasonRateLimited,
@@ -168,15 +161,14 @@ func (e *engine) respondAnon(rx *reception, origin correlation.ID) {
 
 	// The reply the reference composes: the asker's timestamp echoed
 	// as a tag, our clock for an easy sync, then the answer's text.
-	e.reply(pkt, answer{
-		destHash: sender[:meshcore.PathHashSize],
-		secret:   secret,
-		tag:      req.Timestamp,
-		body:     meshcore.FrameAnonReply(uint32(time.Now().Unix()), text),
-		scope:    e.replyScope(rx),
-		supplied: true,
-		pathLen:  req.PathLen,
-		path:     req.Path,
-		kind:     "anon-resp",
-	}, origin)
+	e.reply(pkt, meshcorehost.Answer{
+		DestHash: sender[:meshcore.PathHashSize],
+		Secret:   secret,
+		Tag:      req.Timestamp,
+		Body:     meshcore.FrameAnonReply(uint32(time.Now().Unix()), text),
+		Scope:    e.replyScope(rx),
+		Supplied: true,
+		PathLen:  req.PathLen,
+		Path:     req.Path,
+	}, "anon-resp", origin)
 }
