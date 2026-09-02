@@ -33,7 +33,10 @@ import (
 
 const (
 	protocolName = "meshcore"
-	typeName     = "room"
+	// The type is spelled with its protocol on purpose: one word an
+	// operator types, and a word that could never be mistaken for
+	// another mesh's room when a second protocol arrives.
+	typeName = "meshcore-room"
 
 	// The reference room server's defaults: a flood advert every 47
 	// hours, a zero-hop one every two minutes, a ring of 32 posts.
