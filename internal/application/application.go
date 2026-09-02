@@ -16,6 +16,8 @@ import (
 	"go.uber.org/zap"
 
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/confdb"
+	"meshrunner.dev/lotor/internal/meshcorehost"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/schema"
 	"meshrunner.dev/lotor/internal/version"
@@ -119,6 +121,14 @@ type Spec struct {
 	Build    version.Info
 	TX       TXPolicy
 	Bus      *bus.Bus
+	// Sessions is the application's durable access list — its members
+	// and their roles — keyed to it in the configuration store; nil
+	// keeps the table in memory.
+	Sessions meshcorehost.SessionStore
+	// Store is the configuration store itself, for the tables a type
+	// keeps beside the revision trail — a room's posts and cursors.
+	// Nil is the memory-only posture.
+	Store *confdb.Store
 }
 
 // Builder constructs and validates one application type.

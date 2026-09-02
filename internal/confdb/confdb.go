@@ -106,6 +106,22 @@ CREATE TABLE IF NOT EXISTS station_state(
   state      BLOB NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS room_posts(
+  app    TEXT NOT NULL,
+  seq    INTEGER NOT NULL,
+  at     INTEGER NOT NULL,
+  author BLOB NOT NULL,
+  text   TEXT NOT NULL,
+  corr   TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(app, seq)
+);
+CREATE TABLE IF NOT EXISTS room_cursors(
+  app        TEXT NOT NULL,
+  pubkey     BLOB NOT NULL,
+  sync_since INTEGER NOT NULL,
+  updated    TEXT NOT NULL,
+  PRIMARY KEY(app, pubkey)
+);
 INSERT INTO meta(key, value) VALUES('schema_version', '1')
   ON CONFLICT(key) DO NOTHING;
 `
@@ -575,6 +591,19 @@ func (s *Store) Remove(ctx context.Context, kind, name, principal string) error 
 	if kind == KindStation {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM station_state WHERE station = ?", name); err != nil {
 			return err
+		}
+	}
+	if kind == KindApplication {
+		// Its members, what it said, and how far each read: the
+		// application's runtime state goes with it.
+		for _, stmt := range []struct{ sql, arg string }{
+			{"DELETE FROM acl WHERE relay = ?", ApplicationOwner(name)},
+			{"DELETE FROM room_posts WHERE app = ?", name},
+			{"DELETE FROM room_cursors WHERE app = ?", name},
+		} {
+			if _, err := tx.ExecContext(ctx, stmt.sql, stmt.arg); err != nil {
+				return err
+			}
 		}
 	}
 	diff, err := json.Marshal(map[string]Change{"object": {Old: json.RawMessage(s.maskRaw(attrs))}})

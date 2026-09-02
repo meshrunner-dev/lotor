@@ -777,7 +777,13 @@ func (m *manager) releaseAirtimeConsumer(consumer string) {
 // keyed to its name: the successor of a bounced relay reads back the
 // durable roles its predecessor kept. Guests never cross this door.
 func (m *manager) accessStore(relay string) enginemc.SessionStore {
-	return &aclStore{store: m.store, relay: relay}
+	return &aclStore{store: m.store, owner: relay}
+}
+
+// applicationSessions is the same door for an application, under the
+// owner key that keeps its members apart from every relay's.
+func (m *manager) applicationSessions(name string) enginemc.SessionStore {
+	return &aclStore{store: m.store, owner: confdb.ApplicationOwner(name)}
 }
 
 // regionStore hands a relay a persistence door onto the region
@@ -832,9 +838,11 @@ func (a *regionStoreAdapter) SaveRegions(pr enginemc.PersistedRegions) error {
 // never cross this adapter. It touches the database alone, never the
 // manager's mutex — a replay-guard save fired from the engine
 // goroutine mid-bounce must not wait on the lock the bounce holds.
+// aclStore is the acl table behind one owner — a relay by its bare
+// name, an application by its prefixed one.
 type aclStore struct {
 	store *confdb.Store
-	relay string
+	owner string
 }
 
 // aclStoreWait bounds one access-table operation. The engine's own
@@ -854,7 +862,7 @@ func aclStoreCtx() (context.Context, context.CancelFunc) {
 func (a *aclStore) LoadSessions() ([]enginemc.PersistedSession, error) {
 	ctx, cancel := aclStoreCtx()
 	defer cancel()
-	rows, err := a.store.LoadACL(ctx, a.relay)
+	rows, err := a.store.LoadACL(ctx, a.owner)
 	if err != nil {
 		return nil, err
 	}
@@ -874,13 +882,13 @@ func (a *aclStore) LoadSessions() ([]enginemc.PersistedSession, error) {
 func (a *aclStore) SaveSession(p enginemc.PersistedSession) error {
 	ctx, cancel := aclStoreCtx()
 	defer cancel()
-	return a.store.SaveACL(ctx, a.relay, aclRowOf(p))
+	return a.store.SaveACL(ctx, a.owner, aclRowOf(p))
 }
 
 func (a *aclStore) ForgetSession(pubKey [meshcore.PubKeySize]byte) error {
 	ctx, cancel := aclStoreCtx()
 	defer cancel()
-	return a.store.ForgetACL(ctx, a.relay, pubKey[:])
+	return a.store.ForgetACL(ctx, a.owner, pubKey[:])
 }
 
 // aclRowOf is one durable access entry in the shape the store keeps it.
@@ -1075,6 +1083,7 @@ func (m *manager) startApplication(ctx context.Context, name string) {
 		Name: name, Protocol: ac.Protocol, Type: ac.Type, Radio: ac.Radio,
 		Config: cfg, Log: m.log.With(zap.String("application", name)),
 		Build: buildInfo, TX: applicationPolicy(ac), Bus: m.bus,
+		Sessions: m.applicationSessions(name), Store: m.store,
 	})
 	if err != nil {
 		failed(err, "assembly")

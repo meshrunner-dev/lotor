@@ -21,10 +21,12 @@ import (
 
 	"meshrunner.dev/lotor/internal/application"
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/meshcorecfg"
+	"meshrunner.dev/lotor/internal/meshcorehost"
 	"meshrunner.dev/lotor/internal/origin"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/schema"
@@ -224,6 +226,8 @@ type service struct {
 	log       *zap.Logger
 	tx        application.TXPolicy
 	pipeline  *origin.Pipeline
+	store     *confdb.Store
+	started   time.Time
 
 	mu         sync.Mutex
 	state      application.State
@@ -239,6 +243,18 @@ type service struct {
 	advertsDue uint64
 	sent       uint64
 	dropped    uint64
+	composed   uint64
+	refused    uint64
+	posted     uint64
+	pushes     uint64
+
+	// The room proper: its members and what they said.
+	table      *meshcorehost.Table
+	members    map[[mesh.PubKeySize]byte]*member
+	posts      []post
+	nextClient int
+	nextPush   time.Time
+	lastUnique uint32
 }
 
 func build(spec application.Spec) (application.Service, error) {
@@ -263,6 +279,23 @@ func build(spec application.Spec) (application.Service, error) {
 		pipeline: origin.New(origin.Config{
 			SourceKind: bus.SourceApplication, Source: spec.Name, Bus: spec.Bus, Log: log,
 		}, queueDepth),
+		store: spec.Store, started: time.Now(),
+		table:   meshcorehost.NewTable(spec.Sessions, maxClients),
+		members: map[[mesh.PubKeySize]byte]*member{},
+		posts:   make([]post, 0, p.History),
+	}
+	// The members the store remembers, the secret recomputed per
+	// entry; a store that cannot be read is an error, never an empty
+	// room — the entries carry every admin's replay guard.
+	if err := s.table.Load(id.SharedSecret, func() meshcorehost.RateLimiter {
+		return meshcorehost.RateLimiter{Max: sessionLimitMax, Window: sessionLimitWindow}
+	}); err != nil {
+		return nil, fmt.Errorf("meshcore room %q members: %w", spec.Name, err)
+	}
+	loadCtx, cancel := context.WithTimeout(context.Background(), storeWait)
+	defer cancel()
+	if err := s.loadHistory(loadCtx); err != nil {
+		return nil, fmt.Errorf("meshcore room %q history: %w", spec.Name, err)
 	}
 	if spec.Radio == "" {
 		s.rf = application.RFDetached
@@ -283,6 +316,7 @@ func (s *service) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Go(func() { s.runAdverts(ctx) })
 	wg.Go(func() { s.runTX(ctx) })
+	wg.Go(func() { s.runPush(ctx) })
 	s.runRF(ctx)
 	wg.Wait()
 	s.setLifecycle(application.StateStopped, nil)
@@ -466,6 +500,7 @@ func (s *service) receiveRF(ctx context.Context, device radio.Device) error {
 		s.heard++
 		s.mu.Unlock()
 		logging.Trace(s.log, "room heard a frame", zap.String("corr", frame.Correlation.Short()))
+		s.processRF(ctx, frame)
 	}
 }
 
@@ -531,10 +566,15 @@ func (s *service) Info() application.Info {
 			"heard":       strconv.FormatUint(s.heard, 10),
 			"corrupt":     strconv.FormatUint(s.corrupt, 10),
 			"adverts due": strconv.FormatUint(s.advertsDue, 10),
+			"composed":    strconv.FormatUint(s.composed, 10),
 			"sent":        strconv.FormatUint(s.sent, 10),
 			"dropped":     strconv.FormatUint(s.dropped, 10),
+			"refused":     strconv.FormatUint(s.refused, 10),
 			"tx":          s.gate(),
-			"history":     "0 / " + strconv.Itoa(s.p.History),
+			"members":     strconv.Itoa(len(s.table.Entries())),
+			"sessions":    strconv.Itoa(len(s.table.Sessions())),
+			"posts":       strconv.Itoa(len(s.posts)) + " / " + strconv.Itoa(s.p.History),
+			"pushes":      strconv.FormatUint(s.pushes, 10),
 		},
 	}
 }

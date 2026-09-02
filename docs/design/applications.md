@@ -1,12 +1,15 @@
 # Applications — mesh node roles beyond relaying and companions
 
-Status: **in progress**. Stages 0 to 3 of the ladder below landed on
-2026-09-02 — the library's server-side room codecs, the seam with a
-room that holds its identity and follows a radio, the shared server
-kernel `internal/meshcorehost` the relay engine now stands on, and the
-shared origination pipeline `internal/origin` the station now stands
-on, through which the room already announces itself; the rest is
-still proposal. It records the reasoning for a third role in
+Status: **in progress**. Stages 0 to 4 of the ladder below landed on
+2026-09-02 — the library's server-side room codecs, the seam, the
+shared server kernel `internal/meshcorehost` the relay engine now
+stands on, the shared origination pipeline `internal/origin` the
+station now stands on, and the room itself: logins behind its doors,
+posts kept in `config.db` before they are acknowledged, the push clock,
+keep-alives, cursors. Still to come, in this order: the over-the-air
+admin grammar (`setperm`, `room.post`, the shared `CommonCLI` verbs),
+the console's `members`/`posts`/`post` verbs on the ACL drawer, the
+telemetry answer, bus events for the sentinel and the web snapshot. It records the reasoning for a third role in
 the daemon, the MeshCore room server being its first instance, and the
 persistence question that role forces. Ground rules it must honour: [`DESIGN.md`](../../DESIGN.md);
 plumbing it hooks into: [`radio.md`](../architecture/radio.md).
@@ -342,9 +345,10 @@ The split by class therefore lands entirely in `config.db`:
   object, secrets masked, mutations revisioned. Over-the-air
   `set`/`password` from an admin writes there, principal = the
   admin's key, as the relay's OTA CLI does.
-- **Membership** → the existing `acl` table, whose `relay` column
-  becomes an owner key (`relay:<name>`, `application:<name>`) — one
-  shape bump with its migration. The relay's semantics carry over
+- **Membership** → the existing `acl` table, under an owner key:
+  relays keep their bare names, applications write `application:<name>`
+  — the instance-name grammar forbids the colon, so the two can never
+  collide and no relay row moves. The relay's semantics carry over
   unchanged: durable roles persist with their replay guard and taught
   route; guests never touch disk.
 - **Cursors and history** → `room_cursors` and `room_posts`, the

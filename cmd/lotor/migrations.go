@@ -80,7 +80,42 @@ func storeMigrations() []confdb.Migration {
 			"for: a name the console cannot spell is renamed, references and " +
 			"runtime state following it",
 		Run: migrateInstanceNames,
-	}, aclDurabilityMigration(), stationStateMigration()}
+	}, aclDurabilityMigration(), stationStateMigration(), roomTablesMigration()}
+}
+
+// roomTablesMigration gives a room server its two tables in stores
+// born before the kind existed. Fresh stores carry them in the DDL;
+// this lifts the rest, with the same statements.
+func roomTablesMigration() confdb.Migration {
+	return confdb.Migration{
+		To:  15,
+		Doc: "room servers gain their history and cursor tables beside the revision trail",
+		Run: func(ctx context.Context, tx *sql.Tx) error {
+			for _, stmt := range []string{
+				`CREATE TABLE IF NOT EXISTS room_posts(
+				   app    TEXT NOT NULL,
+				   seq    INTEGER NOT NULL,
+				   at     INTEGER NOT NULL,
+				   author BLOB NOT NULL,
+				   text   TEXT NOT NULL,
+				   corr   TEXT NOT NULL DEFAULT '',
+				   PRIMARY KEY(app, seq)
+				 )`,
+				`CREATE TABLE IF NOT EXISTS room_cursors(
+				   app        TEXT NOT NULL,
+				   pubkey     BLOB NOT NULL,
+				   sync_since INTEGER NOT NULL,
+				   updated    TEXT NOT NULL,
+				   PRIMARY KEY(app, pubkey)
+				 )`,
+			} {
+				if _, err := tx.ExecContext(ctx, stmt); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
 }
 
 func stationStateMigration() confdb.Migration {
