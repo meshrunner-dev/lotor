@@ -361,3 +361,40 @@ func TestAKeepAliveMovesTheCursorAndIsAnsweredDirectWithTheCount(t *testing.T) {
 		t.Fatalf("after forcing the cursor, %d unsynced, want 1", unsynced)
 	}
 }
+
+func TestAFullRoomUnseatsTheIdlestMemberNeverAnAdmin(t *testing.T) {
+	svc := benchRoom(t, nil)
+	admin := newClient(t, svc)
+	login(t, svc, admin, "sesame", 0)
+	members := make([]client, 0, maxClients)
+	for i := 1; i < maxClients; i++ {
+		c := newClient(t, svc)
+		members = append(members, c)
+		login(t, svc, c, "welcome", 0)
+		svc.mu.Lock()
+		// Older members spoke earlier: the first one is the idlest.
+		svc.table.Get(c.id.PubKey[:]).LastActive = time.Now().Add(-time.Duration(maxClients-i) * time.Minute)
+		svc.mu.Unlock()
+	}
+	svc.mu.Lock()
+	svc.table.Get(admin.id.PubKey[:]).LastActive = time.Now().Add(-24 * time.Hour)
+	svc.mu.Unlock()
+	newcomer := newClient(t, svc)
+	if lr, _ := mesh.ParseLoginReply(openReply(t, newcomer, login(t, svc, newcomer, "welcome", 0))); lr.Result != mesh.LoginOK {
+		t.Fatalf("the twenty-first login was refused: %+v", lr)
+	}
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	if svc.table.Get(admin.id.PubKey[:]) == nil {
+		t.Fatal("the idle admin was unseated")
+	}
+	if svc.table.Get(members[0].id.PubKey[:]) != nil {
+		t.Fatal("the idlest member kept its place")
+	}
+	if svc.table.Get(newcomer.id.PubKey[:]) == nil || len(svc.table.By) != maxClients {
+		t.Fatalf("table = %d entries, newcomer present %v", len(svc.table.By), svc.table.Get(newcomer.id.PubKey[:]) != nil)
+	}
+	if _, remembered := svc.members[members[0].id.PubKey]; remembered {
+		t.Error("the evicted member's cursor was kept")
+	}
+}

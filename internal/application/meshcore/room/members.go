@@ -134,10 +134,14 @@ func (s *service) handleLogin(ctx context.Context, pkt *mesh.Packet, corr correl
 		// login: whatever it knew, the client is somewhere else now.
 		c.Out = nil
 	}
-	if err := s.table.Put(c); err != nil {
+	victim, evicted, err := s.table.PutEvicting(c)
+	if err != nil {
 		s.log.Warn("login refused: the member table would not take it",
 			zap.String("corr", corr.Short()), zap.Error(err))
 		return
+	}
+	if evicted {
+		s.evictedLocked(ctx, victim, corr)
 	}
 	m := s.member(c.PubKey)
 	// Applied on every accepted login, the blank recheck included —
@@ -158,6 +162,22 @@ func (s *service) handleLogin(ctx context.Context, pkt *mesh.Packet, corr correl
 	s.replyLocked(ctx, pkt, meshcorehost.Answer{
 		DestHash: c.PubKey[:mesh.PathHashSize], Secret: c.Secret, Tag: clock, Body: rest, Out: c.Out,
 	}, "login-resp", corr)
+}
+
+// evictedLocked lets go of the room's own memory of a member the table
+// unseated: its cursor, in RAM and — best effort — in the store, a
+// stale row costing nothing but a few bytes until a login rewrites it.
+func (s *service) evictedLocked(ctx context.Context, victim [mesh.PubKeySize]byte, corr correlation.ID) {
+	delete(s.members, victim)
+	if s.store != nil {
+		forgetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), storeWait)
+		defer cancel()
+		if err := s.store.ForgetRoomCursor(forgetCtx, s.name, victim[:]); err != nil {
+			s.log.Warn("an evicted member's cursor did not leave the store", zap.Error(err))
+		}
+	}
+	s.log.Info("member evicted to make room", zap.String("corr", corr.Short()),
+		zap.String("pubkey", hex.EncodeToString(victim[:6])))
 }
 
 // handleText takes a member's post — or an admin's command line, which

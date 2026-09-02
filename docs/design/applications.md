@@ -268,6 +268,14 @@ bytes:
   shrunken table, the late ACK that matches nothing, the blank-
   password short path that leaves the cursor untouched.
 
+Two things the room keeps from the reference that the repeater in this
+daemon does *not*, because a room's normal member is a reader who says
+nothing for hours and expects its pushes: **no session expiry** — a
+member stays until the table makes room for a newer one — and the
+reference's shared eviction rule, **admins alone spared**, where the
+repeater spares every access entry. The kernel carries the policy as
+the owner's choice.
+
 Client text longer than the stored maximum is one to decide: the
 reference truncates silently at 151 characters while allowing clients
 160. Refuse loudly, or truncate as the reference does? The proposal
