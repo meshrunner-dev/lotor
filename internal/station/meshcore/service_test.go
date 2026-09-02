@@ -733,7 +733,7 @@ func TestFactoryResetRestoresConfiguredStateAndPersistsIt(t *testing.T) {
 	svc.pending = pendingRequest{kind: pendingStatus, tag: 42}
 	svc.signData = []byte("partial")
 	svc.sendUnscoped = true
-	if !svc.outbound.offer(emission{kind: "queued-before-reset"}) {
+	if !svc.outbound.Offer(emission{Kind: "queued-before-reset"}) {
 		t.Fatal("could not seed outbound queue")
 	}
 	svc.mu.Unlock()
@@ -748,7 +748,7 @@ func TestFactoryResetRestoresConfiguredStateAndPersistsIt(t *testing.T) {
 	if len(svc.channels) != 1 || svc.channels[0].name != "Public" ||
 		len(svc.contacts) != 0 || len(svc.mailbox) != 0 ||
 		svc.defaultScope != "" || svc.stats.sent != 0 || svc.appVersion != 0 ||
-		svc.pending.kind != pendingNone || svc.signData != nil || svc.sendUnscoped || svc.outbound.len() != 0 {
+		svc.pending.kind != pendingNone || svc.signData != nil || svc.sendUnscoped || svc.outbound.Len() != 0 {
 		t.Fatalf("factory reset left state behind: channels %d contacts %d mailbox %d scope %q stats %+v",
 			len(svc.channels), len(svc.contacts), len(svc.mailbox), svc.defaultScope, svc.stats)
 	}
@@ -1086,9 +1086,25 @@ func exchange(t *testing.T, conn net.Conn, command companion.Command) []byte {
 	return frame.Payload
 }
 
+// emissionPacket is the packet an emission carries as its subject.
+func emissionPacket(e emission) *mesh.Packet {
+	packet, _ := e.Subject.(*mesh.Packet)
+	return packet
+}
+
+// testEmission is a queued frame built from a packet, as submission does.
+func testEmission(t *testing.T, packet *mesh.Packet, kind string) emission {
+	t.Helper()
+	raw, err := packet.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return emission{Frame: raw, Subject: packet, Correlation: correlation.New(), Kind: kind}
+}
+
 func takeEmission(t *testing.T, svc *service) emission {
 	t.Helper()
-	item, ok := svc.outbound.takeUntil(t.Context(), time.Now().Add(time.Second))
+	item, ok := svc.outbound.TakeUntil(t.Context(), time.Now().Add(time.Second))
 	if !ok {
 		t.Fatal("station outbound queue did not yield an emission")
 	}
@@ -1096,7 +1112,7 @@ func takeEmission(t *testing.T, svc *service) emission {
 }
 
 func pollEmission(svc *service) (emission, bool) {
-	return svc.outbound.takeUntil(context.Background(), time.Now())
+	return svc.outbound.TakeUntil(context.Background(), time.Now())
 }
 
 func TestAnUnnamedStationStillHasAName(t *testing.T) {

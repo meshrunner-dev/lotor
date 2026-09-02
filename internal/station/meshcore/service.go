@@ -17,6 +17,7 @@ import (
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/meshcorecfg"
+	"meshrunner.dev/lotor/internal/origin"
 	"meshrunner.dev/lotor/internal/product"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/station"
@@ -229,7 +230,10 @@ func build(spec station.Spec) (station.Service, error) {
 	if queueDepth <= 0 {
 		queueDepth = 32
 	}
-	s.outbound = newEmissionQueue(queueDepth)
+	s.pipeline = origin.New(origin.Config{
+		SourceKind: bus.SourceStation, Source: spec.Name, Bus: spec.Bus, Log: log,
+	}, queueDepth)
+	s.outbound = s.pipeline.Queue
 	// The declarative station configuration is the virtual equivalent of the
 	// firmware image defaults restored after formatting its filesystem.
 	s.factoryState = s.snapshotLocked()
@@ -353,6 +357,7 @@ type service struct {
 	duty         *radio.AirtimeLedger
 	rfWake       chan struct{}
 	rfDevice     radio.Device
+	pipeline     *origin.Pipeline
 	outbound     *emissionQueue
 	pushes       chan companionPush
 	startedAt    time.Time
@@ -742,7 +747,7 @@ func (s *service) restoreFactoryLocked() []companion.Response {
 }
 
 func (s *service) resetRuntimeLocked() []emission {
-	dropped := s.outbound.drain()
+	dropped := s.outbound.Drain()
 	s.lastUnique = 0
 	s.appVersion = 0
 	s.sendScope = [16]byte{}
@@ -1056,7 +1061,7 @@ func (s *service) getStats(kind companion.StatsType) []companion.Response {
 		uptime := max(time.Duration(0), time.Since(s.startedAt)) / time.Second
 		return []companion.Response{companion.CoreStats{
 			UptimeSeconds: uint32(min(uptime, time.Duration(math.MaxUint32))),
-			QueueLength:   uint8(min(s.outbound.len(), math.MaxUint8)),
+			QueueLength:   uint8(min(s.outbound.Len(), math.MaxUint8)),
 		}}
 	case companion.StatsRadio:
 		noiseFloor := int16(0)

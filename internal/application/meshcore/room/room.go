@@ -1,13 +1,11 @@
 // Package room is the MeshCore room server, the first application type:
 // a mesh identity clients log into to post text and receive what others
-// posted, under an access list its admin governs. This is the seam's
-// proving tenant, and this first cut proves the seam alone — it holds
-// an identity, follows a radio, hears the mesh and knows when its
-// adverts are due; logins, posts and pushes arrive with the shared
-// server kernel and the origination pipeline, in the order the design
-// document lays out. It refuses every gate but dry until then: a room
-// that cannot yet speak must say so, not run silent behind a gate that
-// promises the air.
+// posted, under an access list its admin governs. This cut holds an
+// identity, follows a radio, hears the mesh and announces itself: its
+// adverts travel the shared origination pipeline, so a shadow room
+// spends the duty it would have spent and an on-air room keys the
+// radio for them. Logins, posts and pushes arrive with the shared
+// server kernel, in the order the design document lays out.
 package room
 
 import (
@@ -22,9 +20,12 @@ import (
 	"go.uber.org/zap"
 
 	"meshrunner.dev/lotor/internal/application"
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/meshcorecfg"
+	"meshrunner.dev/lotor/internal/origin"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/schema"
 
@@ -48,6 +49,14 @@ const (
 	maxPassword        = 15
 
 	rfRetry = 5 * time.Second
+
+	// The reference dispatcher's priorities for what a room sends of
+	// its own accord: a flooded advert yields to everything else.
+	prioAdvertFlood = 3
+	prioAdvertLocal = 0
+	// The room's outbound queue is small on purpose: it originates
+	// little, and a backlog here is a radio that is not answering.
+	defaultQueueDepth = 8
 )
 
 func init() {
@@ -214,6 +223,7 @@ type service struct {
 	id        *mesh.LocalIdentity
 	log       *zap.Logger
 	tx        application.TXPolicy
+	pipeline  *origin.Pipeline
 
 	mu         sync.Mutex
 	state      application.State
@@ -222,10 +232,13 @@ type service struct {
 	rfCause    string
 	binding    *radio.Binding
 	duty       *radio.AirtimeLedger
+	rfDevice   radio.Device
 	rfWake     chan struct{}
 	heard      uint64
 	corrupt    uint64
 	advertsDue uint64
+	sent       uint64
+	dropped    uint64
 }
 
 func build(spec application.Spec) (application.Service, error) {
@@ -240,9 +253,16 @@ func build(spec application.Spec) (application.Service, error) {
 	if log == nil {
 		log = zap.NewNop()
 	}
+	queueDepth := spec.TX.QueueDepth
+	if queueDepth <= 0 {
+		queueDepth = defaultQueueDepth
+	}
 	s := &service{
 		name: spec.Name, radioName: spec.Radio, p: p, id: id, log: log, tx: spec.TX,
 		state: application.StateStarting, rfWake: make(chan struct{}, 1),
+		pipeline: origin.New(origin.Config{
+			SourceKind: bus.SourceApplication, Source: spec.Name, Bus: spec.Bus, Log: log,
+		}, queueDepth),
 	}
 	if spec.Radio == "" {
 		s.rf = application.RFDetached
@@ -252,29 +272,29 @@ func build(spec application.Spec) (application.Service, error) {
 	return s, nil
 }
 
-// Run serves the room until ctx ends. A gate this cut cannot honour is
-// a visible error, never a silent dry run under a louder name.
+// Run serves the room until ctx ends: the advert clocks, the outbound
+// pipeline and the radio session, each on its own goroutine.
 func (s *service) Run(ctx context.Context) error {
-	if s.tx.Mode != "" && s.tx.Mode != config.TXDry {
-		err := fmt.Errorf("tx mode %q is not served yet — this room speaks dry only", s.tx.Mode)
-		s.setLifecycle(application.StateError, err)
-		<-ctx.Done()
-		s.setLifecycle(application.StateStopped, nil)
-		return err
-	}
 	s.setLifecycle(application.StateRunning, nil)
 	s.log.Info("room up", zap.String("node", s.p.NodeName),
 		zap.String("pubkey", hex.EncodeToString(s.id.PubKey[:6])),
+		zap.String("tx", s.gate()),
 		zap.Int("history", s.p.History), zap.Bool("persist_history", s.p.PersistHistory))
-	adverts := make(chan struct{})
-	go func() {
-		defer close(adverts)
-		s.runAdverts(ctx)
-	}()
+	var wg sync.WaitGroup
+	wg.Go(func() { s.runAdverts(ctx) })
+	wg.Go(func() { s.runTX(ctx) })
 	s.runRF(ctx)
-	<-adverts
+	wg.Wait()
 	s.setLifecycle(application.StateStopped, nil)
 	return nil
+}
+
+// gate is the origination mode, dry when nothing said otherwise.
+func (s *service) gate() string {
+	if s.tx.Mode == "" {
+		return config.TXDry
+	}
+	return s.tx.Mode
 }
 
 // runAdverts keeps the reference's two clocks and, in dry mode, says
@@ -308,17 +328,64 @@ func timerOrNever(d time.Duration) <-chan time.Time {
 	return time.After(d)
 }
 
+// advertDue composes the advert a clock asked for and hands it to the
+// pipeline — flooded at the reference's low priority, or zero-hop for
+// the neighbourhood. A dry gate composes and counts and sends nothing:
+// the room's account of what it would have said.
 func (s *service) advertDue(kind string) {
 	pkt, err := s.selfAdvert(time.Now())
 	if err != nil {
 		s.log.Warn("advert not composed", zap.String("kind", kind), zap.Error(err))
 		return
 	}
+	priority := uint8(prioAdvertFlood)
+	if kind == "advert-local" {
+		pkt.Header = mesh.MakeHeader(mesh.RouteDirect, mesh.PayloadTypeAdvert, mesh.PayloadVer1)
+		pkt.SetPathHashCount(0)
+		priority = prioAdvertLocal
+	}
 	s.mu.Lock()
 	s.advertsDue++
 	s.mu.Unlock()
-	s.log.Debug("advert due, gate is dry", zap.String("kind", kind),
-		zap.Int("bytes", len(pkt.Payload)))
+	if s.gate() == config.TXDry {
+		s.log.Debug("advert due, gate is dry", zap.String("kind", kind),
+			zap.Int("bytes", len(pkt.Payload)))
+		return
+	}
+	raw, err := pkt.MarshalBinary()
+	if err != nil {
+		s.log.Warn("advert not marshalled", zap.String("kind", kind), zap.Error(err))
+		return
+	}
+	item := origin.Emission{Frame: raw, Subject: pkt, Correlation: correlation.New(), Kind: kind, Priority: priority}
+	if !s.pipeline.Queue.Offer(item) {
+		s.pipeline.Drop(item, "queue-full")
+	}
+}
+
+// runTX drains the pipeline's queue with the radio the room holds at
+// that instant, and keeps the tally.
+func (s *service) runTX(ctx context.Context) {
+	for ctx.Err() == nil {
+		item, ok := s.pipeline.Queue.TakeUntil(ctx, time.Now().Add(time.Second))
+		if !ok {
+			continue
+		}
+		s.mu.Lock()
+		device, ledger, power := s.rfDevice, s.duty, s.p.TXPowerDBm
+		s.mu.Unlock()
+		out := s.pipeline.Emit(ctx, item, device, ledger, origin.Policy{
+			Mode: s.gate(), LBTThresholdDB: s.tx.LBTThresholdDB, LBTExhausted: s.tx.LBTExhausted, CAD: s.tx.CAD,
+		}, power)
+		s.mu.Lock()
+		switch {
+		case out.Sent:
+			s.sent++
+		case out.Dropped != "":
+			s.dropped++
+		}
+		s.mu.Unlock()
+	}
 }
 
 func (s *service) selfAdvert(at time.Time) (*mesh.Packet, error) {
@@ -357,7 +424,13 @@ func (s *service) runRF(ctx context.Context) {
 		}
 		if err == nil {
 			s.setRF(application.RFActive, nil)
+			s.mu.Lock()
+			s.rfDevice = device
+			s.mu.Unlock()
 			err = s.receiveRF(ctx, device)
+			s.mu.Lock()
+			s.rfDevice = nil
+			s.mu.Unlock()
 		}
 		_ = device.Close()
 		if ctx.Err() == nil && err != nil && !errors.Is(err, radio.ErrControllerDown) {
@@ -458,6 +531,9 @@ func (s *service) Info() application.Info {
 			"heard":       strconv.FormatUint(s.heard, 10),
 			"corrupt":     strconv.FormatUint(s.corrupt, 10),
 			"adverts due": strconv.FormatUint(s.advertsDue, 10),
+			"sent":        strconv.FormatUint(s.sent, 10),
+			"dropped":     strconv.FormatUint(s.dropped, 10),
+			"tx":          s.gate(),
 			"history":     "0 / " + strconv.Itoa(s.p.History),
 		},
 	}

@@ -258,9 +258,14 @@ func (s *service) submitAtPriorityLocked(packet *mesh.Packet, kind string, notBe
 	priority uint8,
 ) []companion.Response {
 	item := emission{
-		packet: packet, correlation: correlation.New(), kind: kind,
-		notBefore: notBefore, priority: priority,
+		Subject: packet, Correlation: correlation.New(), Kind: kind,
+		NotBefore: notBefore, Priority: priority,
 	}
+	raw, err := packet.MarshalBinary()
+	if err != nil {
+		return s.refuseSubmission(item, "malformed")
+	}
+	item.Frame = raw
 	// DISABLED is reserved by the reference for commands compiled out of the
 	// firmware (private-key export/import). Applications wait for OK/SENT or
 	// ERR on transmit commands, so an unavailable TX path is a bad runtime
@@ -274,7 +279,7 @@ func (s *service) submitAtPriorityLocked(packet *mesh.Packet, kind string, notBe
 	case s.duty == nil:
 		return s.refuseSubmission(item, "duty-unavailable")
 	}
-	if s.outbound.offer(item) {
+	if s.outbound.Offer(item) {
 		s.seen.mark(packet.Hash())
 		return nil
 	}
@@ -282,8 +287,8 @@ func (s *service) submitAtPriorityLocked(packet *mesh.Packet, kind string, notBe
 }
 
 func (s *service) refuseSubmission(item emission, reason string) []companion.Response {
-	s.log.Debug("station frame refused", zap.String("corr", item.correlation.Short()),
-		zap.String("kind", item.kind), zap.Uint8("priority", item.priority), zap.String("reason", reason))
+	s.log.Debug("station frame refused", zap.String("corr", item.Correlation.Short()),
+		zap.String("kind", item.Kind), zap.Uint8("priority", item.Priority), zap.String("reason", reason))
 	return errorResponses(companion.ErrBadState)
 }
 

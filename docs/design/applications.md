@@ -1,10 +1,12 @@
 # Applications — mesh node roles beyond relaying and companions
 
-Status: **in progress**. Stages 0 to 2 of the ladder below landed on
+Status: **in progress**. Stages 0 to 3 of the ladder below landed on
 2026-09-02 — the library's server-side room codecs, the seam with a
-room that holds its identity and follows a radio in dry mode, and the
-shared server kernel `internal/meshcorehost`, which the relay engine
-now stands on; the rest is still proposal. It records the reasoning for a third role in
+room that holds its identity and follows a radio, the shared server
+kernel `internal/meshcorehost` the relay engine now stands on, and the
+shared origination pipeline `internal/origin` the station now stands
+on, through which the room already announces itself; the rest is
+still proposal. It records the reasoning for a third role in
 the daemon, the MeshCore room server being its first instance, and the
 persistence question that role forces. Ground rules it must honour: [`DESIGN.md`](../../DESIGN.md);
 plumbing it hooks into: [`radio.md`](../architecture/radio.md).
