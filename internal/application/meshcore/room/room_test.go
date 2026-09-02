@@ -72,26 +72,41 @@ func TestTheRoomRefusesWhatItCannotServe(t *testing.T) {
 	}
 }
 
-func TestAGateBeyondDryIsAVisibleError(t *testing.T) {
-	svc, err := build(application.Spec{Name: "lobby", Config: baseConfig(),
-		TX: application.TXPolicy{Mode: config.TXShadow}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- svc.Run(ctx) }()
-	deadline := time.Now().Add(2 * time.Second)
-	for svc.Info().State != application.StateError && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	info := svc.Info()
-	if info.State != application.StateError || !strings.Contains(info.Cause, "dry only") {
-		t.Fatalf("a shadow room ran as %s (%s)", info.State, info.Cause)
-	}
-	cancel()
-	if err := <-done; err == nil {
-		t.Error("the refused gate returned no error")
+// A shadow room queues its adverts for the pipeline; detached from any
+// radio, the pipeline refuses them as radio-down and the room says so.
+// A dry room composes and counts, and queues nothing.
+func TestAdvertsTravelThePipelineUnlessTheGateIsDry(t *testing.T) {
+	for _, mode := range []string{config.TXShadow, config.TXDry} {
+		cfg := baseConfig()
+		cfg["advert_local_interval"] = "20ms"
+		cfg["advert_flood_interval"] = "0s"
+		svc, err := build(application.Spec{Name: "lobby", Config: cfg, TX: application.TXPolicy{Mode: mode}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- svc.Run(ctx) }()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			info := svc.Info()
+			if info.Summary["adverts due"] != "0" && (mode == config.TXDry || info.Summary["dropped"] != "0") {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		info := svc.Info()
+		cancel()
+		<-done
+		if info.State != application.StateRunning || info.Summary["adverts due"] == "0" || info.Summary["tx"] != mode {
+			t.Fatalf("%s room = %+v", mode, info)
+		}
+		if mode == config.TXDry && info.Summary["dropped"] != "0" {
+			t.Errorf("a dry room queued an advert: %+v", info.Summary)
+		}
+		if mode == config.TXShadow && info.Summary["dropped"] == "0" {
+			t.Errorf("a detached shadow room never offered its advert to the pipeline: %+v", info.Summary)
+		}
 	}
 }
 

@@ -6,37 +6,19 @@ import (
 	"errors"
 	"maps"
 	"math"
-	rand "math/rand/v2"
 	"time"
 
 	"go.uber.org/zap"
 
-	"meshrunner.dev/lotor/internal/bus"
-	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/radio"
-	"meshrunner.dev/lotor/internal/station"
 
 	mesh "meshrunner.dev/pkg/meshcore"
 	"meshrunner.dev/pkg/meshcore/companion"
 )
 
-const (
-	rfRetry         = time.Second
-	stationLBTBound = 4 * time.Second
-	stationLBTRetry = 200 * time.Millisecond
-	stationDutyWait = 10 * time.Minute
-)
-
-type emission struct {
-	packet      *mesh.Packet
-	correlation correlation.ID
-	kind        string
-	notBefore   time.Time
-	busySince   time.Time
-	priority    uint8
-}
+const rfRetry = time.Second
 
 func (s *service) runRF(ctx context.Context) {
 	txDone := make(chan struct{})
@@ -722,7 +704,7 @@ func (s *service) runTX(ctx context.Context) {
 			s.checkConnections()
 			nextConnections = time.Now().Add(time.Second)
 		}
-		item, ok := s.outbound.takeUntil(ctx, nextConnections)
+		item, ok := s.outbound.TakeUntil(ctx, nextConnections)
 		if !ok {
 			if ctx.Err() != nil {
 				return
@@ -736,58 +718,20 @@ func (s *service) runTX(ctx context.Context) {
 	}
 }
 
+// transmit carries one emission through the shared pipeline with the
+// radio this station holds right now, and keeps the tally of what
+// went on the air.
 func (s *service) transmit(ctx context.Context, item emission) {
 	s.mu.Lock()
 	device, ledger, policy, power := s.rfDevice, s.duty, s.txPolicy, s.p.TXPowerDBm
 	s.mu.Unlock()
-	if device == nil || ledger == nil {
-		s.txDrop(item, "radio-down")
+	out := s.pipeline.Emit(ctx, item, device, ledger, originPolicy(policy), power)
+	if !out.Sent {
 		return
 	}
-	raw, err := item.packet.MarshalBinary()
-	if err != nil {
-		s.txDrop(item, "malformed")
-		return
+	if packet, ok := item.Subject.(*mesh.Packet); ok {
+		s.recordTransmission(packet, out.Airtime)
 	}
-	airtime := device.Airtime(len(raw))
-	reservation := s.reserveDuty(ctx, ledger, airtime, item)
-	if reservation == nil {
-		return
-	}
-	defer reservation.Cancel()
-	if !s.stationClearChannel(ctx, device, policy, item) {
-		return
-	}
-	shadow := policy.Mode == config.TXShadow
-	at, actualAir, actualPower := time.Now(), airtime, power
-	var txErr error
-	if !shadow {
-		txBase := correlation.WithContext(context.WithoutCancel(ctx), item.correlation)
-		txCtx, cancel := context.WithTimeout(txBase, 2*airtime+time.Second)
-		report, err := device.Transmit(txCtx, raw, power)
-		cancel()
-		txErr = err
-		if report.Airtime > 0 {
-			at, actualAir, actualPower = report.At, report.Airtime, report.PowerDBm
-		}
-		if err != nil && report.Airtime == 0 {
-			s.txDrop(item, "tx-failed")
-			return
-		}
-	}
-	reservation.Commit(at, actualAir)
-	s.recordTransmission(item.packet, actualAir)
-	if s.bus != nil {
-		s.bus.Publish(bus.FrameSent{SourceKind: bus.SourceStation, Source: s.name,
-			Correlation: item.correlation, At: at,
-			Airtime: actualAir, PowerDBm: actualPower, Kind: item.kind, Shadow: shadow, Raw: raw})
-	}
-	s.log.Debug("station frame sent", zap.String("corr", item.correlation.Short()),
-		zap.String("kind", item.kind), zap.Uint8("priority", item.priority),
-		zap.Bool("shadow", shadow), zap.Error(txErr))
-	logging.Trace(s.log, "station tx emission accounted", zap.String("corr", item.correlation.Short()),
-		zap.Uint8("priority", item.priority), zap.Duration("airtime", actualAir),
-		zap.Int8("power_dbm", actualPower), zap.Bool("shadow", shadow))
 }
 
 func (s *service) recordTransmission(packet *mesh.Packet, airtime time.Duration) {
@@ -802,94 +746,7 @@ func (s *service) recordTransmission(packet *mesh.Packet, airtime time.Duration)
 	}
 }
 
-func (s *service) reserveDuty(ctx context.Context, ledger *radio.AirtimeLedger,
-	airtime time.Duration, item emission,
-) *radio.AirtimeReservation {
-	deadline := time.Now().Add(stationDutyWait)
-	for {
-		now := time.Now()
-		reservation, freeAt, never := ledger.Reserve(now, airtime)
-		if reservation != nil {
-			return reservation
-		}
-		if never || freeAt.After(deadline) {
-			s.txDrop(item, "duty")
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(max(0, freeAt.Sub(now))):
-		}
-	}
-}
-
-func (s *service) stationClearChannel(ctx context.Context, device radio.Device,
-	policy station.TXPolicy, item emission,
-) bool {
-	if !policy.CAD {
-		return true
-	}
-	deadline := time.Now().Add(stationLBTBound)
-	for {
-		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
-		busy, err := device.AssessChannel(attemptCtx, policy.LBTThresholdDB)
-		cancel()
-		if errors.Is(err, radio.ErrBusyReceiving) {
-			now := time.Now()
-			if item.busySince.IsZero() {
-				item.busySince = now
-			}
-			busyFor := now.Sub(item.busySince)
-			if busyFor >= stationLBTBound && policy.LBTExhausted == config.LBTDrop {
-				s.txDrop(item, "lbt")
-				return false
-			}
-			retry := stationLBTRetry/2 + rand.N(stationLBTRetry) //nolint:gosec // timing jitter, not security
-			item.notBefore = now.Add(retry)
-			logging.Trace(s.log, "station tx requeued for reception",
-				zap.String("corr", item.correlation.Short()), zap.Duration("retry_in", retry),
-				zap.Duration("busy_for", busyFor))
-			s.requeue(item)
-			return false
-		}
-		if err != nil {
-			s.txDrop(item, "lbt-failed")
-			return false
-		}
-		if !busy {
-			return true
-		}
-		if time.Now().After(deadline) {
-			if policy.LBTExhausted == config.LBTDrop {
-				s.txDrop(item, "lbt")
-				return false
-			}
-			s.log.Warn("station channel busy past the LBT bound, transmitting anyway",
-				zap.String("corr", item.correlation.Short()))
-			return true
-		}
-		retry := stationLBTRetry/2 + rand.N(stationLBTRetry) //nolint:gosec // timing jitter, not security
-		select {
-		case <-ctx.Done():
-			return false
-		case <-time.After(retry):
-		}
-	}
-}
-
-func (s *service) requeue(item emission) {
-	if !s.outbound.offer(item) {
-		s.txDrop(item, "queue-full")
-	}
-}
-
+// txDrop refuses one emission for a reason the journal records.
 func (s *service) txDrop(item emission, reason string) {
-	s.log.Debug("station frame dropped", zap.String("corr", item.correlation.Short()),
-		zap.String("kind", item.kind), zap.Uint8("priority", item.priority), zap.String("reason", reason))
-	if s.bus != nil {
-		s.bus.Publish(bus.TxDropped{SourceKind: bus.SourceStation, Source: s.name,
-			Correlation: item.correlation,
-			At:          time.Now(), Reason: reason, Kind: item.kind})
-	}
+	s.pipeline.Drop(item, reason)
 }

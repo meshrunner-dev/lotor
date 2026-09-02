@@ -237,11 +237,11 @@ func TestFloodedDirectTextQueuesACKPathReturn(t *testing.T) {
 	raw, _ := packet.MarshalBinary()
 	svc.processRF(t.Context(), radio.Frame{Payload: raw})
 	item := takeEmission(t, svc)
-	if item.packet.PayloadType() != mesh.PayloadTypePath || !item.packet.IsRouteFlood() ||
-		item.notBefore.IsZero() {
+	if emissionPacket(item).PayloadType() != mesh.PayloadTypePath || !emissionPacket(item).IsRouteFlood() ||
+		item.NotBefore.IsZero() {
 		t.Fatalf("path reply = %+v", item)
 	}
-	datagram, err := mesh.ParseDatagram(item.packet.Payload)
+	datagram, err := mesh.ParseDatagram(emissionPacket(item).Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,8 +356,8 @@ func TestReceivedPathPersistsAndQueuesReciprocal(t *testing.T) {
 		t.Fatalf("stored contact path = %+v", contact)
 	}
 	item := takeEmission(t, svc)
-	if item.kind != "station-path-reciprocal" || !item.packet.IsRouteDirect() ||
-		item.packet.PathLen != 2 || !bytes.Equal(item.packet.Path, []byte{9, 10}) {
+	if item.Kind != "station-path-reciprocal" || !emissionPacket(item).IsRouteDirect() ||
+		emissionPacket(item).PathLen != 2 || !bytes.Equal(emissionPacket(item).Path, []byte{9, 10}) {
 		t.Fatalf("reciprocal = %+v", item)
 	}
 	restored, err := build(spec)
@@ -479,21 +479,21 @@ func TestStationReceptionBusyRequeueIsPacedAndKeepsItsBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	item := emission{packet: packet, correlation: correlation.New(), kind: "station-test"}
+	item := testEmission(t, packet, "station-test")
 	now := time.Now()
 	svc.transmit(t.Context(), item)
-	if device.assesses != 1 || svc.outbound.len() != 1 {
-		t.Fatalf("paced requeue: assessments %d queue %d", device.assesses, svc.outbound.len())
+	if device.assesses != 1 || svc.outbound.Len() != 1 {
+		t.Fatalf("paced requeue: assessments %d queue %d", device.assesses, svc.outbound.Len())
 	}
-	requeued, ok := svc.outbound.takeUntil(t.Context(), now.Add(time.Second))
-	if !ok || requeued.busySince.IsZero() || !requeued.notBefore.After(now) {
+	requeued, ok := svc.outbound.TakeUntil(t.Context(), now.Add(time.Second))
+	if !ok || requeued.BusySince.IsZero() || !requeued.NotBefore.After(now) {
 		t.Fatalf("requeued emission = %+v, ok %t", requeued, ok)
 	}
 
-	requeued.busySince = time.Now().Add(-stationLBTBound - time.Second)
+	requeued.BusySince = time.Now().Add(-stationLBTBound - time.Second)
 	svc.transmit(t.Context(), requeued)
-	if device.assesses != 2 || svc.outbound.len() != 0 {
-		t.Fatalf("exhausted reception retry: assessments %d queue %d", device.assesses, svc.outbound.len())
+	if device.assesses != 2 || svc.outbound.Len() != 0 {
+		t.Fatalf("exhausted reception retry: assessments %d queue %d", device.assesses, svc.outbound.Len())
 	}
 }
 
@@ -512,7 +512,7 @@ func TestStartedStationTransmitFinishesAfterSessionCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	item := emission{packet: packet, correlation: correlation.New(), kind: "station-test"}
+	item := testEmission(t, packet, "station-test")
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -535,8 +535,8 @@ func TestStartedStationTransmitFinishesAfterSessionCancellation(t *testing.T) {
 	if got := svc.duty.Usage(time.Now()); got != 100*time.Millisecond {
 		t.Fatalf("accounted airtime = %s", got)
 	}
-	if device.txCorrelation != item.correlation {
-		t.Fatalf("radio context correlation = %s, want %s", device.txCorrelation, item.correlation)
+	if device.txCorrelation != item.Correlation {
+		t.Fatalf("radio context correlation = %s, want %s", device.txCorrelation, item.Correlation)
 	}
 }
 
@@ -607,7 +607,7 @@ func TestStationTextMatchesReferenceLimitsClockAndTimeout(t *testing.T) {
 		t.Fatalf("sent = %#v", responses)
 	}
 	item := takeEmission(t, svc)
-	datagram, err := mesh.ParseDatagram(item.packet.Payload)
+	datagram, err := mesh.ParseDatagram(emissionPacket(item).Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -665,7 +665,7 @@ func TestStationGroupTextTruncatesAtTheReferenceBoundary(t *testing.T) {
 		t.Fatalf("send group = % X", got)
 	}
 	item := takeEmission(t, svc)
-	datagram, err := mesh.ParseGroupDatagram(item.packet.Payload)
+	datagram, err := mesh.ParseGroupDatagram(emissionPacket(item).Payload)
 	if err != nil {
 		t.Fatal(err)
 	}

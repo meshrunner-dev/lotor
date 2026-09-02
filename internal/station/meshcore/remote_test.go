@@ -125,7 +125,7 @@ func TestRemoteLoginAndStatusRequestRoundTrip(t *testing.T) {
 		t.Fatalf("login sent = %#v", responses)
 	}
 	loginEmission := takeEmission(t, svc)
-	anonymous, err := mesh.ParseAnonDatagram(loginEmission.packet.Payload)
+	anonymous, err := mesh.ParseAnonDatagram(emissionPacket(loginEmission).Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestRemoteLoginAndStatusRequestRoundTrip(t *testing.T) {
 	svc.mu.Unlock()
 	svc.checkConnections()
 	keepAlive := takeEmission(t, svc)
-	keepDatagram, err := mesh.ParseDatagram(keepAlive.packet.Payload)
+	keepDatagram, err := mesh.ParseDatagram(emissionPacket(keepAlive).Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestRemoteLoginAndStatusRequestRoundTrip(t *testing.T) {
 		t.Fatalf("status sent = %#v", responses)
 	}
 	statusEmission := takeEmission(t, svc)
-	datagram, err := mesh.ParseDatagram(statusEmission.packet.Payload)
+	datagram, err := mesh.ParseDatagram(emissionPacket(statusEmission).Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestRoomLoginAndKeepAliveCarryPersistedSyncCursor(t *testing.T) {
 		t.Fatalf("room login = %#v", responses)
 	}
 	emission := takeEmission(t, svc)
-	anon, err := mesh.ParseAnonDatagram(emission.packet.Payload)
+	anon, err := mesh.ParseAnonDatagram(emissionPacket(emission).Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestRoomLoginAndKeepAliveCarryPersistedSyncCursor(t *testing.T) {
 	}
 	svc.checkConnections()
 	emission = takeEmission(t, svc)
-	datagram, err := mesh.ParseDatagram(emission.packet.Payload)
+	datagram, err := mesh.ParseDatagram(emissionPacket(emission).Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,8 +328,8 @@ func TestAnonymousRequestCreatesOnlyAReferenceCompatibleVolatileContact(t *testi
 		t.Fatalf("anonymous request = %#v contacts=%d", responses, len(svc.contacts))
 	}
 	emission := takeEmission(t, svc)
-	if emission.packet.PayloadType() != mesh.PayloadTypeAnonReq || emission.packet.PathHashCount() != 0 {
-		t.Fatalf("anonymous emission = %#v", emission.packet)
+	if emissionPacket(emission).PayloadType() != mesh.PayloadTypeAnonReq || emissionPacket(emission).PathHashCount() != 0 {
+		t.Fatalf("anonymous emission = %#v", emissionPacket(emission))
 	}
 	listed := svc.handle(t.Context(), companion.GetContacts{})
 	if start, ok := listed[0].(companion.ContactsStart); !ok || start.Count != 0 {
@@ -383,10 +383,10 @@ func TestRawPacketCommandControlsStationQueuePriority(t *testing.T) {
 	}
 	first := takeEmission(t, svc)
 	second := takeEmission(t, svc)
-	if first.priority != 1 || second.priority != 5 || first.packet.Hash() != high.Hash() ||
-		second.packet.Hash() != low.Hash() {
+	if first.Priority != 1 || second.Priority != 5 || emissionPacket(first).Hash() != high.Hash() ||
+		emissionPacket(second).Hash() != low.Hash() {
 		t.Fatalf("raw packet order = %d/%x then %d/%x",
-			first.priority, first.packet.Hash(), second.priority, second.packet.Hash())
+			first.Priority, emissionPacket(first).Hash(), second.Priority, emissionPacket(second).Hash())
 	}
 }
 
