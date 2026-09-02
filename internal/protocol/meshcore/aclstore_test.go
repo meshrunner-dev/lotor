@@ -36,19 +36,19 @@ func TestAFailedSessionCloseLeavesTheConversationIntact(t *testing.T) {
 	store := newFakeStore()
 	a := newACL(store)
 	c := &client{
-		pubKey: aclKey(0x91), perms: permReadOnly, granted: true,
-		active: true, lastActive: time.Now(),
+		PubKey: aclKey(0x91), Perms: permReadOnly, Granted: true,
+		Active: true, LastActive: time.Now(),
 	}
-	c.out = &outPath{pathLen: 1, path: []byte{0xaa}, learned: time.Now()}
-	if err := a.put(c); err != nil {
+	c.Out = &outPath{PathLen: 1, Path: []byte{0xaa}, Learned: time.Now()}
+	if err := a.Put(c); err != nil {
 		t.Fatal(err)
 	}
 	store.saveErr = errors.New("disk gone")
-	if err := a.closeSession(c.pubKey); err == nil {
+	if err := a.CloseSession(c.PubKey); err == nil {
 		t.Fatal("close succeeded without persisting the cleared route")
 	}
-	kept := a.get(c.pubKey[:])
-	if kept == nil || !kept.active || kept.closed || kept.out == nil {
+	kept := a.Get(c.PubKey[:])
+	if kept == nil || !kept.Active || kept.Closed || kept.Out == nil {
 		t.Fatalf("failed close partially changed the live session: %+v", kept)
 	}
 }
@@ -100,7 +100,7 @@ func TestUnreadableStoreRefusesTheRelay(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unreadable access store was accepted")
 	}
-	if len(e.acl.by) != 0 {
+	if len(e.acl.By) != 0 {
 		t.Error("a refused load left sessions behind")
 	}
 }
@@ -132,10 +132,10 @@ func TestLoadPurgesLegacyGuestsAndKeepsAccess(t *testing.T) {
 	if err := e.AttachSessions(store); err != nil {
 		t.Fatal(err)
 	}
-	if len(e.acl.by) != 1 {
-		t.Errorf("restored %d access entries, want 1", len(e.acl.by))
+	if len(e.acl.By) != 1 {
+		t.Errorf("restored %d access entries, want 1", len(e.acl.By))
 	}
-	if _, kept := e.acl.by[granted]; !kept {
+	if _, kept := e.acl.By[granted]; !kept {
 		t.Error("the grant was crowded out by legacy guests")
 	}
 	if store.forgets != maxClients {
@@ -153,33 +153,33 @@ func TestAccessEntriesAreNeverEvicted(t *testing.T) {
 	// of fresh guests: a run of logins must not unseat any durable
 	// authorisation, not only administrators.
 	admin := aclKey(0xAA)
-	if err := e.acl.put(&client{
-		pubKey: admin, perms: permReadOnly, granted: true,
-		lastActive: time.Now().Add(-time.Hour),
+	if err := e.acl.Put(&client{
+		PubKey: admin, Perms: permReadOnly, Granted: true,
+		LastActive: time.Now().Add(-time.Hour),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	for i := range maxClients - 1 {
-		if err := e.acl.put(&client{
-			pubKey: aclKey(byte(i)), perms: permGuest, lastActive: time.Now(),
+		if err := e.acl.Put(&client{
+			PubKey: aclKey(byte(i)), Perms: permGuest, LastActive: time.Now(),
 		}); err != nil {
 			t.Fatalf("guest %d refused: %v", i, err)
 		}
 	}
 	// The table is full. One more guest evicts a guest, never the admin.
-	if err := e.acl.put(&client{
-		pubKey: aclKey(0xBB), perms: permGuest, lastActive: time.Now(),
+	if err := e.acl.Put(&client{
+		PubKey: aclKey(0xBB), Perms: permGuest, LastActive: time.Now(),
 	}); err != nil {
 		t.Fatalf("a guest could not take a guest's place: %v", err)
 	}
-	if _, kept := e.acl.by[admin]; !kept {
+	if _, kept := e.acl.By[admin]; !kept {
 		t.Fatal("a guest login evicted the read-only access entry")
 	}
 	if _, gone := store.saved[admin]; !gone {
 		t.Error("the read-only access entry was deleted from the store")
 	}
-	if len(e.acl.by) != maxClients {
-		t.Errorf("table holds %d, want %d", len(e.acl.by), maxClients)
+	if len(e.acl.By) != maxClients {
+		t.Errorf("table holds %d, want %d", len(e.acl.By), maxClients)
 	}
 }
 
@@ -189,20 +189,20 @@ func TestAFullTableOfAccessEntriesRefusesTheLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := range maxClients {
-		if err := e.acl.put(&client{
-			pubKey: aclKey(byte(i)), perms: permReadOnly, granted: true, lastActive: time.Now(),
+		if err := e.acl.Put(&client{
+			PubKey: aclKey(byte(i)), Perms: permReadOnly, Granted: true, LastActive: time.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	err := e.acl.put(&client{pubKey: aclKey(0xCC), perms: permGuest, lastActive: time.Now()})
+	err := e.acl.Put(&client{PubKey: aclKey(0xCC), Perms: permGuest, LastActive: time.Now()})
 	if !errors.Is(err, errSessionsFull) {
 		t.Fatalf("a full table of grants answered %v", err)
 	}
-	if len(e.acl.by) != maxClients {
-		t.Errorf("the refusal changed the table: %d entries", len(e.acl.by))
+	if len(e.acl.By) != maxClients {
+		t.Errorf("the refusal changed the table: %d entries", len(e.acl.By))
 	}
-	if _, leaked := e.acl.by[aclKey(0xCC)]; leaked {
+	if _, leaked := e.acl.By[aclKey(0xCC)]; leaked {
 		t.Error("the refused session was installed anyway")
 	}
 }
@@ -215,10 +215,10 @@ func TestARefusedSaveInstallsNothing(t *testing.T) {
 	}
 	store.saveErr = errors.New("disk full")
 	k := aclKey(0x11)
-	if err := e.acl.put(&client{pubKey: k, perms: permAdmin, lastActive: time.Now()}); err == nil {
+	if err := e.acl.Put(&client{PubKey: k, Perms: permAdmin, LastActive: time.Now()}); err == nil {
 		t.Fatal("a session that never reached the store was installed")
 	}
-	if _, live := e.acl.by[k]; live {
+	if _, live := e.acl.By[k]; live {
 		t.Error("the table holds a session the store refused")
 	}
 }
@@ -232,14 +232,14 @@ func TestARefusedForgetKeepsTheEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	k := aclKey(0x22)
-	if err := e.acl.put(&client{pubKey: k, perms: permAdmin, granted: true, lastActive: time.Now()}); err != nil {
+	if err := e.acl.Put(&client{PubKey: k, Perms: permAdmin, Granted: true, LastActive: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	store.forgetErr = errors.New("disk read-only")
-	if err := e.acl.remove(k); err == nil {
+	if err := e.acl.Remove(k); err == nil {
 		t.Fatal("a revocation that did not persist reported success")
 	}
-	if _, gone := e.acl.by[k]; !gone {
+	if _, gone := e.acl.By[k]; !gone {
 		t.Error("the entry was dropped from the table anyway — the two would disagree on restart")
 	}
 }
@@ -251,15 +251,15 @@ func TestGuestActivityNeverTouchesTheAccessStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	k := aclKey(0x2A)
-	c := &client{pubKey: k, perms: permGuest, lastActive: time.Now()}
-	if err := e.acl.put(c); err != nil {
+	c := &client{PubKey: k, Perms: permGuest, LastActive: time.Now()}
+	if err := e.acl.Put(c); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.acl.advance(c, 100, time.Now()); err != nil {
+	if err := e.acl.Advance(c, 100, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	c.out = &outPath{pathLen: 1, path: []byte{0x42}, learned: time.Now()}
-	if err := e.acl.save(c); err != nil {
+	c.Out = &outPath{PathLen: 1, Path: []byte{0x42}, Learned: time.Now()}
+	if err := e.acl.Save(c); err != nil {
 		t.Fatal(err)
 	}
 	if store.saves != 0 || store.forgets != 0 || len(store.saved) != 0 {
@@ -276,20 +276,20 @@ func TestGuestDemotionMustRemoveTheAccessEntry(t *testing.T) {
 	}
 	k := aclKey(0x2B)
 	admin := &client{
-		pubKey: k, perms: permAdmin, lastTimestamp: 10, lastActive: time.Now(),
+		PubKey: k, Perms: permAdmin, LastTimestamp: 10, LastActive: time.Now(),
 	}
-	if err := e.acl.put(admin); err != nil {
+	if err := e.acl.Put(admin); err != nil {
 		t.Fatal(err)
 	}
 	guest := *admin
-	guest.perms = permGuest
-	guest.granted = false
+	guest.Perms = permGuest
+	guest.Granted = false
 
 	store.forgetErr = errors.New("disk read-only")
-	if err := e.acl.put(&guest); err == nil {
+	if err := e.acl.Put(&guest); err == nil {
 		t.Fatal("a demotion whose ACL deletion failed was installed")
 	}
-	if live := e.acl.by[k]; live == nil || !live.isAdmin() {
+	if live := e.acl.By[k]; live == nil || !live.IsAdmin() {
 		t.Fatalf("failed demotion changed the live role: %+v", live)
 	}
 	if _, kept := store.saved[k]; !kept {
@@ -297,10 +297,10 @@ func TestGuestDemotionMustRemoveTheAccessEntry(t *testing.T) {
 	}
 
 	store.forgetErr = nil
-	if err := e.acl.put(&guest); err != nil {
+	if err := e.acl.Put(&guest); err != nil {
 		t.Fatal(err)
 	}
-	if live := e.acl.by[k]; live == nil || live.hasAccess() {
+	if live := e.acl.By[k]; live == nil || live.HasAccess() {
 		t.Fatalf("successful demotion did not install a guest session: %+v", live)
 	}
 	if _, kept := store.saved[k]; kept {
@@ -318,7 +318,7 @@ func TestLegacyGuestCleanupMustSucceed(t *testing.T) {
 	if err := e.AttachSessions(store); err == nil {
 		t.Fatal("a legacy guest that could not be removed was accepted")
 	}
-	if len(e.acl.by) != 0 {
+	if len(e.acl.By) != 0 {
 		t.Fatal("a failed cleanup restored the legacy guest")
 	}
 }
@@ -330,20 +330,20 @@ func TestTheReplayGuardIsDurableBeforeItCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	k := aclKey(0x33)
-	c := &client{pubKey: k, perms: permAdmin, lastTimestamp: 100, lastActive: time.Now()}
-	if err := e.acl.put(c); err != nil {
+	c := &client{PubKey: k, Perms: permAdmin, LastTimestamp: 100, LastActive: time.Now()}
+	if err := e.acl.Put(c); err != nil {
 		t.Fatal(err)
 	}
 	store.saveErr = errors.New("disk stalled")
-	if err := e.acl.advance(c, 200, time.Now()); err == nil {
+	if err := e.acl.Advance(c, 200, time.Now()); err == nil {
 		t.Fatal("the guard advanced past a store that refused it")
 	}
-	if c.lastTimestamp != 100 {
+	if c.LastTimestamp != 100 {
 		t.Errorf("the guard moved to %d on a refused save — the request must look unserved",
-			c.lastTimestamp)
+			c.LastTimestamp)
 	}
 	store.saveErr = nil
-	if err := e.acl.advance(c, 200, time.Now()); err != nil {
+	if err := e.acl.Advance(c, 200, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if got := store.saved[k].LastTimestamp; got != 200 {
@@ -364,11 +364,11 @@ func TestACommandIsNotRunWhenItsGuardCannotPersist(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &client{
-		pubKey: peer.PubKey, secret: secret, perms: permAdmin, granted: true,
-		lastTimestamp: nowTS(0), lastActive: time.Now(),
-		asks: rateLimiter{max: 6, window: time.Minute},
+		PubKey: peer.PubKey, Secret: secret, Perms: permAdmin, Granted: true,
+		LastTimestamp: nowTS(0), LastActive: time.Now(),
+		Asks: rateLimiter{Max: 6, Window: time.Minute},
 	}
-	if err := e.acl.put(c); err != nil {
+	if err := e.acl.Put(c); err != nil {
 		t.Fatal(err)
 	}
 	ran := 0
@@ -393,8 +393,8 @@ func TestACommandIsNotRunWhenItsGuardCannotPersist(t *testing.T) {
 	if ran != 0 {
 		t.Fatal("the command ran on a replay guard that never reached the disk")
 	}
-	if c.lastTimestamp != nowTS(0) {
-		t.Errorf("the guard moved to %d despite the refusal", c.lastTimestamp)
+	if c.LastTimestamp != nowTS(0) {
+		t.Errorf("the guard moved to %d despite the refusal", c.LastTimestamp)
 	}
 	// The disk recovers and the same line is served, once.
 	store.saveErr = nil
@@ -419,10 +419,10 @@ func TestAReplayedLoginLeavesTheSessionAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &client{
-		pubKey: peer.PubKey, secret: secret, perms: permAdmin, granted: true,
-		lastTimestamp: nowTS(500), lastActive: time.Now(),
+		PubKey: peer.PubKey, Secret: secret, Perms: permAdmin, Granted: true,
+		LastTimestamp: nowTS(500), LastActive: time.Now(),
 	}
-	if err := e.acl.put(c); err != nil {
+	if err := e.acl.Put(c); err != nil {
 		t.Fatal(err)
 	}
 	before := *c
@@ -431,23 +431,23 @@ func TestAReplayedLoginLeavesTheSessionAlone(t *testing.T) {
 	if got != nil {
 		t.Fatal("a replayed login was admitted")
 	}
-	live := e.acl.get(peer.PubKey[:])
+	live := e.acl.Get(peer.PubKey[:])
 	if live == nil {
 		t.Fatal("the replay retired the session")
 	}
-	if live.perms != before.perms || !live.granted {
+	if live.Perms != before.Perms || !live.Granted {
 		t.Errorf("the replay rewrote the session: perms %#x granted %v, want %#x true",
-			live.perms, live.granted, before.perms)
+			live.Perms, live.Granted, before.Perms)
 	}
-	if live.lastTimestamp != before.lastTimestamp {
-		t.Errorf("the replay moved the guard to %d", live.lastTimestamp)
+	if live.LastTimestamp != before.LastTimestamp {
+		t.Errorf("the replay moved the guard to %d", live.LastTimestamp)
 	}
 	// A fresh guest login on the same key still demotes, as the
 	// reference's every-password-rewrites-the-role rule says.
 	if got := e.admitLogin(peer.PubKey[:], secret, "raccoon", nowTS(600), correlation.New()); got == nil {
 		t.Fatal("a fresh guest login was refused")
-	} else if got.perms&permRoleMask != permGuest || got.granted {
-		t.Errorf("a fresh guest login kept %#x granted=%v", got.perms, got.granted)
+	} else if got.Perms&permRoleMask != permGuest || got.Granted {
+		t.Errorf("a fresh guest login kept %#x granted=%v", got.Perms, got.Granted)
 	}
 }
 
@@ -485,13 +485,13 @@ func TestARefusedGrantLeavesTheLiveSessionAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	guest := &client{
-		pubKey: peer.PubKey, secret: secret, perms: permReadOnly,
-		lastTimestamp: 42, lastActive: time.Now(),
+		PubKey: peer.PubKey, Secret: secret, Perms: permReadOnly,
+		LastTimestamp: 42, LastActive: time.Now(),
 	}
-	if err := e.acl.put(guest); err != nil {
+	if err := e.acl.Put(guest); err != nil {
 		t.Fatal(err)
 	}
-	before := *e.acl.by[peer.PubKey]
+	before := *e.acl.By[peer.PubKey]
 
 	store.saveErr = errors.New("disk full")
 	o := &aclOrder{perms: permAdmin, prefixLen: meshcore.PubKeySize, done: newAck()}
@@ -499,23 +499,23 @@ func TestARefusedGrantLeavesTheLiveSessionAlone(t *testing.T) {
 	if err := e.applyGrant(o); err == nil {
 		t.Fatal("a grant the store refused reported success")
 	}
-	live := e.acl.by[peer.PubKey]
+	live := e.acl.By[peer.PubKey]
 	if live == nil {
 		t.Fatal("the refused grant retired the session")
 	}
-	if live.perms != before.perms || live.granted != before.granted {
+	if live.Perms != before.Perms || live.Granted != before.Granted {
 		t.Errorf("the refused grant promoted the live session: perms %#x granted %v, want %#x %v",
-			live.perms, live.granted, before.perms, before.granted)
+			live.Perms, live.Granted, before.Perms, before.Granted)
 	}
-	if live.lastTimestamp != before.lastTimestamp {
-		t.Errorf("the refused grant moved the replay guard to %d", live.lastTimestamp)
+	if live.LastTimestamp != before.LastTimestamp {
+		t.Errorf("the refused grant moved the replay guard to %d", live.LastTimestamp)
 	}
 	// The disk recovers and the same grant lands, once and wholly.
 	store.saveErr = nil
 	if err := e.applyGrant(o); err != nil {
 		t.Fatal(err)
 	}
-	if live = e.acl.by[peer.PubKey]; !live.isAdmin() || !live.granted {
+	if live = e.acl.By[peer.PubKey]; !live.IsAdmin() || !live.Granted {
 		t.Errorf("the recovered grant did not land: %+v", live)
 	}
 	if p := store.saved[peer.PubKey]; p.Perms&permRoleMask != permAdmin || !p.Granted {
@@ -534,9 +534,9 @@ func TestAdmittingIntoAFullGuestTableKeepsGuestsOffDisk(t *testing.T) {
 			t.Fatal(err)
 		}
 		for i := range maxClients {
-			if err := e.acl.put(&client{
-				pubKey: aclKey(byte(i)), perms: permGuest,
-				lastActive: time.Now().Add(time.Duration(i) * time.Minute),
+			if err := e.acl.Put(&client{
+				PubKey: aclKey(byte(i)), Perms: permGuest,
+				LastActive: time.Now().Add(time.Duration(i) * time.Minute),
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -547,8 +547,8 @@ func TestAdmittingIntoAFullGuestTableKeepsGuestsOffDisk(t *testing.T) {
 	e, store := fill(t)
 	victim := aclKey(0) // the least recently active
 	newcomer := aclKey(0xEE)
-	if err := e.acl.put(&client{
-		pubKey: newcomer, perms: permGuest, lastActive: time.Now().Add(time.Hour),
+	if err := e.acl.Put(&client{
+		PubKey: newcomer, Perms: permGuest, LastActive: time.Now().Add(time.Hour),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -556,10 +556,10 @@ func TestAdmittingIntoAFullGuestTableKeepsGuestsOffDisk(t *testing.T) {
 		t.Errorf("guest eviction touched the access store: saves=%d forgets=%d rows=%d",
 			store.saves, store.forgets, len(store.saved))
 	}
-	if _, gone := e.acl.by[victim]; gone {
+	if _, gone := e.acl.By[victim]; gone {
 		t.Error("the least-recent guest was not evicted")
 	}
-	if _, in := e.acl.by[newcomer]; !in {
+	if _, in := e.acl.By[newcomer]; !in {
 		t.Error("the newcomer was not admitted")
 	}
 }

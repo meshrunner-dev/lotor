@@ -630,15 +630,15 @@ func (e *engine) AttachSessions(store SessionStore) error {
 	if e.id == nil {
 		return nil
 	}
-	e.acl.store = store
-	if err := e.acl.load(func(pubKey []byte) ([]byte, error) {
+	e.acl.SetStore(store)
+	if err := e.acl.Load(func(pubKey []byte) ([]byte, error) {
 		return e.id.SharedSecret(pubKey)
 	}, func() rateLimiter {
-		return rateLimiter{max: e.p.SessionLimit, window: sessionLimitWindow}
+		return rateLimiter{Max: e.p.SessionLimit, Window: sessionLimitWindow}
 	}); err != nil {
 		return fmt.Errorf("access list: the store holds this node's replay guards and could not be read: %w", err)
 	}
-	if n := len(e.acl.by); n > 0 {
+	if n := len(e.acl.By); n > 0 {
 		e.log.Info("access entries restored", zap.Int("count", n))
 		e.publishClientView(time.Time{}, false)
 	}

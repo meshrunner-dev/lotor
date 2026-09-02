@@ -24,36 +24,6 @@ const (
 	discoverDelayWiden  = 4
 )
 
-// rateLimiter is a fixed window: so many events from the window's
-// first, then denial until it expires. The reference's RateLimiter,
-// ported shape and quirk alike — the guard every anonymous answer
-// stands behind, so a request flood cannot turn the node into an
-// amplifier. Refused work costs the price of its reception, nothing
-// more: no packet is built, nothing reaches the queue.
-type rateLimiter struct {
-	max    int
-	window time.Duration
-	start  time.Time
-	count  int
-}
-
-// allow consumes one slot; the window opens on the first event after
-// the previous one expired.
-func (r *rateLimiter) allow(now time.Time) bool {
-	if r.max <= 0 {
-		// A budget nobody set grants nothing. These are the only
-		// defence against being made an amplifier, so the zero value
-		// refuses rather than permits.
-		return false
-	}
-	if now.Before(r.start.Add(r.window)) {
-		r.count++
-		return r.count <= r.max
-	}
-	r.start, r.count = now, 1
-	return true
-}
-
 // limits are the budgets for the work a stranger can ask of this
 // node — one set, built with the engine, so none of them can sit at a
 // zero value while a packet is already being judged.
@@ -64,8 +34,8 @@ type limits struct {
 
 func newLimits() limits {
 	return limits{
-		discover: rateLimiter{max: discoverLimitMax, window: discoverLimitWindow},
-		anon:     rateLimiter{max: anonLimitMax, window: anonLimitWindow},
+		discover: rateLimiter{Max: discoverLimitMax, Window: discoverLimitWindow},
+		anon:     rateLimiter{Max: anonLimitMax, Window: anonLimitWindow},
 	}
 }
 
@@ -109,7 +79,7 @@ func (e *engine) respondDiscover(dev radio.Device, pkt *meshcore.Packet, origin 
 			zap.Time("last_change", e.discoverySince))
 		return // nothing about us changed since the scanner last looked
 	}
-	if !e.limits.discover.allow(time.Now()) {
+	if !e.limits.discover.Allow(time.Now()) {
 		// Debug, not Warn: the volume here is attacker-controlled.
 		e.log.Debug("discovery response rate-limited", zap.String("corr", origin.Short()))
 		e.bus.Publish(bus.TxDropped{

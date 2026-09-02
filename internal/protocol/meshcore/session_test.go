@@ -312,11 +312,11 @@ func TestARoutedSessionIsNeverCharged(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.respondAnon(rxOf(e, pkt), correlation.New())
-	c := e.acl.get(peer.PubKey[:])
+	c := e.acl.Get(peer.PubKey[:])
 	if c == nil {
 		t.Fatal("no session after login")
 	}
-	c.out = &outPath{pathLen: 0, path: nil, learned: time.Now()} // adjacent
+	c.Out = &outPath{PathLen: 0, Path: nil, Learned: time.Now()} // adjacent
 
 	served := len(e.queue.entries)
 	for i := range sessionLimitMax + 4 {
@@ -390,11 +390,11 @@ func TestKeepAliveKeepsTheSessionAlive(t *testing.T) {
 	}
 	e.respondAnon(rxOf(e, pkt), correlation.New())
 
-	c := e.acl.get(peer.PubKey[:])
+	c := e.acl.Get(peer.PubKey[:])
 	if c == nil {
 		t.Fatal("login left no session")
 	}
-	c.lastActive = time.Now().Add(-30 * time.Minute)
+	c.LastActive = time.Now().Add(-30 * time.Minute)
 	e.publishClientView(time.Time{}, false)
 	before := e.Clients().Generation
 
@@ -405,10 +405,10 @@ func TestKeepAliveKeepsTheSessionAlive(t *testing.T) {
 	}
 	e.respondRequest(rxOf(e, req), correlation.New())
 
-	if again := e.acl.get(peer.PubKey[:]); again == nil {
+	if again := e.acl.Get(peer.PubKey[:]); again == nil {
 		t.Fatal("the session was retired")
-	} else if time.Since(again.lastActive) > time.Minute {
-		t.Fatalf("keep-alive left lastActive at %v — it keeps nothing alive", again.lastActive)
+	} else if time.Since(again.LastActive) > time.Minute {
+		t.Fatalf("keep-alive left lastActive at %v — it keeps nothing alive", again.LastActive)
 	}
 	view := e.Clients()
 	if view.Generation != before+1 {
@@ -423,17 +423,17 @@ func TestIdleSessionsRetire(t *testing.T) {
 	e, _ := testEngine(t)
 	var key [meshcore.PubKeySize]byte
 	key[0] = 0xAB
-	if err := e.acl.put(&client{
-		pubKey: key, active: true, lastActive: time.Now().Add(-2 * sessionIdle),
+	if err := e.acl.Put(&client{
+		PubKey: key, Active: true, LastActive: time.Now().Add(-2 * sessionIdle),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	e.publishClientView(time.Time{}, false)
 	e.expireClientSessions(time.Now())
-	if e.acl.get(key[:]) != nil {
+	if e.acl.Get(key[:]) != nil {
 		t.Fatal("an idle session answered as live")
 	}
-	if got := e.acl.matching(0xAB); len(got) != 0 {
+	if got := e.acl.Matching(0xAB); len(got) != 0 {
 		t.Fatalf("%d idle sessions still matched", len(got))
 	}
 }
@@ -529,20 +529,20 @@ func TestALoginKeepsTheRouteTheClientTaught(t *testing.T) {
 	// from the table, never from a pointer taken before.
 	session := func() *client {
 		t.Helper()
-		c := e.acl.get(peer.PubKey[:])
+		c := e.acl.Get(peer.PubKey[:])
 		if c == nil {
 			t.Fatal("the login made no session")
 		}
 		return c
 	}
-	session().out = &outPath{pathLen: 2, path: []byte{0x4f, 0xa2}, learned: time.Now()}
+	session().Out = &outPath{PathLen: 2, Path: []byte{0x4f, 0xa2}, Learned: time.Now()}
 
 	frame, _ = login(t, e.id, peer, nowTS(301), "raccoon", false)
 	if pkt, err = meshcore.ParsePacket(frame.Payload); err != nil {
 		t.Fatal(err)
 	}
 	e.respondAnon(rxOf(e, pkt), correlation.New())
-	if session().out == nil {
+	if session().Out == nil {
 		t.Fatal("the login dropped the route the client taught")
 	}
 	if n := len(e.queue.entries); n < 2 {
@@ -555,13 +555,13 @@ func TestALoginKeepsTheRouteTheClientTaught(t *testing.T) {
 
 	// A zero-hop route is a route: the adjacent client earns a direct
 	// answer, which is the one an on-air-zero-hop rung still keys.
-	session().out = &outPath{pathLen: 0, path: []byte{}, learned: time.Now()}
+	session().Out = &outPath{PathLen: 0, Path: []byte{}, Learned: time.Now()}
 	frame, _ = login(t, e.id, peer, nowTS(302), "raccoon", false)
 	if pkt, err = meshcore.ParsePacket(frame.Payload); err != nil {
 		t.Fatal(err)
 	}
 	e.respondAnon(rxOf(e, pkt), correlation.New())
-	if session().out == nil {
+	if session().Out == nil {
 		t.Error("a login dropped an adjacent client's route")
 	}
 	reply = e.queue.entries[len(e.queue.entries)-1].pkt

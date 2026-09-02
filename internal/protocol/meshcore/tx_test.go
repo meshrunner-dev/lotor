@@ -1258,7 +1258,7 @@ func TestAGrantTheCallerGaveUpOnIsNotApplied(t *testing.T) {
 		t.Fatal("a change nobody served reported success")
 	}
 	e.drainACLAsk()
-	if len(e.acl.by) != 0 {
+	if len(e.acl.By) != 0 {
 		t.Fatal("an abandoned grant reached the table")
 	}
 }

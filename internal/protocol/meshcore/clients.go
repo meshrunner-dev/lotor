@@ -19,25 +19,6 @@ import (
 	"meshrunner.dev/lotor/internal/bus"
 )
 
-// ClientSession is one logged-in companion, as an operator may see
-// it: who, how it is reached, and how fresh the conversation is. No
-// secret leaves the pipeline with it.
-type ClientSession struct {
-	PubKey [meshcore.PubKeySize]byte
-	// Perms carries the reference's role byte so a read-only or
-	// read-write principal is not mislabeled as a guest in the
-	// session view.
-	Perms byte
-	// Path is the route home the client taught us, one hash byte per
-	// hop; HasPath false means it has not, and answers flood. The two
-	// are distinct on purpose: a zero-hop path says the client is
-	// adjacent, which is not the same as not knowing.
-	Path        []byte
-	HasPath     bool
-	PathLearned time.Time
-	LastActive  time.Time
-}
-
 // ClientSnapshot is one coherent outside edition of both client
 // surfaces. Generation increases whenever the pipeline publishes a
 // changed access, activity, route or session membership state.
@@ -69,12 +50,6 @@ type aclOrder struct {
 	done *ack
 }
 
-// ErrNoSuchEntry says a removal named nobody the table holds.
-var ErrNoSuchEntry = errors.New("no such entry")
-
-// ErrNoSuchSession says a close named no currently active session.
-var ErrNoSuchSession = errors.New("no such active session")
-
 // Grant records a permission byte for a public key — the role in its
 // low bits, zero taking the entry away. Granting requires the whole
 // key, because a permission set to a prefix could name the wrong
@@ -103,19 +78,6 @@ func (e *engine) Grant(pubKey []byte, perms byte) error {
 	return o.done.wait("permission change")
 }
 
-// ACLEntry is one durable authorisation, as the console shows the
-// access list: who, what role, whether it was granted explicitly or
-// earned with the admin password, and how fresh.
-type ACLEntry struct {
-	PubKey [meshcore.PubKeySize]byte
-	// Perms is the byte as stored — the reference's vocabulary, the
-	// role in the low two bits.
-	Perms      byte
-	Admin      bool
-	Granted    bool
-	LastActive time.Time
-}
-
 // AccessList reports durable non-guest authorisations — any goroutine.
 func (e *engine) AccessList() ([]ACLEntry, error) {
 	return e.Clients().Access, nil
@@ -135,7 +97,7 @@ func (e *engine) accessListBody(bodyMax int) []byte {
 	// whenever the question had arrived flooded, since a path return
 	// pays for the path it came by. Either way the asker got nothing
 	// and its replay guard was already spent.
-	rows := e.acl.entries()
+	rows := e.acl.Entries()
 	sort.Slice(rows, func(i, j int) bool {
 		return bytes.Compare(rows[i].PubKey[:], rows[j].PubKey[:]) < 0
 	})
@@ -148,47 +110,6 @@ func (e *engine) accessListBody(bodyMax int) []byte {
 		body = append(body, r.Perms)
 	}
 	return body
-}
-
-// The role words, spelled once — RoleName and RoleByte are the two
-// directions of the same dictionary.
-const (
-	RoleAdmin     = "admin"
-	RoleReadWrite = "read-write"
-	RoleReadOnly  = "read-only"
-	RoleGuest     = "guest"
-)
-
-// RoleByte is RoleName backwards: the byte a role's word means, for
-// the channels that speak words. ok is false for a word no role
-// carries.
-func RoleByte(name string) (byte, bool) {
-	switch name {
-	case RoleAdmin:
-		return permAdmin, true
-	case RoleReadWrite:
-		return permReadWrite, true
-	case RoleReadOnly:
-		return permReadOnly, true
-	case RoleGuest:
-		return permGuest, true
-	}
-	return 0, false
-}
-
-// RoleName names the role a permission byte carries — the reference's
-// four, by the low two bits. The one place the words exist.
-func RoleName(perms byte) string {
-	switch perms & permRoleMask {
-	case permAdmin:
-		return RoleAdmin
-	case permReadWrite:
-		return RoleReadWrite
-	case permReadOnly:
-		return RoleReadOnly
-	default:
-		return RoleGuest
-	}
 }
 
 // drainACLAsk serves a pending grant or revoke, on the pipeline's
@@ -213,54 +134,20 @@ func (e *engine) drainACLAsk() {
 }
 
 // applyGrant carries out one grant or revoke on the table the
-// pipeline owns.
+// pipeline owns, and tells the views and the log what changed.
 func (e *engine) applyGrant(o *aclOrder) error {
-	if o.perms&permRoleMask == permGuest {
-		// A guest role is not a grant; setting it, like the reference,
-		// removes the entry entirely — the first prefix match, as its
-		// getClient answers.
-		k, found := e.acl.matchPrefix(o.pubKey[:o.prefixLen])
-		if !found {
-			return ErrNoSuchEntry
-		}
-		if err := e.acl.remove(k); err != nil {
-			return fmt.Errorf("the revocation would not persist: %w", err)
-		}
-		e.publishClientView(time.Now(), true)
-		e.log.Info("permission revoked", zap.String("pubkey", shortKey(k[:])))
-		return nil
-	}
-	secret, err := e.id.SharedSecret(o.pubKey[:])
+	asks := rateLimiter{Max: e.p.SessionLimit, Window: sessionLimitWindow}
+	removed, wasRemoval, c, err := e.acl.Grant(o.pubKey, o.prefixLen, o.perms, e.id.SharedSecret, asks, time.Now())
 	if err != nil {
 		return err
 	}
-	// Composed on a candidate and installed only once it is durable —
-	// admitLogin's discipline, for the same reason. Promoting the live
-	// session first meant a disk that refused the grant left the
-	// principal administering the node until the next restart, while
-	// the operator read "the grant would not persist".
-	var c client
-	if live := e.acl.get(o.pubKey[:]); live != nil {
-		c = *live
-	} else {
-		c.pubKey = o.pubKey
-		c.asks = rateLimiter{max: e.p.SessionLimit, window: sessionLimitWindow}
-	}
-	c.secret = secret
-	// The whole byte, as the reference stores it — upper bits are
-	// future capability flags, and flattening them here would erase
-	// what a companion asked for.
-	c.perms = o.perms
-	c.granted = true
-	if c.lastActive.IsZero() {
-		c.lastActive = time.Now()
-	}
-	if err := e.acl.put(&c); err != nil {
-		return fmt.Errorf("the grant would not persist: %w", err)
-	}
 	e.publishClientView(time.Now(), true)
+	if wasRemoval {
+		e.log.Info("permission revoked", zap.String("pubkey", shortKey(removed[:])))
+		return nil
+	}
 	e.log.Info("permission granted",
-		zap.String("pubkey", shortKey(o.pubKey[:])), zap.Bool("admin", c.isAdmin()))
+		zap.String("pubkey", shortKey(o.pubKey[:])), zap.Bool("admin", c.IsAdmin()))
 	return nil
 }
 
@@ -295,7 +182,7 @@ func (e *engine) drainSessionCloseAsk() {
 		if !o.done.claim() {
 			break
 		}
-		if err := e.acl.closeSession(o.pubKey); err != nil {
+		if err := e.acl.CloseSession(o.pubKey); err != nil {
 			if !errors.Is(err, ErrNoSuchSession) {
 				err = fmt.Errorf("the session close would not persist: %w", err)
 			}
@@ -307,29 +194,6 @@ func (e *engine) drainSessionCloseAsk() {
 		}
 	default:
 	}
-}
-
-// sessions renders the active table. Expiry is performed by the
-// engine clock before publication, never by this read.
-func (a *acl) sessions() []ClientSession {
-	out := make([]ClientSession, 0, len(a.by))
-	for _, c := range a.by {
-		if !c.active {
-			continue
-		}
-		row := ClientSession{
-			PubKey:     c.pubKey,
-			Perms:      c.perms,
-			LastActive: c.lastActive,
-		}
-		if c.out != nil {
-			row.HasPath = true
-			row.Path = append([]byte(nil), c.out.path...)
-			row.PathLearned = c.out.learned
-		}
-		out = append(out, row)
-	}
-	return out
 }
 
 // Clients returns a detached copy of the latest coherent client
@@ -363,8 +227,8 @@ func (e *engine) publishClientView(at time.Time, notify bool) {
 	e.clientGeneration++
 	v := &ClientSnapshot{
 		Generation: e.clientGeneration,
-		Access:     e.acl.entries(),
-		Sessions:   e.acl.sessions(),
+		Access:     e.acl.Entries(),
+		Sessions:   e.acl.Sessions(),
 	}
 	sort.Slice(v.Access, func(i, j int) bool {
 		return bytes.Compare(v.Access[i].PubKey[:], v.Access[j].PubKey[:]) < 0
@@ -387,10 +251,10 @@ func (e *engine) publishClientView(at time.Time, notify bool) {
 // advanceClient moves the replay clock and publishes the resulting
 // activity only after a durable entry's store accepted it.
 func (e *engine) advanceClient(c *client, ts uint32, now time.Time) error {
-	wasActive := c.active
-	c.active = true
-	if err := e.acl.advance(c, ts, now); err != nil {
-		c.active = wasActive
+	wasActive := c.Active
+	c.Active = true
+	if err := e.acl.Advance(c, ts, now); err != nil {
+		c.Active = wasActive
 		return err
 	}
 	e.publishClientView(now, true)
@@ -399,36 +263,14 @@ func (e *engine) advanceClient(c *client, ts uint32, now time.Time) error {
 
 // clientSessionWake names the earliest active session deadline.
 func (e *engine) clientSessionWake(now time.Time) (time.Duration, bool) {
-	var wait time.Duration
-	set := false
-	for _, c := range e.acl.by {
-		if !c.active {
-			continue
-		}
-		candidate := max(time.Duration(0), c.lastActive.Add(sessionIdle).Sub(now))
-		if !set || candidate < wait {
-			wait, set = candidate, true
-		}
-	}
-	return wait, set
+	return e.acl.NextExpiry(now, sessionIdle)
 }
 
 // expireClientSessions applies the deadline under pipeline ownership.
 // Guests disappear with their derived credential; durable principals
 // merely leave the live-session view and remain authorised.
 func (e *engine) expireClientSessions(now time.Time) bool {
-	changed := false
-	for k, c := range e.acl.by {
-		if !c.active || now.Before(c.lastActive.Add(sessionIdle)) {
-			continue
-		}
-		if c.hasAccess() {
-			c.active = false
-		} else {
-			delete(e.acl.by, k)
-		}
-		changed = true
-	}
+	changed := e.acl.Expire(now, sessionIdle)
 	if changed {
 		e.publishClientView(now, true)
 	}

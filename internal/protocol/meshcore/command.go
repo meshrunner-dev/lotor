@@ -20,6 +20,7 @@ import (
 	"meshrunner.dev/pkg/meshcore"
 
 	"meshrunner.dev/lotor/internal/correlation"
+	"meshrunner.dev/lotor/internal/meshcorehost"
 )
 
 // commandMaxReply bounds one answer: the reference's reply buffer is
@@ -56,7 +57,7 @@ func (e *engine) cmdVerdict(rx *reception) (verdict, why string, handled bool) {
 	if c == nil {
 		return "", "", false
 	}
-	if !c.isAdmin() {
+	if !c.IsAdmin() {
 		return "", "", false
 	}
 	text, err := meshcore.ParseTextPlaintext(plain)
@@ -70,23 +71,14 @@ func (e *engine) cmdVerdict(rx *reception) (verdict, why string, handled bool) {
 	}
 	// The decode is kept: running it twice would let the verdict and
 	// the action disagree about what was said.
-	rx.opened = &opened{session: c, secret: c.secret, plain: plain, text: text}
+	rx.opened = &opened{session: c, secret: c.Secret, plain: plain, text: text}
 	return verdictCommand, "administration from a logged-in admin", true
 }
 
 // openText finds the session that sent a TXT_MSG and returns its
 // decrypted content — openReq's shape, for the other payload type.
 func (e *engine) openText(pkt *meshcore.Packet) (*client, []byte) {
-	d, err := meshcore.ParseDatagram(pkt.Payload)
-	if err != nil || e.id == nil || d.DestHash[0] != e.id.PubKey[0] {
-		return nil, nil
-	}
-	for _, c := range e.acl.matching(d.SrcHash[0]) {
-		if plain, err := d.Open(c.secret); err == nil && len(plain) >= 5 {
-			return c, plain
-		}
-	}
-	return nil, nil
+	return e.acl.OpenSession(e.id, pkt.Payload)
 }
 
 // runCommand serves one administration line: the replay guard first,
@@ -99,15 +91,15 @@ func (e *engine) runCommand(rx *reception, origin correlation.ID) {
 	}
 	pkt, c, text := rx.pkt, rx.opened.session, rx.opened.text
 	ts := uint32(text.Timestamp.Unix())
-	if ts < c.lastTimestamp {
+	if ts < c.LastTimestamp {
 		e.log.Debug("command replay refused", zap.String("corr", origin.Short()))
 		return
 	}
-	retry := ts == c.lastTimestamp
+	retry := ts == c.LastTimestamp
 	// Charged only when the answer would flood, like every session
 	// answer: an admin at the end of a taught route is the person
 	// this node exists to obey, not an amplification risk.
-	if c.out == nil && !c.asks.allow(time.Now()) {
+	if c.Out == nil && !c.Asks.Allow(time.Now()) {
 		e.log.Debug("command rate-limited — flood answers", zap.String("corr", origin.Short()))
 		e.dropRateLimited(origin)
 		return
@@ -142,7 +134,7 @@ func (e *engine) runCommand(rx *reception, origin correlation.ID) {
 	// retry that earns neither ACK nor reply leaves it asking for
 	// ever. The library knows which subtypes are owed one and what
 	// they hash; ErrNoAck is the ordinary answer for the rest.
-	if ack, err := meshcore.BuildCommandAck(rx.opened.plain, c.pubKey[:]); err == nil {
+	if ack, err := meshcore.BuildCommandAck(rx.opened.plain, c.PubKey[:]); err == nil {
 		e.ackText(pkt, c, ack, origin)
 	} else if !errors.Is(err, meshcore.ErrNoAck) {
 		e.log.Warn("command ack build failed", zap.String("corr", origin.Short()), zap.Error(err))
@@ -154,10 +146,10 @@ func (e *engine) runCommand(rx *reception, origin correlation.ID) {
 		e.log.Debug("command retried — not run again",
 			zap.String("corr", origin.Short()), zap.String("command", safeCommandLine(line)))
 	} else {
-		out = e.commands(line, c.pubKey[:])
+		out = e.commands(line, c.PubKey[:])
 		e.log.Info("command from the air",
 			zap.String("corr", origin.Short()),
-			zap.String("pubkey", shortKey(c.pubKey[:])),
+			zap.String("pubkey", shortKey(c.PubKey[:])),
 			zap.String("command", safeCommandLine(line)))
 		e.log.Debug("command answered",
 			zap.String("corr", origin.Short()), zap.String("reply", safeCommandReply(line, out)))
@@ -183,50 +175,24 @@ func (e *engine) runCommand(rx *reception, origin correlation.ID) {
 // for a plain-subtype command line, down the same route its answer
 // would take.
 func (e *engine) ackText(inbound *meshcore.Packet, c *client, pkt *meshcore.Packet, origin correlation.ID) {
-	scope := e.replyScope(&reception{pkt: inbound})
-	if c.out != nil {
-		pkt.Header = meshcore.MakeHeader(meshcore.RouteDirect,
-			meshcore.PayloadTypeAck, meshcore.PayloadVer1)
-		pkt.Path, pkt.PathLen = c.out.path, c.out.pathLen
-		scope.Scope(pkt)
-		e.logReplyRoute(pkt, origin, "cmd-ack", "learned", prioDirect)
-		e.enqueueAfter(pkt, "cmd-ack", origin, prioDirect, serverResponseDelay)
-		return
-	}
-	pkt.Header = meshcore.MakeHeader(meshcore.RouteFlood,
-		meshcore.PayloadTypeAck, meshcore.PayloadVer1)
-	pkt.SetPathHashSizeAndCount(inbound.PathHashSize(), 0)
-	scope.Scope(pkt)
-	e.logReplyRoute(pkt, origin, "cmd-ack", "flood", prioFloodReply)
-	e.enqueueAfter(pkt, "cmd-ack", origin, prioFloodReply, serverResponseDelay)
+	priority, source := meshcorehost.RouteHome(pkt, inbound, c.Out, e.replyScope(&reception{pkt: inbound}))
+	e.logReplyRoute(pkt, origin, "cmd-ack", source, priority)
+	e.enqueueAfter(pkt, "cmd-ack", origin, priority, serverResponseDelay)
 }
 
 // replyText sends one command's output back as a text message, down
 // the route the admin taught when there is one.
 func (e *engine) replyText(inbound *meshcore.Packet, c *client, plain []byte, origin correlation.ID) {
 	pkt, err := meshcore.BuildDatagram(meshcore.PayloadTypeTxtMsg,
-		c.pubKey[:meshcore.PathHashSize], e.id.PubKey[:meshcore.PathHashSize],
-		c.secret, plain)
+		c.PubKey[:meshcore.PathHashSize], e.id.PubKey[:meshcore.PathHashSize],
+		c.Secret, plain)
 	if err != nil {
 		e.log.Warn("command reply build failed", zap.String("corr", origin.Short()), zap.Error(err))
 		return
 	}
-	scope := e.replyScope(&reception{pkt: inbound})
-	if c.out != nil {
-		pkt.Header = meshcore.MakeHeader(meshcore.RouteDirect,
-			meshcore.PayloadTypeTxtMsg, meshcore.PayloadVer1)
-		pkt.Path, pkt.PathLen = c.out.path, c.out.pathLen
-		scope.Scope(pkt)
-		e.logReplyRoute(pkt, origin, "cmd-resp", "learned", prioDirect)
-		e.enqueueAfter(pkt, "cmd-resp", origin, prioDirect, serverResponseDelay)
-		return
-	}
-	pkt.Header = meshcore.MakeHeader(meshcore.RouteFlood,
-		meshcore.PayloadTypeTxtMsg, meshcore.PayloadVer1)
-	pkt.SetPathHashSizeAndCount(inbound.PathHashSize(), 0)
-	scope.Scope(pkt)
-	e.logReplyRoute(pkt, origin, "cmd-resp", "flood", prioFloodReply)
-	e.enqueueAfter(pkt, "cmd-resp", origin, prioFloodReply, serverResponseDelay)
+	priority, source := meshcorehost.RouteHome(pkt, inbound, c.Out, e.replyScope(&reception{pkt: inbound}))
+	e.logReplyRoute(pkt, origin, "cmd-resp", source, priority)
+	e.enqueueAfter(pkt, "cmd-resp", origin, priority, serverResponseDelay)
 }
 
 // commandTailSafe are the verbs whose whole line may enter the

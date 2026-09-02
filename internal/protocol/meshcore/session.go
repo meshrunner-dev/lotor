@@ -11,6 +11,7 @@ import (
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/correlation"
+	"meshrunner.dev/lotor/internal/meshcorehost"
 )
 
 // Client sessions, the reference repeater's shape. A companion logs in
@@ -62,15 +63,10 @@ const (
 	sessionLimitMax    = 6
 	sessionLimitWindow = time.Minute
 
-	// sessionIdle retires a session nobody has used. The secret it
-	// holds is derived from two long-term keys, so nothing is lost by
-	// deriving it again — and a table of live credentials should not
-	// outlive the conversations that made it.
-	sessionIdle = time.Hour
-
-	// loginMaxSkew bounds how far a login's own timestamp may sit from
-	// ours before we read it as a recording rather than a request.
-	loginMaxSkew = 24 * time.Hour
+	// sessionIdle and loginMaxSkew are the kernel's clocks, spelled
+	// the way this engine always has.
+	sessionIdle  = meshcorehost.SessionIdle
+	loginMaxSkew = meshcorehost.LoginMaxSkew
 )
 
 // respondLogin answers a password attempt. Unlike the other anonymous
@@ -87,7 +83,7 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	// recheck. That is what makes an explicit read-only grant useful
 	// without sharing either configured password; the configured doors
 	// only decide whether an unknown key may create a session.
-	known := e.acl.get(senderPub) != nil
+	known := e.acl.Get(senderPub) != nil
 	if !known && e.p.AdminPassword == "" &&
 		e.p.GuestAccess != guestPassword && e.p.GuestAccess != guestOpen {
 		e.responseSuppressed(origin, "login", "access-closed")
@@ -110,9 +106,9 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	// stamped far from now is a recording, not a request. The window
 	// is generous — a companion's clock is its own — but finite,
 	// which is the part the reference's RTC-less nodes cannot afford.
-	if skew := time.Since(time.Unix(int64(ts), 0)); skew > loginMaxSkew || skew < -loginMaxSkew {
+	if meshcorehost.Skewed(ts, time.Now()) {
 		e.log.Debug("login refused: stale or future timestamp",
-			zap.String("corr", origin.Short()), zap.Duration("skew", skew))
+			zap.String("corr", origin.Short()), zap.Uint32("timestamp", ts))
 		return
 	}
 	c := e.admitLogin(senderPub, secret, password, ts, origin)
@@ -128,26 +124,26 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 		return
 	}
 
-	c.lastTimestamp, c.lastActive = ts, time.Now()
-	c.asks = rateLimiter{max: e.p.SessionLimit, window: sessionLimitWindow}
-	c.active = true
+	c.LastTimestamp, c.LastActive = ts, time.Now()
+	c.Asks = rateLimiter{Max: e.p.SessionLimit, Window: sessionLimitWindow}
+	c.Active = true
 	// The session is only real once the table takes it. A non-guest
 	// login reaches the access store first; a guest deliberately stays
 	// in RAM and must log in again after a restart.
-	if err := e.acl.put(c); err != nil {
+	if err := e.acl.Put(c); err != nil {
 		e.log.Warn("login refused: the session table would not take it",
 			zap.String("corr", origin.Short()),
-			zap.String("pubkey", shortKey(c.pubKey[:])), zap.Error(err))
+			zap.String("pubkey", shortKey(c.PubKey[:])), zap.Error(err))
 		return
 	}
-	e.publishClientView(c.lastActive, true)
+	e.publishClientView(c.LastActive, true)
 
 	role := "guest"
-	if c.isAdmin() {
+	if c.IsAdmin() {
 		role = "admin"
 	}
 	e.log.Info(role+" logged in", zap.String("corr", origin.Short()),
-		zap.String("pubkey", shortKey(c.pubKey[:])))
+		zap.String("pubkey", shortKey(c.PubKey[:])))
 	// A login reply echoes no tag: the reference puts its own clock in
 	// that position, so the frame's timestamp is the clock and the
 	// body is what follows it.
@@ -155,91 +151,50 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	if err != nil {
 		return
 	}
-	e.reply(pkt, answer{
-		destHash: c.pubKey[:meshcore.PathHashSize], secret: c.secret,
-		tag: clock, body: rest, kind: "login-resp",
-		scope: e.replyScope(rx), out: c.out,
-	}, origin)
+	e.reply(pkt, meshcorehost.Answer{
+		DestHash: c.PubKey[:meshcore.PathHashSize], Secret: c.Secret,
+		Tag: clock, Body: rest, Scope: e.replyScope(rx), Out: c.Out,
+	}, "login-resp", origin)
 }
 
 // admitLogin resolves a password attempt into a session, or nil when
-// it earns silence.
-//
-// Everything is composed on a candidate and nothing touches the live
-// session: a refused attempt — a wrong word, a replay — must leave
-// the table exactly as it found it. Writing the role first and
-// checking the timestamp after let an old guest login, captured
-// before that same key was promoted, demote the admin it replayed
-// against while being correctly refused.
+// it earns silence — the kernel's judgement, behind this node's two
+// doors: the admin word, checked first, because with an open guest
+// door every password admits someone and the roles must not depend on
+// which arm of a switch ran first; then the guest door, open or by
+// its own word.
 func (e *engine) admitLogin(senderPub, secret []byte, password string,
 	ts uint32, origin correlation.ID,
 ) *client {
-	live := e.acl.get(senderPub)
-	var c client
-	if live != nil {
-		// A shallow copy: out is replaced, never written through, so
-		// the live session's own route is untouched until this one is
-		// installed in its place.
-		c = *live
-	} else {
-		copy(c.pubKey[:], senderPub)
+	doors := func(word string) (byte, bool) {
+		switch {
+		case e.p.AdminPassword != "" &&
+			subtle.ConstantTimeCompare([]byte(word), []byte(e.p.AdminPassword)) == 1:
+			return permAdmin, true
+		case e.p.GuestAccess == guestOpen ||
+			subtle.ConstantTimeCompare([]byte(word), []byte(e.p.GuestPassword)) == 1:
+			return permGuest, true
+		}
+		return 0, false
 	}
-	switch {
-	case password == "" && live != nil:
-		// A blank password re-checks an existing session.
-	case e.p.AdminPassword != "" &&
-		subtle.ConstantTimeCompare([]byte(password), []byte(e.p.AdminPassword)) == 1:
-		// The admin word, checked first: with an open guest door every
-		// password admits someone, and the roles must not depend on
-		// which arm of a switch ran first.
-		c.perms = (c.perms &^ permRoleMask) | permAdmin
-		c.secret = secret
-	case e.p.GuestAccess == guestOpen ||
-		subtle.ConstantTimeCompare([]byte(password), []byte(e.p.GuestPassword)) == 1:
-		// A password login sets the role the password earns — the
-		// reference rewrites the bits on every one, demotion
-		// included; only the blank login, the in-ACL recheck, keeps
-		// what a grant recorded. A demoted entry is no grant either.
-		c.perms = (c.perms &^ permRoleMask) | permGuest
-		c.granted = false
-		c.secret = secret
-	default:
+	c, refusal := meshcorehost.Admit(e.acl.Get(senderPub), senderPub, secret, password, ts, doors)
+	switch refusal {
+	case meshcorehost.RefusedWord:
 		e.log.Debug("login refused", zap.String("corr", origin.Short()))
-		return nil
-	}
-	if ts <= c.lastTimestamp {
+	case meshcorehost.RefusedReplay:
 		e.log.Debug("login replay refused", zap.String("corr", origin.Short()))
-		return nil
+	case meshcorehost.RefusedSkew:
+		// Judged before admission, in respondLogin; named here so the
+		// switch says every refusal the kernel can pronounce.
+		e.log.Debug("login refused: stale or future timestamp", zap.String("corr", origin.Short()))
 	}
-	// The route a client taught survives its next login, whatever the
-	// password, as it does in the reference — ClientACL::putClient
-	// returns a known entry untouched, and only a new one is blanked.
-	// A stale one costs nothing: a client whose route died lost ours
-	// too and logs in flooded, and a flooded question is answered by
-	// path return, which never reads this field; a client that merely
-	// moved replaces it with its next PATH, which onContactPathRecv
-	// takes without condition.
-	//
-	// A successful login is the only operation that reopens an
-	// operator-closed durable session. Refused attempts were composed
-	// on this candidate and leave the live marker untouched.
-	c.closed = false
-	return &c
+	return c
 }
 
-// loginReply composes what the reference sends back: our clock, the
-// verdict, its legacy keep-alive hint, the role, the permissions, a
-// random blob so two logins never hash alike, and the reply level we
-// answer at.
+// loginReply composes what the reference sends back, at the reply
+// level this engine answers at.
 func loginReply(c *client) ([]byte, error) {
-	return meshcore.FrameLoginReply(meshcore.LoginReply{
-		Clock:         uint32(time.Now().Unix()),
-		Result:        meshcore.LoginOK,
-		KeepAlive:     0, // legacy hint, in units of sixteen seconds
-		IsAdmin:       c.isAdmin(),
-		Permissions:   c.perms,
-		FirmwareLevel: firmwareVerLevel,
-	})
+	return meshcorehost.LoginReply(c, firmwareVerLevel, time.Now())
 }
 
 // reqVerdict judges an authenticated request: ours to read only when a
@@ -250,23 +205,14 @@ func (e *engine) reqVerdict(rx *reception) (verdict, why string, handled bool) {
 		return "", "", false // not ours, or no session: route it on
 	}
 	// The MAC sweep this took is kept for the answer.
-	rx.opened = &opened{session: c, secret: c.secret, plain: plain}
+	rx.opened = &opened{session: c, secret: c.Secret, plain: plain}
 	return verdictRequest, "authenticated request", true
 }
 
 // openReq finds the session that sent a REQ and returns its decrypted
 // content. The source hash narrows the candidates; the MAC decides.
 func (e *engine) openReq(pkt *meshcore.Packet) (*client, []byte) {
-	d, err := meshcore.ParseDatagram(pkt.Payload)
-	if err != nil || e.id == nil || d.DestHash[0] != e.id.PubKey[0] {
-		return nil, nil
-	}
-	for _, c := range e.acl.matching(d.SrcHash[0]) {
-		if plain, err := d.Open(c.secret); err == nil && len(plain) >= 5 {
-			return c, plain
-		}
-	}
-	return nil, nil
+	return e.acl.OpenSession(e.id, pkt.Payload)
 }
 
 // respondRequest serves one authenticated request.
@@ -280,7 +226,7 @@ func (e *engine) respondRequest(rx *reception, origin correlation.ID) {
 		e.responseSuppressed(origin, "session", "malformed")
 		return
 	}
-	if ts <= c.lastTimestamp {
+	if ts <= c.LastTimestamp {
 		e.log.Debug("request replay refused", zap.String("corr", origin.Short()))
 		return
 	}
@@ -289,7 +235,7 @@ func (e *engine) respondRequest(rx *reception, origin correlation.ID) {
 	// amplification: a client that never taught a route home makes
 	// every answer cross the whole mesh. One that did costs a single
 	// directed emission, and flows as freely as the reference lets it.
-	if c.out == nil && !c.asks.allow(time.Now()) {
+	if c.Out == nil && !c.Asks.Allow(time.Now()) {
 		e.log.Debug("session rate-limited — flood answers", zap.String("corr", origin.Short()))
 		e.dropRateLimited(origin)
 		return
@@ -328,11 +274,10 @@ func (e *engine) respondRequest(rx *reception, origin correlation.ID) {
 
 	// Every response is tagged with the asker's own timestamp, so a
 	// companion can match answers to questions.
-	e.reply(pkt, answer{
-		destHash: c.pubKey[:meshcore.PathHashSize], secret: c.secret,
-		tag: ts, body: body, kind: "req-resp",
-		scope: e.replyScope(rx), out: c.out,
-	}, origin)
+	e.reply(pkt, meshcorehost.Answer{
+		DestHash: c.PubKey[:meshcore.PathHashSize], Secret: c.Secret,
+		Tag: ts, Body: body, Scope: e.replyScope(rx), Out: c.Out,
+	}, "req-resp", origin)
 }
 
 // answerRequest builds the body of an authenticated answer. answered
@@ -349,7 +294,7 @@ func (e *engine) answerRequest(c *client, args []byte, budget int,
 		// Admin only, both reserved bytes zero — the reference's
 		// exact gate; anyone else earns the silence a question this
 		// node does not serve earns.
-		if !c.isAdmin() || len(args) < 3 || args[1] != 0 || args[2] != 0 {
+		if !c.IsAdmin() || len(args) < 3 || args[1] != 0 || args[2] != 0 {
 			return nil, false
 		}
 		return e.accessListBody(budget), true
@@ -362,7 +307,7 @@ func (e *engine) answerRequest(c *client, args []byte, budget int,
 		if len(args) >= 2 {
 			mask = ^args[1]
 		}
-		if c.perms&permRoleMask == permGuest {
+		if c.Perms&permRoleMask == permGuest {
 			mask = 0
 		}
 		return e.telemetryBodyLogged(log, mask, budget), true

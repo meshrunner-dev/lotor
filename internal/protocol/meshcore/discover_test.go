@@ -14,17 +14,17 @@ import (
 func TestRateLimiterKeepsTheReferenceShape(t *testing.T) {
 	// Fixed window: so many from the window's first event, denial
 	// until it expires — RateLimiter.h, quirk and all.
-	r := rateLimiter{max: 4, window: 2 * time.Minute}
+	r := rateLimiter{Max: 4, Window: 2 * time.Minute}
 	now := time.Now()
 	for i := range 4 {
-		if !r.allow(now.Add(time.Duration(i) * time.Second)) {
+		if !r.Allow(now.Add(time.Duration(i) * time.Second)) {
 			t.Fatalf("event %d refused under the cap", i+1)
 		}
 	}
-	if r.allow(now.Add(5 * time.Second)) {
+	if r.Allow(now.Add(5 * time.Second)) {
 		t.Fatal("fifth event allowed inside the window")
 	}
-	if !r.allow(now.Add(2*time.Minute + time.Second)) {
+	if !r.Allow(now.Add(2*time.Minute + time.Second)) {
 		t.Fatal("window expired, still refusing")
 	}
 }

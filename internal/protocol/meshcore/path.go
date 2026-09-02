@@ -38,8 +38,8 @@ func (e *engine) pathVerdict(rx *reception) (verdict, why string, handled bool) 
 	if err != nil || e.id == nil || d.DestHash[0] != e.id.PubKey[0] {
 		return "", "", false
 	}
-	for _, c := range e.acl.matching(d.SrcHash[0]) {
-		plain, err := d.Open(c.secret)
+	for _, c := range e.acl.Matching(d.SrcHash[0]) {
+		plain, err := d.Open(c.Secret)
 		if err != nil {
 			continue // some other session's packet, or not one at all
 		}
@@ -66,23 +66,19 @@ const pathHopCountMask = 63
 // it just left.
 func (e *engine) learnOutPath(c *client, pr *meshcore.PathReturn, origin correlation.ID) {
 	now := time.Now()
-	c.out = &outPath{
-		pathLen: pr.PathLen,
-		path:    append([]byte(nil), pr.Path...),
-		learned: now,
-	}
-	c.lastActive = now
-	c.active = true
+	c.Out = &outPath{PathLen: pr.PathLen, Path: append([]byte(nil), pr.Path...), Learned: now}
+	c.LastActive = now
+	c.Active = true
 	// Best effort, and the one place it is: a durable client's route
 	// lost to disk trouble costs the next answer a flood, never a
 	// replay. Guest routes are memory-only by definition.
-	if err := e.acl.save(c); err != nil {
+	if err := e.acl.Save(c); err != nil {
 		e.log.Warn("the taught route did not reach the store",
 			zap.String("corr", origin.Short()), zap.Error(err))
 	}
 	e.publishClientView(now, true)
 	e.log.Debug("a client taught us its route home",
 		zap.String("corr", origin.Short()),
-		zap.String("pubkey", shortKey(c.pubKey[:])),
+		zap.String("pubkey", shortKey(c.PubKey[:])),
 		zap.Int("hops", int(pr.PathLen&pathHopCountMask)))
 }

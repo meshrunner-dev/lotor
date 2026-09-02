@@ -63,7 +63,7 @@ func guestIn(t *testing.T, e *engine, peer *meshcore.LocalIdentity) *client {
 	e.p.GuestAccess = guestOpen
 	frame, _ := login(t, e.id, peer, nowTS(100), "", false)
 	drive(t, e, frame)
-	c := e.acl.get(peer.PubKey[:])
+	c := e.acl.Get(peer.PubKey[:])
 	if c == nil {
 		t.Fatal("the login opened no session")
 	}
@@ -126,15 +126,15 @@ func TestWithoutARouteHomeTheAnswerFloods(t *testing.T) {
 func TestRouteHomeIsLearnedAndTheNewestWins(t *testing.T) {
 	e, _, _, peer := txRig(t, "shadow")
 	c := guestIn(t, e, peer)
-	if c.out != nil {
+	if c.Out != nil {
 		t.Fatal("a fresh session already knows a route home")
 	}
 
 	if v := drive(t, e, teachPath(t, e.id, peer, 2, []byte{0xAA, 0xBB})); v != verdictClientPath {
 		t.Fatalf("verdict = %q, want the route to be learned", v)
 	}
-	if c.out == nil || c.out.pathLen != 2 || string(c.out.path) != string([]byte{0xAA, 0xBB}) {
-		t.Fatalf("route home = %+v", c.out)
+	if c.Out == nil || c.Out.PathLen != 2 || string(c.Out.Path) != string([]byte{0xAA, 0xBB}) {
+		t.Fatalf("route home = %+v", c.Out)
 	}
 	view := e.Clients()
 	if len(view.Sessions) != 1 || !view.Sessions[0].HasPath ||
@@ -150,8 +150,8 @@ func TestRouteHomeIsLearnedAndTheNewestWins(t *testing.T) {
 	if v := drive(t, e, teachPath(t, e.id, peer, 1, []byte{0xCC})); v != verdictClientPath {
 		t.Fatalf("verdict = %q", v)
 	}
-	if c.out.pathLen != 1 || string(c.out.path) != string([]byte{0xCC}) {
-		t.Fatalf("route home = %+v, want the one it just taught us", c.out)
+	if c.Out.PathLen != 1 || string(c.Out.Path) != string([]byte{0xCC}) {
+		t.Fatalf("route home = %+v, want the one it just taught us", c.Out)
 	}
 }
 
@@ -167,7 +167,7 @@ func TestRouteLearningLogKeepsTheFrameCorrelation(t *testing.T) {
 		t.Fatal(err)
 	}
 	rx := rxOf(e, pkt)
-	if c.out == nil {
+	if c.Out == nil {
 		t.Fatal("the path verdict did not learn the route")
 	}
 	entries := observed.FilterMessage("a client taught us its route home").All()
@@ -185,23 +185,7 @@ func TestARouteFromAStrangerIsNotLearned(t *testing.T) {
 	if v := drive(t, e, teachPath(t, e.id, peer, 2, []byte{0xAA, 0xBB})); v == verdictClientPath {
 		t.Fatal("a stranger taught us a route home")
 	}
-	if e.acl.get(peer.PubKey[:]) != nil {
+	if e.acl.Get(peer.PubKey[:]) != nil {
 		t.Fatal("a route home conjured a session out of nothing")
-	}
-}
-
-func TestASuppliedPathOutranksTheStoredOne(t *testing.T) {
-	// A route carried by this very question is fresher than one
-	// remembered from an earlier exchange.
-	stored := &outPath{pathLen: 2, path: []byte{0xAA, 0xBB}}
-	home := answer{supplied: true, pathLen: 1, path: []byte{0x11}, out: stored}.routeHome()
-	if home == nil || home.pathLen != 1 || home.path[0] != 0x11 {
-		t.Fatalf("route home = %+v, want the one the question carried", home)
-	}
-	if home := (answer{out: stored}).routeHome(); home == nil || home.pathLen != 2 {
-		t.Fatalf("stored route ignored: %+v", home)
-	}
-	if home := (answer{}).routeHome(); home != nil {
-		t.Fatalf("invented a route out of nothing: %+v", home)
 	}
 }

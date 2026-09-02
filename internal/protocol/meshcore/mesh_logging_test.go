@@ -14,6 +14,7 @@ import (
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
+	"meshrunner.dev/lotor/internal/meshcorehost"
 	"meshrunner.dev/lotor/internal/radio"
 )
 
@@ -286,13 +287,12 @@ func TestResponseSuppressionAndReplyRoutingAreDebugDecisions(t *testing.T) {
 	inbound := &meshwire.Packet{
 		Header: meshwire.MakeHeader(meshwire.RouteDirect, meshwire.PayloadTypeReq, meshwire.PayloadVer1),
 	}
-	e.reply(inbound, answer{
-		destHash: make([]byte, meshwire.PathHashSize),
-		secret:   make([]byte, meshwire.SharedSecretSize),
-		tag:      42,
-		body:     []byte{1},
-		kind:     "test-response",
-	}, id)
+	e.reply(inbound, meshcorehost.Answer{
+		DestHash: make([]byte, meshwire.PathHashSize),
+		Secret:   make([]byte, meshwire.SharedSecretSize),
+		Tag:      42,
+		Body:     []byte{1},
+	}, "test-response", id)
 
 	route := observedOne(t, observed, "reply route selected")
 	if route.Level != zap.DebugLevel {
@@ -321,36 +321,33 @@ func TestReplyRouteDebugDistinguishesAllSources(t *testing.T) {
 	flood := &meshwire.Packet{
 		Header: meshwire.MakeHeader(meshwire.RouteFlood, meshwire.PayloadTypeReq, meshwire.PayloadVer1),
 	}
-	base := answer{
-		destHash: make([]byte, meshwire.PathHashSize),
-		secret:   make([]byte, meshwire.SharedSecretSize),
-		tag:      42,
-		body:     []byte{1},
+	base := meshcorehost.Answer{
+		DestHash: make([]byte, meshwire.PathHashSize),
+		Secret:   make([]byte, meshwire.SharedSecretSize),
+		Tag:      42,
+		Body:     []byte{1},
 	}
-
 	cases := []struct {
 		name    string
 		inbound *meshwire.Packet
-		answer  answer
+		answer  meshcorehost.Answer
 	}{
 		{name: "path-return", inbound: flood, answer: base},
-		{name: "supplied", inbound: direct, answer: func() answer {
+		{name: "supplied", inbound: direct, answer: func() meshcorehost.Answer {
 			a := base
-			a.supplied, a.pathLen, a.path = true, 1, []byte{0x11}
-			a.scope = meshwire.TransportKeyForName("lab")
+			a.Supplied, a.PathLen, a.Path = true, 1, []byte{0x11}
+			a.Scope = meshwire.TransportKeyForName("lab")
 			return a
 		}()},
-		{name: "learned", inbound: direct, answer: func() answer {
+		{name: "learned", inbound: direct, answer: func() meshcorehost.Answer {
 			a := base
-			a.out = &outPath{pathLen: 1, path: []byte{0x22}}
+			a.Out = &outPath{PathLen: 1, Path: []byte{0x22}}
 			return a
 		}()},
 		{name: "flood", inbound: direct, answer: base},
 	}
 	for _, test := range cases {
-		a := test.answer
-		a.kind = "route-" + test.name
-		e.reply(test.inbound, a, correlation.New())
+		e.reply(test.inbound, test.answer, "route-"+test.name, correlation.New())
 	}
 
 	entries := observed.FilterMessage("reply route selected").All()

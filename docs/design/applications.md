@@ -1,9 +1,10 @@
 # Applications — mesh node roles beyond relaying and companions
 
-Status: **in progress**. Stages 0 and 1 of the ladder below landed on
-2026-09-02 — the library's server-side room codecs, and the seam with
-a room that holds its identity and follows a radio in dry mode; the
-rest is still proposal. It records the reasoning for a third role in
+Status: **in progress**. Stages 0 to 2 of the ladder below landed on
+2026-09-02 — the library's server-side room codecs, the seam with a
+room that holds its identity and follows a radio in dry mode, and the
+shared server kernel `internal/meshcorehost`, which the relay engine
+now stands on; the rest is still proposal. It records the reasoning for a third role in
 the daemon, the MeshCore room server being its first instance, and the
 persistence question that role forces. Ground rules it must honour: [`DESIGN.md`](../../DESIGN.md);
 plumbing it hooks into: [`radio.md`](../architecture/radio.md).
@@ -157,15 +158,20 @@ the room touches it:
 
 1. **`internal/meshcorehost` — the server-side kernel**, lifted from
    the relay engine: the client table and its roles, login with its
-   replay and skew guards, the anonymous-request limiter, the
-   reply-routing decision (direct on a taught path, flood reply, or a
-   PATH return carrying the answer), and the over-the-air admin
-   grammar the reference calls `CommonCLI` — `set`/`get`/`password`/
-   `advert`/`clock`/`region`. It keeps the engine's discipline: state
-   owned by the caller's goroutine, no mutex, orders arriving on the
-   caller's ask channel. The relay engine becomes its first consumer;
-   the room its second. The name follows `internal/meshcorecfg`, the
-   precedent for MeshCore code shared across roles.
+   replay and skew guards behind the owner's own *doors* (the word→role
+   map a repeater and a room disagree on), the opening of what a client
+   sealed to us, expiry, grants, and the reply-routing decision (direct
+   on a taught path, flood reply, or a PATH return carrying the
+   answer). It keeps the engine's discipline: state owned by the
+   caller's goroutine, no mutex, orders arriving on the caller's ask
+   channel; the kernel composes and decides, the owner emits, logs and
+   publishes. The relay engine is its first consumer; the room its
+   second. The name follows `internal/meshcorecfg`, the precedent for
+   MeshCore code shared across roles. The anonymous-request limiter's
+   *budget* and the over-the-air admin grammar (`CommonCLI`'s
+   `set`/`get`/`password`/`advert`/`clock`/`region`) stay with the
+   engine for now: the grammar's verbs act on a relay's own
+   configuration door, and lifting them is the room's stage-4 work.
 
    One thing this extraction surfaces: the permission role bits
    (`permRoleMask`, `permAdmin`, `permGuest`) live in the relay engine

@@ -37,12 +37,12 @@ func TestAccessEntriesSurviveABounce(t *testing.T) {
 	for i := range key {
 		key[i] = byte(i + 1)
 	}
-	c := &client{pubKey: key, secret: []byte("shared"), perms: permAdmin,
-		lastTimestamp: 1000, lastActive: time.Now()}
-	c.out = &outPath{pathLen: 2, path: []byte{0xaa, 0xbb}, learned: time.Now()}
-	a.put(c)
-	c.lastTimestamp = 1005
-	a.save(c)
+	c := &client{PubKey: key, Secret: []byte("shared"), Perms: permAdmin,
+		LastTimestamp: 1000, LastActive: time.Now()}
+	c.Out = &outPath{PathLen: 2, Path: []byte{0xaa, 0xbb}, Learned: time.Now()}
+	a.Put(c)
+	c.LastTimestamp = 1005
+	a.Save(c)
 
 	// The store kept it.
 	if len(store.rows) != 1 {
@@ -53,27 +53,27 @@ func TestAccessEntriesSurviveABounce(t *testing.T) {
 	// secret recomputed — here a stub that proves it was asked.
 	b := newACL(store)
 	asked := false
-	b.load(func(pubKey []byte) ([]byte, error) {
+	b.Load(func(pubKey []byte) ([]byte, error) {
 		asked = true
 		return []byte("recomputed"), nil
-	}, func() rateLimiter { return rateLimiter{max: 8, window: time.Minute} })
-	got := b.get(key[:])
+	}, func() rateLimiter { return rateLimiter{Max: 8, Window: time.Minute} })
+	got := b.Get(key[:])
 	if got == nil {
 		t.Fatal("the session did not survive the bounce")
 	}
 	if !asked {
 		t.Error("the secret was read from disk, not recomputed")
 	}
-	if got.lastTimestamp != 1005 {
-		t.Errorf("replay guard reset to %d", got.lastTimestamp)
+	if got.LastTimestamp != 1005 {
+		t.Errorf("replay guard reset to %d", got.LastTimestamp)
 	}
-	if !got.isAdmin() {
+	if !got.IsAdmin() {
 		t.Error("the admin role was lost")
 	}
-	if got.out == nil || got.out.pathLen != 2 {
-		t.Errorf("the route home was lost: %+v", got.out)
+	if got.Out == nil || got.Out.PathLen != 2 {
+		t.Errorf("the route home was lost: %+v", got.Out)
 	}
-	if sessions := b.sessions(); len(sessions) != 0 {
+	if sessions := b.Sessions(); len(sessions) != 0 {
 		t.Fatalf("restored access appeared as live traffic: %+v", sessions)
 	}
 
@@ -82,22 +82,22 @@ func TestAccessEntriesSurviveABounce(t *testing.T) {
 	// as flood.
 	var adj [meshcore.PubKeySize]byte
 	adj[0] = 0x77
-	ac := &client{pubKey: adj, secret: []byte("s"), perms: permReadOnly, granted: true,
-		lastTimestamp: 1, lastActive: time.Now()}
-	ac.out = &outPath{pathLen: 0, path: nil, learned: time.Now()} // adjacent
-	a.put(ac)
+	ac := &client{PubKey: adj, Secret: []byte("s"), Perms: permReadOnly, Granted: true,
+		LastTimestamp: 1, LastActive: time.Now()}
+	ac.Out = &outPath{PathLen: 0, Path: nil, Learned: time.Now()} // adjacent
+	a.Put(ac)
 	e := newACL(store)
-	e.load(func([]byte) ([]byte, error) { return []byte("x"), nil },
-		func() rateLimiter { return rateLimiter{max: 8, window: time.Minute} })
-	got2 := e.get(adj[:])
-	if got2 == nil || got2.out == nil {
+	e.Load(func([]byte) ([]byte, error) { return []byte("x"), nil },
+		func() rateLimiter { return rateLimiter{Max: 8, Window: time.Minute} })
+	got2 := e.Get(adj[:])
+	if got2 == nil || got2.Out == nil {
 		t.Fatalf("adjacent session reloaded as flood: %+v", got2)
 	}
-	if got2.out.pathLen != 0 {
-		t.Errorf("adjacent route grew hops: %d", got2.out.pathLen)
+	if got2.Out.PathLen != 0 {
+		t.Errorf("adjacent route grew hops: %d", got2.Out.PathLen)
 	}
-	if string(got.secret) != "recomputed" {
-		t.Errorf("secret = %q, want the recomputed one", got.secret)
+	if string(got.Secret) != "recomputed" {
+		t.Errorf("secret = %q, want the recomputed one", got.Secret)
 	}
 
 	// A legacy guest row is not an access entry. Loading cleans it up
@@ -106,9 +106,9 @@ func TestAccessEntriesSurviveABounce(t *testing.T) {
 	legacy.PubKey[0] = 0xff
 	store.SaveSession(legacy)
 	d := newACL(store)
-	d.load(func([]byte) ([]byte, error) { return []byte("x"), nil },
-		func() rateLimiter { return rateLimiter{max: 8, window: time.Minute} })
-	if d.get(legacy.PubKey[:]) != nil {
+	d.Load(func([]byte) ([]byte, error) { return []byte("x"), nil },
+		func() rateLimiter { return rateLimiter{Max: 8, Window: time.Minute} })
+	if d.Get(legacy.PubKey[:]) != nil {
 		t.Error("a legacy guest was restored into the access list")
 	}
 	if _, held := store.rows[legacy.PubKey]; held {
@@ -151,11 +151,11 @@ func TestGuestSessionIsMemoryOnly(t *testing.T) {
 	}
 
 	restarted := newACL(store)
-	if err := restarted.load(func([]byte) ([]byte, error) { return secret, nil },
-		func() rateLimiter { return rateLimiter{max: 8, window: time.Minute} }); err != nil {
+	if err := restarted.Load(func([]byte) ([]byte, error) { return secret, nil },
+		func() rateLimiter { return rateLimiter{Max: 8, Window: time.Minute} }); err != nil {
 		t.Fatal(err)
 	}
-	if restarted.get(peer.PubKey[:]) != nil {
+	if restarted.Get(peer.PubKey[:]) != nil {
 		t.Fatal("guest session survived a restart")
 	}
 }
@@ -165,49 +165,49 @@ func TestClosingASessionPreservesOnlyDurableAccess(t *testing.T) {
 	a := newACL(store)
 	now := time.Now()
 
-	guest := &client{pubKey: aclKey(0x11), perms: permGuest, active: true, lastActive: now}
-	if err := a.put(guest); err != nil {
+	guest := &client{PubKey: aclKey(0x11), Perms: permGuest, Active: true, LastActive: now}
+	if err := a.Put(guest); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.closeSession(guest.pubKey); err != nil {
+	if err := a.CloseSession(guest.PubKey); err != nil {
 		t.Fatal(err)
 	}
-	if a.get(guest.pubKey[:]) != nil {
+	if a.Get(guest.PubKey[:]) != nil {
 		t.Fatal("closing a guest left its memory-only session behind")
 	}
 
 	granted := &client{
-		pubKey: aclKey(0x22), secret: []byte("shared"), perms: permReadOnly,
-		granted: true, active: true, lastTimestamp: 42, lastActive: now,
+		PubKey: aclKey(0x22), Secret: []byte("shared"), Perms: permReadOnly,
+		Granted: true, Active: true, LastTimestamp: 42, LastActive: now,
 	}
-	granted.out = &outPath{pathLen: 1, path: []byte{0xaa}, learned: now}
-	if err := a.put(granted); err != nil {
+	granted.Out = &outPath{PathLen: 1, Path: []byte{0xaa}, Learned: now}
+	if err := a.Put(granted); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.closeSession(granted.pubKey); err != nil {
+	if err := a.CloseSession(granted.PubKey); err != nil {
 		t.Fatal(err)
 	}
-	kept := a.get(granted.pubKey[:])
-	if kept == nil || !kept.hasAccess() || kept.active || !kept.closed {
+	kept := a.Get(granted.PubKey[:])
+	if kept == nil || !kept.HasAccess() || kept.Active || !kept.Closed {
 		t.Fatalf("close damaged the durable role or left it live: %+v", kept)
 	}
-	if kept.out != nil {
+	if kept.Out != nil {
 		t.Fatal("close kept a route belonging to the old conversation")
 	}
-	if kept.lastTimestamp != 42 {
-		t.Fatalf("close reset replay guard to %d", kept.lastTimestamp)
+	if kept.LastTimestamp != 42 {
+		t.Fatalf("close reset replay guard to %d", kept.LastTimestamp)
 	}
-	if len(a.entries()) != 1 || len(a.sessions()) != 0 {
-		t.Fatalf("views after close: access=%+v sessions=%+v", a.entries(), a.sessions())
+	if len(a.Entries()) != 1 || len(a.Sessions()) != 0 {
+		t.Fatalf("views after close: access=%+v sessions=%+v", a.Entries(), a.Sessions())
 	}
-	if len(a.matching(granted.pubKey[0])) != 0 {
+	if len(a.Matching(granted.PubKey[0])) != 0 {
 		t.Fatal("ordinary authenticated traffic reopened an explicitly closed session")
 	}
-	persisted := store.rows[granted.pubKey]
+	persisted := store.rows[granted.PubKey]
 	if !persisted.Granted || persisted.Perms != permReadOnly || persisted.HasOut {
 		t.Fatalf("persisted ACL after close = %+v", persisted)
 	}
-	if err := a.closeSession(granted.pubKey); !errors.Is(err, ErrNoSuchSession) {
+	if err := a.CloseSession(granted.PubKey); !errors.Is(err, ErrNoSuchSession) {
 		t.Fatalf("closing an already closed session = %v", err)
 	}
 }
