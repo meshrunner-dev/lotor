@@ -20,14 +20,15 @@ import (
 // to the durable access list.
 const (
 	// The reference's ClientACL roles — PERM_ACL_* in ClientACL.h —
-	// living in the low two bits of the permission byte. Guest is not
-	// persisted: setting it is how an entry is removed. Admin is
-	// admin at exactly three, never at "non-zero".
-	permRoleMask  = 0x03
-	permGuest     = 0x00
-	permReadOnly  = 0x01
-	permReadWrite = 0x02
-	permAdmin     = 0x03
+	// living in the low two bits of the permission byte. They are wire
+	// units, so the library owns them; these names keep this package's
+	// spelling. Guest is not persisted: setting it is how an entry is
+	// removed. Admin is admin at exactly three, never at "non-zero".
+	permRoleMask  = meshcore.PermRoleMask
+	permGuest     = meshcore.PermGuest
+	permReadOnly  = meshcore.PermReadOnly
+	permReadWrite = meshcore.PermReadWrite
+	permAdmin     = meshcore.PermAdmin
 
 	// PermRoleMask and the Perm* roles are the same ladder for the
 	// callers that speak grants — one vocabulary, defined once, so an

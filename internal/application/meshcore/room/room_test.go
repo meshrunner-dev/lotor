@@ -20,7 +20,7 @@ func baseConfig() map[string]any {
 }
 
 func TestTheRoomRegistersAsAMeshCoreType(t *testing.T) {
-	b, err := application.Lookup("meshcore", "room")
+	b, err := application.Lookup("meshcore", "meshcore-room")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestADryRoomRunsDetachedAndReportsItself(t *testing.T) {
 	cfg := baseConfig()
 	cfg["advert_local_interval"] = "20ms"
 	cfg["advert_flood_interval"] = "0s"
-	svc, err := build(application.Spec{Name: "lobby", Protocol: "meshcore", Type: "room", Config: cfg})
+	svc, err := build(application.Spec{Name: "lobby", Protocol: "meshcore", Type: "meshcore-room", Config: cfg})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestADryRoomRunsDetachedAndReportsItself(t *testing.T) {
 	if info.Summary["adverts due"] == "0" {
 		t.Error("the local advert clock never fired")
 	}
-	if info.Type != "room" || info.Protocol != "meshcore" || len(info.PublicKey) != 64 ||
+	if info.Type != "meshcore-room" || info.Protocol != "meshcore" || len(info.PublicKey) != 64 ||
 		info.Summary["node"] != "lobby" {
 		t.Errorf("info = %+v", info)
 	}

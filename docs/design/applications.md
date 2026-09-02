@@ -68,7 +68,7 @@ and differ in who they talk to. `internal/application` mirrors
 `internal/station` shape for shape:
 
 ```go
-// Registered per (protocol, type): "meshcore"/"room" first.
+// Registered per type, each type naming its protocol: "meshcore-room" first.
 type Builder struct {
     Build   func(Spec) (Service, error)
     Check   func(map[string]any) error
@@ -97,18 +97,19 @@ and the web snapshot need no per-type knowledge to show it.
 **Configuration.** A new kind, `applications:`, with instances by
 name. Two structural attributes select the implementation:
 `protocol` (the mesh it speaks) and `type` (what it does on it), so
-config never conflates the two, as `DESIGN.md` insists. The schema's
-single-choice mechanism (`ChoiceAttr`) needs one small extension to
-resolve contributed attributes from the pair rather than from one
-attribute — or `type` is the choice and each type declares its
-protocol, which is the same information stored once. Both are a few
-lines; the doc prefers the pair because the operator types the words.
+config never conflates the two, as `DESIGN.md` insists. The type is the
+schema's one choice, and each type declares the protocol it speaks —
+the registry holds it to that word, so `protocol: lorawan` with a
+MeshCore room is a configuration error, not a near miss. Type names
+carry their protocol explicitly, `meshcore-room`, so the one word an
+operator types can never be mistaken for another mesh's room when a
+second protocol arrives.
 
 ```yaml
 applications:
   lobby:
     protocol: meshcore
-    type: room
+    type: meshcore-room
     radio: slot1
     profile: eu-868-narrow          # the band preset, as a station
     tx: { mode: shadow }
