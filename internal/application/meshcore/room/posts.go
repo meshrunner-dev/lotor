@@ -166,7 +166,10 @@ func (s *service) unsyncedLocked(key [mesh.PubKeySize]byte, m *member) uint8 {
 
 // runPush is the reference's loop: sweep the pushes that timed out,
 // offer one member one post, pace by whether anything went out. The
-// idle table's expiry and the cursor flush ride the same clock.
+// cursor flush rides the same clock. Nothing expires: a room's normal
+// member is a reader who says nothing for hours and expects its
+// pushes, so, as in the reference, a member stays until the table
+// makes room for a newer one.
 func (s *service) runPush(ctx context.Context) {
 	flush := time.NewTicker(cursorFlushDelay)
 	defer flush.Stop()
@@ -180,9 +183,6 @@ func (s *service) runPush(ctx context.Context) {
 			return
 		case <-flush.C:
 			s.flushCursors(ctx)
-			s.mu.Lock()
-			s.table.Expire(time.Now(), meshcorehost.SessionIdle)
-			s.mu.Unlock()
 		case <-time.After(max(wait, 0)):
 			s.pushDue(time.Now())
 		}

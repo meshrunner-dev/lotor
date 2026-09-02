@@ -220,3 +220,34 @@ func TestGrantRemovesOnGuestAndPromotesDurably(t *testing.T) {
 		t.Fatalf("a refused grant installed: %v", err)
 	}
 }
+
+func TestTheOwnerChoosesWhomAFullTableSpares(t *testing.T) {
+	store := newMemStore()
+	tb := NewTable(store, 3)
+	tb.Protect = (*Client).IsAdmin // the reference's shared putClient: admins alone
+	now := time.Now()
+	admin := &Client{PubKey: key(0x01), Perms: meshcore.PermAdmin, LastActive: now.Add(-time.Hour)}
+	old := &Client{PubKey: key(0x02), Perms: meshcore.PermReadWrite, LastActive: now.Add(-time.Hour)}
+	fresh := &Client{PubKey: key(0x03), Perms: meshcore.PermReadWrite, LastActive: now}
+	for _, c := range []*Client{admin, old, fresh} {
+		if err := tb.Put(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	victim, evicting, err := tb.PutEvicting(&Client{PubKey: key(0x04), Perms: meshcore.PermReadWrite, LastActive: now})
+	if err != nil || !evicting || victim != old.PubKey {
+		t.Fatalf("newcomer evicted %x (%v, %v), want the idle read-write member", victim[:2], evicting, err)
+	}
+	if tb.Live(admin.PubKey) == nil || tb.Live(old.PubKey) != nil || tb.Live(key(0x04)) == nil {
+		t.Fatal("the wrong member left the table")
+	}
+	// The evicted access entry left the store with it.
+	if _, kept := store.rows[old.PubKey]; kept {
+		t.Error("an evicted member's row survived in the store")
+	}
+	// Under the repeater's rule the same table has no room at all.
+	tb.Protect = nil
+	if _, _, err := tb.PutEvicting(&Client{PubKey: key(0x05)}); !errors.Is(err, ErrSessionsFull) {
+		t.Errorf("a table of access entries made room: %v", err)
+	}
+}

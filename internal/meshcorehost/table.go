@@ -169,7 +169,14 @@ type Table struct {
 	// By is the table, keyed by full public key. It is exposed because
 	// the owner walks it — for expiry, for delivery — and a wrapper per
 	// walk would only hide that the walk happens on the owner's turn.
-	By       map[[meshcore.PubKeySize]byte]*Client
+	By map[[meshcore.PubKeySize]byte]*Client
+	// Protect names the entries a full table never evicts to admit a
+	// newcomer. The reference's shared putClient spares admins alone;
+	// this daemon's repeater spares every access entry, because a run
+	// of fresh guest logins must not unseat an authorised principal,
+	// while a room — whose members are mostly read-write — keeps the
+	// reference's rule. Nil spares access entries.
+	Protect  func(*Client) bool
 	store    SessionStore // nil keeps the table in memory only
 	capacity int
 }
@@ -178,6 +185,14 @@ type Table struct {
 // reference's MAX_CLIENTS, which each role sets to its own figure.
 func NewTable(store SessionStore, capacity int) *Table {
 	return &Table{By: map[[meshcore.PubKeySize]byte]*Client{}, store: store, capacity: capacity}
+}
+
+// protected says whether an entry outranks a login under the policy.
+func (t *Table) protected(c *Client) bool {
+	if t.Protect != nil {
+		return t.Protect(c)
+	}
+	return c.HasAccess()
 }
 
 // SetStore installs the persistence door after construction — what an
@@ -272,37 +287,48 @@ func (t *Table) Load(secret func(pubKey []byte) ([]byte, error), asks func() Rat
 // guest never reaches it; when a guest login demotes a durable entry,
 // that entry is forgotten before the guest session replaces it.
 func (t *Table) Put(c *Client) error {
-	var victim [meshcore.PubKeySize]byte
-	evicting := false
+	_, _, err := t.PutEvicting(c)
+	return err
+}
+
+// PutEvicting is Put that names the entry it unseated, for an owner
+// that keeps state of its own beside the table. An evicted access
+// entry is forgotten in the store too: the table is the authority on
+// who is a member, and a row without an entry would resurrect a
+// principal the room made room by dropping.
+func (t *Table) PutEvicting(c *Client) (victim [meshcore.PubKeySize]byte, evicting bool, err error) {
 	old, known := t.By[c.PubKey]
 	if !known {
 		var room bool
 		if victim, evicting, room = t.Evictable(); !room {
-			return ErrSessionsFull
+			return victim, false, ErrSessionsFull
 		}
 	}
 	switch {
 	case c.HasAccess():
 		if err := t.Save(c); err != nil {
-			return err
+			return victim, false, err
 		}
 	case known && old.HasAccess():
 		if err := t.Forget(c.PubKey); err != nil {
-			return err
+			return victim, false, err
 		}
 	}
 	if evicting {
+		if t.By[victim].HasAccess() {
+			if err := t.Forget(victim); err != nil {
+				return victim, false, err
+			}
+		}
 		delete(t.By, victim)
 	}
 	t.By[c.PubKey] = c
-	return nil
+	return victim, evicting, nil
 }
 
-// Evictable names the session that would make room for a new one.
-// room is false when the table is full and every place is held by a
-// durable access entry. The reference skips non-guest permissions
-// when it hunts for its victim (ClientACL::putClient), because a run
-// of fresh guest logins must not unseat an authorised principal.
+// Evictable names the session that would make room for a new one:
+// the least recently active entry the policy does not protect. room
+// is false when the table is full and every place is protected.
 // evicting is false when there was a free place to begin with.
 func (t *Table) Evictable() (victim [meshcore.PubKeySize]byte, evicting, room bool) {
 	if len(t.By) < t.capacity {
@@ -310,7 +336,7 @@ func (t *Table) Evictable() (victim [meshcore.PubKeySize]byte, evicting, room bo
 	}
 	var when time.Time
 	for k, v := range t.By {
-		if v.HasAccess() {
+		if t.protected(v) {
 			continue
 		}
 		if !room || v.LastActive.Before(when) {

@@ -284,6 +284,11 @@ func build(spec application.Spec) (application.Service, error) {
 		members: map[[mesh.PubKeySize]byte]*member{},
 		posts:   make([]post, 0, p.History),
 	}
+	// A full room makes room the reference's way — the least recently
+	// active member goes, admins alone are spared — because a room's
+	// members are mostly readers who logged in with the room word, and
+	// a table that never unseated one would close its door at twenty.
+	s.table.Protect = (*meshcorehost.Client).IsAdmin
 	// The members the store remembers, the secret recomputed per
 	// entry; a store that cannot be read is an error, never an empty
 	// room — the entries carry every admin's replay guard.
