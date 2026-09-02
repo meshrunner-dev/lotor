@@ -3,6 +3,7 @@ package logging
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -49,7 +50,30 @@ func TestTraceRendersByName(t *testing.T) {
 	var enc sliceEncoder
 	EncodeLevel(TraceLevel, &enc)
 	EncodeLevel(zapcore.WarnLevel, &enc)
-	if got := strings.Join(enc, ","); got != "trace,warn" {
+	// Padded, because the level is a column: the shorter words carry
+	// the difference so the caller after them starts at one offset.
+	if got := strings.Join(enc, ","); got != "trace,warn " {
+		t.Errorf("rendered %q", got)
+	}
+	for _, l := range []zapcore.Level{
+		TraceLevel, zapcore.DebugLevel, zapcore.InfoLevel,
+		zapcore.WarnLevel, zapcore.ErrorLevel,
+	} {
+		var one sliceEncoder
+		EncodeLevel(l, &one)
+		if len(one) != 1 || len(one[0]) != levelWidth {
+			t.Errorf("%v rendered %q, want %d characters", l, one, levelWidth)
+		}
+	}
+}
+
+// The clock stands alone, to the microsecond: journald shows whole
+// seconds unless asked, so anything coarser would say nothing the
+// journal has not already said.
+func TestTimeRendersTheClockAlone(t *testing.T) {
+	var enc sliceEncoder
+	EncodeTime(time.Date(2026, 9, 2, 2, 14, 2, 557474000, time.UTC), &enc)
+	if got := strings.Join(enc, ""); got != "02:14:02.557474" {
 		t.Errorf("rendered %q", got)
 	}
 }

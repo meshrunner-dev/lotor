@@ -6,6 +6,8 @@
 package logging
 
 import (
+	"time"
+
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -30,14 +32,34 @@ func LevelName(l zapcore.Level) string {
 	return l.String()
 }
 
+// levelWidth is the longest word in the ladder — "trace", "debug" and
+// "error" all reach it.
+const levelWidth = 5
+
 // EncodeLevel renders the ladder for the console encoder — trace by
-// its name, not zap's Level(-2).
+// its name, not zap's Level(-2) — padded so the level is a column
+// rather than a word. The console encoder joins its parts with a
+// single space, which is not enough on its own: "info" and "trace"
+// would push the caller to different offsets on consecutive lines,
+// and a reader scanning down for the errors would have nothing
+// straight to scan along.
 func EncodeLevel(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
-	if l == TraceLevel {
-		enc.AppendString("trace")
-		return
+	name := LevelName(l)
+	for len(name) < levelWidth {
+		name += " "
 	}
-	zapcore.LowercaseLevelEncoder(l, enc)
+	enc.AppendString(name)
+}
+
+// EncodeTime renders the clock alone, to the microsecond. The date is
+// left out because nothing reads these lines without one already:
+// journald stamps every entry it takes, and a terminal session knows
+// what day it is. The microsecond is what the journal cannot give
+// back — it stores that much but shows whole seconds unless asked,
+// and radio work is full of events a second apart in the log and
+// milliseconds apart in truth.
+func EncodeTime(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
+	enc.AppendString(t.Format("15:04:05.000000"))
 }
 
 // Trace logs at the trace level; zap has no method for a level it

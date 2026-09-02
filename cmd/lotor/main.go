@@ -29,7 +29,6 @@ import (
 	"meshrunner.dev/pkg/meshcore"
 
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/cli"
@@ -1782,8 +1781,12 @@ func newLogger(level string) (*zap.Logger, zap.AtomicLevel, error) {
 	// Retry loops make errors an expected operational state; the
 	// message and fields carry the story, a stack trace adds nothing.
 	cfg.DisableStacktrace = true
-	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	cfg.EncoderConfig.EncodeTime = logging.EncodeTime
 	cfg.EncoderConfig.EncodeLevel = logging.EncodeLevel
+	// A tab jumps to the next eight-column stop, so "info" and "trace"
+	// dig the same hole at different widths and nothing lines up. One
+	// space, and the padding in EncodeLevel does the aligning.
+	cfg.EncoderConfig.ConsoleSeparator = " "
 	log, err := cfg.Build()
 	return log, atomic, err
 }
