@@ -76,6 +76,24 @@ type Station struct {
 	TX *TX `yaml:"tx"`
 }
 
+// Application declares one mesh identity the daemon hosts to serve
+// peers over the air — a room server first. It is neither a relay
+// (it never forwards) nor a station (its users are on the mesh, not on
+// a TCP port): it originates and receives under its own identity, and
+// exists while detached from RF exactly as a station does. Protocol
+// names the mesh it speaks and Type what it does on it; the layered
+// configuration carries its waveform, identity and the type's own
+// attributes.
+type Application struct {
+	Protocol string  `yaml:"protocol"`
+	Type     string  `yaml:"type"`
+	Radio    string  `yaml:"radio"`
+	Layered  Layered `yaml:",inline"`
+	// TX is the application's own origination gate — dry, shadow or
+	// on-air, never a forwarding rung.
+	TX *TX `yaml:"tx"`
+}
+
 // The transmit gate ladder: dry runs the judgement alone, shadow runs
 // the whole pipeline and journals the emissions it would have made,
 // on-air-zero-hop keys only what stays with the direct neighbourhood
@@ -167,6 +185,14 @@ func (s *Station) TXMode() string {
 		return TXDry
 	}
 	return s.TX.Mode
+}
+
+// TXMode resolves the application's origination gate.
+func (a *Application) TXMode() string {
+	if a.TX == nil {
+		return TXDry
+	}
+	return a.TX.Mode
 }
 
 // Sentinel configures the observation and archival instantiation.
@@ -287,13 +313,16 @@ type File struct {
 	Radios   map[string]Radio   `yaml:"radios"`
 	Relays   map[string]Relay   `yaml:"relays"`
 	Stations map[string]Station `yaml:"stations"`
-	Sensors  map[string]Sensor  `yaml:"sensors"`
-	Sentinel *Sentinel          `yaml:"sentinel"`
-	CLI      *CLI               `yaml:"cli"`
-	Web      *Web               `yaml:"web"`
-	System   *System            `yaml:"system"`
-	Update   *Update            `yaml:"update"`
-	MQTT     map[string]MQTT    `yaml:"mqtt"`
+	// Applications are the hosted mesh identities that serve peers —
+	// room servers and their kin. Optional, like stations.
+	Applications map[string]Application `yaml:"applications"`
+	Sensors      map[string]Sensor      `yaml:"sensors"`
+	Sentinel     *Sentinel              `yaml:"sentinel"`
+	CLI          *CLI                   `yaml:"cli"`
+	Web          *Web                   `yaml:"web"`
+	System       *System                `yaml:"system"`
+	Update       *Update                `yaml:"update"`
+	MQTT         map[string]MQTT        `yaml:"mqtt"`
 }
 
 // The cadence a sensor may be read at. The floor keeps a bus shared
@@ -380,7 +409,7 @@ func validateNames(f *File) error {
 		names []string
 	}{
 		{"relay", keysOf(f.Relays)}, {configAttrRadio, keysOf(f.Radios)},
-		{"station", keysOf(f.Stations)},
+		{"station", keysOf(f.Stations)}, {"application", keysOf(f.Applications)},
 		{"sensor", keysOf(f.Sensors)}, {"observer", keysOf(f.MQTT)},
 	} {
 		for _, name := range set.names {
@@ -480,6 +509,9 @@ func (f *File) Validate(requireRelays bool) error {
 	if err := validateStations(f); err != nil {
 		return err
 	}
+	if err := validateApplications(f); err != nil {
+		return err
+	}
 	if err := validateRadios(f.Radios); err != nil {
 		return err
 	}
@@ -549,6 +581,35 @@ func validateStations(f *File) error {
 			}
 			if s.TX.Mode == TXOnAirZeroHop {
 				return fmt.Errorf("station %q: tx mode %q belongs to relays — want dry, shadow or on-air",
+					name, TXOnAirZeroHop)
+			}
+		}
+	}
+	return nil
+}
+
+// validateApplications holds an application to its shape: a protocol
+// and a type, a declared radio when it names one, and an origination
+// gate without the forwarding rung — the same line stations draw.
+func validateApplications(f *File) error {
+	for name, a := range f.Applications {
+		if a.Protocol == "" {
+			return fmt.Errorf("application %q: protocol is required", name)
+		}
+		if a.Type == "" {
+			return fmt.Errorf("application %q: type is required", name)
+		}
+		if a.Radio != "" {
+			if _, ok := f.Radios[a.Radio]; !ok {
+				return fmt.Errorf("application %q: radio %q is not declared", name, a.Radio)
+			}
+		}
+		if a.TX != nil {
+			if err := a.TX.Normalize(); err != nil {
+				return fmt.Errorf("application %q: %w", name, err)
+			}
+			if a.TX.Mode == TXOnAirZeroHop {
+				return fmt.Errorf("application %q: tx mode %q belongs to relays — want dry, shadow or on-air",
 					name, TXOnAirZeroHop)
 			}
 		}

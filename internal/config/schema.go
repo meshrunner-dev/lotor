@@ -12,14 +12,32 @@ import (
 )
 
 const (
-	configAttrRadio  = "radio"
-	configAttrListen = "listen"
+	configAttrRadio    = "radio"
+	configAttrListen   = "listen"
+	configAttrProtocol = "protocol"
 )
+
+// txAttrs is the transmit gate every originating kind declares, once:
+// the mode enum is the kind's own — relays alone earn the zero-hop
+// rung — and the rest is shared to the word.
+func txAttrs(modes []string, modeDoc, cadDoc string) []schema.Attr {
+	return []schema.Attr{
+		{Name: "tx.mode", Type: schema.String, Enum: modes, Doc: modeDoc},
+		{Name: "tx.lbt_threshold_db", Type: schema.Float,
+			Doc: "margin above the noise floor that marks the channel busy (0 disables the RSSI stage)"},
+		{Name: "tx.lbt_exhausted", Type: schema.String,
+			Enum: []string{LBTTransmit, LBTDrop},
+			Doc:  "what a channel busy past the bounded wait earns"},
+		{Name: "tx.queue_depth", Type: schema.Int,
+			Doc: "outbound queue bound, 1..63 (0 takes 32)"},
+		{Name: "tx.cad", Type: schema.Bool, Doc: cadDoc},
+	}
+}
 
 // RelayAttrs describes a relay's own structure.
 func RelayAttrs() []schema.Attr {
-	return []schema.Attr{
-		{Name: "protocol", Type: schema.String,
+	return append([]schema.Attr{
+		{Name: configAttrProtocol, Type: schema.String,
 			Doc: "the protocol this relay speaks (chooses the rest of its attributes)"},
 		{Name: configAttrRadio, Type: schema.String,
 			Doc: "the radio this relay owns — one owner per radio"},
@@ -27,27 +45,17 @@ func RelayAttrs() []schema.Attr {
 			Doc: `the band preset; "custom" starts from nothing`},
 		{Name: "noise_history", Type: schema.Bool,
 			Doc: "archive this relay's noise floor (measurement always runs; this is the disk)"},
-		{Name: "tx.mode", Type: schema.String,
-			Enum: []string{TXDry, TXShadow, TXOnAirZeroHop, TXOnAir},
-			Doc:  "the transmit gate; absent block means dry, the receive-only posture"},
-		{Name: "tx.lbt_threshold_db", Type: schema.Float,
-			Doc: "margin above the noise floor that marks the channel busy (0 disables the RSSI stage)"},
-		{Name: "tx.lbt_exhausted", Type: schema.String,
-			Enum: []string{LBTTransmit, LBTDrop},
-			Doc:  "what a channel busy past the bounded wait earns"},
-		{Name: "tx.queue_depth", Type: schema.Int,
-			Doc: "outbound queue bound, 1..63 (0 takes 32)"},
-		{Name: "tx.cad", Type: schema.Bool,
-			Doc: "listen with the radio's own activity detection before keying " +
-				"(unset leaves it on — the reference ships it off)"},
-	}
+	}, txAttrs([]string{TXDry, TXShadow, TXOnAirZeroHop, TXOnAir},
+		"the transmit gate; absent block means dry, the receive-only posture",
+		"listen with the radio's own activity detection before keying "+
+			"(unset leaves it on — the reference ships it off)")...)
 }
 
 // StationAttrs describes a locally hosted station's structure. The protocol
 // contributes its identity, mailbox and desired waveform fields.
 func StationAttrs() []schema.Attr {
-	return []schema.Attr{
-		{Name: "protocol", Type: schema.String,
+	return append([]schema.Attr{
+		{Name: configAttrProtocol, Type: schema.String,
 			Doc: "the protocol this station speaks (chooses the rest of its attributes)"},
 		{Name: configAttrListen, Type: schema.String,
 			Doc: "the dedicated companion TCP listener; required and unique"},
@@ -55,19 +63,27 @@ func StationAttrs() []schema.Attr {
 			Doc: "optional radio attachment; empty keeps the station TCP-only"},
 		{Name: attrProfile, Type: schema.String,
 			Doc: `the station preset; "custom" starts from nothing`},
-		{Name: "tx.mode", Type: schema.String,
-			Enum: []string{TXDry, TXShadow, TXOnAir},
-			Doc:  "the station transmit gate; absent means dry"},
-		{Name: "tx.lbt_threshold_db", Type: schema.Float,
-			Doc: "margin above the noise floor that marks the channel busy (0 disables the RSSI stage)"},
-		{Name: "tx.lbt_exhausted", Type: schema.String,
-			Enum: []string{LBTTransmit, LBTDrop},
-			Doc:  "what a channel busy past the bounded wait earns"},
-		{Name: "tx.queue_depth", Type: schema.Int,
-			Doc: "outbound queue bound, 1..63 (0 takes 32)"},
-		{Name: "tx.cad", Type: schema.Bool,
-			Doc: "listen with the radio's activity detection before keying"},
-	}
+	}, txAttrs([]string{TXDry, TXShadow, TXOnAir},
+		"the station transmit gate; absent means dry",
+		"listen with the radio's activity detection before keying")...)
+}
+
+// ApplicationAttrs describes what every application declares, whatever
+// it serves: the mesh it speaks, what it does on it, an optional
+// radio, and its origination gate. The type contributes the rest.
+func ApplicationAttrs() []schema.Attr {
+	return append([]schema.Attr{
+		{Name: configAttrProtocol, Type: schema.String,
+			Doc: "the mesh protocol this application speaks"},
+		{Name: "type", Type: schema.String,
+			Doc: "what this application does on the mesh (chooses the rest of its attributes)"},
+		{Name: configAttrRadio, Type: schema.String,
+			Doc: "optional radio attachment; empty keeps the application off the air"},
+		{Name: attrProfile, Type: schema.String,
+			Doc: `the band preset; "custom" starts from nothing`},
+	}, txAttrs([]string{TXDry, TXShadow, TXOnAir},
+		"the origination gate; absent means dry",
+		"listen with the radio's activity detection before keying")...)
 }
 
 // attrProfile is the layering knob every layered kind carries.

@@ -30,6 +30,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"meshrunner.dev/lotor/internal/application"
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/cli"
 	"meshrunner.dev/lotor/internal/config"
@@ -44,6 +45,7 @@ import (
 	"meshrunner.dev/lotor/internal/update"
 	"meshrunner.dev/lotor/internal/web"
 
+	_ "meshrunner.dev/lotor/internal/application/meshcore/room"
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/mqtt"
@@ -602,6 +604,7 @@ func buildKinds() []schema.Kind {
 	kinds = append(kinds, []schema.Kind{
 		relayKind(),
 		stationKind(),
+		applicationKind(),
 		sensorKind(),
 		radioKind(),
 	}...)
@@ -632,6 +635,33 @@ func relayKind() schema.Kind {
 		Profiles: func(choice string) []string {
 			return profileNames(choice, protocol.Registered(), func(name string) map[string]map[string]any {
 				builder, err := protocol.Lookup(name)
+				if err != nil {
+					return nil
+				}
+				return builder.Presets
+			})
+		},
+	}
+}
+
+// applicationKind is the hosted identities that serve peers. The type
+// is the choice: it names the contributed attributes and the presets,
+// and declares the protocol it speaks — one word an operator types,
+// resolved against the registry.
+func applicationKind() schema.Kind {
+	return schema.Kind{
+		Name: confdb.KindApplication, Doc: "one hosted mesh identity serving peers over the air — a room server",
+		Attrs: choiceAttrs(config.ApplicationAttrs(), attrType, application.Registered()), ChoiceAttr: attrType,
+		Contributed: func(choice string) []schema.Attr {
+			builder, err := application.LookupType(choice)
+			if err != nil {
+				return nil
+			}
+			return builder.Schema
+		},
+		Profiles: func(choice string) []string {
+			return profileNames(choice, application.Registered(), func(name string) map[string]map[string]any {
+				builder, err := application.LookupType(name)
 				if err != nil {
 					return nil
 				}
@@ -774,27 +804,28 @@ func watchProbation(ctx context.Context, stateDir string, log *zap.Logger) {
 // live views and the mutation door, all of them the manager's.
 func consoleDeps(mgr *manager, b *bus.Bus, sen *sentinel.Sentinel) cli.Deps {
 	return cli.Deps{
-		Version:      version,
-		Revision:     buildInfo.ShortRevision(),
-		Started:      time.Now(),
-		Sessions:     cli.NewSessions(),
-		Bus:          b,
-		Sentinel:     sen,
-		Kinds:        mgr.kinds,
-		LiveRelays:   mgr.RelayInfos,
-		LiveStations: mgr.StationInfos,
-		LiveRadios:   mgr.RadioInfos,
-		LiveSensors:  mgr.SensorInfos,
-		LiveMQTTs:    mgr.MQTTInfos,
-		History:      mgr.History,
-		Log:          mgr.log,
-		LiveTraces:   mgr.Traces,
-		Layers:       mgr.Layers,
-		Mutate:       mgr.Mutate,
-		Undo:         mgr.Undo,
-		Create:       mgr.Create,
-		Remove:       mgr.Remove,
-		SystemName:   mgr.SystemName,
+		Version:          version,
+		Revision:         buildInfo.ShortRevision(),
+		Started:          time.Now(),
+		Sessions:         cli.NewSessions(),
+		Bus:              b,
+		Sentinel:         sen,
+		Kinds:            mgr.kinds,
+		LiveRelays:       mgr.RelayInfos,
+		LiveStations:     mgr.StationInfos,
+		LiveApplications: mgr.ApplicationInfos,
+		LiveRadios:       mgr.RadioInfos,
+		LiveSensors:      mgr.SensorInfos,
+		LiveMQTTs:        mgr.MQTTInfos,
+		History:          mgr.History,
+		Log:              mgr.log,
+		LiveTraces:       mgr.Traces,
+		Layers:           mgr.Layers,
+		Mutate:           mgr.Mutate,
+		Undo:             mgr.Undo,
+		Create:           mgr.Create,
+		Remove:           mgr.Remove,
+		SystemName:       mgr.SystemName,
 	}
 }
 
