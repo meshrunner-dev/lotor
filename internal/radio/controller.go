@@ -14,8 +14,10 @@ import (
 )
 
 // ConsumerRole is the authority class of one logical user of a physical
-// radio. A relay is singular and authoritative; stations are never allowed to
-// retune it while that relay exists.
+// radio. A relay is singular and authoritative; stations and applications
+// are one class beneath it — never allowed to retune the radio while a
+// relay exists, served round-robin, their inboxes bounded — and differ
+// only in what they are for.
 type ConsumerRole string
 
 const (
@@ -23,7 +25,13 @@ const (
 	RoleRelay ConsumerRole = "relay"
 	// RoleStation is a non-forwarding companion identity.
 	RoleStation ConsumerRole = "station"
+	// RoleApplication is a non-forwarding identity that serves peers
+	// over the air — a room server.
+	RoleApplication ConsumerRole = "application"
 )
+
+// consumer reports whether a role belongs to the non-authoritative class.
+func (r ConsumerRole) consumer() bool { return r == RoleStation || r == RoleApplication }
 
 // ControllerState is the physical attachment lifecycle.
 type ControllerState string
@@ -134,7 +142,7 @@ func (c *Controller) Bind(name string, role ConsumerRole, waveform Waveform) (*B
 	if name == "" {
 		return nil, errors.New("radio binding needs a name")
 	}
-	if role != RoleRelay && role != RoleStation {
+	if role != RoleRelay && !role.consumer() {
 		return nil, fmt.Errorf("unknown radio consumer role %q", role)
 	}
 	if err := c.validateWaveform(waveform); err != nil {
@@ -634,9 +642,9 @@ func (c *Controller) broadcastExcept(ctx context.Context, skip *controllerPort, 
 			return
 		}
 		accepted, depth := port.deliver(result)
-		if !accepted && port.binding.role == RoleStation && depth >= stationReceiveQueueDepth {
-			c.log.Warn("station receive queue full, dropping frame",
-				zap.String("station", port.binding.name))
+		if !accepted && port.binding.role.consumer() && depth >= stationReceiveQueueDepth {
+			c.log.Warn("consumer receive queue full, dropping frame",
+				zap.String(string(port.binding.role), port.binding.name))
 		}
 		if accepted && port.binding.role == RoleRelay && depth >= relayReceiveQueueWarning &&
 			depth&(depth-1) == 0 {
@@ -739,7 +747,7 @@ func (c *Controller) nextOperation() *radioOperation {
 func (c *Controller) rebuildRROrderLocked() {
 	order := make([]string, 0, len(c.stationQueues))
 	for key := range c.stationQueues {
-		if binding := c.bindings[key]; binding != nil && binding.role == RoleStation {
+		if binding := c.bindings[key]; binding != nil && binding.role.consumer() {
 			order = append(order, key)
 		}
 	}
@@ -926,7 +934,7 @@ func (p *controllerPort) deliver(result receiveResult) (accepted bool, depth int
 	if p.stop != nil {
 		return false, -1
 	}
-	if p.binding.role == RoleStation && len(p.queue) >= stationReceiveQueueDepth {
+	if p.binding.role.consumer() && len(p.queue) >= stationReceiveQueueDepth {
 		return false, len(p.queue)
 	}
 	p.queue = append(p.queue, result)

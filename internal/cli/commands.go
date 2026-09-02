@@ -145,6 +145,64 @@ func (s *session) stationStatus(name string) error {
 	return fmt.Errorf("no station %q", name)
 }
 
+func (s *session) applicationList() error {
+	if len(s.applications()) == 0 {
+		fmt.Fprint(s.out, "no applications configured\r\n")
+		return nil
+	}
+	tb := s.table()
+	tb.header("NAME", "TYPE", "PROTOCOL", "STATE", "RF", "RADIO")
+	for _, a := range s.applications() {
+		radioName := a.Radio
+		if radioName == "" {
+			radioName = noneText
+		}
+		tb.row(a.Name, a.Type, a.Protocol, a.State, a.RF, radioName)
+	}
+	return tb.flush(s.out)
+}
+
+func (s *session) applicationStatus(name string) error {
+	for _, a := range s.applications() {
+		if a.Name != name {
+			continue
+		}
+		tb := s.table()
+		tb.row("state", a.State)
+		if a.Cause != "" {
+			tb.row("cause", a.Cause)
+		}
+		tb.row("type", a.Type)
+		tb.row("protocol", a.Protocol)
+		if a.Identity != "" {
+			tb.row("identity", a.Identity[:min(12, len(a.Identity))])
+		}
+		rf := a.RF
+		if a.Radio != "" {
+			rf += " — " + a.Radio
+		}
+		tb.row("rf", rf)
+		if a.RFCause != "" {
+			tb.row("rf cause", a.RFCause)
+		}
+		tb.row("waveform", fmt.Sprintf("%.3f MHz  sf%d  bw %d  cr 4/%d  preamble %d  sync 0x%02x  crc %v",
+			float64(a.Waveform.FrequencyHz)/1e6, a.Waveform.SpreadingFactor,
+			a.Waveform.BandwidthHz, a.Waveform.CodingRate, a.Waveform.Preamble,
+			a.Waveform.SyncWord, a.Waveform.CRC))
+		// The type's own line, in the order it chose to be read.
+		keys := make([]string, 0, len(a.Summary))
+		for k := range a.Summary {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			tb.row(k, a.Summary[k])
+		}
+		return tb.flush(s.out)
+	}
+	return fmt.Errorf("no application %q", name)
+}
+
 // relayStatus is one relay as it is running — what print does not
 // show, because print answers about the configuration.
 func (s *session) relayStatus(ctx context.Context, in input) error {
@@ -264,8 +322,8 @@ func (s *session) radioList() error {
 			authority = "unclaimed"
 		}
 		stations := noneText
-		if len(r.Stations) > 0 {
-			stations = strings.Join(r.Stations, ", ")
+		if others := append(append([]string(nil), r.Stations...), r.Applications...); len(others) > 0 {
+			stations = strings.Join(others, ", ")
 		}
 		tb.row(r.Name, r.Driver, envelopeText(r.Envelope), authority, stations)
 	}
@@ -367,6 +425,11 @@ func (s *session) radioStatus(_ context.Context, in input) error {
 			stations = strings.Join(r.Stations, ", ")
 		}
 		tb.row("stations", stations)
+		applications := noneText
+		if len(r.Applications) > 0 {
+			applications = strings.Join(r.Applications, ", ")
+		}
+		tb.row("applications", applications)
 		return tb.flush(s.out)
 	}
 	return fmt.Errorf("no radio %q", name)

@@ -12,6 +12,9 @@ const (
 	SourceRelay = "relay"
 	// SourceStation identifies a non-forwarding virtual companion.
 	SourceStation = "station"
+	// SourceApplication identifies a hosted identity serving peers over
+	// the air — a room server — which originates but never forwards.
+	SourceApplication = "application"
 )
 
 // ArchiveSourceKey gives heterogeneous traffic producers disjoint durable

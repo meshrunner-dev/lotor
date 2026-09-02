@@ -37,6 +37,7 @@ import (
 const (
 	scopeRelay   = "relay"
 	scopeStation = "station"
+	scopeApp     = "application"
 	scopeRadio   = "radio"
 	scopeSensor  = "sensor"
 	scopeMQTT    = "mqtt"
@@ -238,6 +239,16 @@ type StationInfo struct {
 	Identity                      string
 }
 
+// ApplicationInfo is one hosted identity serving peers over the air.
+// Summary is the type's own status line, keyed by the words it prints.
+type ApplicationInfo struct {
+	Name, Protocol, Type, Radio string
+	State, Cause, RF, RFCause   string
+	Waveform                    radio.Waveform
+	Identity                    string
+	Summary                     map[string]string
+}
+
 // HistoryQuery is one history print's answer to "which slice": the
 // same vocabulary frames speaks — a count, window edges, or a
 // revision to centre on.
@@ -305,6 +316,7 @@ type RadioInfo struct {
 	Envelope     radio.Envelope
 	Relay        string
 	Stations     []string
+	Applications []string
 	Authority    string
 	State, Cause string
 }
@@ -334,14 +346,15 @@ type Deps struct {
 	Version string
 	// Revision is the build's short commit, beside Version on the
 	// status row — empty when the build carries none.
-	Revision string
-	Started  time.Time
-	Relays   []RelayInfo
-	Stations []StationInfo
-	Radios   []RadioInfo
-	Sensors  []SensorInfo
-	Sentinel *sentinel.Sentinel
-	Bus      *bus.Bus
+	Revision     string
+	Started      time.Time
+	Relays       []RelayInfo
+	Stations     []StationInfo
+	Applications []ApplicationInfo
+	Radios       []RadioInfo
+	Sensors      []SensorInfo
+	Sentinel     *sentinel.Sentinel
+	Bus          *bus.Bus
 	// Privilege is the session's rights, set per listener by the
 	// transport; empty reads as ReadOnly.
 	Privilege Privilege
@@ -356,9 +369,10 @@ type Deps struct {
 	// under a running session: they always name the current engine,
 	// where the plain fields above froze at startup. Optional — tests
 	// and static deployments use the fields.
-	LiveRelays   func() []RelayInfo
-	LiveStations func() []StationInfo
-	LiveRadios   func() []RadioInfo
+	LiveRelays       func() []RelayInfo
+	LiveStations     func() []StationInfo
+	LiveApplications func() []ApplicationInfo
+	LiveRadios       func() []RadioInfo
 	// LiveSensors lists the configured parts as the daemon holds them.
 	LiveSensors func() []SensorInfo
 	// History reads the configuration's revision journal, newest

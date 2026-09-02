@@ -37,16 +37,19 @@ const Memory = ":memory:"
 // named instances; the sentinel and the CLI are singletons stored
 // under an empty name.
 const (
-	KindRadio    = "radio"
-	KindRelay    = "relay"
-	KindStation  = "station"
-	KindSensor   = "sensor"
-	KindSentinel = "sentinel"
-	KindCLI      = "cli"
-	KindSystem   = "system"
-	KindUpdate   = "update"
-	KindWeb      = "web"
-	KindMQTT     = "mqtt"
+	KindRadio   = "radio"
+	KindRelay   = "relay"
+	KindStation = "station"
+	// KindApplication is a hosted mesh identity serving peers — a room
+	// server and its kin. Named instances, like stations.
+	KindApplication = "application"
+	KindSensor      = "sensor"
+	KindSentinel    = "sentinel"
+	KindCLI         = "cli"
+	KindSystem      = "system"
+	KindUpdate      = "update"
+	KindWeb         = "web"
+	KindMQTT        = "mqtt"
 )
 
 const schemaDDL = `
@@ -290,46 +293,35 @@ func (s *Store) Load(ctx context.Context) (*config.File, error) {
 func assign(f *config.File, kind, name string, attrs []byte) error {
 	switch kind {
 	case KindRadio:
-		r, err := fromAttrs[config.Radio](attrs)
-		if err != nil {
-			return err
-		}
-		f.Radios[name] = r
+		return assignInstance(&f.Radios, name, attrs)
 	case KindRelay:
-		r, err := fromAttrs[config.Relay](attrs)
-		if err != nil {
-			return err
-		}
-		f.Relays[name] = r
+		return assignInstance(&f.Relays, name, attrs)
 	case KindStation:
-		s, err := fromAttrs[config.Station](attrs)
-		if err != nil {
-			return err
-		}
-		if f.Stations == nil {
-			f.Stations = map[string]config.Station{}
-		}
-		f.Stations[name] = s
+		return assignInstance(&f.Stations, name, attrs)
+	case KindApplication:
+		return assignInstance(&f.Applications, name, attrs)
 	case KindSensor:
-		s, err := fromAttrs[config.Sensor](attrs)
-		if err != nil {
-			return err
-		}
-		f.Sensors[name] = s
+		return assignInstance(&f.Sensors, name, attrs)
+	case KindMQTT:
+		return assignInstance(&f.MQTT, name, attrs)
 	case KindSentinel, KindCLI, KindSystem, KindUpdate, KindWeb:
 		return assignSingleton(f, kind, attrs)
-	case KindMQTT:
-		mq, err := fromAttrs[config.MQTT](attrs)
-		if err != nil {
-			return err
-		}
-		if f.MQTT == nil {
-			f.MQTT = map[string]config.MQTT{}
-		}
-		f.MQTT[name] = mq
 	default:
 		return fmt.Errorf("unknown object kind %q", kind)
 	}
+}
+
+// assignInstance decodes one named object into its map, making the map
+// when the file was loaded without any of that kind.
+func assignInstance[T any](into *map[string]T, name string, attrs []byte) error {
+	v, err := fromAttrs[T](attrs)
+	if err != nil {
+		return err
+	}
+	if *into == nil {
+		*into = map[string]T{}
+	}
+	(*into)[name] = v
 	return nil
 }
 
@@ -434,6 +426,9 @@ func fileObjects(f *config.File) []importObject {
 	}
 	for name, s := range f.Stations {
 		objects = append(objects, importObject{KindStation, name, s})
+	}
+	for name, a := range f.Applications {
+		objects = append(objects, importObject{KindApplication, name, a})
 	}
 	for name, sn := range f.Sensors {
 		objects = append(objects, importObject{KindSensor, name, sn})
