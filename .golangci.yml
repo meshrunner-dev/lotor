@@ -61,6 +61,10 @@ linters:
           files:
             - "**/internal/protocol/meshcore/*.go"
             - "**/internal/station/meshcore/*.go"
+            - "**/internal/application/**/*.go"
+            - "**/internal/meshcorehost/*.go"
+            - "**/internal/meshcorecfg/*.go"
+            - "**/internal/origin/*.go"
             - "!$test"
           deny:
             - pkg: encoding/binary

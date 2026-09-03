@@ -11,6 +11,7 @@ import (
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/correlation"
+	"meshrunner.dev/lotor/internal/meshcorehost"
 	"meshrunner.dev/lotor/internal/origin"
 	"meshrunner.dev/lotor/internal/radio"
 
@@ -38,6 +39,9 @@ func benchRoom(t *testing.T, store *confdb.Store) *service {
 	if !ok {
 		t.Fatalf("build returned a %T", svc)
 	}
+	// The bench logs in as many strangers as a test needs; the budget
+	// that bounds them on the air has a test of its own.
+	room.strangers.Max = 1 << 16
 	return room
 }
 
@@ -381,14 +385,14 @@ func TestAFullRoomUnseatsTheIdlestMemberNeverAnAdmin(t *testing.T) {
 	svc := benchRoom(t, nil)
 	admin := newClient(t, svc)
 	login(t, svc, admin, "sesame", 0)
-	members := make([]client, 0, maxClients)
-	for i := 1; i < maxClients; i++ {
+	members := make([]client, 0, defaultMembers)
+	for i := 1; i < defaultMembers; i++ {
 		c := newClient(t, svc)
 		members = append(members, c)
 		login(t, svc, c, "welcome", 0)
 		svc.mu.Lock()
 		// Older members spoke earlier: the first one is the idlest.
-		svc.table.Get(c.id.PubKey[:]).LastActive = time.Now().Add(-time.Duration(maxClients-i) * time.Minute)
+		svc.table.Get(c.id.PubKey[:]).LastActive = time.Now().Add(-time.Duration(defaultMembers-i) * time.Minute)
 		svc.mu.Unlock()
 	}
 	svc.mu.Lock()
@@ -406,7 +410,7 @@ func TestAFullRoomUnseatsTheIdlestMemberNeverAnAdmin(t *testing.T) {
 	if svc.table.Get(members[0].id.PubKey[:]) != nil {
 		t.Fatal("the idlest member kept its place")
 	}
-	if svc.table.Get(newcomer.id.PubKey[:]) == nil || len(svc.table.By) != maxClients {
+	if svc.table.Get(newcomer.id.PubKey[:]) == nil || len(svc.table.By) != defaultMembers {
 		t.Fatalf("table = %d entries, newcomer present %v", len(svc.table.By), svc.table.Get(newcomer.id.PubKey[:]) != nil)
 	}
 	if _, remembered := svc.members[members[0].id.PubKey]; remembered {
@@ -519,5 +523,120 @@ func TestAPushTurnBeforeItsTimeDoesNothing(t *testing.T) {
 	}
 	if pushed := emissionPacket(queued(t, svc)); pushed.PayloadType() != mesh.PayloadTypeTxtMsg {
 		t.Fatalf("the turns on time pushed a %v", pushed.PayloadType())
+	}
+}
+
+// A stranger's login is budgeted before the key agreement it costs; a
+// member the room knows is never charged, so a whole room reconnecting
+// after a restart is served while a flood of fresh keys is not.
+func TestStrangersAreBudgetedAndMembersAreNot(t *testing.T) {
+	svc := benchRoom(t, nil)
+	svc.strangers = meshcorehost.RateLimiter{Max: 2, Window: time.Minute}
+	alice, bob, carol := newClient(t, svc), newClient(t, svc), newClient(t, svc)
+	login(t, svc, alice, "welcome", 0)
+	login(t, svc, bob, "welcome", 0)
+	ts := uint32(time.Now().Add(-10 * time.Second).Unix())
+	pkt, _, err := mesh.BuildRoomLoginReq(carol.id, svc.id.PubKey[:], ts, 0, "welcome")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hear(t, svc, pkt)
+	nothingQueued(t, svc)
+	svc.mu.Lock()
+	limited, known := svc.limited, svc.table.Get(carol.id.PubKey[:]) != nil
+	svc.mu.Unlock()
+	if limited != 1 || known {
+		t.Fatalf("a third stranger: limited %d, admitted %v", limited, known)
+	}
+	// Alice is known: her re-login is not charged to the exhausted budget.
+	if lr, _ := mesh.ParseLoginReply(openReply(t, alice, login(t, svc, alice, "", 0))); lr.Result != mesh.LoginOK {
+		t.Fatalf("a known member was refused: %+v", lr)
+	}
+}
+
+// A guest — a word that opened no named door — takes a free seat or
+// another guest's, never a member's: a stranger holding nothing cannot
+// empty the room, while members fill it the reference's way.
+func TestAGuestUnseatsNoMember(t *testing.T) {
+	svc := benchRoom(t, nil)
+	svc.mu.Lock()
+	svc.table = meshcorehost.NewTable(nil, 3)
+	svc.table.Spare = roomSpare
+	svc.mu.Unlock()
+	member1, member2, guest1 := newClient(t, svc), newClient(t, svc), newClient(t, svc)
+	login(t, svc, member1, "welcome", 0)
+	login(t, svc, member2, "welcome", 0)
+	login(t, svc, guest1, "anything", 0)
+	// Full: a second guest may take the first guest's seat, never a member's.
+	guest2 := newClient(t, svc)
+	if lr, _ := mesh.ParseLoginReply(openReply(t, guest2, login(t, svc, guest2, "whatever", 0))); lr.Result != mesh.LoginOK {
+		t.Fatalf("a guest could not replace a guest: %+v", lr)
+	}
+	svc.mu.Lock()
+	swapped := svc.table.Get(guest1.id.PubKey[:]) == nil && svc.table.Get(guest2.id.PubKey[:]) != nil
+	members := svc.table.Get(member1.id.PubKey[:]) != nil && svc.table.Get(member2.id.PubKey[:]) != nil
+	svc.mu.Unlock()
+	if !swapped || !members {
+		t.Fatalf("guest swap %v, members intact %v", swapped, members)
+	}
+	// Now every seat is a member's — the guest, idlest, gives way to a
+	// third member — and a guest is refused where a member was seated.
+	member3 := newClient(t, svc)
+	svc.mu.Lock()
+	svc.table.Get(guest2.id.PubKey[:]).LastActive = time.Now().Add(-time.Hour)
+	svc.mu.Unlock()
+	login(t, svc, member3, "welcome", 0)
+	guest3 := newClient(t, svc)
+	ts := uint32(time.Now().Add(-10 * time.Second).Unix())
+	pkt, _, _ := mesh.BuildRoomLoginReq(guest3.id, svc.id.PubKey[:], ts, 0, "nothing")
+	hear(t, svc, pkt)
+	nothingQueued(t, svc)
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	if svc.table.Get(guest3.id.PubKey[:]) != nil || len(svc.table.By) != 3 {
+		t.Fatal("a guest unseated a member from a full room")
+	}
+}
+
+// persist_history: false is the reference's RAM ring: nothing of the
+// room's history reaches the store — posts or cursors — and nothing is
+// read back, whatever the store holds.
+func TestARoomThatDoesNotPersistWritesAndReadsNothing(t *testing.T) {
+	ctx := context.Background()
+	store, err := confdb.Open(ctx, confdb.Memory, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A persisted room leaves history behind...
+	persisted := benchRoom(t, store)
+	alice := newClient(t, persisted)
+	login(t, persisted, alice, "welcome", 0)
+	sendPost(t, persisted, alice, "kept", time.Now())
+	if rows, _ := store.LoadRoomPosts(ctx, "lobby"); len(rows) != 1 {
+		t.Fatalf("the persisted room stored %d posts", len(rows))
+	}
+	// ...that a RAM-only room over the same store neither reads nor adds to.
+	cfg := baseConfig()
+	cfg["admin_password"], cfg["guest_password"] = "sesame", "welcome"
+	cfg["advert_local_interval"], cfg["advert_flood_interval"] = "0s", "0s"
+	cfg["persist_history"] = false
+	built, err := build(application.Spec{Name: "lobby", Protocol: "meshcore", Type: "meshcore-room",
+		Config: cfg, TX: application.TXPolicy{Mode: config.TXShadow, QueueDepth: 8}, Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ram, _ := built.(*service)
+	ram.strangers.Max = 1 << 16
+	if len(ram.posts) != 0 {
+		t.Fatalf("a RAM-only room read %d posts back", len(ram.posts))
+	}
+	bob := newClient(t, ram)
+	login(t, ram, bob, "welcome", 4242)
+	sendPost(t, ram, bob, "ephemeral", time.Now())
+	ram.flushCursors(ctx)
+	rows, _ := store.LoadRoomPosts(ctx, "lobby")
+	cursors, _ := store.LoadRoomCursors(ctx, "lobby")
+	if len(rows) != 1 || len(cursors) != 0 {
+		t.Fatalf("the RAM-only room wrote: posts %d (want the persisted room's 1), cursors %d", len(rows), len(cursors))
 	}
 }

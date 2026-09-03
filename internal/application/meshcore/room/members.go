@@ -27,7 +27,6 @@ import (
 
 const (
 	// The reference room server's constants, by name.
-	maxClients          = 20
 	maxPostText         = 151
 	serverResponseDelay = 300 * time.Millisecond
 	textAckDelay        = 200 * time.Millisecond
@@ -126,6 +125,16 @@ func (s *service) doors(word string) (byte, bool) {
 // reference's 13 bytes the way the question came — a path return when
 // it flooded, so the client learns the way here.
 func (s *service) handleLogin(ctx context.Context, pkt *mesh.Packet, corr correlation.ID) {
+	// A stranger pays for the key agreement out of a budget; a member
+	// the room knows never does. Judged before the ECDH, on the key
+	// the envelope carries in the clear, so a refused attempt costs
+	// the reception and nothing more.
+	if sender, ok := meshcorehost.AnonSender(s.id, pkt.Payload); !ok {
+		return
+	} else if !s.admitStranger(sender) {
+		s.log.Debug("login rate-limited: unknown key", zap.String("corr", corr.Short()))
+		return
+	}
 	a, _, ok := meshcorehost.OpenAnon(s.id, pkt.Payload)
 	if !ok {
 		return
@@ -182,6 +191,21 @@ func (s *service) handleLogin(ctx context.Context, pkt *mesh.Packet, corr correl
 	s.replyLocked(ctx, pkt, meshcorehost.Answer{
 		DestHash: c.PubKey[:mesh.PathHashSize], Secret: c.Secret, Tag: clock, Body: rest, Out: c.Out,
 	}, "login-resp", corr)
+}
+
+// admitStranger charges a login from a key the room does not know to
+// the strangers' budget, and reports whether it may proceed.
+func (s *service) admitStranger(sender []byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.table.Get(sender) != nil {
+		return true
+	}
+	if s.strangers.Allow(time.Now()) {
+		return true
+	}
+	s.limited++
+	return false
 }
 
 // evictedLocked lets go of the room's own memory of a member the table

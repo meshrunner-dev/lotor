@@ -90,9 +90,11 @@ func (s *service) storePostLocked(ctx context.Context, author [mesh.PubKeySize]b
 }
 
 // loadHistory restores what the store holds: the posts, newest ring
-// deep, and every member's cursor.
+// deep, and every member's cursor. A room that does not persist its
+// history reads none back — the RAM ring the reference runs, and the
+// cursors reseed themselves from what each member offers at login.
 func (s *service) loadHistory(ctx context.Context) error {
-	if s.store == nil {
+	if s.store == nil || !s.p.PersistHistory {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, storeWait)
@@ -123,8 +125,10 @@ func (s *service) loadHistory(ctx context.Context) error {
 
 // flushCursors writes the cursors that moved since the last flush —
 // the reference's lazy five seconds, so an ACK never costs an fsync.
+// Nothing is written when history does not persist: the flag is the
+// operator's word that this room touches the disk for nothing.
 func (s *service) flushCursors(ctx context.Context) {
-	if s.store == nil {
+	if s.store == nil || !s.p.PersistHistory {
 		return
 	}
 	s.mu.Lock()

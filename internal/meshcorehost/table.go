@@ -170,13 +170,15 @@ type Table struct {
 	// the owner walks it — for expiry, for delivery — and a wrapper per
 	// walk would only hide that the walk happens on the owner's turn.
 	By map[[meshcore.PubKeySize]byte]*Client
-	// Protect names the entries a full table never evicts to admit a
-	// newcomer. The reference's shared putClient spares admins alone;
-	// this daemon's repeater spares every access entry, because a run
-	// of fresh guest logins must not unseat an authorised principal,
-	// while a room — whose members are mostly read-write — keeps the
-	// reference's rule. Nil spares access entries.
-	Protect  func(*Client) bool
+	// Spare says whether a seated entry is safe from a given newcomer
+	// when the table is full. The reference's shared putClient spares
+	// admins alone; this daemon's repeater spares every access entry,
+	// because a run of fresh guest logins must not unseat an
+	// authorised principal; a room spares admins from everyone and
+	// members from guests, so those who hold its word fill it the
+	// reference's way while a stranger holding nothing cannot empty
+	// it. Nil spares access entries from everyone.
+	Spare    func(newcomer, seated *Client) bool
 	store    SessionStore // nil keeps the table in memory only
 	capacity int
 }
@@ -187,12 +189,12 @@ func NewTable(store SessionStore, capacity int) *Table {
 	return &Table{By: map[[meshcore.PubKeySize]byte]*Client{}, store: store, capacity: capacity}
 }
 
-// protected says whether an entry outranks a login under the policy.
-func (t *Table) protected(c *Client) bool {
-	if t.Protect != nil {
-		return t.Protect(c)
+// spared says whether a seated entry outranks this newcomer.
+func (t *Table) spared(newcomer, seated *Client) bool {
+	if t.Spare != nil {
+		return t.Spare(newcomer, seated)
 	}
-	return c.HasAccess()
+	return seated.HasAccess()
 }
 
 // SetStore installs the persistence door after construction — what an
@@ -300,7 +302,7 @@ func (t *Table) PutEvicting(c *Client) (victim [meshcore.PubKeySize]byte, evicti
 	old, known := t.By[c.PubKey]
 	if !known {
 		var room bool
-		if victim, evicting, room = t.Evictable(); !room {
+		if victim, evicting, room = t.Evictable(c); !room {
 			return victim, false, ErrSessionsFull
 		}
 	}
@@ -326,17 +328,17 @@ func (t *Table) PutEvicting(c *Client) (victim [meshcore.PubKeySize]byte, evicti
 	return victim, evicting, nil
 }
 
-// Evictable names the session that would make room for a new one:
-// the least recently active entry the policy does not protect. room
-// is false when the table is full and every place is protected.
-// evicting is false when there was a free place to begin with.
-func (t *Table) Evictable() (victim [meshcore.PubKeySize]byte, evicting, room bool) {
+// Evictable names the session that would make room for newcomer: the
+// least recently active entry the policy does not spare from it. room
+// is false when the table is full and every place is spared. evicting
+// is false when there was a free place to begin with.
+func (t *Table) Evictable(newcomer *Client) (victim [meshcore.PubKeySize]byte, evicting, room bool) {
 	if len(t.By) < t.capacity {
 		return victim, false, true
 	}
 	var when time.Time
 	for k, v := range t.By {
-		if t.protected(v) {
+		if t.spared(newcomer, v) {
 			continue
 		}
 		if !room || v.LastActive.Before(when) {

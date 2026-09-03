@@ -39,6 +39,18 @@ func OpenAnon(id *meshcore.LocalIdentity, payload []byte) (a Anon, short, ok boo
 	return Anon{Sender: d.SenderPub, Secret: secret, Plain: plain}, false, true
 }
 
+// AnonSender names who asked, from the envelope alone — the sender's
+// key travels in the clear — and whether the request is addressed to
+// id at all. It costs a parse and nothing else, which is what a budget
+// consulted before the key agreement needs to know.
+func AnonSender(id *meshcore.LocalIdentity, payload []byte) ([]byte, bool) {
+	d, err := meshcore.ParseAnonDatagram(payload)
+	if err != nil || id == nil || d.DestHash[0] != id.PubKey[0] {
+		return nil, false
+	}
+	return d.SenderPub, true
+}
+
 // OpenSession finds the live session that sent a datagram addressed to
 // id and returns its decrypted content. The source hash narrows the
 // candidates; the MAC decides. Nil when the datagram is not ours, or

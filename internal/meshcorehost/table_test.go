@@ -127,7 +127,7 @@ func TestTheTablePersistsAccessAndForgetsGuests(t *testing.T) {
 	}
 	// Full of one guest and one admin: a newcomer evicts the guest,
 	// never the admin.
-	victim, evicting, room := tb.Evictable()
+	victim, evicting, room := tb.Evictable(&Client{PubKey: key(0x03)})
 	if !room || !evicting || victim != guest.PubKey {
 		t.Fatalf("evictable = %x %v %v", victim[:2], evicting, room)
 	}
@@ -224,7 +224,7 @@ func TestGrantRemovesOnGuestAndPromotesDurably(t *testing.T) {
 func TestTheOwnerChoosesWhomAFullTableSpares(t *testing.T) {
 	store := newMemStore()
 	tb := NewTable(store, 3)
-	tb.Protect = (*Client).IsAdmin // the reference's shared putClient: admins alone
+	tb.Spare = func(_, seated *Client) bool { return seated.IsAdmin() } // the reference's shared putClient: admins alone
 	now := time.Now()
 	admin := &Client{PubKey: key(0x01), Perms: meshcore.PermAdmin, LastActive: now.Add(-time.Hour)}
 	old := &Client{PubKey: key(0x02), Perms: meshcore.PermReadWrite, LastActive: now.Add(-time.Hour)}
@@ -246,7 +246,7 @@ func TestTheOwnerChoosesWhomAFullTableSpares(t *testing.T) {
 		t.Error("an evicted member's row survived in the store")
 	}
 	// Under the repeater's rule the same table has no room at all.
-	tb.Protect = nil
+	tb.Spare = nil
 	if _, _, err := tb.PutEvicting(&Client{PubKey: key(0x05)}); !errors.Is(err, ErrSessionsFull) {
 		t.Errorf("a table of access entries made room: %v", err)
 	}
@@ -273,4 +273,48 @@ func TestSeenForgetsTheOldestFirst(t *testing.T) {
 	if seen.Witness(hash(1)) {
 		t.Error("the oldest hash survived a full turn of the ring")
 	}
+}
+
+func TestARoomSparesMembersFromGuestsAndAdminsFromEveryone(t *testing.T) {
+	tb := NewTable(nil, 3)
+	tb.Spare = roomSpare
+	now := time.Now()
+	admin := &Client{PubKey: key(0x01), Perms: meshcore.PermAdmin, LastActive: now.Add(-3 * time.Hour)}
+	member := &Client{PubKey: key(0x02), Perms: meshcore.PermReadWrite, LastActive: now.Add(-2 * time.Hour)}
+	guest := &Client{PubKey: key(0x03), Perms: meshcore.PermGuest, LastActive: now.Add(-time.Hour)}
+	for _, c := range []*Client{admin, member, guest} {
+		if err := tb.Put(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A guest newcomer may only take the guest's seat, though the member is idler.
+	victim, evicting, room := tb.Evictable(&Client{PubKey: key(0x04)})
+	if !room || !evicting || victim != guest.PubKey {
+		t.Fatalf("guest newcomer: victim %x, %v %v", victim[:2], evicting, room)
+	}
+	// A member newcomer takes the idlest non-admin — the member.
+	victim, evicting, room = tb.Evictable(&Client{PubKey: key(0x05), Perms: meshcore.PermReadWrite})
+	if !room || !evicting || victim != member.PubKey {
+		t.Fatalf("member newcomer: victim %x, %v %v", victim[:2], evicting, room)
+	}
+	// A room of members alone has no seat for a guest, and one for a member.
+	tb = NewTable(nil, 3)
+	tb.Spare = roomSpare
+	for i, perms := range []byte{meshcore.PermAdmin, meshcore.PermReadWrite, meshcore.PermReadWrite} {
+		if err := tb.Put(&Client{PubKey: key(byte(0x10 + i)), Perms: perms, LastActive: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, room := tb.Evictable(&Client{PubKey: key(0x07)}); room {
+		t.Error("a guest found a seat in a room full of members")
+	}
+	if _, _, room := tb.Evictable(&Client{PubKey: key(0x08), Perms: meshcore.PermReadWrite}); !room {
+		t.Error("a member found no seat in a room of members")
+	}
+}
+
+// roomSpare is the room's policy, as its tests state it: admins are
+// spared from everyone, members from guests.
+func roomSpare(newcomer, seated *Client) bool {
+	return seated.IsAdmin() || (!newcomer.HasAccess() && seated.HasAccess())
 }

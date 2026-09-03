@@ -47,8 +47,17 @@ const (
 	defaultLocalAdvert = 2 * time.Minute
 	defaultHistory     = 32
 	maxHistory         = 4096
-	maxNodeName        = 31
-	maxPassword        = 15
+	defaultMembers     = 20
+	maxMembers         = 1000
+	// The budget for logins from keys the room has never seen: the
+	// key agreement they cost happens on the RF goroutine, and a
+	// stranger who cannot log in should not be able to keep it busy.
+	// Members the room knows are never charged — a whole room
+	// reconnecting after a restart is the normal case, not the attack.
+	strangerLoginMax    = 8
+	strangerLoginWindow = time.Minute
+	maxNodeName         = 31
+	maxPassword         = 15
 
 	rfRetry = 5 * time.Second
 
@@ -96,6 +105,8 @@ func roomSchema() []schema.Attr {
 			Doc: "how often the room adverts zero-hop (0 = never; the reference's 2m)"},
 		schema.Attr{Name: "history", Type: schema.Int,
 			Doc: "posts kept, oldest overwritten first (0 takes the reference's 32)"},
+		schema.Attr{Name: "max_members", Type: schema.Int,
+			Doc: "members the room seats before the least active non-admin gives way (0 takes the reference's 20)"},
 		schema.Attr{Name: "persist_history", Type: schema.Bool,
 			Doc: "keep the posts across a restart; false is the reference's RAM ring"},
 	)
@@ -117,6 +128,7 @@ type params struct {
 	LocalAdvert    time.Duration `yaml:"advert_local_interval"`
 	History        int           `yaml:"history"`
 	PersistHistory bool          `yaml:"persist_history"`
+	MaxMembers     int           `yaml:"max_members"`
 }
 
 // resolve decodes and judges the contributed configuration. Absent
@@ -137,6 +149,9 @@ func resolve(cfg map[string]any) (params, *mesh.LocalIdentity, error) {
 	}
 	if p.History == 0 {
 		p.History = defaultHistory
+	}
+	if p.MaxMembers == 0 {
+		p.MaxMembers = defaultMembers
 	}
 	if err := validateAir(p); err != nil {
 		return p, nil, err
@@ -195,6 +210,9 @@ func validateRoom(p params) error {
 	if p.History < 0 || p.History > maxHistory {
 		return fmt.Errorf("meshcore room params: history %d — want 1..%d", p.History, maxHistory)
 	}
+	if p.MaxMembers < 0 || p.MaxMembers > maxMembers {
+		return fmt.Errorf("meshcore room params: max_members %d — want 1..%d", p.MaxMembers, maxMembers)
+	}
 	if (p.NodeLat < -90 || p.NodeLat > 90) || (p.NodeLon < -180 || p.NodeLon > 180) {
 		return errors.New("meshcore room params: node_lat/node_lon out of range")
 	}
@@ -248,9 +266,12 @@ type service struct {
 	posted     uint64
 	pushes     uint64
 	duplicates uint64
+	limited    uint64
 	// seen is the reference's packet-hash ring, in front of every
 	// handler: a copy of something already acted on acts no more.
 	seen meshcorehost.Seen
+	// strangers budgets the logins of keys the room does not know.
+	strangers meshcorehost.RateLimiter
 
 	// The room proper: its members and what they said.
 	table      *meshcorehost.Table
@@ -284,15 +305,20 @@ func build(spec application.Spec) (application.Service, error) {
 			SourceKind: bus.SourceApplication, Source: spec.Name, Bus: spec.Bus, Log: log,
 		}, queueDepth),
 		store: spec.Store, started: time.Now(),
-		table:   meshcorehost.NewTable(spec.Sessions, maxClients),
-		members: map[[mesh.PubKeySize]byte]*member{},
-		posts:   make([]post, 0, p.History),
+		table:     meshcorehost.NewTable(spec.Sessions, p.MaxMembers),
+		strangers: meshcorehost.RateLimiter{Max: strangerLoginMax, Window: strangerLoginWindow},
+		members:   map[[mesh.PubKeySize]byte]*member{},
+		posts:     make([]post, 0, p.History),
 	}
 	// A full room makes room the reference's way — the least recently
 	// active member goes, admins alone are spared — because a room's
 	// members are mostly readers who logged in with the room word, and
 	// a table that never unseated one would close its door at twenty.
-	s.table.Protect = (*meshcorehost.Client).IsAdmin
+	// One thing the reference could not afford to distinguish, this
+	// room does: a guest — a word that opened no named door — takes a
+	// free seat or another guest's, never a member's, so a stranger
+	// holding nothing cannot empty a room whose membership is durable.
+	s.table.Spare = roomSpare
 	// The members the store remembers, the secret recomputed per
 	// entry; a store that cannot be read is an error, never an empty
 	// room — the entries carry every admin's replay guard.
@@ -312,6 +338,12 @@ func build(spec application.Spec) (application.Service, error) {
 		s.rf = application.RFDown
 	}
 	return s, nil
+}
+
+// roomSpare is the room's eviction policy: admins are spared from
+// everyone, members from guests.
+func roomSpare(newcomer, seated *meshcorehost.Client) bool {
+	return seated.IsAdmin() || (!newcomer.HasAccess() && seated.HasAccess())
 }
 
 // Run serves the room until ctx ends: the advert clocks, the outbound
@@ -580,6 +612,7 @@ func (s *service) Info() application.Info {
 			"dropped":     strconv.FormatUint(s.dropped, 10),
 			"refused":     strconv.FormatUint(s.refused, 10),
 			"duplicates":  strconv.FormatUint(s.duplicates, 10),
+			"limited":     strconv.FormatUint(s.limited, 10),
 			"tx":          s.gate(),
 			"members":     strconv.Itoa(len(s.table.Entries())),
 			"sessions":    strconv.Itoa(len(s.table.Sessions())),
