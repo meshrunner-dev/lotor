@@ -3,6 +3,7 @@ package room
 import (
 	"context"
 	"crypto/rand"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,7 +177,15 @@ func openReply(t *testing.T, c client, reply *mesh.Packet) []byte {
 // room's next emission, nil when it stayed silent.
 func sendPost(t *testing.T, svc *service, c client, text string, at time.Time) (*mesh.Packet, []byte) {
 	t.Helper()
-	plain := mesh.BuildTextPlaintext(at, mesh.TxtTypePlain, text)
+	return sendPostAttempt(t, svc, c, text, at, 0)
+}
+
+// sendPostAttempt is sendPost with the retransmission counter a retrying
+// client bumps — the reference's way of keeping a retry's hash distinct
+// from the frame it repeats, so the seen ring lets it through.
+func sendPostAttempt(t *testing.T, svc *service, c client, text string, at time.Time, attempt int) (*mesh.Packet, []byte) {
+	t.Helper()
+	plain := mesh.BuildTextPlaintextAttempt(at, mesh.TxtTypePlain, text, attempt)
 	pkt, err := mesh.BuildDatagram(mesh.PayloadTypeTxtMsg, svc.id.PubKey[:mesh.PathHashSize],
 		c.id.PubKey[:mesh.PathHashSize], c.secret, plain)
 	if err != nil {
@@ -223,8 +232,9 @@ func TestAPostIsKeptAcknowledgedAndPushedToTheOthers(t *testing.T) {
 	if kept, _ := store.LoadRoomPosts(ctx, "lobby"); len(kept) != 1 || kept[0].Text != "hello room" {
 		t.Fatalf("store = %+v", kept)
 	}
-	// The same post again is a retry: acknowledged, not stored twice.
-	if ack, _ := sendPost(t, svc, alice, "hello room", at); ack == nil {
+	// The same post again, with the fresh attempt bits a retrying client
+	// sends, is a retry: acknowledged, not stored twice.
+	if ack, _ := sendPostAttempt(t, svc, alice, "hello room", at, 1); ack == nil {
 		t.Fatal("a retry earned no ACK")
 	}
 	svc.mu.Lock()
@@ -248,10 +258,15 @@ func TestAPostIsKeptAcknowledgedAndPushedToTheOthers(t *testing.T) {
 	// The push clock: alice never receives her own post; bob does,
 	// once the post has settled, as signed-plain text carrying her
 	// prefix, and his cursor moves when he acknowledges it.
-	later := at.Add(postSyncDelay + time.Second)
-	svc.pushDue(later)
-	svc.pushDue(later)
-	svc.pushDue(later)
+	// Three turns of the clock, each on its schedule: the round-robin
+	// reaches every member, and a turn before its time would do nothing.
+	turn := at.Add(postSyncDelay + time.Second)
+	for range 3 {
+		svc.pushDue(turn)
+		svc.mu.Lock()
+		turn = svc.nextPush.Add(time.Millisecond)
+		svc.mu.Unlock()
+	}
 	var push *mesh.Packet
 	for {
 		item, ok := svc.pipeline.Queue.TakeUntil(ctx, time.Now().Add(2*serverResponseDelay))
@@ -396,5 +411,113 @@ func TestAFullRoomUnseatsTheIdlestMemberNeverAnAdmin(t *testing.T) {
 	}
 	if _, remembered := svc.members[members[0].id.PubKey]; remembered {
 		t.Error("the evicted member's cursor was kept")
+	}
+}
+
+// A retransmission of a post the room refused is judged afresh, not
+// acknowledged as the retry of something kept: the reference client
+// sends up to 160 characters, the room keeps 151, and the second try
+// used to earn an ACK for a post nobody had.
+func TestARetryOfARefusedPostIsNotAcknowledged(t *testing.T) {
+	svc := benchRoom(t, nil)
+	alice := newClient(t, svc)
+	login(t, svc, alice, "welcome", 0)
+	long := strings.Repeat("x", maxPostText+1)
+	at := time.Now()
+	if reply, _ := sendPost(t, svc, alice, long, at); reply != nil {
+		t.Fatalf("an over-long post was answered with %v", reply.PayloadType())
+	}
+	// The same text at the same timestamp, fresh attempt bits: a retry
+	// in the reference's eyes, and still nothing the room kept.
+	if reply, _ := sendPostAttempt(t, svc, alice, long, at, 1); reply != nil {
+		t.Fatalf("the retry of a refused post was acknowledged with %v", reply.PayloadType())
+	}
+	svc.mu.Lock()
+	kept, refused := len(svc.posts), svc.refused
+	svc.mu.Unlock()
+	if kept != 0 || refused != 2 {
+		t.Fatalf("posts kept %d, refused %d — want 0 and 2", kept, refused)
+	}
+	// A kept post's retry still earns its ACK again and nothing else.
+	if reply, _ := sendPost(t, svc, alice, "short", at.Add(time.Second)); reply == nil || reply.PayloadType() != mesh.PayloadTypeAck {
+		t.Fatal("a kept post was not acknowledged")
+	}
+	if reply, _ := sendPostAttempt(t, svc, alice, "short", at.Add(time.Second), 1); reply == nil || reply.PayloadType() != mesh.PayloadTypeAck {
+		t.Fatal("the retry of a kept post was not acknowledged again")
+	}
+	svc.mu.Lock()
+	kept = len(svc.posts)
+	svc.mu.Unlock()
+	if kept != 1 {
+		t.Fatalf("a retry stored the post twice: %d", kept)
+	}
+}
+
+// The copies a flood sends back, or a recording replayed, act once:
+// the reference keeps its handlers behind a seen ring, and so does the
+// room — one ACK for five identical post frames, one cursor move for
+// six identical keep-alives.
+func TestADuplicateFrameActsOnce(t *testing.T) {
+	svc := benchRoom(t, nil)
+	alice := newClient(t, svc)
+	login(t, svc, alice, "welcome", 0)
+	plain := mesh.BuildTextPlaintext(time.Now(), mesh.TxtTypePlain, "hello")
+	pkt, err := mesh.BuildDatagram(mesh.PayloadTypeTxtMsg, svc.id.PubKey[:mesh.PathHashSize],
+		alice.id.PubKey[:mesh.PathHashSize], alice.secret, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		hear(t, svc, pkt)
+	}
+	if reply := emissionPacket(queued(t, svc)); reply.PayloadType() != mesh.PayloadTypeAck {
+		t.Fatalf("the first copy earned a %v", reply.PayloadType())
+	}
+	nothingQueued(t, svc)
+	svc.mu.Lock()
+	duplicates, kept := svc.duplicates, len(svc.posts)
+	svc.mu.Unlock()
+	if duplicates != 4 || kept != 1 {
+		t.Fatalf("duplicates %d, posts %d — want 4 and 1", duplicates, kept)
+	}
+}
+
+// The push clock keeps to its schedule: a turn that fires before the
+// two seconds a login bought does nothing and leaves the schedule
+// where the login put it, so the reply reaches the member before any
+// post does.
+func TestAPushTurnBeforeItsTimeDoesNothing(t *testing.T) {
+	svc := benchRoom(t, nil)
+	alice, bob := newClient(t, svc), newClient(t, svc)
+	login(t, svc, alice, "welcome", 0)
+	sendPost(t, svc, alice, "for bob", time.Now().Add(-postSyncDelay-time.Second))
+	// Bob logs in behind on his cursor: a post is waiting for him, and
+	// the login bought him two seconds of quiet.
+	login(t, svc, bob, "welcome", 0)
+	svc.mu.Lock()
+	// Age the post past its settling delay so only the schedule holds it back.
+	for i := range svc.posts {
+		svc.posts[i].at -= uint32(postSyncDelay/time.Second) + 1
+	}
+	scheduled := svc.nextPush
+	svc.mu.Unlock()
+	svc.pushDue(time.Now())
+	nothingQueued(t, svc)
+	svc.mu.Lock()
+	if svc.nextPush != scheduled {
+		t.Errorf("an early turn moved the schedule from %v to %v", scheduled, svc.nextPush)
+	}
+	svc.mu.Unlock()
+	// On time, the round-robin reaches bob within two turns (alice, the
+	// author, is skipped for her own post).
+	turn := scheduled.Add(time.Millisecond)
+	for range 2 {
+		svc.pushDue(turn)
+		svc.mu.Lock()
+		turn = svc.nextPush.Add(time.Millisecond)
+		svc.mu.Unlock()
+	}
+	if pushed := emissionPacket(queued(t, svc)); pushed.PayloadType() != mesh.PayloadTypeTxtMsg {
+		t.Fatalf("the turns on time pushed a %v", pushed.PayloadType())
 	}
 }

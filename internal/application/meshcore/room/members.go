@@ -46,6 +46,11 @@ type member struct {
 	ackDeadline time.Time
 	failures    uint8
 	cursorDirty bool
+	// lastKept is the timestamp of the newest post this member had
+	// accepted and kept: the one a retry may claim an ACK for. The
+	// replay guard moves on every attempt, kept or refused, so it
+	// cannot tell the two apart; this can.
+	lastKept uint32
 }
 
 func (s *service) member(key [mesh.PubKeySize]byte) *member {
@@ -58,10 +63,25 @@ func (s *service) member(key [mesh.PubKeySize]byte) *member {
 }
 
 // processRF judges one frame on the RF goroutine: what is sealed to
-// this room is answered, everything else is the mesh's business.
+// this room is answered, everything else is the mesh's business. The
+// reference keeps every handler behind its seen ring, and so does the
+// room: the copies a flood sends back through several repeaters, and a
+// recording replayed on the air, hash like their original and act no
+// more — no second ACK, no second write, no cursor pulled back twice.
 func (s *service) processRF(ctx context.Context, frame radio.Frame) {
 	pkt, err := mesh.ParsePacket(frame.Payload)
 	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	duplicate := s.seen.Witness(pkt.Hash())
+	if duplicate {
+		s.duplicates++
+	}
+	s.mu.Unlock()
+	if duplicate {
+		logging.Trace(s.log, "duplicate frame ignored", zap.String("corr", frame.Correlation.Short()),
+			zap.Stringer("type", pkt.PayloadType()))
 		return
 	}
 	switch pkt.PayloadType() {
@@ -201,7 +221,12 @@ func (s *service) handleText(ctx context.Context, pkt *mesh.Packet, corr correla
 		s.log.Debug("post replay refused", zap.String("corr", corr.Short()))
 		return
 	}
-	retry := ts == c.LastTimestamp
+	// A retry is the newest timestamp asked again — and only when the
+	// room kept what it carried: the guard moved on a refused attempt
+	// too, and a retry of a refusal must be judged afresh, or the room
+	// would acknowledge a post it never had.
+	m := s.member(c.PubKey)
+	retry := ts == c.LastTimestamp && m.lastKept == ts
 	now := time.Now()
 	if err := s.table.Advance(c, ts, now); err != nil {
 		s.log.Warn("the member store refused the replay guard — post not taken",
@@ -209,7 +234,7 @@ func (s *service) handleText(ctx context.Context, pkt *mesh.Packet, corr correla
 		return
 	}
 	c.Active = true
-	s.member(c.PubKey).failures = 0
+	m.failures = 0
 	if text.Type == mesh.TxtTypeCLIData {
 		if c.IsAdmin() {
 			s.log.Debug("admin command line not served yet", zap.String("corr", corr.Short()))
@@ -220,7 +245,7 @@ func (s *service) handleText(ctx context.Context, pkt *mesh.Packet, corr correla
 		s.log.Debug("post refused: guest", zap.String("corr", corr.Short()))
 		return
 	}
-	s.acceptPostLocked(ctx, pkt, c, plain, text.Text, retry, corr)
+	s.acceptPostLocked(ctx, pkt, c, m, plain, text.Text, ts, retry, corr)
 }
 
 // acceptPostLocked keeps a member's post and acknowledges it — a retry
@@ -228,8 +253,8 @@ func (s *service) handleText(ctx context.Context, pkt *mesh.Packet, corr correla
 // truncates silently at 151 characters while allowing its clients 160;
 // a post that is not what its author wrote is not acknowledged as if
 // it were, and neither is one that could not be kept.
-func (s *service) acceptPostLocked(ctx context.Context, pkt *mesh.Packet, c *meshcorehost.Client,
-	plain []byte, text string, retry bool, corr correlation.ID,
+func (s *service) acceptPostLocked(ctx context.Context, pkt *mesh.Packet, c *meshcorehost.Client, m *member,
+	plain []byte, text string, ts uint32, retry bool, corr correlation.ID,
 ) {
 	if !retry {
 		if len(text) > maxPostText {
@@ -242,6 +267,7 @@ func (s *service) acceptPostLocked(ctx context.Context, pkt *mesh.Packet, c *mes
 			s.refused++
 			return
 		}
+		m.lastKept = ts
 	}
 	ack, err := mesh.BuildCommandAck(plain, c.PubKey[:])
 	if err != nil {

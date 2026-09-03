@@ -251,3 +251,26 @@ func TestTheOwnerChoosesWhomAFullTableSpares(t *testing.T) {
 		t.Errorf("a table of access entries made room: %v", err)
 	}
 }
+
+func TestSeenForgetsTheOldestFirst(t *testing.T) {
+	var seen Seen
+	hash := func(i int) [meshcore.MaxHashSize]byte {
+		var h [meshcore.MaxHashSize]byte
+		h[0], h[1] = byte(i), byte(i>>8)
+		return h
+	}
+	if seen.Witness(hash(1)) || !seen.Witness(hash(1)) {
+		t.Fatal("a hash was known before it was seen, or forgotten at once")
+	}
+	// A hit does not refresh: after SeenCapacity newer hashes the first
+	// is gone, however often it echoed in between.
+	for i := 2; i <= SeenCapacity+1; i++ {
+		seen.Witness(hash(1))
+		if seen.Witness(hash(i)) {
+			t.Fatalf("hash %d read as seen before it was", i)
+		}
+	}
+	if seen.Witness(hash(1)) {
+		t.Error("the oldest hash survived a full turn of the ring")
+	}
+}

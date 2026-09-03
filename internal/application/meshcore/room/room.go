@@ -247,6 +247,10 @@ type service struct {
 	refused    uint64
 	posted     uint64
 	pushes     uint64
+	duplicates uint64
+	// seen is the reference's packet-hash ring, in front of every
+	// handler: a copy of something already acted on acts no more.
+	seen meshcorehost.Seen
 
 	// The room proper: its members and what they said.
 	table      *meshcorehost.Table
@@ -575,6 +579,7 @@ func (s *service) Info() application.Info {
 			"sent":        strconv.FormatUint(s.sent, 10),
 			"dropped":     strconv.FormatUint(s.dropped, 10),
 			"refused":     strconv.FormatUint(s.refused, 10),
+			"duplicates":  strconv.FormatUint(s.duplicates, 10),
 			"tx":          s.gate(),
 			"members":     strconv.Itoa(len(s.table.Entries())),
 			"sessions":    strconv.Itoa(len(s.table.Sessions())),

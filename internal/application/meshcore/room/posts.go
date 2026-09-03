@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"meshrunner.dev/lotor/internal/confdb"
+	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/meshcorehost"
@@ -190,10 +191,16 @@ func (s *service) runPush(ctx context.Context) {
 }
 
 // pushDue is one turn of the clock at now: timed-out pushes counted,
-// one member served, the next turn scheduled.
+// one member served, the next turn scheduled. A turn before its time
+// does nothing and moves nothing — the reference re-tests its schedule
+// on every pass, and a login or a post that pushed the schedule out
+// while the clock was already armed must be honoured, not overwritten.
 func (s *service) pushDue(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if now.Before(s.nextPush) {
+		return
+	}
 	for _, m := range s.members {
 		if m.pendingAck != 0 && now.After(m.ackDeadline) {
 			m.failures++
@@ -208,9 +215,14 @@ func (s *service) pushDue(now time.Time) {
 		s.nextClient = (s.nextClient + 1) % len(keys)
 		pushed = s.pushToLocked(now, key)
 	}
-	if pushed {
+	switch {
+	case pushed:
 		s.nextPush = now.Add(syncPushInterval)
-	} else {
+	case len(keys) == 0:
+		// Nobody to serve: the reference's loop spins anyway, but a
+		// daemon need not wake eight times a second for an empty room.
+		s.nextPush = now.Add(syncPushInterval)
+	default:
 		s.nextPush = now.Add(syncIdleInterval)
 	}
 }
@@ -272,8 +284,13 @@ func (s *service) pushToLocked(now time.Time, key [mesh.PubKeySize]byte) bool {
 		priority = meshcorehost.PrioFloodReply
 		m.ackDeadline = now.Add(pushAckFlood)
 	}
-	m.pendingAck = mesh.AckCRC(plain, key[:])
-	m.pushAt = chosen.at
+	// A dry gate composes and counts and sends nothing — so it must
+	// expect nothing back: an ACK armed for a frame that never left
+	// would count three failures and stall every member for good.
+	if s.gate() != config.TXDry {
+		m.pendingAck = mesh.AckCRC(plain, key[:])
+		m.pushAt = chosen.at
+	}
 	s.pushes++
 	corr := correlation.New()
 	logging.Trace(s.log, "post pushed", zap.String("corr", corr.Short()),
