@@ -136,6 +136,8 @@ func (s *Store) ForgetRoomCursor(ctx context.Context, app string, pubKey []byte)
 }
 
 // ApplicationOwner is the acl table's owner key for an application:
-// the instance-name grammar forbids the colon, so it can never collide
-// with a relay's bare name.
-func ApplicationOwner(app string) string { return KindApplication + ":" + app }
+// the kind, a slash and the name. The slash is what keeps the key from
+// ever spelling a relay — the instance-name grammar forbids it, so no
+// relay can be called "application/lobby" — where a colon, the
+// natural first choice, is a legal name character.
+func ApplicationOwner(app string) string { return KindApplication + "/" + app }

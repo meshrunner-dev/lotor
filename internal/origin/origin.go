@@ -130,13 +130,19 @@ type Outcome struct {
 func (p *Pipeline) Emit(ctx context.Context, item Emission, dev radio.Device,
 	ledger *radio.AirtimeLedger, policy Policy, power int8,
 ) Outcome {
+	if policy.Mode == "" || policy.Mode == config.TXDry {
+		// A dry gate reaches no radio: whatever reached this queue under
+		// it is refused here, so the contract "empty reads as dry" is
+		// enforced where the keying would happen and not merely stated.
+		return p.drop(item, "dry")
+	}
 	if dev == nil || ledger == nil {
 		return p.drop(item, "radio-down")
 	}
 	airtime := dev.Airtime(len(item.Frame))
-	reservation, ok := p.reserveDuty(ctx, ledger, airtime, item)
-	if !ok {
-		return Outcome{Dropped: "duty"}
+	reservation, outcome := p.reserveDuty(ctx, ledger, airtime, item)
+	if reservation == nil {
+		return outcome
 	}
 	defer reservation.Cancel()
 	if outcome, proceed := p.clearChannel(ctx, dev, policy, item); !proceed {
@@ -175,24 +181,25 @@ func (p *Pipeline) Emit(ctx context.Context, item Emission, dev radio.Device,
 
 // reserveDuty waits for the shared ledger to admit the airtime, up to
 // the configured patience; a budget that will never free, or not in
-// time, drops the frame with the reason counted.
+// time, drops the frame as duty, and a wait the owner cancelled drops
+// it as cancelled — each counted under its own name, so a shutdown
+// never reads as a saturated ledger.
 func (p *Pipeline) reserveDuty(ctx context.Context, ledger *radio.AirtimeLedger,
 	airtime time.Duration, item Emission,
-) (*radio.AirtimeReservation, bool) {
+) (*radio.AirtimeReservation, Outcome) {
 	deadline := time.Now().Add(p.cfg.DutyWait)
 	for {
 		now := time.Now()
 		reservation, freeAt, never := ledger.Reserve(now, airtime)
 		if reservation != nil {
-			return reservation, true
+			return reservation, Outcome{}
 		}
 		if never || freeAt.After(deadline) {
-			p.drop(item, "duty")
-			return nil, false
+			return nil, p.drop(item, "duty")
 		}
 		select {
 		case <-ctx.Done():
-			return nil, false
+			return nil, p.drop(item, "cancelled")
 		case <-time.After(max(0, freeAt.Sub(now))):
 		}
 	}

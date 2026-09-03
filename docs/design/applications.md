@@ -354,7 +354,7 @@ The split by class therefore lands entirely in `config.db`:
   `set`/`password` from an admin writes there, principal = the
   admin's key, as the relay's OTA CLI does.
 - **Membership** → the existing `acl` table, under an owner key:
-  relays keep their bare names, applications write `application:<name>`
+  relays keep their bare names, applications write `application/<name>`
   — the instance-name grammar forbids the colon, so the two can never
   collide and no relay row moves. The relay's semantics carry over
   unchanged: durable roles persist with their replay guard and taught

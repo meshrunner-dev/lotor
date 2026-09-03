@@ -479,6 +479,7 @@ func fileObjects(f *config.File) []importObject {
 func purgeRuntimeState(ctx context.Context, tx *sql.Tx) error {
 	for _, stmt := range []string{
 		"DELETE FROM acl", "DELETE FROM regions", "DELETE FROM regions_meta", "DELETE FROM station_state",
+		"DELETE FROM room_posts", "DELETE FROM room_cursors",
 	} {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return err

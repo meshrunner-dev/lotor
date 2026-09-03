@@ -9,6 +9,7 @@ package room
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"time"
@@ -109,9 +110,9 @@ func (s *service) processRF(ctx context.Context, frame radio.Frame) {
 // with a blank password never reaches the doors.
 func (s *service) doors(word string) (byte, bool) {
 	switch {
-	case s.p.AdminPassword != "" && word == s.p.AdminPassword:
+	case s.p.AdminPassword != "" && subtle.ConstantTimeCompare([]byte(word), []byte(s.p.AdminPassword)) == 1:
 		return mesh.PermAdmin, true
-	case s.p.GuestPassword != "" && word == s.p.GuestPassword:
+	case s.p.GuestPassword != "" && subtle.ConstantTimeCompare([]byte(word), []byte(s.p.GuestPassword)) == 1:
 		return mesh.PermReadWrite, true
 	case s.p.AllowReadOnly:
 		return mesh.PermGuest, true

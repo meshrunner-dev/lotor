@@ -13,11 +13,13 @@ import (
 	"fmt"
 	"strings"
 
+	"meshrunner.dev/lotor/internal/application"
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/protocol"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/schema"
+	"meshrunner.dev/lotor/internal/station"
 	"meshrunner.dev/pkg/meshcore"
 )
 
@@ -510,6 +512,19 @@ func revisionMasker(kinds []schema.Kind) func(string) string {
 	for _, n := range radio.Registered() {
 		if d, err := radio.Lookup(n); err == nil {
 			take(d.Schema)
+		}
+	}
+	// The hosted kinds contribute their own secrets — a station's and
+	// an application's identity, a room's passwords — and a mask that
+	// forgot a registry would journal them in the clear.
+	for _, n := range station.Registered() {
+		if b, err := station.Lookup(n); err == nil {
+			take(b.Schema)
+		}
+	}
+	for _, n := range application.Registered() {
+		if b, err := application.LookupType(n); err == nil {
+			take(b.Schema)
 		}
 	}
 	return func(raw string) string {

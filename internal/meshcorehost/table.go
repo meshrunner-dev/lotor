@@ -306,9 +306,22 @@ func (t *Table) PutEvicting(c *Client) (victim [meshcore.PubKeySize]byte, evicti
 			return victim, false, ErrSessionsFull
 		}
 	}
+	// The victim leaves the store before the newcomer enters it: a
+	// store that refuses the second write is then compensated by
+	// forgetting the newcomer again, so the store never holds a row
+	// for a client the table does not seat, and never lacks one for a
+	// client it does — whichever write failed, the two agree.
+	if evicting && t.By[victim].HasAccess() {
+		if err := t.Forget(victim); err != nil {
+			return victim, false, err
+		}
+	}
 	switch {
 	case c.HasAccess():
 		if err := t.Save(c); err != nil {
+			if evicting && t.By[victim].HasAccess() {
+				_ = t.Save(t.By[victim]) // best effort: put the victim's row back
+			}
 			return victim, false, err
 		}
 	case known && old.HasAccess():
@@ -317,11 +330,6 @@ func (t *Table) PutEvicting(c *Client) (victim [meshcore.PubKeySize]byte, evicti
 		}
 	}
 	if evicting {
-		if t.By[victim].HasAccess() {
-			if err := t.Forget(victim); err != nil {
-				return victim, false, err
-			}
-		}
 		delete(t.By, victim)
 	}
 	t.By[c.PubKey] = c
