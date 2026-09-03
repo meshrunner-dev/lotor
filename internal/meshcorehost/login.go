@@ -93,13 +93,16 @@ func Admit(live *Client, senderPub, secret []byte, password string, ts uint32, d
 // LoginReply composes what the reference sends back: our clock, the
 // verdict, its legacy keep-alive hint, the role, the permissions, a
 // random blob so two logins never hash alike, and the reply level we
-// answer at.
-func LoginReply(c *Client, firmwareLevel uint8, now time.Time) ([]byte, error) {
+// answer at. markGuests is the room's dialect of the legacy role byte
+// — 2 for a client whose permission byte is wholly zero — which the
+// repeater never writes.
+func LoginReply(c *Client, firmwareLevel uint8, now time.Time, markGuests bool) ([]byte, error) {
 	return meshcore.FrameLoginReply(meshcore.LoginReply{
 		Clock:         uint32(now.Unix()),
 		Result:        meshcore.LoginOK,
 		KeepAlive:     0, // legacy hint, in units of sixteen seconds
 		IsAdmin:       c.IsAdmin(),
+		Guest:         markGuests && c.Perms == 0,
 		Permissions:   c.Perms,
 		FirmwareLevel: firmwareLevel,
 	})

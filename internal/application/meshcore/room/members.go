@@ -179,7 +179,7 @@ func (s *service) handleLogin(ctx context.Context, pkt *mesh.Packet, corr correl
 	// which is the sharp edge that strands a returning admin.
 	m.syncSince, m.pendingAck, m.failures, m.cursorDirty = login.SyncSince, 0, 0, true
 	s.nextPush = now.Add(pushNotifyDelay)
-	body, err := meshcorehost.LoginReply(c, firmwareVerLevel, now)
+	body, err := meshcorehost.LoginReply(c, firmwareVerLevel, now, true)
 	if err != nil {
 		return
 	}

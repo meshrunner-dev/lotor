@@ -194,7 +194,7 @@ func (e *engine) admitLogin(senderPub, secret []byte, password string,
 // loginReply composes what the reference sends back, at the reply
 // level this engine answers at.
 func loginReply(c *client) ([]byte, error) {
-	return meshcorehost.LoginReply(c, firmwareVerLevel, time.Now())
+	return meshcorehost.LoginReply(c, firmwareVerLevel, time.Now(), false)
 }
 
 // reqVerdict judges an authenticated request: ours to read only when a

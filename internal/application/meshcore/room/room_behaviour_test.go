@@ -136,7 +136,10 @@ func TestTheRoomAdmitsByItsDoorsAndAnswersTheReferenceReply(t *testing.T) {
 	if lr, _ := mesh.ParseLoginReply(openReply(t, member, login(t, svc, member, "welcome", 0))); mesh.Role(lr.Permissions) != mesh.PermReadWrite {
 		t.Fatalf("member role = %+v", lr)
 	}
-	if lr, _ := mesh.ParseLoginReply(openReply(t, guest, login(t, svc, guest, "whatever", 0))); mesh.Role(lr.Permissions) != mesh.PermGuest {
+	// The room marks a guest with 2 in the legacy role byte, where the
+	// repeater only ever writes 1 or 0 (v1.12.1, C5).
+	if lr, _ := mesh.ParseLoginReply(openReply(t, guest, login(t, svc, guest, "whatever", 0))); mesh.Role(lr.Permissions) != mesh.PermGuest ||
+		!lr.Guest || lr.IsAdmin {
 		t.Fatalf("guest role = %+v", lr)
 	}
 	svc.mu.Lock()
