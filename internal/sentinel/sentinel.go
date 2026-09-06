@@ -50,26 +50,47 @@ type txStamp struct {
 	air time.Duration
 }
 
-// nextTxWindow computes the relay's spent airtime over the sliding
-// hour ending at this emission without changing RAM. The caller only
-// installs the returned window after the ledger and its metric commit;
-// a failed SQLite write must not leave memory one emission ahead.
-func (s *Sentinel) nextTxWindow(relay string, at time.Time, air time.Duration) (time.Duration, []txStamp) {
-	current := s.txWindows[relay]
-	w := make([]txStamp, len(current), len(current)+1)
-	copy(w, current)
-	w = append(w, txStamp{at: at, air: air})
+// nextTxWindow reports the relay's spent airtime over the sliding hour
+// ending at this emission, and how many rows at the front of the
+// window that hour has left behind. It leaves the stored window
+// untouched: the caller installs the emission with commitTxWindow once
+// the ledger and its metric commit, and a failed write must not leave
+// memory one emission ahead of the journal.
+//
+// Answering with a count is what lets the window stay put. Handing back
+// the next window as a slice meant building it first — the whole hour
+// allocated and copied to add a single row — because a caller cannot be
+// given a window that shares the stored array unless the store has
+// already changed.
+func (s *Sentinel) nextTxWindow(relay string, at time.Time, air time.Duration) (time.Duration, int) {
+	w := s.txWindows[relay]
 	cut := at.Add(-time.Hour)
-	i := 0
-	for i < len(w) && w[i].at.Before(cut) {
-		i++
+	expired := 0
+	for expired < len(w) && w[expired].at.Before(cut) {
+		expired++
 	}
-	w = w[i:]
-	var sum time.Duration
-	for _, t := range w {
+	sum := air
+	for _, t := range w[expired:] {
 		sum += t.air
 	}
-	return sum, w
+	return sum, expired
+}
+
+// commitTxWindow installs the emission the ledger accepted, dropping
+// the rows nextTxWindow found expired. The window keeps the array it
+// already holds, so it grows only when an hour carries more emissions
+// than any hour before it — a high-water mark then held for the life
+// of the process. That is bounded here: SourceKey gives stations and
+// relays windows of their own, and there are few of either.
+func (s *Sentinel) commitTxWindow(relay string, at time.Time, air time.Duration, expired int) {
+	if s.txWindows == nil {
+		s.txWindows = map[string][]txStamp{}
+	}
+	w := s.txWindows[relay]
+	if expired > 0 {
+		w = append(w[:0], w[expired:]...)
+	}
+	s.txWindows[relay] = append(w, txStamp{at: at, air: air})
 }
 
 // Open prepares the journal. The path may be MemoryJournal for hosts
@@ -370,13 +391,10 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 		err = s.store.insertMetric(ctx, "noise_starved", e.Relay, e.At, float64(e.Aborted))
 	case bus.FrameSent:
 		source := e.SourceKey()
-		window, next := s.nextTxWindow(source, e.At, e.Airtime)
+		window, expired := s.nextTxWindow(source, e.At, e.Airtime)
 		if err = s.store.recordSent(ctx, e.At, source, e.Correlation.String(), e.Kind,
 			e.Airtime, e.PowerDBm, e.Shadow, window); err == nil {
-			if s.txWindows == nil {
-				s.txWindows = map[string][]txStamp{}
-			}
-			s.txWindows[source] = next
+			s.commitTxWindow(source, e.At, e.Airtime, expired)
 		}
 	case bus.TxDropped:
 		err = s.store.recordTxDrop(ctx, e.At, e.SourceKey(), e.Correlation.String(), e.Reason, e.Kind)
