@@ -130,7 +130,14 @@ the registry holds it to that word, so `protocol: lorawan` with a
 MeshCore room is a configuration error, not a near miss. Type names
 carry their protocol explicitly, `meshcore-room`, so the one word an
 operator types can never be mistaken for another mesh's room when a
-second protocol arrives.
+second protocol arrives. The reference's own radio-side knobs are
+attributes of the type under their reference names: `default_scope`
+(the region the room floods under — replies follow `chooseReplyScope`,
+direct sends are never scoped, as the reference's `sendDirect` is not),
+`path_hash_mode` (the hash width its own floods declare) and
+`multi_acks` (the redundant multi-ack 300 ms ahead of a direct post
+ACK). The room carries one scope, not a region table: the relay engine
+keeps the many-region form beside its regions.
 
 ```yaml
 applications:

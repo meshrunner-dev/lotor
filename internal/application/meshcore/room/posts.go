@@ -287,9 +287,9 @@ func (s *service) pushToLocked(now time.Time, key [mesh.PubKeySize]byte) bool {
 		priority = meshcorehost.RouteDirect(pkt, c.Out, mesh.TransportKey{})
 		m.ackDeadline = now.Add(pushAckBase + pushAckPerHop*time.Duration(int(c.Out.PathLen&63)+1))
 	} else {
-		pkt.Header = mesh.MakeHeader(mesh.RouteFlood, mesh.PayloadTypeTxtMsg, mesh.PayloadVer1)
-		pkt.SetPathHashSizeAndCount(mesh.PathHashSize, 0)
-		priority = meshcorehost.PrioFloodReply
+		// No route taught yet: the reference floods the push under
+		// the room's default scope at its own hash width.
+		priority = meshcorehost.RouteFloodFresh(pkt, s.p.pathHashWidth(), s.p.scope())
 		m.ackDeadline = now.Add(pushAckFlood)
 	}
 	// A dry gate composes and counts and sends nothing — so it must

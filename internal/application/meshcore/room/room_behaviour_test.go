@@ -22,6 +22,12 @@ import (
 // in-memory store so history persists across a rebuild, no radio.
 func benchRoom(t *testing.T, store *confdb.Store) *service {
 	t.Helper()
+	return benchRoomTuned(t, store, nil)
+}
+
+// benchRoomTuned is the bench with the operator's own knobs turned.
+func benchRoomTuned(t *testing.T, store *confdb.Store, tune func(cfg map[string]any)) *service {
+	t.Helper()
 	cfg := baseConfig()
 	cfg["admin_password"] = "sesame"
 	cfg["guest_password"] = "welcome"
@@ -30,6 +36,9 @@ func benchRoom(t *testing.T, store *confdb.Store) *service {
 	// Without a store the room must run RAM-only: a persisted post
 	// that has nowhere to go is refused, which is the contract.
 	cfg["persist_history"] = store != nil
+	if tune != nil {
+		tune(cfg)
+	}
 	svc, err := build(application.Spec{Name: "lobby", Protocol: "meshcore", Type: "meshcore-room",
 		Config: cfg, TX: application.TXPolicy{Mode: config.TXShadow, QueueDepth: 8}, Store: store})
 	if err != nil {
@@ -488,6 +497,131 @@ func TestADuplicateFrameActsOnce(t *testing.T) {
 	svc.mu.Unlock()
 	if duplicates != 4 || kept != 1 {
 		t.Fatalf("duplicates %d, posts %d — want 4 and 1", duplicates, kept)
+	}
+}
+
+// A room with a default scope floods where the reference would: a
+// plain flood is answered plainly, a question inside the scope is
+// answered inside it, a direct question without a route is answered in
+// the room's own scope, a direct reply down a taught route is never
+// scoped, and the room's own floods — a push — declare its hash width.
+func TestARoomSpeaksInItsScopeWhereTheReferenceWould(t *testing.T) {
+	lyon := mesh.TransportKeyForName("lyon")
+	svc := benchRoomTuned(t, nil, func(cfg map[string]any) {
+		cfg["default_scope"], cfg["path_hash_mode"] = "lyon", 1
+	})
+	alice, bob, carol := newClient(t, svc), newClient(t, svc), newClient(t, svc)
+
+	if reply := login(t, svc, alice, "welcome", 0); reply.HasTransportCodes() {
+		t.Fatalf("a plain flood was answered in a scope: %v", reply.Route())
+	}
+	scoped, _, err := mesh.BuildRoomLoginReq(bob.id, svc.id.PubKey[:], uint32(time.Now().Unix())-10, 0, "welcome")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lyon.Scope(scoped)
+	hear(t, svc, scoped)
+	if reply := emissionPacket(queued(t, svc)); reply.PayloadType() != mesh.PayloadTypePath || !lyon.Matches(reply) {
+		t.Fatalf("a scoped login was answered with %v outside its scope", reply.PayloadType())
+	}
+
+	// Alice posts down a direct frame without a route taught: the ACK
+	// has to flood, and floods in the room's scope.
+	ack, _ := sendPost(t, svc, alice, "hello", time.Now())
+	if !ack.IsRouteFlood() || !lyon.Matches(ack) {
+		t.Fatalf("the ACK to a routeless direct post = %v, scoped %t", ack.Route(), lyon.Matches(ack))
+	}
+
+	// Carol teaches a route, then asks direct: the reply is direct and
+	// plain, as the reference's sendDirect always is.
+	login(t, svc, carol, "welcome", 0)
+	path, err := mesh.BuildPathReturn(svc.id.PubKey[:mesh.PathHashSize], carol.id.PubKey[:mesh.PathHashSize],
+		carol.secret, 1, []byte{0x42}, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hear(t, svc, path)
+	req, _ := mesh.BuildRequest(carol.id, svc.id.PubKey[:], carol.secret, uint32(time.Now().Unix())+5,
+		mesh.FrameKeepAliveRequest(0))
+	req.Header = mesh.MakeHeader(mesh.RouteDirect, mesh.PayloadTypeReq, mesh.PayloadVer1)
+	hear(t, svc, req)
+	if reply := emissionPacket(queued(t, svc)); !reply.IsRouteDirect() || reply.HasTransportCodes() {
+		t.Fatalf("a direct reply = %v", reply.Route())
+	}
+
+	// Alice's post is pushed to both readers, in whatever order the
+	// round-robin walks them: carol's copy goes down her route, plain;
+	// bob has no route, so his floods in the room's scope with two
+	// bytes of hash per hop, as path_hash_mode 1 says.
+	now := time.Now().Add(2 * postSyncDelay)
+	svc.mu.Lock()
+	svc.nextPush = time.Time{}
+	svc.mu.Unlock()
+	var flooded, direct *mesh.Packet
+	for range 8 {
+		svc.pushDue(now)
+		for svc.pipeline.Queue.Len() > 0 {
+			push := emissionPacket(queued(t, svc))
+			if push.PayloadType() != mesh.PayloadTypeTxtMsg {
+				t.Fatalf("the push clock composed a %v", push.PayloadType())
+			}
+			if push.IsRouteFlood() {
+				flooded = push
+			} else {
+				direct = push
+			}
+		}
+		if flooded != nil && direct != nil {
+			break
+		}
+		svc.mu.Lock()
+		now = svc.nextPush.Add(time.Millisecond)
+		svc.mu.Unlock()
+	}
+	if flooded == nil || !lyon.Matches(flooded) || flooded.PathHashSize() != 2 {
+		t.Fatalf("flooded push = %+v", flooded)
+	}
+	if direct == nil || direct.HasTransportCodes() {
+		t.Fatalf("direct push = %+v", direct)
+	}
+}
+
+// With multi_acks on, a post down a taught route earns a redundant
+// multi-ack 300 ms ahead of the ACK proper — both direct, both plain,
+// the reference's order — while a routeless post gets the one ACK.
+func TestAMultiAckPrecedesADirectPostAck(t *testing.T) {
+	svc := benchRoomTuned(t, nil, func(cfg map[string]any) { cfg["multi_acks"] = true })
+	alice, bob := newClient(t, svc), newClient(t, svc)
+	login(t, svc, alice, "welcome", 0)
+	if ack, _ := sendPost(t, svc, alice, "one", time.Now()); ack.PayloadType() != mesh.PayloadTypeAck {
+		t.Fatalf("a routeless post earned a %v first", ack.PayloadType())
+	}
+	nothingQueued(t, svc)
+
+	login(t, svc, bob, "welcome", 0)
+	path, err := mesh.BuildPathReturn(svc.id.PubKey[:mesh.PathHashSize], bob.id.PubKey[:mesh.PathHashSize],
+		bob.secret, 1, []byte{0x42}, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hear(t, svc, path)
+	start := time.Now()
+	first, plain := sendPost(t, svc, bob, "two", start)
+	crc, remaining, err := mesh.ParseMultiAck(first.Payload)
+	if err != nil || crc != mesh.AckCRC(plain, bob.id.PubKey[:]) || remaining != 1 || !first.IsRouteDirect() ||
+		first.HasTransportCodes() {
+		t.Fatalf("first emission = %v %v (%08x, %d, %v)", first.PayloadType(), first.Route(), crc, remaining, err)
+	}
+	second := queued(t, svc)
+	ack := emissionPacket(second)
+	if ack.PayloadType() != mesh.PayloadTypeAck || !ack.IsRouteDirect() || ack.HasTransportCodes() {
+		t.Fatalf("second emission = %v %v", ack.PayloadType(), ack.Route())
+	}
+	// The queue hands the ACK out once it is due, so its not-before is
+	// read against the post's arrival: the multi-ack's delay plus the
+	// reference's 300 ms.
+	if gap := second.NotBefore.Sub(start); gap < textAckDelay+multiAckSpacing || gap > textAckDelay+multiAckSpacing+time.Second {
+		t.Fatalf("the ACK proper was due %v after the post, want %v", gap, textAckDelay+multiAckSpacing)
 	}
 }
 

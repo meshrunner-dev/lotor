@@ -123,3 +123,32 @@ func RouteHome(pkt, inbound *meshcore.Packet, out *OutPath, scope meshcore.Trans
 	}
 	return RouteFlood(pkt, inbound, scope), "flood"
 }
+
+// RouteFloodFresh floods a packet of this node's own making — an
+// advert, a push — which has no inbound frame to inherit a hash width
+// from: it declares the width this node speaks at, the reference's
+// path_hash_mode + 1, and travels under the node's own scope.
+func RouteFloodFresh(pkt *meshcore.Packet, hashWidth int, scope meshcore.TransportKey) int {
+	pkt.Header = meshcore.MakeHeader(meshcore.RouteFlood, pkt.PayloadType(), meshcore.PayloadVer1)
+	pkt.SetPathHashSizeAndCount(hashWidth, 0)
+	scope.Scope(pkt)
+	return PrioFloodReply
+}
+
+// ReplyScope is the reference's chooseReplyScope for a node that
+// carries one scope, the one it speaks: a question that arrived inside
+// it is answered inside it; a plain flood is answered plainly, never
+// pulled into a scope its asker may not hold; anything else — a direct
+// question, which carries no code, or a code this node does not carry
+// — is answered in the node's own scope, which is nothing when it
+// speaks unscoped. The relay engine keeps the many-region form of the
+// same rule beside its region table.
+func ReplyScope(inbound *meshcore.Packet, speak meshcore.TransportKey) meshcore.TransportKey {
+	if !speak.IsZero() && speak.Matches(inbound) {
+		return speak
+	}
+	if inbound.IsRouteFlood() && !inbound.HasTransportCodes() {
+		return meshcore.TransportKey{}
+	}
+	return speak
+}

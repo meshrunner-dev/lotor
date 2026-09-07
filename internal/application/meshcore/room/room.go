@@ -121,6 +121,12 @@ func roomSchema() []schema.Attr {
 			Doc: "members the room seats before the least active non-admin gives way (0 takes the reference's 20)"},
 		schema.Attr{Name: "persist_history", Type: schema.Bool,
 			Doc: "keep the posts across a restart; false is the reference's RAM ring"},
+		schema.Attr{Name: "default_scope", Type: schema.String,
+			Doc: "the region this room floods under, by name (empty floods unscoped, as with no default region)"},
+		schema.Attr{Name: "path_hash_mode", Type: schema.Int,
+			Doc: "hash width the room's own floods declare, mode+1 bytes (0..2; unset takes the reference's 0, one byte)"},
+		schema.Attr{Name: "multi_acks", Type: schema.Bool,
+			Doc: "send a redundant multi-ack 300ms ahead of each direct post ACK, the reference's multi.acks 1"},
 	)
 }
 
@@ -141,6 +147,27 @@ type params struct {
 	History        int           `yaml:"history"`
 	PersistHistory bool          `yaml:"persist_history"`
 	MaxMembers     int           `yaml:"max_members"`
+	DefaultScope   string        `yaml:"default_scope"`
+	PathHashMode   *int          `yaml:"path_hash_mode"`
+	MultiAcks      bool          `yaml:"multi_acks"`
+}
+
+// pathHashWidth is the hash width the room's own floods declare — the
+// reference's path_hash_mode + 1, one byte when nothing is set.
+func (p params) pathHashWidth() int {
+	if p.PathHashMode == nil {
+		return 1
+	}
+	return *p.PathHashMode + 1
+}
+
+// scope is the transport key the room speaks under: the named
+// region's, or none.
+func (p params) scope() mesh.TransportKey {
+	if p.DefaultScope == "" {
+		return mesh.TransportKey{}
+	}
+	return mesh.TransportKeyForName(p.DefaultScope)
 }
 
 // resolve decodes and judges the contributed configuration. Absent
@@ -224,6 +251,9 @@ func validateRoom(p params) error {
 	}
 	if p.MaxMembers < 0 || p.MaxMembers > maxMembers {
 		return fmt.Errorf("meshcore room params: max_members %d — want 1..%d", p.MaxMembers, maxMembers)
+	}
+	if v := p.PathHashMode; v != nil && (*v < 0 || *v > 2) {
+		return fmt.Errorf("meshcore room params: path_hash_mode %d — the reference accepts 0, 1 or 2", *v)
 	}
 	if (p.NodeLat < -90 || p.NodeLat > 90) || (p.NodeLon < -180 || p.NodeLon > 180) {
 		return errors.New("meshcore room params: node_lat/node_lon out of range")
@@ -457,6 +487,8 @@ func (s *service) advertDue(kind string) {
 		pkt.Header = mesh.MakeHeader(mesh.RouteDirect, mesh.PayloadTypeAdvert, mesh.PayloadVer1)
 		pkt.SetPathHashCount(0)
 		priority = prioAdvertLocal
+	} else {
+		meshcorehost.RouteFloodFresh(pkt, s.p.pathHashWidth(), s.p.scope())
 	}
 	s.mu.Lock()
 	s.advertsDue++

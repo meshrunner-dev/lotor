@@ -31,6 +31,7 @@ const (
 	maxPostText         = 151
 	serverResponseDelay = 300 * time.Millisecond
 	textAckDelay        = 200 * time.Millisecond
+	multiAckSpacing     = 300 * time.Millisecond
 	pushNotifyDelay     = 2 * time.Second
 	sessionLimitMax     = 6
 	sessionLimitWindow  = time.Minute
@@ -58,6 +59,18 @@ func routeOf(pkt *mesh.Packet) origin.Route {
 	default:
 		return origin.RouteUnclassified
 	}
+}
+
+// replyScope is the scope a composed reply travels under: the
+// reference's chooseReplyScope when the reply floods — a PATH return
+// to a flooded question, or a flood for want of a route — and none
+// when it goes down a taught route, because the reference's sendDirect
+// never scopes.
+func (s *service) replyScope(inbound *mesh.Packet, out *meshcorehost.OutPath) mesh.TransportKey {
+	if out != nil && !inbound.IsRouteFlood() {
+		return mesh.TransportKey{}
+	}
+	return meshcorehost.ReplyScope(inbound, s.p.scope())
 }
 
 // member is the room's own state about one client, beside what the
@@ -234,6 +247,7 @@ func (s *service) handleLogin(ctx context.Context, pkt *mesh.Packet, corr correl
 		zap.String("pubkey", hex.EncodeToString(c.PubKey[:6])), zap.Uint32("since", login.SyncSince))
 	s.replyLocked(ctx, pkt, meshcorehost.Answer{
 		DestHash: c.PubKey[:mesh.PathHashSize], Secret: c.Secret, Tag: clock, Body: rest, Out: c.Out,
+		Scope: s.replyScope(pkt, c.Out),
 	}, "login-resp", corr)
 }
 
@@ -341,8 +355,25 @@ func (s *service) acceptPostLocked(ctx context.Context, pkt *mesh.Packet, c *mes
 	if err != nil {
 		return
 	}
-	priority, source := meshcorehost.RouteHome(ack, pkt, c.Out, mesh.TransportKey{})
-	s.sendLocked(ack, "post-ack", uint8(priority), textAckDelay, corr)
+	delay := textAckDelay
+	if c.Out != nil && s.p.MultiAcks {
+		// The reference's multi.acks: a redundant copy 300 ms ahead of
+		// the ACK proper, on the direct route alone, so a post's ACK
+		// survives one lost frame. The flood fallback sends one ACK.
+		if multi, err := mesh.BuildMultiAck(ack.Payload, 1); err == nil {
+			meshcorehost.RouteDirect(multi, c.Out, mesh.TransportKey{})
+			s.sendLocked(multi, "post-multi-ack", meshcorehost.PrioDirect, delay, corr)
+			delay += multiAckSpacing
+		}
+	}
+	// Down a taught route the ACK travels plainly, as the reference's
+	// sendDirect does; the flood fallback is scoped by chooseReplyScope.
+	scope := mesh.TransportKey{}
+	if c.Out == nil {
+		scope = meshcorehost.ReplyScope(pkt, s.p.scope())
+	}
+	priority, source := meshcorehost.RouteHome(ack, pkt, c.Out, scope)
+	s.sendLocked(ack, "post-ack", uint8(priority), delay, corr)
 	logging.Trace(s.log, "post acknowledged", zap.String("corr", corr.Short()),
 		zap.String("route", source), zap.Bool("retry", retry))
 }
@@ -404,6 +435,7 @@ func (s *service) handleRequest(ctx context.Context, pkt *mesh.Packet, corr corr
 	}
 	s.replyLocked(ctx, pkt, meshcorehost.Answer{
 		DestHash: c.PubKey[:mesh.PathHashSize], Secret: c.Secret, Tag: ts, Body: answer, Out: c.Out,
+		Scope: s.replyScope(pkt, c.Out),
 	}, "req-resp", corr)
 }
 
