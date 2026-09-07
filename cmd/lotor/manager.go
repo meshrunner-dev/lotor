@@ -30,6 +30,7 @@ import (
 	"meshrunner.dev/lotor/internal/cli"
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/config"
+	"meshrunner.dev/lotor/internal/hosted"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/mqtt"
 	"meshrunner.dev/lotor/internal/protocol"
@@ -142,19 +143,17 @@ type managedRelay struct {
 }
 
 type managedStation struct {
-	cancel  context.CancelFunc
-	done    chan struct{}
+	managedHost
+
 	service station.Service
 	failure station.Info
-	binding *radio.Binding
 }
 
 type managedApplication struct {
-	cancel  context.CancelFunc
-	done    chan struct{}
+	managedHost
+
 	service application.Service
 	failure application.Info
-	binding *radio.Binding
 }
 
 type managedRadio struct {
@@ -628,32 +627,14 @@ func (m *manager) sharedAirtimeLedger(radioName, consumer string, budget time.Du
 	return ledger, nil
 }
 
-func stationPolicy(sc config.Station) station.TXPolicy {
-	policy := station.TXPolicy{Mode: sc.TXMode()}
-	if sc.TX == nil {
-		return policy
-	}
-	policy.LBTThresholdDB = sc.TX.LBTThresholdDB
-	policy.LBTExhausted = sc.TX.LBTExhausted
-	policy.CAD = sc.TX.CAD == nil || *sc.TX.CAD
-	policy.QueueDepth = sc.TX.QueueDepth
-	return policy
-}
-
 // consumerDemand is what any non-relay consumer — a station, an
 // application — asks of a radio: one shape for both, so the judgement
 // and the attachment are written once.
-type consumerDemand struct {
-	Waveform     radio.Waveform
-	PowerDBm     int8
-	DutyCyclePct float64
-}
+type consumerDemand = hosted.RadioDemand
 
 // radioAttacher is the RF door both consumer kinds open; the station
 // and application packages each declare it by the same signature.
-type radioAttacher interface {
-	AttachRadio(name string, binding *radio.Binding, duty *radio.AirtimeLedger, cause string)
-}
+type radioAttacher = hosted.RadioAttacher
 
 // checkConsumerAttachment judges a consumer's demand against the radio
 // it names: the waveform against the envelope and the driver, and for
@@ -753,18 +734,6 @@ func (m *manager) attachConsumerRadio(kind, name, radioName, txMode string, role
 	}
 	attacher.AttachRadio(radioName, binding, ledger, "")
 	return binding
-}
-
-func applicationPolicy(ac config.Application) application.TXPolicy {
-	policy := application.TXPolicy{Mode: ac.TXMode()}
-	if ac.TX == nil {
-		return policy
-	}
-	policy.LBTThresholdDB = ac.TX.LBTThresholdDB
-	policy.LBTExhausted = ac.TX.LBTExhausted
-	policy.CAD = ac.TX.CAD == nil || *ac.TX.CAD
-	policy.QueueDepth = ac.TX.QueueDepth
-	return policy
 }
 
 func (m *manager) releaseAirtimeConsumer(consumer string) {
@@ -924,17 +893,8 @@ func (m *manager) stopRelay(name string) {
 func (m *manager) startStation(ctx context.Context, name string) {
 	sc := m.file.Stations[name]
 	m.releaseAirtimeConsumer(confdb.KindStation + ":" + name)
-	builder, err := station.Lookup(sc.Protocol)
-	var cfg map[string]any
-	var traces []config.Trace
-	if err == nil {
-		cfg, traces, err = sc.Layered.Resolve(builder.Presets)
-	}
-	if err == nil {
-		err = builder.Check(cfg)
-	}
-	if err != nil {
-		m.log.Error("station configuration failed", zap.String("station", name), zap.Error(err))
+	failed := func(err error, what string) {
+		m.log.Error("station "+what+" failed", zap.String("station", name), zap.Error(err))
 		rf := station.RFDetached
 		if sc.Radio != "" {
 			rf = station.RFDown
@@ -943,39 +903,30 @@ func (m *manager) startStation(ctx context.Context, name string) {
 			Name: name, Protocol: sc.Protocol, Listen: sc.Listen, Radio: sc.Radio,
 			State: station.StateError, Cause: err.Error(), RF: rf,
 		}}
+	}
+	builder, err := station.Lookup(sc.Protocol)
+	var cfg map[string]any
+	var traces []config.Trace
+	if err == nil {
+		cfg, traces, err = m.resolveHost(stationHosting, name, hostedStation(builder))
+	}
+	if err != nil {
+		failed(err, "configuration")
 		return
 	}
 	svc, err := builder.Build(station.Spec{
 		Name: name, Protocol: sc.Protocol, Listen: sc.Listen, Radio: sc.Radio,
 		Config: cfg, Log: m.log.With(zap.String("station", name)),
-		Build: buildInfo, State: m.store, TX: stationPolicy(sc), Bus: m.bus,
+		Build: buildInfo, State: m.store, TX: hostPolicy(sc.Host()), Bus: m.bus,
 	})
 	if err != nil {
-		m.log.Error("station assembly failed", zap.String("station", name), zap.Error(err))
-		rf := station.RFDetached
-		if sc.Radio != "" {
-			rf = station.RFDown
-		}
-		m.stations[name] = &managedStation{failure: station.Info{
-			Name: name, Protocol: sc.Protocol, Listen: sc.Listen, Radio: sc.Radio,
-			State: station.StateError, Cause: err.Error(), RF: rf,
-		}}
+		failed(err, "assembly")
 		return
 	}
-	sctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	h := &managedStation{cancel: cancel, done: done, service: svc}
+	h := &managedStation{service: svc}
 	m.stations[name] = h
-	m.attachStationRadio(name, h, builder, cfg)
-	m.viewMu.Lock()
-	m.traces[confdb.KindStation+" "+name] = withStructural(traces, stationStructural(sc))
-	m.viewMu.Unlock()
-	m.wg.Go(func() {
-		defer close(done)
-		if err := svc.Run(sctx); err != nil && sctx.Err() == nil {
-			m.log.Error("station stopped", zap.String("station", name), zap.Error(err))
-		}
-	})
+	m.attachHostRadio(stationHosting, name, &h.managedHost, svc, hostedStation(builder), cfg)
+	m.runHost(ctx, stationHosting, name, &h.managedHost, svc.Run, traces)
 }
 
 func (m *manager) stopStation(name string) {
@@ -983,70 +934,16 @@ func (m *manager) stopStation(name string) {
 	if !ok {
 		return
 	}
-	if h.cancel != nil {
-		h.cancel()
-		<-h.done
-	}
-	if h.binding != nil {
-		h.binding.Unbind()
-	}
 	delete(m.stations, name)
-	m.releaseAirtimeConsumer(confdb.KindStation + ":" + name)
-	m.log.Info("station stopped", zap.String("station", name))
-}
-
-// attachStationRadio supplies or withdraws only the RF capability. The
-// application listener remains owned by the service and is never bounced by
-// this operation. The caller holds mu.
-func (m *manager) attachStationRadio(name string, h *managedStation,
-	builder station.Builder, cfg map[string]any,
-) {
-	attacher, ok := h.service.(station.RadioAttacher)
-	if !ok {
-		return
-	}
-	sc := m.file.Stations[name]
-	demand := func() (consumerDemand, error) {
-		d, err := builder.Asks(cfg)
-		if err != nil {
-			return consumerDemand{}, err
-		}
-		if requester, ok := h.service.(station.RadioRequester); ok {
-			d = requester.RadioDemand()
-		}
-		return consumerDemand{Waveform: d.Waveform, PowerDBm: d.PowerDBm, DutyCyclePct: d.DutyCyclePct}, nil
-	}
-	h.binding = m.attachConsumerRadio(confdb.KindStation, name, sc.Radio, sc.TXMode(),
-		radio.RoleStation, attacher, demand)
+	m.stopHost(stationHosting, name, &h.managedHost)
 }
 
 // rebindStation applies a radio= mutation without closing the station's TCP
 // listener or its current companion connection. The caller holds mu.
 func (m *manager) rebindStation(name string) {
-	h := m.stations[name]
-	if h == nil || h.service == nil {
-		return
+	if h := m.stations[name]; h != nil && h.service != nil {
+		m.rebindHost(stationHosting, name, &h.managedHost, h.service)
 	}
-	if h.binding != nil {
-		h.binding.Unbind()
-		h.binding = nil
-	}
-	m.releaseAirtimeConsumer(confdb.KindStation + ":" + name)
-	builder, err := station.Lookup(m.file.Stations[name].Protocol)
-	if err != nil {
-		if a, ok := h.service.(station.RadioAttacher); ok {
-			a.AttachRadio(m.file.Stations[name].Radio, nil, nil, err.Error())
-		}
-		return
-	}
-	cfg, _, err := m.file.Stations[name].Layered.Resolve(builder.Presets)
-	if err != nil {
-		if a, ok := h.service.(station.RadioAttacher); ok {
-			a.AttachRadio(m.file.Stations[name].Radio, nil, nil, err.Error())
-		}
-		return
-	}
-	m.attachStationRadio(name, h, builder, cfg)
 }
 
 // startApplication assembles the service independently of RF, exactly
@@ -1055,15 +952,6 @@ func (m *manager) rebindStation(name string) {
 func (m *manager) startApplication(ctx context.Context, name string) {
 	ac := m.file.Applications[name]
 	m.releaseAirtimeConsumer(confdb.KindApplication + ":" + name)
-	builder, err := application.Lookup(ac.Protocol, ac.Type)
-	var cfg map[string]any
-	var traces []config.Trace
-	if err == nil {
-		cfg, traces, err = ac.Layered.Resolve(builder.Presets)
-	}
-	if err == nil {
-		err = builder.Check(cfg)
-	}
 	failed := func(err error, what string) {
 		m.log.Error("application "+what+" failed", zap.String("application", name), zap.Error(err))
 		rf := application.RFDetached
@@ -1075,6 +963,12 @@ func (m *manager) startApplication(ctx context.Context, name string) {
 			State: application.StateError, Cause: err.Error(), RF: rf,
 		}}
 	}
+	builder, err := application.Lookup(ac.Protocol, ac.Type)
+	var cfg map[string]any
+	var traces []config.Trace
+	if err == nil {
+		cfg, traces, err = m.resolveHost(applicationHosting, name, hostedApplication(builder))
+	}
 	if err != nil {
 		failed(err, "configuration")
 		return
@@ -1082,27 +976,17 @@ func (m *manager) startApplication(ctx context.Context, name string) {
 	svc, err := builder.Build(application.Spec{
 		Name: name, Protocol: ac.Protocol, Type: ac.Type, Radio: ac.Radio,
 		Config: cfg, Log: m.log.With(zap.String("application", name)),
-		Build: buildInfo, TX: applicationPolicy(ac), Bus: m.bus,
+		Build: buildInfo, TX: hostPolicy(ac.Host()), Bus: m.bus,
 		Sessions: m.applicationSessions(name), Store: m.store,
 	})
 	if err != nil {
 		failed(err, "assembly")
 		return
 	}
-	actx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	h := &managedApplication{cancel: cancel, done: done, service: svc}
+	h := &managedApplication{service: svc}
 	m.applications[name] = h
-	m.attachApplicationRadio(name, h, builder, cfg)
-	m.viewMu.Lock()
-	m.traces[confdb.KindApplication+" "+name] = withStructural(traces, applicationStructural(ac))
-	m.viewMu.Unlock()
-	m.wg.Go(func() {
-		defer close(done)
-		if err := svc.Run(actx); err != nil && actx.Err() == nil {
-			m.log.Error("application stopped", zap.String("application", name), zap.Error(err))
-		}
-	})
+	m.attachHostRadio(applicationHosting, name, &h.managedHost, svc, hostedApplication(builder), cfg)
+	m.runHost(ctx, applicationHosting, name, &h.managedHost, svc.Run, traces)
 }
 
 func (m *manager) stopApplication(name string) {
@@ -1110,67 +994,16 @@ func (m *manager) stopApplication(name string) {
 	if !ok {
 		return
 	}
-	if h.cancel != nil {
-		h.cancel()
-		<-h.done
-	}
-	if h.binding != nil {
-		h.binding.Unbind()
-	}
 	delete(m.applications, name)
-	m.releaseAirtimeConsumer(confdb.KindApplication + ":" + name)
-	m.log.Info("application stopped", zap.String("application", name))
-}
-
-// attachApplicationRadio supplies or withdraws only the RF capability;
-// the service is never bounced by it. The caller holds mu.
-func (m *manager) attachApplicationRadio(name string, h *managedApplication,
-	builder application.Builder, cfg map[string]any,
-) {
-	attacher, ok := h.service.(application.RadioAttacher)
-	if !ok {
-		return
-	}
-	ac := m.file.Applications[name]
-	demand := func() (consumerDemand, error) {
-		d, err := builder.Asks(cfg)
-		if err != nil {
-			return consumerDemand{}, err
-		}
-		if requester, ok := h.service.(application.RadioRequester); ok {
-			d = requester.RadioDemand()
-		}
-		return consumerDemand{Waveform: d.Waveform, PowerDBm: d.PowerDBm, DutyCyclePct: d.DutyCyclePct}, nil
-	}
-	h.binding = m.attachConsumerRadio(confdb.KindApplication, name, ac.Radio, ac.TXMode(),
-		radio.RoleApplication, attacher, demand)
+	m.stopHost(applicationHosting, name, &h.managedHost)
 }
 
 // rebindApplication applies a radio= mutation without stopping the
 // service. The caller holds mu.
 func (m *manager) rebindApplication(name string) {
-	h := m.applications[name]
-	if h == nil || h.service == nil {
-		return
+	if h := m.applications[name]; h != nil && h.service != nil {
+		m.rebindHost(applicationHosting, name, &h.managedHost, h.service)
 	}
-	if h.binding != nil {
-		h.binding.Unbind()
-		h.binding = nil
-	}
-	m.releaseAirtimeConsumer(confdb.KindApplication + ":" + name)
-	ac := m.file.Applications[name]
-	builder, err := application.Lookup(ac.Protocol, ac.Type)
-	var cfg map[string]any
-	if err == nil {
-		cfg, _, err = ac.Layered.Resolve(builder.Presets)
-	}
-	if err != nil {
-		if a, ok := h.service.(application.RadioAttacher); ok {
-			a.AttachRadio(ac.Radio, nil, nil, err.Error())
-		}
-		return
-	}
-	m.attachApplicationRadio(name, h, builder, cfg)
 }
 
 // The live views the console reads. Each returns a copy: sessions
@@ -1309,8 +1142,8 @@ func (m *manager) Traces() map[string][]config.Trace {
 	// the hardware is missing.
 	m.syntheticRadioTraces(out)
 	m.syntheticRelayTraces(out)
-	m.syntheticStationTraces(out)
-	m.syntheticApplicationTraces(out)
+	m.syntheticHostTraces(stationHosting, out)
+	m.syntheticHostTraces(applicationHosting, out)
 	addSensorTraces(out, m.file.Sensors)
 	// The singletons have no layering, so their "provenance" is the
 	// store itself — synthesised here so print works the same way
@@ -1387,36 +1220,6 @@ func (m *manager) syntheticRelayTraces(out map[string][]config.Trace) {
 			}
 		}
 		out["relay "+name] = rows
-	}
-}
-
-func (m *manager) syntheticStationTraces(out map[string][]config.Trace) {
-	for name, sc := range m.file.Stations {
-		if _, live := out[confdb.KindStation+" "+name]; live {
-			continue
-		}
-		rows := stationStructural(sc)
-		if b, err := station.Lookup(sc.Protocol); err == nil {
-			if _, traces, rerr := sc.Layered.Resolve(b.Presets); rerr == nil {
-				rows = withStructural(traces, rows)
-			}
-		}
-		out[confdb.KindStation+" "+name] = rows
-	}
-}
-
-func (m *manager) syntheticApplicationTraces(out map[string][]config.Trace) {
-	for name, ac := range m.file.Applications {
-		if _, live := out[confdb.KindApplication+" "+name]; live {
-			continue
-		}
-		rows := applicationStructural(ac)
-		if b, err := application.Lookup(ac.Protocol, ac.Type); err == nil {
-			if _, traces, rerr := ac.Layered.Resolve(b.Presets); rerr == nil {
-				rows = withStructural(traces, rows)
-			}
-		}
-		out[confdb.KindApplication+" "+name] = rows
 	}
 }
 
@@ -2001,17 +1804,15 @@ func deepCheck(next *config.File, kind, name, relayName string) error {
 	case kind == confdb.KindRadio:
 		return checkRadioTopology(next, name)
 	case kind == confdb.KindStation:
-		sc := next.Stations[name]
-		if sc.Radio == "" {
-			return checkStationAlone(sc)
+		if radioName := stationHosting.host(next, name).Radio; radioName != "" {
+			return checkRadioTopology(next, radioName)
 		}
-		return checkRadioTopology(next, sc.Radio)
+		return checkHostAlone(stationHosting, next, name)
 	case kind == confdb.KindApplication:
-		ac := next.Applications[name]
-		if ac.Radio == "" {
-			return checkApplicationAlone(ac)
+		if radioName := applicationHosting.host(next, name).Radio; radioName != "" {
+			return checkRadioTopology(next, radioName)
 		}
-		return checkRadioTopology(next, ac.Radio)
+		return checkHostAlone(applicationHosting, next, name)
 	case kind == confdb.KindSensor:
 		return checkSensorAlone(next.Sensors[name])
 	case kind == confdb.KindMQTT:
@@ -2088,17 +1889,15 @@ func checkCreatedObject(next *config.File, kind, name string) error {
 		rc := next.Relays[name]
 		return checkRadioTopology(next, rc.Radio)
 	case confdb.KindStation:
-		sc := next.Stations[name]
-		if sc.Radio == "" {
-			return checkStationAlone(sc)
+		if radioName := stationHosting.host(next, name).Radio; radioName != "" {
+			return checkRadioTopology(next, radioName)
 		}
-		return checkRadioTopology(next, sc.Radio)
+		return checkHostAlone(stationHosting, next, name)
 	case confdb.KindApplication:
-		ac := next.Applications[name]
-		if ac.Radio == "" {
-			return checkApplicationAlone(ac)
+		if radioName := applicationHosting.host(next, name).Radio; radioName != "" {
+			return checkRadioTopology(next, radioName)
 		}
-		return checkRadioTopology(next, ac.Radio)
+		return checkHostAlone(applicationHosting, next, name)
 	case confdb.KindRadio:
 		return checkRadioAlone(next.Radios[name])
 	case confdb.KindSensor:
@@ -3718,36 +3517,6 @@ func checkRadioAlone(rd config.Radio) error {
 	return check(cfg)
 }
 
-func checkStationAlone(sc config.Station) error {
-	builder, err := station.Lookup(sc.Protocol)
-	if err != nil {
-		return err
-	}
-	if err := checkScopes(sc.Layered, builder.Presets, builder.Check); err != nil {
-		return err
-	}
-	cfg, _, err := sc.Layered.Resolve(builder.Presets)
-	if err != nil {
-		return err
-	}
-	return builder.Check(cfg)
-}
-
-func checkApplicationAlone(ac config.Application) error {
-	builder, err := application.Lookup(ac.Protocol, ac.Type)
-	if err != nil {
-		return err
-	}
-	if err := checkScopes(ac.Layered, builder.Presets, builder.Check); err != nil {
-		return err
-	}
-	cfg, _, err := ac.Layered.Resolve(builder.Presets)
-	if err != nil {
-		return err
-	}
-	return builder.Check(cfg)
-}
-
 type configuredDuty struct {
 	consumer string
 	budget   time.Duration
@@ -3782,16 +3551,13 @@ func checkRadioTopology(next *config.File, radioName string) error {
 	if err != nil {
 		return err
 	}
-	stationDuties, err := configuredStationDuties(next, radioName, driver, radioCfg, envelope)
-	if err != nil {
-		return err
+	for _, k := range []hostedKind{stationHosting, applicationHosting} {
+		hostDuties, err := configuredHostDuties(k, next, radioName, driver, radioCfg, envelope)
+		if err != nil {
+			return err
+		}
+		duties = append(duties, hostDuties...)
 	}
-	duties = append(duties, stationDuties...)
-	applicationDuties, err := configuredApplicationDuties(next, radioName, driver, radioCfg, envelope)
-	if err != nil {
-		return err
-	}
-	duties = append(duties, applicationDuties...)
 	sort.Slice(duties, func(i, j int) bool { return duties[i].consumer < duties[j].consumer })
 	if len(duties) > 1 {
 		want := duties[0]
@@ -3832,102 +3598,6 @@ func configuredRelayDuties(next *config.File, radioName string,
 		}
 	}
 	return duties, nil
-}
-
-func configuredStationDuties(next *config.File, radioName string, driver radio.Driver,
-	radioCfg map[string]any, envelope radio.Envelope,
-) ([]configuredDuty, error) {
-	var duties []configuredDuty
-	for stationName, sc := range next.Stations {
-		if sc.Radio != radioName {
-			continue
-		}
-		budget, enabled, err := checkConfiguredStationAttachment(sc, driver, radioCfg, envelope)
-		if err != nil {
-			return nil, fmt.Errorf("station %q: %w", stationName, err)
-		}
-		if enabled {
-			duties = append(duties, configuredDuty{
-				consumer: confdb.KindStation + ":" + stationName,
-				budget:   budget,
-			})
-		}
-	}
-	return duties, nil
-}
-
-func configuredApplicationDuties(next *config.File, radioName string, driver radio.Driver,
-	radioCfg map[string]any, envelope radio.Envelope,
-) ([]configuredDuty, error) {
-	var duties []configuredDuty
-	for appName, ac := range next.Applications {
-		if ac.Radio != radioName {
-			continue
-		}
-		budget, enabled, err := checkConfiguredApplicationAttachment(ac, driver, radioCfg, envelope)
-		if err != nil {
-			return nil, fmt.Errorf("application %q: %w", appName, err)
-		}
-		if enabled {
-			duties = append(duties, configuredDuty{
-				consumer: confdb.KindApplication + ":" + appName,
-				budget:   budget,
-			})
-		}
-	}
-	return duties, nil
-}
-
-func checkConfiguredApplicationAttachment(ac config.Application, driver radio.Driver,
-	radioCfg map[string]any, envelope radio.Envelope,
-) (budget time.Duration, enabled bool, err error) {
-	if err := checkApplicationAlone(ac); err != nil {
-		return 0, false, err
-	}
-	builder, err := application.Lookup(ac.Protocol, ac.Type)
-	if err != nil {
-		return 0, false, err
-	}
-	cfg, _, err := ac.Layered.Resolve(builder.Presets)
-	if err != nil {
-		return 0, false, err
-	}
-	if builder.Asks == nil {
-		return 0, false, fmt.Errorf("application type %q cannot describe a radio demand", ac.Type)
-	}
-	demand, err := builder.Asks(cfg)
-	if err != nil {
-		return 0, false, err
-	}
-	return configuredConsumerDuty(ac.TXMode(),
-		consumerDemand{Waveform: demand.Waveform, PowerDBm: demand.PowerDBm, DutyCyclePct: demand.DutyCyclePct},
-		driver, radioCfg, envelope)
-}
-
-func checkConfiguredStationAttachment(sc config.Station, driver radio.Driver,
-	radioCfg map[string]any, envelope radio.Envelope,
-) (budget time.Duration, enabled bool, err error) {
-	if err := checkStationAlone(sc); err != nil {
-		return 0, false, err
-	}
-	builder, err := station.Lookup(sc.Protocol)
-	if err != nil {
-		return 0, false, err
-	}
-	cfg, _, err := sc.Layered.Resolve(builder.Presets)
-	if err != nil {
-		return 0, false, err
-	}
-	if builder.Asks == nil {
-		return 0, false, fmt.Errorf("protocol %q cannot describe a radio demand", sc.Protocol)
-	}
-	demand, err := builder.Asks(cfg)
-	if err != nil {
-		return 0, false, err
-	}
-	return configuredConsumerDuty(sc.TXMode(),
-		consumerDemand{Waveform: demand.Waveform, PowerDBm: demand.PowerDBm, DutyCyclePct: demand.DutyCyclePct},
-		driver, radioCfg, envelope)
 }
 
 // configuredConsumerDuty is the preflight's judgement of one demand:
