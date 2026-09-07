@@ -179,21 +179,41 @@ func (r *Relay) TXMode() string {
 	return r.TX.Mode
 }
 
-// TXMode resolves the station's independent transmit gate.
-func (s *Station) TXMode() string {
-	if s.TX == nil {
+// Host is what a station and an application declare alike: the mesh
+// they speak, the radio they follow, their layered attributes and
+// their own origination gate. The daemon's one path for hosting either
+// reads this projection; what only one of them declares — a station's
+// listener, an application's type — stays on its own struct.
+type Host struct {
+	Protocol string
+	Radio    string
+	Layered  Layered
+	TX       *TX
+}
+
+// TXMode resolves the origination gate, absent block included.
+func (h Host) TXMode() string {
+	if h.TX == nil {
 		return TXDry
 	}
-	return s.TX.Mode
+	return h.TX.Mode
+}
+
+// Host is the station's hosted half.
+func (s *Station) Host() Host {
+	return Host{Protocol: s.Protocol, Radio: s.Radio, Layered: s.Layered, TX: s.TX}
+}
+
+// TXMode resolves the station's independent transmit gate.
+func (s *Station) TXMode() string { return s.Host().TXMode() }
+
+// Host is the application's hosted half.
+func (a *Application) Host() Host {
+	return Host{Protocol: a.Protocol, Radio: a.Radio, Layered: a.Layered, TX: a.TX}
 }
 
 // TXMode resolves the application's origination gate.
-func (a *Application) TXMode() string {
-	if a.TX == nil {
-		return TXDry
-	}
-	return a.TX.Mode
-}
+func (a *Application) TXMode() string { return a.Host().TXMode() }
 
 // Sentinel configures the observation and archival instantiation.
 // Its absence is meaningful: no sentinel block, no journal, no

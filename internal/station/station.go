@@ -13,38 +13,45 @@ import (
 	"go.uber.org/zap"
 
 	"meshrunner.dev/lotor/internal/bus"
+	"meshrunner.dev/lotor/internal/hosted"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/schema"
 	"meshrunner.dev/lotor/internal/version"
 )
 
-// State is the station lifecycle visible to operators.
-type State string
+// The lifecycle, the radio attachment, the RF door and the origination
+// gate are what every hosted identity shares; internal/hosted says them
+// once, and this seam reads in its own vocabulary.
 
-const (
-	// StateStarting has not opened the application listener yet.
-	StateStarting State = "starting"
-	// StateRunning is accepting companion application connections.
-	StateRunning State = "running"
-	// StateError exposes the listener or service failure cause.
-	StateError State = "error"
-	// StateStopped is terminal after the station context ends.
-	StateStopped State = "stopped"
+type (
+	// State is the station lifecycle: StateStarting has not opened its
+	// listener yet.
+	State = hosted.State
+	// RFState is the radio attachment, apart from the lifecycle: a
+	// detached or failed radio never makes the listener cease to exist.
+	RFState = hosted.RFState
+	// RadioAttacher is the live RF door.
+	RadioAttacher = hosted.RadioAttacher
+	// RadioRequester exposes the live protocol-owned waveform.
+	RadioRequester = hosted.RadioRequester
+	// RadioDemand is what a station asks of an attachment.
+	RadioDemand = hosted.RadioDemand
+	// TXPolicy is the station's origination gate.
+	TXPolicy = hosted.TXPolicy
 )
 
-// RFState deliberately differs from the station lifecycle: a detached or
-// failed radio never makes the application listener cease to exist.
-type RFState string
-
+// StateStarting and its siblings are the shared words, re-exported so a
+// call site reads in this seam's own vocabulary.
 const (
-	// RFDetached means no radio is configured for this station.
-	RFDetached RFState = "detached"
-	// RFDown means an attachment is configured but unavailable.
-	RFDown RFState = "down"
-	// RFActive means the station may receive and submit emissions.
-	RFActive RFState = "active"
-	// RFBlocked means another consumer owns an incompatible waveform.
-	RFBlocked RFState = "blocked"
+	StateStarting = hosted.StateStarting
+	StateRunning  = hosted.StateRunning
+	StateError    = hosted.StateError
+	StateStopped  = hosted.StateStopped
+
+	RFDetached = hosted.RFDetached
+	RFDown     = hosted.RFDown
+	RFActive   = hosted.RFActive
+	RFBlocked  = hosted.RFBlocked
 )
 
 // Info is a coherent runtime snapshot.
@@ -69,38 +76,6 @@ type Info struct {
 type Service interface {
 	Run(ctx context.Context) error
 	Info() Info
-}
-
-// RadioAttacher is the optional live RF door. A manager may move a station
-// between radios without stopping its application listener or TCP client.
-type RadioAttacher interface {
-	AttachRadio(name string, binding *radio.Binding, duty *radio.AirtimeLedger, cause string)
-}
-
-// RadioRequester exposes the live protocol-owned waveform. It may differ from
-// the configuration default after a companion application changed its radio
-// parameters and that preference survived a daemon restart.
-type RadioRequester interface {
-	RadioDemand() RadioDemand
-}
-
-// RadioDemand is everything a station protocol asks from an attachment. Duty
-// remains a percentage here because the manager owns conversion to the one
-// shared sliding-hour ledger.
-type RadioDemand struct {
-	Waveform     radio.Waveform
-	PowerDBm     int8
-	DutyCyclePct float64
-}
-
-// TXPolicy is the station's protocol-neutral origination gate. Stations never
-// receive a forwarding rung: dry, shadow and on-air are the whole ladder.
-type TXPolicy struct {
-	Mode           string
-	LBTThresholdDB float64
-	LBTExhausted   string
-	CAD            bool
-	QueueDepth     int
 }
 
 // StateStore is the protocol-neutral durable home for one station's mutable
