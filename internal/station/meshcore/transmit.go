@@ -123,7 +123,7 @@ func (s *service) sendText(command companion.SendText) []companion.Response {
 		s.routeFlood(packet)
 		kind = "station-message-flood"
 	} else {
-		pathBytes := pathByteLen(contact.info.PathLen)
+		pathBytes := mesh.PathByteLen(contact.info.PathLen)
 		s.routeDirect(packet, contact.info.PathLen, contact.info.Path[:pathBytes])
 	}
 	if response := s.submitLocked(packet, kind); response != nil {
@@ -248,10 +248,6 @@ func (*service) routeDirect(packet *mesh.Packet, pathLen uint8, path []byte) {
 	packet.PathLen = pathLen
 	packet.Path = append([]byte(nil), path...)
 	packet.TransportCodes = [2]uint16{}
-}
-
-func pathByteLen(pathLen uint8) int {
-	return int(pathLen&63) * (int(pathLen>>6) + 1)
 }
 
 // submitLocked queues what a companion ordered. Such a frame never

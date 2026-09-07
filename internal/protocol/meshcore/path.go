@@ -51,14 +51,10 @@ func (e *engine) pathVerdict(rx *reception) (verdict, why string, handled bool) 
 		}
 		e.learnOutPath(c, pr, rx.id)
 		return verdictClientPath, fmt.Sprintf("route home, %d hops",
-			pr.PathLen&pathHopCountMask), true
+			meshcore.PathHops(pr.PathLen)), true
 	}
 	return "", "", false
 }
-
-// pathHopCountMask isolates the hop count from a path descriptor's
-// low six bits, for the journal line that reports what was learned.
-const pathHopCountMask = 63
 
 // learnOutPath records the route and refreshes the session on it. The
 // newest one wins outright: a client that moved is the reason it sent
@@ -80,5 +76,5 @@ func (e *engine) learnOutPath(c *client, pr *meshcore.PathReturn, origin correla
 	e.log.Debug("a client taught us its route home",
 		zap.String("corr", origin.Short()),
 		zap.String("pubkey", shortKey(c.PubKey[:])),
-		zap.Int("hops", int(pr.PathLen&pathHopCountMask)))
+		zap.Int("hops", meshcore.PathHops(pr.PathLen)))
 }

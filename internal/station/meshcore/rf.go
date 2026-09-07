@@ -386,7 +386,7 @@ func (s *service) sendACK(contact contactEntry, ack []byte) {
 		s.submitAtLocked(packet, "station-ack-flood", time.Now().Add(200*time.Millisecond))
 		return
 	}
-	path := contact.info.Path[:pathByteLen(pathLen)]
+	path := contact.info.Path[:mesh.PathByteLen(pathLen)]
 	delay := 200 * time.Millisecond
 	if s.p.MultiACKs > 0 {
 		packet, err := mesh.BuildMultiAck(ack, 1)

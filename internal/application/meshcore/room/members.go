@@ -517,7 +517,7 @@ func (s *service) handlePath(pkt *mesh.Packet, corr correlation.ID) {
 		s.log.Warn("the taught route did not reach the store", zap.String("corr", corr.Short()), zap.Error(err))
 	}
 	s.log.Debug("a member taught us its route home", zap.String("corr", corr.Short()),
-		zap.String("pubkey", hex.EncodeToString(c.PubKey[:6])), zap.Int("hops", int(pr.PathLen&63)))
+		zap.String("pubkey", hex.EncodeToString(c.PubKey[:6])), zap.Int("hops", mesh.PathHops(pr.PathLen)))
 	if pr.ExtraType == uint8(mesh.PayloadTypeAck) {
 		if crc, err := mesh.ParseAck(pr.Extra); err == nil {
 			s.ackReceivedLocked(crc, corr)

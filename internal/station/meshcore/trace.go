@@ -72,7 +72,7 @@ func appendUint32(dst []byte, value uint32) []byte {
 }
 
 func (s *service) cacheAdvertPathLocked(publicKey [mesh.PubKeySize]byte, packet *mesh.Packet) {
-	if !mesh.ValidPathLen(packet.PathLen) || pathByteLen(packet.PathLen) != len(packet.Path) {
+	if !mesh.ValidPathLen(packet.PathLen) || mesh.PathByteLen(packet.PathLen) != len(packet.Path) {
 		return
 	}
 	prefix := [7]byte(publicKey[:7])
@@ -98,7 +98,7 @@ func (s *service) getAdvertPath(publicKey [mesh.PubKeySize]byte) []companion.Res
 		if item.receivedUnix == 0 || !bytes.Equal(item.prefix[:], prefix) {
 			continue
 		}
-		pathBytes := pathByteLen(item.pathLen)
+		pathBytes := mesh.PathByteLen(item.pathLen)
 		return []companion.Response{companion.AdvertPath{
 			ReceivedUnix: item.receivedUnix, PathLen: item.pathLen,
 			Path: append([]byte(nil), item.path[:pathBytes]...),

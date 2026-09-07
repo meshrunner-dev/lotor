@@ -287,7 +287,7 @@ func (s *service) pushToLocked(now time.Time, key [mesh.PubKeySize]byte) bool {
 	if chosen == nil {
 		return false
 	}
-	plain, err := mesh.BuildSignedTextPlaintext(time.Unix(int64(chosen.at), 0), chosen.author[:4],
+	plain, err := mesh.BuildSignedTextPlaintext(time.Unix(int64(chosen.at), 0), chosen.author[:mesh.SignedPrefixSize],
 		chosen.text, uint8(rand.IntN(4))) //nolint:gosec // the reference's random attempt bits, not security
 	if err != nil {
 		return false
@@ -301,7 +301,7 @@ func (s *service) pushToLocked(now time.Time, key [mesh.PubKeySize]byte) bool {
 	var priority int
 	if c.Out != nil {
 		priority = meshcorehost.RouteDirect(pkt, c.Out, mesh.TransportKey{})
-		m.ackDeadline = now.Add(pushAckBase + pushAckPerHop*time.Duration(int(c.Out.PathLen&63)+1))
+		m.ackDeadline = now.Add(pushAckBase + pushAckPerHop*time.Duration(mesh.PathHops(c.Out.PathLen)+1))
 	} else {
 		// No route taught yet: the reference floods the push under
 		// the room's default scope at its own hash width.

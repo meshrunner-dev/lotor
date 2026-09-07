@@ -208,7 +208,7 @@ func (s *service) routeContact(packet *mesh.Packet, contact contactEntry, forceF
 		return true
 	}
 	pathLen := contact.info.PathLen
-	s.routeDirect(packet, pathLen, contact.info.Path[:pathByteLen(pathLen)])
+	s.routeDirect(packet, pathLen, contact.info.Path[:mesh.PathByteLen(pathLen)])
 	return false
 }
 
