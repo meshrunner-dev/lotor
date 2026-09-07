@@ -257,9 +257,16 @@ bytes:
 - every durable role persists — `read-only`, `read-write`, `admin` —
   not admins alone; guests stay in RAM, exactly as the relay's ACL
   already does. A member who logged in yesterday is still a member;
-- anonymous requests and keep-alives are rate-limited (the repeater's
-  `anon_limiter(4, 180)` shape; the reference room server carries a
-  TODO where its limiter should be);
+- two budgets stand where the reference room server carries a TODO:
+  logins from keys the room does not know share one fixed window
+  (eight a minute — the repeater's `anon_limiter` shape), and every
+  authenticated request, keep-alives included, spends a slot of its
+  session's budget (the reference's six a minute) before the store is
+  touched. The repeater charges flooded answers alone, since those are
+  what it amplifies; a room's keep-alive is direct-only, but the duty
+  and the write it costs are real. A known key's login is not budgeted,
+  as the relay engine argues (`session.go`): the reply goes back to a
+  key that has already proven itself;
 - a post an admin could not persist is **not acknowledged** — "a post
   acknowledged is a post kept" — and the refusal is counted and
   logged, where the reference stores in RAM and acknowledges;

@@ -98,9 +98,7 @@ func (s *service) processRF(ctx context.Context, frame radio.Frame) {
 	}
 	s.mu.Lock()
 	duplicate := s.seen.Witness(pkt.Hash())
-	if duplicate {
-		s.duplicates++
-	}
+	s.tallyReceptionLocked(pkt, frame, duplicate)
 	s.mu.Unlock()
 	if duplicate {
 		logging.Trace(s.log, "duplicate frame ignored", zap.String("corr", frame.Correlation.Short()),
@@ -123,6 +121,28 @@ func (s *service) processRF(ctx context.Context, frame radio.Frame) {
 			s.ackReceived(crc, frame.Correlation)
 		}
 	default:
+	}
+}
+
+// tallyReceptionLocked keeps what the reference's status answer says
+// about the receive side: how each frame travelled, which ones were
+// copies, and how the last one sounded.
+func (s *service) tallyReceptionLocked(pkt *mesh.Packet, frame radio.Frame, duplicate bool) {
+	s.lastRSSI, s.lastSNR = frame.RSSI, frame.SNR
+	switch {
+	case pkt.IsRouteFlood():
+		s.recvFlood++
+		if duplicate {
+			s.floodDups++
+		}
+	case pkt.IsRouteDirect():
+		s.recvDirect++
+		if duplicate {
+			s.directDups++
+		}
+	}
+	if duplicate {
+		s.duplicates++
 	}
 }
 
@@ -349,6 +369,19 @@ func (s *service) handleRequest(ctx context.Context, pkt *mesh.Packet, corr corr
 		return
 	}
 	now := time.Now()
+	// Every authenticated request spends one slot of the session's
+	// budget, keep-alives included, and it is spent before the store
+	// is touched: the reference room server carries a TODO where its
+	// limiter should be, and a member asking in a loop would otherwise
+	// cost a write and a direct reply per frame. The repeater charges
+	// flooded answers alone, because those are the ones it amplifies;
+	// a room's keep-alive is direct-only and amplifies nothing, yet the
+	// duty and the fsync it costs are real.
+	if !c.Asks.Allow(now) {
+		s.limited++
+		s.log.Debug("request rate-limited", zap.String("corr", corr.Short()))
+		return
+	}
 	if err := s.table.Advance(c, ts, now); err != nil {
 		s.log.Warn("the member store refused the replay guard — request not served",
 			zap.String("corr", corr.Short()), zap.Error(err))
@@ -363,10 +396,6 @@ func (s *service) handleRequest(ctx context.Context, pkt *mesh.Packet, corr corr
 		if pkt.IsRouteDirect() {
 			s.keepAliveLocked(c, m, plain, body, corr)
 		}
-		return
-	}
-	if c.Out == nil && !c.Asks.Allow(now) {
-		s.log.Debug("request rate-limited — flood answers", zap.String("corr", corr.Short()))
 		return
 	}
 	answer, answered := s.answerLocked(c, body)

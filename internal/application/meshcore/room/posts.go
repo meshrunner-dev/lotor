@@ -306,7 +306,19 @@ func (s *service) pushToLocked(now time.Time, key [mesh.PubKeySize]byte) bool {
 
 // statsLocked is the reference's ServerStats about this room.
 func (s *service) statsLocked() mesh.RoomStats {
+	// The reference's err_events counts what its firmware could not
+	// do with a frame; here that is a reception it could not decode
+	// and an emission it gave up on. No battery is sensed for an
+	// application in this cut, so BattMilliVolts stays zero.
 	stats := mesh.RoomStats{
+		TxQueueLen:    uint16(min(s.pipeline.Queue.Len(), 1<<16-1)),
+		LastRSSI:      int16(s.lastRSSI),
+		LastSNR:       s.lastSNR,
+		RecvFlood:     uint32(min(s.recvFlood, 1<<32-1)),
+		RecvDirect:    uint32(min(s.recvDirect, 1<<32-1)),
+		FloodDups:     uint16(min(s.floodDups, 1<<16-1)),
+		DirectDups:    uint16(min(s.directDups, 1<<16-1)),
+		ErrEvents:     uint16(min(s.corrupt+s.dropped, 1<<16-1)),
 		PacketsRecv:   uint32(min(s.heard, 1<<32-1)),
 		PacketsSent:   uint32(min(s.sent, 1<<32-1)),
 		SentFlood:     uint32(min(s.sentFlood, 1<<32-1)),

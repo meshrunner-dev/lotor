@@ -257,6 +257,12 @@ type service struct {
 	rfDevice   radio.Device
 	rfWake     chan struct{}
 	heard      uint64
+	recvFlood  uint64
+	recvDirect uint64
+	floodDups  uint64
+	directDups uint64
+	lastRSSI   float64
+	lastSNR    float64
 	corrupt    uint64
 	advertsDue uint64
 	sent       uint64

@@ -491,6 +491,31 @@ func TestADuplicateFrameActsOnce(t *testing.T) {
 	}
 }
 
+// A member's requests are budgeted, keep-alives included, and the
+// budget is spent before the store is touched: the seventh request in
+// a minute is counted as limited and moves nothing — not even the
+// replay guard.
+func TestAMembersRequestsAreBudgetedKeepAlivesIncluded(t *testing.T) {
+	svc := benchRoom(t, nil)
+	alice := newClient(t, svc)
+	login(t, svc, alice, "welcome", 0)
+	base := uint32(time.Now().Unix()) + 10
+	for i := range sessionLimitMax + 1 {
+		req, err := mesh.BuildRequest(alice.id, svc.id.PubKey[:], alice.secret, base+uint32(i), mesh.FrameKeepAliveRequest(0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header = mesh.MakeHeader(mesh.RouteDirect, mesh.PayloadTypeReq, mesh.PayloadVer1)
+		hear(t, svc, req)
+	}
+	svc.mu.Lock()
+	limited, last := svc.limited, svc.table.By[alice.id.PubKey].LastTimestamp
+	svc.mu.Unlock()
+	if limited != 1 || last != base+uint32(sessionLimitMax-1) {
+		t.Fatalf("limited %d, last timestamp %d — want 1 and %d", limited, last, base+uint32(sessionLimitMax-1))
+	}
+}
+
 // The push clock keeps to its schedule: a turn that fires before the
 // two seconds a login bought does nothing and leaves the schedule
 // where the login put it, so the reply reaches the member before any
