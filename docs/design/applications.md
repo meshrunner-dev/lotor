@@ -81,7 +81,6 @@ type Builder struct {
     Asks    func(map[string]any) (RadioDemand, error)
     Presets map[string]map[string]any   // band presets, as stations
     Schema  []schema.Attr               // the type's contributed attrs
-    Migrations []confdb.Migration       // the type's tables in the store — see Persistence
 }
 
 type Service interface {
@@ -341,10 +340,32 @@ What it costs, stated so nobody rediscovers it:
   (`room_posts`, `room_cursors`, keyed by application name) and are
   not revisioned. "Every mutation is recorded" keeps its meaning for
   configuration objects, and this is the one stated exception.
-- **Migrations through the store's own registry.** Each application
-  type contributes its tables through `confdb.Migration`, the shape
-  bump discipline the store already enforces — no `Builder.Data`, no
-  second migration system.
+- **Migrations through the store's own registry.** An application's
+  tables are the store's and the daemon's, not the type's: their DDL
+  is a `confdb.Migration` in the store's registry like every other
+  table, the accessors live in `confdb`, and `Store.Remove` drops the
+  rows of an application it forgets. An earlier draft had each type
+  contribute a `Builder.Migrations`; it never landed, and it should
+  not — a shipped migration stays pinned to its historical DDL, so a
+  per-type contribution point would only move frozen text around. The
+  store does not import the protocol library for this: a key column's
+  width is a local constant it shares with the room by value. No
+  `Builder.Data`, no second migration system; the day a second type
+  brings tables, the same registry takes them.
+- **Writes happen under the room's one lock.** The room has a single
+  mutex, as `AGENTS.md` asks — one per table, never one per caller —
+  and its store writes run inside it: a post is kept before it is
+  acknowledged, a login's eviction is recorded before the reply is
+  composed. That puts a SQLite commit in the critical section the RF
+  loop, the push clock and the console share, which `DESIGN.md`'s
+  owner-goroutine doctrine would keep out. It is deliberate: a room
+  writes a handful of times an hour, a healthy eMMC commit takes tens
+  of milliseconds, and a LoRa frame takes longer than that to arrive.
+  The one write bound, `storeWait`, is short — three seconds — so a
+  disk that stops answering costs a refused ACK the client retries,
+  not a frozen room for as long as the disk sulks. Should a room ever
+  become hot, the station's shape is the upgrade: compose and stamp
+  under the lock, write outside it, retake it to publish.
 - **Cursors are debounced.** The reference's five-second lazy write is
   the right instinct: a cursor lost to a crash costs a re-delivery the
   client's own cursor repairs at its next keep-alive, and the store is

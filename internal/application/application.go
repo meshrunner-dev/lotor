@@ -1,10 +1,16 @@
-// Package application is the protocol-neutral registry and lifecycle seam
-// for hosted mesh identities that serve peers over the air — a room
-// server first. An application is neither a relay nor a station: it
-// never forwards, and its users are on the mesh rather than on a local
-// socket. Like a station it owns its durable protocol state and exists
-// while detached from RF; the radio attachment is a separate capability
-// the daemon supplies and withdraws.
+// Package application is the registry and lifecycle seam for hosted
+// mesh identities that serve peers over the air — a room server first.
+// An application is neither a relay nor a station: it never forwards,
+// and its users are on the mesh rather than on a local socket. Like a
+// station it owns its durable protocol state and exists while detached
+// from RF; the radio attachment is a separate capability the daemon
+// supplies and withdraws.
+//
+// The registry and the lifecycle know no protocol. The Spec a builder
+// receives does: it hands over MeshCore's session store, because every
+// type registered today speaks MeshCore, and pretending otherwise would
+// be a neutrality of names only. When a second protocol brings its own
+// notion of a session, that field is where the seam will have to widen.
 package application
 
 import (
@@ -109,8 +115,8 @@ type TXPolicy struct {
 	QueueDepth     int
 }
 
-// Spec is the protocol-neutral structure resolved before a type's
-// builder sees its contributed configuration.
+// Spec is what the daemon resolves before a type's builder sees its
+// contributed configuration.
 type Spec struct {
 	Name     string
 	Protocol string
@@ -127,7 +133,10 @@ type Spec struct {
 	Sessions meshcorehost.SessionStore
 	// Store is the configuration store itself, for the tables a type
 	// keeps beside the revision trail — a room's posts and cursors.
-	// Nil is the memory-only posture.
+	// Nil is the memory-only posture. A type declares the few methods
+	// it actually uses as an interface of its own and assigns this to
+	// it, so what it asks of the store is written down where the
+	// asking happens.
 	Store *confdb.Store
 }
 

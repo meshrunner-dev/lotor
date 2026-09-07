@@ -36,7 +36,11 @@ const (
 	pushAckPerHop    = 2 * time.Second
 	maxPushFailures  = 3
 	cursorFlushDelay = 5 * time.Second
-	storeWait        = 10 * time.Second
+	// storeWait bounds one write. It is taken under the service mutex —
+	// see the package doc — so a disk that has stopped answering costs
+	// the room this long, once per write, and then a refused ACK the
+	// client retries: not a frozen RF loop for as long as the disk sulks.
+	storeWait = 3 * time.Second
 )
 
 // post is one thing said in the room: when, by whom, what.

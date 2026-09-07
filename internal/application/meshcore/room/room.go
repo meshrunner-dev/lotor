@@ -1,11 +1,23 @@
 // Package room is the MeshCore room server, the first application type:
 // a mesh identity clients log into to post text and receive what others
-// posted, under an access list its admin governs. This cut holds an
-// identity, follows a radio, hears the mesh and announces itself: its
-// adverts travel the shared origination pipeline, so a shadow room
+// posted, under an access list its admin governs. It holds an identity,
+// follows a radio, hears the mesh and announces itself; logins, posts
+// and pushes go through the shared server kernel, and everything it
+// emits travels the shared origination pipeline, so a shadow room
 // spends the duty it would have spent and an on-air room keys the
-// radio for them. Logins, posts and pushes arrive with the shared
-// server kernel, in the order the design document lays out.
+// radio.
+//
+// One lock. The RF loop, the push clock, the advert clock and the
+// console share the service mutex, and the store's writes run under
+// it: a post is on disk before it is acknowledged, an eviction is
+// recorded before the reply is composed. That is a SQLite commit in
+// the critical section, which the owner-goroutine shape in DESIGN.md
+// would keep out, and it is deliberate — a room writes a handful of
+// times an hour, a healthy commit takes tens of milliseconds, a LoRa
+// frame takes longer to arrive, and storeWait bounds the one disk that
+// stops answering. Should a room ever become hot, the station's shape
+// is the upgrade: compose and stamp under the lock, write outside it,
+// retake it to publish.
 package room
 
 import (
@@ -234,6 +246,19 @@ func asks(cfg map[string]any) (application.RadioDemand, error) {
 	}, nil
 }
 
+// store is what this room asks of the configuration store, and all of
+// it: its posts and its members' cursors. *confdb.Store satisfies it;
+// so does a fake, which is what a test of a room whose disk fails
+// needs. The daemon hands over the whole store, and this is where the
+// room writes down the little it takes.
+type store interface {
+	LoadRoomPosts(ctx context.Context, app string) ([]confdb.RoomPost, error)
+	SaveRoomPost(ctx context.Context, app string, p confdb.RoomPost, keep int) (int64, error)
+	LoadRoomCursors(ctx context.Context, app string) ([]confdb.RoomCursor, error)
+	SaveRoomCursor(ctx context.Context, app string, c confdb.RoomCursor) error
+	ForgetRoomCursor(ctx context.Context, app string, pubKey []byte) error
+}
+
 // service is one room. Everything below mu is read by Info from any
 // goroutine; the RF loop and the advert clock write it.
 type service struct {
@@ -244,7 +269,7 @@ type service struct {
 	log       *zap.Logger
 	tx        application.TXPolicy
 	pipeline  *origin.Pipeline
-	store     *confdb.Store
+	store     store
 	started   time.Time
 
 	mu         sync.Mutex
@@ -313,11 +338,16 @@ func build(spec application.Spec) (application.Service, error) {
 		pipeline: origin.New(origin.Config{
 			SourceKind: bus.SourceApplication, Source: spec.Name, Bus: spec.Bus, Log: log,
 		}, queueDepth),
-		store: spec.Store, started: time.Now(),
+		started:   time.Now(),
 		table:     meshcorehost.NewTable(spec.Sessions, p.MaxMembers),
 		strangers: meshcorehost.RateLimiter{Max: strangerLoginMax, Window: strangerLoginWindow},
 		members:   map[[mesh.PubKeySize]byte]*member{},
 		posts:     make([]post, 0, p.History),
+	}
+	// A nil pointer boxed in an interface is not a nil interface: the
+	// memory-only posture has to be kept as one on purpose.
+	if spec.Store != nil {
+		s.store = spec.Store
 	}
 	// A full room makes room the reference's way — the least recently
 	// active member goes, admins alone are spared — because a room's

@@ -10,9 +10,13 @@ import (
 	"context"
 	"fmt"
 	"time"
-
-	"meshrunner.dev/pkg/meshcore"
 )
+
+// roomKeySize is the width of a member's key as the room tables keep
+// it — an Ed25519 public key. The store does not speak MeshCore to
+// know how wide a column is; the room package, which does, converts
+// from the library's own constant, and the two are the same 32.
+const roomKeySize = 32
 
 // RoomPost is one post as the store keeps it: the room's own clock
 // when it was stored — the timestamp members synchronise on — its
@@ -22,7 +26,7 @@ import (
 type RoomPost struct {
 	Seq         int64
 	At          uint32
-	Author      [meshcore.PubKeySize]byte
+	Author      [roomKeySize]byte
 	Text        string
 	Correlation string
 }
@@ -30,7 +34,7 @@ type RoomPost struct {
 // RoomCursor is how far one member has read: the room-clock timestamp
 // of the newest post it acknowledged.
 type RoomCursor struct {
-	PubKey    [meshcore.PubKeySize]byte
+	PubKey    [roomKeySize]byte
 	SyncSince uint32
 }
 
