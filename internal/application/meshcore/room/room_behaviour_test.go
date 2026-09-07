@@ -179,13 +179,12 @@ func TestTheRoomAdmitsByItsDoorsAndAnswersTheReferenceReply(t *testing.T) {
 		t.Errorf("table = %d durable, %d live", len(svc.table.Entries()), len(svc.table.Sessions()))
 	}
 	svc.mu.Unlock()
-	// Read-only closed: an unknown word earns silence.
-	svc.mu.Lock()
-	svc.p.AllowReadOnly = false
-	svc.mu.Unlock()
-	pkt, _, _ := mesh.BuildRoomLoginReq(stranger.id, svc.id.PubKey[:], uint32(time.Now().Unix()), 0, "nope")
-	hear(t, svc, pkt)
-	nothingQueued(t, svc)
+	// Read-only closed: an unknown word earns silence. A second room,
+	// because a room's parameters are immutable once built.
+	closed := benchRoomTuned(t, nil, func(cfg map[string]any) { cfg["allow_read_only"] = false })
+	pkt, _, _ := mesh.BuildRoomLoginReq(stranger.id, closed.id.PubKey[:], uint32(time.Now().Unix()), 0, "nope")
+	hear(t, closed, pkt)
+	nothingQueued(t, closed)
 }
 
 // openReply opens the login reply a client received and returns the

@@ -641,25 +641,27 @@ type radioAttacher = hosted.RadioAttacher
 // any gate past dry, the transmit prerequisites.
 func (m *manager) checkConsumerAttachment(radioName, txMode string, demand consumerDemand,
 	envelope radio.Envelope,
-) error {
+) (budget time.Duration, enabled bool, err error) {
 	if err := envelope.Allows(demand.Waveform); err != nil {
-		return err
+		return 0, false, err
 	}
 	driver, err := radio.Lookup(m.file.Radios[radioName].Driver)
 	if err != nil {
-		return err
+		return 0, false, err
 	}
 	radioCfg, _, err := m.file.Radios[radioName].Layered.Resolve(driver.Presets)
 	if err != nil {
-		return err
+		return 0, false, err
 	}
 	if driver.CheckWaveform != nil {
 		if err := driver.CheckWaveform(demand.Waveform); err != nil {
-			return err
+			return 0, false, err
 		}
 	}
-	_, _, err = consumerDuty(txMode, demand, driver, radioCfg, envelope)
-	return err
+	// The budget the judgement computed is the budget the attachment
+	// uses: one formula, so the preflight and the live ledger cannot
+	// disagree about what a percentage of an hour is.
+	return consumerDuty(txMode, demand, driver, radioCfg, envelope)
 }
 
 // consumerDuty is the transmit half of the judgement, shared by the
@@ -712,7 +714,8 @@ func (m *manager) attachConsumerRadio(kind, name, radioName, txMode string, role
 		attacher.AttachRadio(radioName, nil, nil, err.Error())
 		return nil
 	}
-	if err := m.checkConsumerAttachment(radioName, txMode, d, controller.Envelope()); err != nil {
+	budget, enabled, err := m.checkConsumerAttachment(radioName, txMode, d, controller.Envelope())
+	if err != nil {
 		attacher.AttachRadio(radioName, nil, nil, err.Error())
 		return nil
 	}
@@ -722,8 +725,7 @@ func (m *manager) attachConsumerRadio(kind, name, radioName, txMode string, role
 		return nil
 	}
 	var ledger *radio.AirtimeLedger
-	if txMode != config.TXDry {
-		budget := time.Duration(float64(time.Hour) * d.DutyCyclePct / 100)
+	if enabled {
 		ledger, err = m.sharedAirtimeLedger(radioName, kind+":"+name,
 			budget, m.spentAirtimeForRadio(m.ctx, radioName))
 		if err != nil {
@@ -1643,11 +1645,11 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 		m.restartRadio(name)
 		return "applied — radio " + name + " restarting", nil
 	}
-	if kind == confdb.KindStation && stationRadioOnly(typed, unset) {
+	if kind == confdb.KindStation && hostedRadioOnly(typed, unset) {
 		m.rebindStation(name)
 		return "applied — station " + name + " radio attachment updated", nil
 	}
-	if kind == confdb.KindApplication && stationRadioOnly(typed, unset) {
+	if kind == confdb.KindApplication && hostedRadioOnly(typed, unset) {
 		m.rebindApplication(name)
 		return "applied — application " + name + " radio attachment updated", nil
 	}
@@ -1665,7 +1667,7 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 	return fmt.Sprintf("applied — relay %s restarting", relayName), nil
 }
 
-func stationRadioOnly(typed map[string]any, unset []string) bool {
+func hostedRadioOnly(typed map[string]any, unset []string) bool {
 	if len(typed)+len(unset) != 1 {
 		return false
 	}
@@ -2642,9 +2644,6 @@ func (m *manager) parseChanges(kind, name string,
 	return typed, nil
 }
 
-// orphanOverride reports whether an attribute, unknown to the current
-// schema, still sits in the object's live override scope — stored by
-// a past shape of the software, removable and nothing else.
 // layeredOf finds the layering of one instance, whatever its kind — the
 // one lookup every provenance and override question starts from.
 func layeredOf(f *config.File, kind, name string) (config.Layered, bool) {
@@ -2677,35 +2676,12 @@ func layeredOf(f *config.File, kind, name string) (config.Layered, bool) {
 	return config.Layered{}, false
 }
 
+// orphanOverride reports whether an attribute, unknown to the current
+// schema, still sits in the object's live override scope — stored by
+// a past shape of the software, removable and nothing else.
 func (m *manager) orphanOverride(kind, name, attr string) bool {
-	var l *config.Layered
-	switch kind {
-	case confdb.KindRelay:
-		if rc, ok := m.file.Relays[name]; ok {
-			l = &rc.Layered
-		}
-	case confdb.KindStation:
-		if sc, ok := m.file.Stations[name]; ok {
-			l = &sc.Layered
-		}
-	case confdb.KindApplication:
-		if ac, ok := m.file.Applications[name]; ok {
-			l = &ac.Layered
-		}
-	case confdb.KindRadio:
-		if rd, ok := m.file.Radios[name]; ok {
-			l = &rd.Layered
-		}
-	case confdb.KindSensor:
-		if sn, ok := m.file.Sensors[name]; ok {
-			l = &sn.Layered
-		}
-	case confdb.KindMQTT:
-		if mq, ok := m.file.MQTT[name]; ok {
-			l = &mq.Layered
-		}
-	}
-	if l == nil {
+	l, ok := layeredOf(m.file, kind, name)
+	if !ok {
 		return false
 	}
 	scope := l.Profile

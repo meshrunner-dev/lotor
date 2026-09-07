@@ -11,14 +11,8 @@ import (
 )
 
 type (
-	emission      = origin.Emission
-	emissionQueue = origin.Queue
+	emission = origin.Emission
 )
-
-// stationLBTBound is how long a frame may wait for the channel before
-// the exhausted policy applies — the pipeline's default, the
-// reference companion's four seconds.
-const stationLBTBound = origin.DefaultLBTBound
 
 // originPolicy is this station's gate in the pipeline's terms.
 func originPolicy(p station.TXPolicy) origin.Policy {

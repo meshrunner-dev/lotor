@@ -293,7 +293,7 @@ func (s *service) submitAtPriorityLocked(packet *mesh.Packet, kind string, notBe
 	case s.duty == nil:
 		return s.refuseSubmission(item, "duty-unavailable")
 	}
-	if s.outbound.Offer(item) {
+	if s.pipeline.Queue.Offer(item) {
 		s.seen.mark(packet.Hash())
 		return nil
 	}

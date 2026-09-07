@@ -234,7 +234,6 @@ func build(spec station.Spec) (station.Service, error) {
 	s.pipeline = origin.New(origin.Config{
 		SourceKind: bus.SourceStation, Source: spec.Name, Bus: spec.Bus, Log: log,
 	}, queueDepth)
-	s.outbound = s.pipeline.Queue
 	// The declarative station configuration is the virtual equivalent of the
 	// firmware image defaults restored after formatting its filesystem.
 	s.factoryState = s.snapshotLocked()
@@ -359,7 +358,6 @@ type service struct {
 	rfWake       chan struct{}
 	rfDevice     radio.Device
 	pipeline     *origin.Pipeline
-	outbound     *emissionQueue
 	pushes       chan companionPush
 	startedAt    time.Time
 	stats        stationStats
@@ -622,7 +620,7 @@ func (s *service) handle(ctx context.Context, cmd companion.Command) []companion
 	}
 	s.mu.Unlock()
 	for _, item := range dropped {
-		s.txDrop(item, "station-restart")
+		s.pipeline.Drop(item, "station-restart")
 	}
 	return responses
 }
@@ -748,7 +746,7 @@ func (s *service) restoreFactoryLocked() []companion.Response {
 }
 
 func (s *service) resetRuntimeLocked() []emission {
-	dropped := s.outbound.Drain()
+	dropped := s.pipeline.Queue.Drain()
 	s.clock = meshcorehost.UniqueClock{}
 	s.appVersion = 0
 	s.sendScope = [16]byte{}
@@ -1057,7 +1055,7 @@ func (s *service) getStats(kind companion.StatsType) []companion.Response {
 		uptime := max(time.Duration(0), time.Since(s.startedAt)) / time.Second
 		return []companion.Response{companion.CoreStats{
 			UptimeSeconds: uint32(min(uptime, time.Duration(math.MaxUint32))),
-			QueueLength:   uint8(min(s.outbound.Len(), math.MaxUint8)),
+			QueueLength:   uint8(min(s.pipeline.Queue.Len(), math.MaxUint8)),
 		}}
 	case companion.StatsRadio:
 		noiseFloor := int16(0)

@@ -705,7 +705,7 @@ func (s *service) runTX(ctx context.Context) {
 			s.checkConnections()
 			nextConnections = time.Now().Add(time.Second)
 		}
-		item, ok := s.outbound.TakeUntil(ctx, nextConnections)
+		item, ok := s.pipeline.Queue.TakeUntil(ctx, nextConnections)
 		if !ok {
 			if ctx.Err() != nil {
 				return
@@ -745,9 +745,4 @@ func (s *service) recordTransmission(route origin.Route, airtime time.Duration) 
 		s.stats.sentDirect++
 	case origin.RouteUnclassified:
 	}
-}
-
-// txDrop refuses one emission for a reason the journal records.
-func (s *service) txDrop(item emission, reason string) {
-	s.pipeline.Drop(item, reason)
 }

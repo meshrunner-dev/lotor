@@ -15,6 +15,7 @@ import (
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
+	"meshrunner.dev/lotor/internal/origin"
 	"meshrunner.dev/lotor/internal/radio"
 	"meshrunner.dev/lotor/internal/station"
 
@@ -482,18 +483,18 @@ func TestStationReceptionBusyRequeueIsPacedAndKeepsItsBound(t *testing.T) {
 	item := testEmission(t, packet, "station-test")
 	now := time.Now()
 	svc.transmit(t.Context(), item)
-	if device.assesses != 1 || svc.outbound.Len() != 1 {
-		t.Fatalf("paced requeue: assessments %d queue %d", device.assesses, svc.outbound.Len())
+	if device.assesses != 1 || svc.pipeline.Queue.Len() != 1 {
+		t.Fatalf("paced requeue: assessments %d queue %d", device.assesses, svc.pipeline.Queue.Len())
 	}
-	requeued, ok := svc.outbound.TakeUntil(t.Context(), now.Add(time.Second))
+	requeued, ok := svc.pipeline.Queue.TakeUntil(t.Context(), now.Add(time.Second))
 	if !ok || requeued.BusySince.IsZero() || !requeued.NotBefore.After(now) {
 		t.Fatalf("requeued emission = %+v, ok %t", requeued, ok)
 	}
 
-	requeued.BusySince = time.Now().Add(-stationLBTBound - time.Second)
+	requeued.BusySince = time.Now().Add(-origin.DefaultLBTBound - time.Second)
 	svc.transmit(t.Context(), requeued)
-	if device.assesses != 2 || svc.outbound.Len() != 0 {
-		t.Fatalf("exhausted reception retry: assessments %d queue %d", device.assesses, svc.outbound.Len())
+	if device.assesses != 2 || svc.pipeline.Queue.Len() != 0 {
+		t.Fatalf("exhausted reception retry: assessments %d queue %d", device.assesses, svc.pipeline.Queue.Len())
 	}
 }
 

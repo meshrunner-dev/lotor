@@ -295,13 +295,17 @@ type store interface {
 type service struct {
 	name      string
 	radioName string
-	p         params
-	id        *mesh.LocalIdentity
-	log       *zap.Logger
-	tx        application.TXPolicy
-	pipeline  *origin.Pipeline
-	store     store
-	started   time.Time
+	// p is immutable once built, which is why every goroutine reads it
+	// without the lock. The over-the-air admin grammar, when it comes,
+	// will not write here: a door it may move gets its own field under
+	// mu, and the room is rebuilt for anything else.
+	p        params
+	id       *mesh.LocalIdentity
+	log      *zap.Logger
+	tx       application.TXPolicy
+	pipeline *origin.Pipeline
+	store    store
+	started  time.Time
 
 	mu         sync.Mutex
 	state      application.State

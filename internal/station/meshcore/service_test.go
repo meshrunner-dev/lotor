@@ -733,7 +733,7 @@ func TestFactoryResetRestoresConfiguredStateAndPersistsIt(t *testing.T) {
 	svc.pending = pendingRequest{kind: pendingStatus, tag: 42}
 	svc.signData = []byte("partial")
 	svc.sendUnscoped = true
-	if !svc.outbound.Offer(emission{Kind: "queued-before-reset"}) {
+	if !svc.pipeline.Queue.Offer(emission{Kind: "queued-before-reset"}) {
 		t.Fatal("could not seed outbound queue")
 	}
 	svc.mu.Unlock()
@@ -748,7 +748,7 @@ func TestFactoryResetRestoresConfiguredStateAndPersistsIt(t *testing.T) {
 	if len(svc.channels) != 1 || svc.channels[0].name != "Public" ||
 		len(svc.contacts) != 0 || len(svc.mailbox) != 0 ||
 		svc.defaultScope != "" || svc.stats.sent != 0 || svc.appVersion != 0 ||
-		svc.pending.kind != pendingNone || svc.signData != nil || svc.sendUnscoped || svc.outbound.Len() != 0 {
+		svc.pending.kind != pendingNone || svc.signData != nil || svc.sendUnscoped || svc.pipeline.Queue.Len() != 0 {
 		t.Fatalf("factory reset left state behind: channels %d contacts %d mailbox %d scope %q stats %+v",
 			len(svc.channels), len(svc.contacts), len(svc.mailbox), svc.defaultScope, svc.stats)
 	}
@@ -1105,7 +1105,7 @@ func testEmission(t *testing.T, packet *mesh.Packet, kind string) emission {
 
 func takeEmission(t *testing.T, svc *service) emission {
 	t.Helper()
-	item, ok := svc.outbound.TakeUntil(t.Context(), time.Now().Add(time.Second))
+	item, ok := svc.pipeline.Queue.TakeUntil(t.Context(), time.Now().Add(time.Second))
 	if !ok {
 		t.Fatal("station outbound queue did not yield an emission")
 	}
@@ -1113,7 +1113,7 @@ func takeEmission(t *testing.T, svc *service) emission {
 }
 
 func pollEmission(svc *service) (emission, bool) {
-	return svc.outbound.TakeUntil(context.Background(), time.Now())
+	return svc.pipeline.Queue.TakeUntil(context.Background(), time.Now())
 }
 
 func TestAnUnnamedStationStillHasAName(t *testing.T) {
