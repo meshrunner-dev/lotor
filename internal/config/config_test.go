@@ -341,6 +341,44 @@ func TestStationRejectsRelayOnlyTXRung(t *testing.T) {
 	}
 }
 
+// An application names its mesh and what it does on it, follows only a
+// radio the file declares, and never earns the relay's forwarding rung;
+// without a tx: block its gate is dry.
+func TestApplicationsValidateTheirWiring(t *testing.T) {
+	good := Application{Protocol: "meshcore", Type: "meshcore-room"}
+	if err := (&File{Applications: map[string]Application{"lobby": good}}).Validate(true); err != nil {
+		t.Fatalf("detached application-only file: %v", err)
+	}
+	for _, c := range []struct {
+		name string
+		app  Application
+		want string
+	}{
+		{"no protocol", Application{Type: "meshcore-room"}, "protocol is required"},
+		{"no type", Application{Protocol: "meshcore"}, "type is required"},
+		{"undeclared radio", Application{Protocol: "meshcore", Type: "meshcore-room", Radio: "slot1"}, "not declared"},
+		{"relay rung", Application{Protocol: "meshcore", Type: "meshcore-room", TX: &TX{Mode: TXOnAirZeroHop}},
+			"belongs to relays"},
+	} {
+		err := (&File{Applications: map[string]Application{"lobby": c.app}}).Validate(false)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want %q", c.name, err, c.want)
+		}
+	}
+	attached := good
+	attached.Radio = "slot1"
+	f := &File{Applications: map[string]Application{"lobby": attached}, Radios: map[string]Radio{"slot1": {Driver: "test"}}}
+	if err := f.Validate(false); err != nil {
+		t.Fatalf("attached application: %v", err)
+	}
+	if got := (&Application{}).TXMode(); got != TXDry {
+		t.Fatalf("an application without a tx block runs %q, want dry", got)
+	}
+	if got := (&Application{TX: &TX{Mode: TXShadow}}).TXMode(); got != TXShadow {
+		t.Fatalf("tx mode = %q", got)
+	}
+}
+
 func TestASensorsCadenceIsBounded(t *testing.T) {
 	// A bus shared with a radio is not a thing to read a thousand
 	// times a second, and every other cadence here says its range.

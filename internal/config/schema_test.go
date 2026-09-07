@@ -64,6 +64,9 @@ func TestStructuralSchemasCoverTheirStructs(t *testing.T) {
 	covered(t, StationAttrs(), reflect.TypeFor[Station](), map[string]string{
 		"overrides": "the attr storage, not an attr",
 	})
+	covered(t, ApplicationAttrs(), reflect.TypeFor[Application](), map[string]string{
+		"overrides": "the attr storage, not an attr",
+	})
 	covered(t, RadioAttrs(), reflect.TypeFor[Radio](), map[string]string{
 		"overrides": "the attr storage, not an attr",
 	})

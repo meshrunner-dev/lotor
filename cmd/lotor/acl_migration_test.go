@@ -64,4 +64,29 @@ func TestACLDurabilityMigrationDropsGuestsAndConstrainsTheTable(t *testing.T) {
 	}); err == nil {
 		t.Fatal("the migrated ACL accepted a new guest row")
 	}
+
+	// The room tables the later migration adds are usable on the
+	// migrated store, round trip: the DDL a shipped migration pins and
+	// the DDL a fresh store creates must agree, and only use proves it.
+	author := [32]byte{7}
+	if _, err := store.SaveRoomPost(ctx, "lobby", confdb.RoomPost{At: 1, Author: author, Text: "hi", Correlation: "c"}, 8); err != nil {
+		t.Fatal(err)
+	}
+	posts, err := store.LoadRoomPosts(ctx, "lobby")
+	if err != nil || len(posts) != 1 || posts[0].Author != author || posts[0].Text != "hi" || posts[0].At != 1 {
+		t.Fatalf("room posts after migration = %+v, %v", posts, err)
+	}
+	if err := store.SaveRoomCursor(ctx, "lobby", confdb.RoomCursor{PubKey: author, SyncSince: 5}); err != nil {
+		t.Fatal(err)
+	}
+	cursors, err := store.LoadRoomCursors(ctx, "lobby")
+	if err != nil || len(cursors) != 1 || cursors[0].PubKey != author || cursors[0].SyncSince != 5 {
+		t.Fatalf("room cursors after migration = %+v, %v", cursors, err)
+	}
+	if err := store.ForgetRoomCursor(ctx, "lobby", author[:]); err != nil {
+		t.Fatal(err)
+	}
+	if cursors, err = store.LoadRoomCursors(ctx, "lobby"); err != nil || len(cursors) != 0 {
+		t.Fatalf("a forgotten cursor remains: %+v, %v", cursors, err)
+	}
 }

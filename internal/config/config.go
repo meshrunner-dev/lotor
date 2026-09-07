@@ -510,12 +510,13 @@ func Load(path string) (*File, error) {
 func (f *File) validate() error { return f.Validate(true) }
 
 // Validate cross-checks an assembled configuration, wherever it was
-// assembled. A file with neither relays nor stations is a mistake — nobody
-// writes one to run nothing — but a database may honestly hold none yet: a
-// daemon comes up with its console and waits to be configured.
+// assembled. A file with no relay, station or application is a mistake —
+// nobody writes one to run nothing — but a database may honestly hold
+// none yet: a daemon comes up with its console and waits to be
+// configured.
 func (f *File) Validate(requireRelays bool) error {
-	if requireRelays && len(f.Relays) == 0 && len(f.Stations) == 0 {
-		return errors.New("no relays or stations declared")
+	if requireRelays && len(f.Relays) == 0 && len(f.Stations) == 0 && len(f.Applications) == 0 {
+		return errors.New("no relays, stations or applications declared")
 	}
 	// The handles first: a name the console cannot spell makes every
 	// later judgement moot, because the object it names could never

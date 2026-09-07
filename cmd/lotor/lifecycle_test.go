@@ -175,6 +175,84 @@ func TestCreateMutateAndRemoveDetachedStation(t *testing.T) {
 	}
 }
 
+// An application lives the station's lifecycle down the manager's one
+// hosting path: created detached it runs with its RF door closed, a
+// tuning mutation persists, and its removal takes its access list and
+// its room tables with it.
+func TestCreateMutateAndRemoveDetachedApplication(t *testing.T) {
+	m := lifecycleManager(t)
+	ctx := context.Background()
+	msg, err := m.Create(ctx, confdb.KindApplication, "lobby",
+		map[string]string{
+			"protocol": "meshcore", "type": "meshcore-room", "profile": "eu-868-narrow",
+			"identity": "new", "node_name": "Lobby", "guest_password": "welcome",
+		}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(msg, "starting") {
+		t.Fatalf("create = %q", msg)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		infos := m.ApplicationInfos()
+		if len(infos) == 1 && infos[0].State == "running" {
+			if infos[0].RF != "detached" || infos[0].Type != "meshcore-room" || infos[0].Protocol != "meshcore" {
+				t.Fatalf("application info = %+v", infos[0])
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("application did not run: %+v", infos)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if _, err := m.Mutate(ctx, confdb.KindApplication, "lobby",
+		map[string]string{"node_name": "Lobby Two"}, nil, "test"); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := m.store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.Applications["lobby"].Layered.Overrides["eu-868-narrow"]["node_name"]; got != "Lobby Two" {
+		t.Fatalf("persisted node_name = %v", got)
+	}
+
+	// What the room kept in the store goes with it — the tables the
+	// registry's cascade names, keyed by the application's owner word.
+	owner := confdb.ApplicationOwner("lobby")
+	member := make([]byte, 32)
+	member[0] = 9
+	if err := m.store.SaveACL(ctx, owner, confdb.ACLRow{PubKey: member, Perms: 2, Granted: true, LastActive: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	var author [32]byte
+	copy(author[:], member)
+	if _, err := m.store.SaveRoomPost(ctx, "lobby", confdb.RoomPost{At: 1, Author: author, Text: "hi"}, 8); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.store.SaveRoomCursor(ctx, "lobby", confdb.RoomCursor{PubKey: author, SyncSince: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Remove(ctx, confdb.KindApplication, "lobby", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.ApplicationInfos()) != 0 {
+		t.Fatal("removed application remains visible")
+	}
+	if rows, err := m.store.LoadACL(ctx, owner); err != nil || len(rows) != 0 {
+		t.Fatalf("access list survived the removal: %+v, %v", rows, err)
+	}
+	if posts, err := m.store.LoadRoomPosts(ctx, "lobby"); err != nil || len(posts) != 0 {
+		t.Fatalf("posts survived the removal: %+v, %v", posts, err)
+	}
+	if cursors, err := m.store.LoadRoomCursors(ctx, "lobby"); err != nil || len(cursors) != 0 {
+		t.Fatalf("cursors survived the removal: %+v, %v", cursors, err)
+	}
+}
+
 func TestStationRadioMutationKeepsCompanionConnection(t *testing.T) {
 	registerLifecycleDriver()
 	m := lifecycleManager(t)

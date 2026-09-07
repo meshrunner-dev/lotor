@@ -140,6 +140,17 @@ func TestExportReplaysThroughTheRealChain(t *testing.T) {
 			},
 		},
 	}}
+	// An application rides the same chain: its identity is a secret
+	// the export must carry whole, its passwords too.
+	f.Applications = map[string]config.Application{"lobby": {
+		Protocol: "meshcore", Type: "meshcore-room",
+		Layered: config.Layered{
+			Profile: "eu-868-narrow",
+			Overrides: map[string]map[string]any{
+				"eu-868-narrow": {"identity": strings.Repeat("2a", 32), "node_name": "Lobby", "guest_password": `we"lcome`},
+			},
+		},
+	}}
 	m1, b1 := replayManager(t, f)
 	exported := commandLines(adminConsole(t, m1, b1, "export\n"))
 	if len(exported) == 0 {
@@ -151,7 +162,7 @@ func TestExportReplaysThroughTheRealChain(t *testing.T) {
 
 	// The canonical persisted form, compared object by object.
 	for _, obj := range [][2]string{
-		{"radio", "slot1"}, {"relay", "meshcore-868"}, {"mqtt", "obs"},
+		{"radio", "slot1"}, {"relay", "meshcore-868"}, {"mqtt", "obs"}, {"application", "lobby"},
 	} {
 		p1, o1, ok1 := m1.Layers(obj[0], obj[1])
 		p2, o2, ok2 := m2.Layers(obj[0], obj[1])

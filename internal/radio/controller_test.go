@@ -153,6 +153,32 @@ func TestBindingExposesControllerEnvelopeBeforeHardwareOpens(t *testing.T) {
 	}
 }
 
+// An application binds as a consumer, like a station: alone on a radio
+// it is the stable authority a lone station would be, and a relay that
+// binds beside it takes that authority over, as it does from a station.
+func TestAnApplicationBindsAsAConsumer(t *testing.T) {
+	dev := newControllerFakeDevice()
+	c, _ := controllerRig(t, dev)
+	eu := Waveform{FrequencyHz: 869_618_000, SpreadingFactor: 8, BandwidthHz: 62_500, CodingRate: 8}
+	room, err := c.Bind("lobby", RoleApplication, eu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if role, name := c.Authority(); role != RoleApplication || name != "lobby" {
+		t.Fatalf("a lone application is not the authority: %s %q", role, name)
+	}
+	if _, err := c.Bind("mc", RoleRelay, eu); err != nil {
+		t.Fatalf("a relay could not bind beside an application: %v", err)
+	}
+	if role, name := c.Authority(); role != RoleRelay || name != "mc" {
+		t.Fatalf("the relay did not take the authority: %s %q", role, name)
+	}
+	if _, err := c.Bind("odd", ConsumerRole("gateway"), eu); err == nil {
+		t.Fatal("an unknown role bound")
+	}
+	room.Unbind()
+}
+
 func TestControllerRelayOwnsWaveformAndRXIsShared(t *testing.T) {
 	dev := newControllerFakeDevice()
 	c, _ := controllerRig(t, dev)

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
@@ -15,8 +16,12 @@ import (
 type fakeRadio struct {
 	transmits, assesses int
 	assessErr           error
-	busy                bool
-	airtime             time.Duration
+	// txErr fails every transmission; txErrAirtime is the airtime the
+	// failing report still claims radiated, zero for a dead key.
+	txErr        error
+	txErrAirtime time.Duration
+	busy         bool
+	airtime      time.Duration
 }
 
 func (*fakeRadio) Envelope() radio.Envelope {
@@ -39,7 +44,81 @@ func (r *fakeRadio) AssessChannel(context.Context, float64) (bool, error) {
 }
 func (r *fakeRadio) Transmit(_ context.Context, _ []byte, power int8) (radio.TxReport, error) {
 	r.transmits++
+	if r.txErr != nil {
+		return radio.TxReport{At: time.Now(), Airtime: r.txErrAirtime, PowerDBm: power}, r.txErr
+	}
 	return radio.TxReport{At: time.Now(), Airtime: r.airtime, PowerDBm: power}, nil
+}
+
+// TestThePipelineTellsTheBusWhatItSentAndWhatItDropped is the bus
+// contract: every emission ends as one FrameSent — shadow marked as
+// such — or one TxDropped naming its reason, under the producer's own
+// kind and name.
+func TestThePipelineTellsTheBusWhatItSentAndWhatItDropped(t *testing.T) {
+	b := bus.New()
+	sub := b.Subscribe(16)
+	defer sub.Close()
+	p := New(Config{SourceKind: bus.SourceApplication, Source: "lobby", Bus: b, DutyWait: 50 * time.Millisecond}, 1)
+	dev := &fakeRadio{airtime: 100 * time.Millisecond}
+	free := radio.NewAirtimeLedger(time.Hour, nil)
+
+	p.Emit(context.Background(), emission("shadow"), dev, free, Policy{Mode: config.TXShadow}, 10)
+	sent, ok := (<-sub.C).(bus.FrameSent)
+	if !ok || !sent.Shadow || sent.SourceKind != bus.SourceApplication || sent.Source != "lobby" ||
+		sent.Kind != "shadow" || sent.Airtime != 100*time.Millisecond {
+		t.Fatalf("shadow emission announced as %+v", sent)
+	}
+	p.Emit(context.Background(), emission("air"), dev, free, Policy{Mode: config.TXOnAir}, 10)
+	if sent, ok := (<-sub.C).(bus.FrameSent); !ok || sent.Shadow || sent.Kind != "air" {
+		t.Fatalf("on-air emission announced as %+v", sent)
+	}
+
+	// Every refusal is one TxDropped with its reason.
+	saturated := radio.NewAirtimeLedger(time.Second, []radio.AirtimeStamp{{At: time.Now(), Airtime: time.Second}})
+	dead := &fakeRadio{airtime: 100 * time.Millisecond, txErr: errors.New("pa fault")}
+	radiated := &fakeRadio{airtime: 100 * time.Millisecond, txErr: errors.New("late irq"), txErrAirtime: 90 * time.Millisecond}
+	if out := p.Emit(context.Background(), emission("radiated"), radiated, free, Policy{Mode: config.TXOnAir}, 10); !out.Sent ||
+		out.Airtime != 90*time.Millisecond {
+		t.Fatalf("a failing key that still radiated: %+v", out)
+	}
+	if sent, ok := (<-sub.C).(bus.FrameSent); !ok || sent.Kind != "radiated" {
+		t.Fatalf("radiated failure announced as %+v", sent)
+	}
+	for _, c := range []struct {
+		reason string
+		emit   func() Outcome
+	}{
+		{"dry", func() Outcome { return p.Emit(context.Background(), emission("dry"), dev, free, Policy{}, 10) }},
+		{"radio-down", func() Outcome {
+			return p.Emit(context.Background(), emission("down"), nil, free, Policy{Mode: config.TXOnAir}, 10)
+		}},
+		{"duty", func() Outcome {
+			return p.Emit(context.Background(), emission("duty"), dev, saturated, Policy{Mode: config.TXOnAir}, 10)
+		}},
+		{"tx-failed", func() Outcome {
+			return p.Emit(context.Background(), emission("dead"), dead, free, Policy{Mode: config.TXOnAir}, 10)
+		}},
+		{"queue-full", func() Outcome {
+			if !p.Queue.Offer(emission("first")) {
+				t.Fatal("a queue of one refused its first frame")
+			}
+			return p.Requeue(emission("second"))
+		}},
+	} {
+		if out := c.emit(); out.Dropped != c.reason {
+			t.Fatalf("%s: %+v", c.reason, out)
+		}
+		dropped, ok := (<-sub.C).(bus.TxDropped)
+		if !ok || dropped.Reason != c.reason || dropped.SourceKind != bus.SourceApplication || dropped.Source != "lobby" {
+			t.Fatalf("%s announced as %+v", c.reason, dropped)
+		}
+	}
+	if free.Usage(time.Now()) != 290*time.Millisecond {
+		t.Errorf("ledger usage %s: the shadow, the on-air and the radiated failure should have spent", free.Usage(time.Now()))
+	}
+	if sub.Dropped() != 0 || len(sub.C) != 0 {
+		t.Errorf("bus: %d events lost, %d unread", sub.Dropped(), len(sub.C))
+	}
 }
 
 func emission(kind string) Emission {
