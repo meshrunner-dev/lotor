@@ -11,13 +11,17 @@ remain in [`DESIGN.md`](../../DESIGN.md).
 The architecture protects a small set of non-negotiable properties:
 
 - exactly one controller owns and calls a physical radio device;
-- at most one relay binds to a radio, while zero or more stations may share it;
+- at most one relay binds to a radio, while zero or more stations and
+  applications may share it;
 - a relay is always waveform authority when present;
-- without a relay, the oldest attached station is stable waveform authority;
+- without a relay, the oldest attached station or application is stable
+  waveform authority;
 - there is no waveform time slicing;
 - all hardware operations are serialized;
-- queued relay hardware operations have strict priority over station operations;
-- station operations are fair to one another through round-robin scheduling;
+- queued relay hardware operations have strict priority over station and
+  application operations;
+- station and application operations are fair to one another through
+  round-robin scheduling;
 - every non-dry producer on a radio shares one physical airtime ledger;
 - `shadow` consumes that ledger even though it does not key the transmitter;
 - one physical reception is delivered to every active open logical session;
@@ -163,14 +167,19 @@ RF state becomes `detached`, `down`, or `blocked`.
 Authority is deterministic:
 
 1. the relay binding, if present;
-2. otherwise the station with the oldest bind sequence; or
+2. otherwise the station or application with the oldest bind sequence; or
 3. no authority when the radio has no bindings.
 
 Only bindings whose waveform exactly matches the authority are active. A
-different station waveform produces `BindingBlocked`; it never retunes a
-relay-owned radio. On a station-only radio, the oldest station remains stable
-authority until it changes its own request or unbinds. This prevents map order,
-restarts of another station, or connection timing from changing the channel.
+different consumer waveform produces `BindingBlocked`; it never retunes a
+relay-owned radio. On a radio without a relay, the oldest consumer remains
+stable authority until it changes its own request or unbinds. This prevents
+map order, restarts of another consumer, or connection timing from changing
+the channel while the radio runs. A restart of the radio itself rebinds its
+consumers afresh — stations first, then applications, each kind in name
+order, the same order a cold start uses — so the authority after a restart
+is the first consumer by that order, whoever held it before; a mesh where
+that matters gives the radio a relay, which is authority whenever present.
 
 Controller and binding state are separate:
 
@@ -339,7 +348,7 @@ must request the same physical duty budget.
 Logs should identify the physical and logical dimensions independently:
 
 - `radio` for controller/driver and on-air facts;
-- `relay` or `station` for the consumer decision; and
+- `relay`, `station` or `application` for the consumer decision; and
 - `corr` for the frame lineage.
 
 The bus follows the same distinction. The relay pipeline publishes

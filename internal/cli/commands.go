@@ -189,14 +189,18 @@ func (s *session) applicationStatus(name string) error {
 			float64(a.Waveform.FrequencyHz)/1e6, a.Waveform.SpreadingFactor,
 			a.Waveform.BandwidthHz, a.Waveform.CodingRate, a.Waveform.Preamble,
 			a.Waveform.SyncWord, a.Waveform.CRC))
-		// The type's own line, in the order it chose to be read.
+		// The type's own lines. Summary is a map, so the order is the
+		// console's to give, and it gives the one that reads the same
+		// twice: by key. The values are the type's words about itself
+		// today, but a type may one day put a name heard on the air in
+		// one, so they are neutralised like everything else printed.
 		keys := make([]string, 0, len(a.Summary))
 		for k := range a.Summary {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			tb.row(k, a.Summary[k])
+			tb.row(k, printable(a.Summary[k]))
 		}
 		return tb.flush(s.out)
 	}

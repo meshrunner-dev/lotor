@@ -33,6 +33,12 @@ endorsed by the MeshCore project.
   A station originates and receives traffic; it never forwards it. It
   exists while detached from RF and may move between radios without
   losing its TCP connection or state.
+- **application** — a mesh identity the daemon hosts to serve peers
+  over the air: a room server first. It is neither a relay (it never
+  forwards) nor a station (its users are on the mesh, not on a local
+  socket). Like a station it owns its durable state, exists while
+  detached from RF, and shares a radio as a consumer under the relay's
+  authority; `docs/design/applications.md` carries the role.
 - **radio** — a physical transceiver attachment: a bus, pins, and the
   board's physical envelope. Radios carry no waveform *choice*; they
   declare what choices are possible.

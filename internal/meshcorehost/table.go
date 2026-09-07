@@ -157,10 +157,14 @@ var ErrNoSuchEntry = errors.New("no such entry")
 // ErrNoSuchSession says a close named no currently active session.
 var ErrNoSuchSession = errors.New("no such active session")
 
-// Table holds the live sessions, and belongs to its owner's goroutine
-// alone — which is why there is no mutex here: nothing outside judges
-// a frame, and a lock would only have protected the map while the
-// sessions it points at were written through anyway.
+// Table holds the live sessions, and belongs to its owner — which is
+// why there is no mutex here: nothing outside judges a frame, and a
+// lock would only have protected the map while the sessions it points
+// at were written through anyway. Each owner brings one discipline and
+// keeps to it: the relay engine walks the table on its one goroutine's
+// turn; the room, whose RF loop, push clock and console all touch it,
+// serialises them under its one service mutex. Whoever comes next
+// inherits one of the two, never a third.
 //
 // Guests live in memory only. Non-guest roles are access entries and
 // cross a restart through the store, including an admin role earned

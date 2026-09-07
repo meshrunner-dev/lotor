@@ -301,7 +301,31 @@ bytes:
 - the reference's known sharp edges are fixed rather than reproduced
   when they are not wire-visible: the round-robin index read past a
   shrunken table, the late ACK that matches nothing, the blank-
-  password short path that leaves the cursor untouched.
+  password short path that leaves the cursor untouched;
+- a table made entirely of admins refuses a newcomer, where the
+  reference's `putClient` evicts an admin anyway. Refusing is the safer
+  reading of "admins are spared", and the room logs it; an operator who
+  wants the reference's behaviour raises `max_members`.
+
+**Properties of the protocol the room reproduces, and says so** — none
+is lotor's to fix without changing bytes on the air:
+
+- a post's ACK is a CRC over its plaintext, whose every field a
+  connected reader can see; the two random attempt bits leave four
+  candidates. A reader who lands a forged ACK inside the push window
+  moves another member's cursor past a post — silently, once per
+  post. The reference is byte for byte the same, and the attacker
+  must already be a member;
+- a member may rewind its own cursor without limit through the
+  keep-alive's `since`, as in the reference, and be re-pushed the
+  whole ring. The reference's ring is 32; `history` here goes to 4096,
+  so the amplification an operator grants is theirs to weigh against
+  the duty budget — the push clock bounds it to one push per 1.2 s
+  across all members;
+- a login captured in the ±24 h window can be replayed once its member
+  has been evicted, because the replay guard is the entry and leaves
+  with it; the recording earns the role its word earned, no more, and
+  the reference, which bounds no skew at all, accepts it forever.
 
 Two things the room keeps from the reference that the repeater in this
 daemon does *not*, because a room's normal member is a reader who says
@@ -311,12 +335,14 @@ reference's shared eviction rule, **admins alone spared**, where the
 repeater spares every access entry. The kernel carries the policy as
 the owner's choice.
 
-Client text longer than the stored maximum is one to decide: the
-reference truncates silently at 151 characters while allowing clients
-160. Refuse loudly, or truncate as the reference does? The proposal
-leans to refusing — a post that is not what its author wrote should
-not be acknowledged as if it were — but this is wire-adjacent
-behaviour and is listed under open questions.
+Client text longer than the stored maximum is refused: a post that is
+not what its author wrote is not acknowledged as if it were. The wire
+carries up to 151 characters of text (9 bytes of header fill the 160 a
+TXT_MSG may hold); the reference's `strncpy(dest, src, 151)` reserves
+the terminator and keeps 150 of them, silently, while clients may send
+160. The room keeps all 151 and refuses the 152nd — and the retry of a
+refused post is judged afresh, never acknowledged as the retry of
+something kept.
 
 ## Persistence
 
@@ -429,16 +455,20 @@ and now the room too.*
 - Logs: `application=<name>` beside `radio=` and `corr=`, the frame
   lineage unchanged. A post's correlation follows it from reception
   through storage to every push and ACK — the mailbox precedent.
-- Bus: `FrameSent`/`TxDropped` with `SourceKind = application`;
-  `ApplicationState` on lifecycle and RF changes; typed events per
-  type — `RoomPost{App, Author, At, Corr}`, `RoomMember{App, Key,
-  Role, Change}` — that a sentinel archives and the web snapshot
-  shows, and that an MQTT observer may one day publish.
+- Bus: `FrameSent`/`TxDropped` with `SourceKind = application`, as
+  shipped. Not yet: an `ApplicationState` event on lifecycle and RF
+  changes, and typed events per type — `RoomPost{App, Author, At,
+  Corr}`, `RoomMember{App, Key, Role, Change}` — that a sentinel would
+  archive and the web snapshot show. The console and the web read the
+  live `Info` instead for now.
 - Console `status`: lifecycle, RF state and its cause, the identity,
-  and the type's summary — members, posts held, pushes pending,
-  members stalled.
-- Counters: logins by outcome, posts accepted/refused (by reason),
-  pushes sent/acked/timed out, anonymous requests limited.
+  and the type's summary. The room's, as shipped: `node`, `tx`,
+  `members` and `sessions`, `posts` (held / ring) and `posted`,
+  `pushes`, `pushes pending` and `members stalled`, and the frame
+  tallies `heard`, `corrupt`, `duplicates`, `composed`, `sent`,
+  `dropped`, `refused`, `limited`. The summary is a map; the console
+  sorts its keys and neutralises its values like every other printed
+  word.
 
 ## Staging
 
@@ -474,17 +504,21 @@ is the conformance oracle.
 - A room server that also relays is two objects on one radio — a relay
   and an application — never one object with both authorities.
 
-## Open questions, to settle before the first line
+## Questions the code settled
 
-- **`type` and `protocol`**: composite choice in the schema, or type
-  declares protocol? Same information; the answer decides one helper.
-- **Over-long posts**: refuse (proposed) or truncate at 151 as the
-  reference does?
-- **Stalled members**: the reference stops pushing after three
-  failures until the client speaks. Keep, or add an eviction after an
-  idle period the reference never implemented?
-- **History retention**: by count alone (`history: N`, the ring), or
-  by age as well? Count is the reference's shape and the simplest to
-  reason about under pruning.
-- **Names**: `origin` for the origination pipeline is a placeholder
-  until a better word appears.
+Listed here with their answers, so the document and the tree say the
+same thing:
+
+- **`type` and `protocol`**: the type declares its protocol, and
+  `application.Lookup(protocol, type)` holds it to that word. One
+  choice attribute in the schema, one helper.
+- **Over-long posts**: refused, not truncated — a post the room would
+  have to cut is a post the author did not write, and the retry of a
+  refused post is judged afresh rather than acknowledged as kept.
+- **Stalled members**: the reference's shape, kept — three pushes that
+  time out stall a member until it speaks, and the status line counts
+  them (`members stalled`). No idle eviction: a room's normal member
+  says nothing for hours and expects its pushes.
+- **History retention**: by count alone, the ring; the store prunes to
+  it on every post and once on the way up when `history` shrank.
+- **Names**: `origin` shipped as the origination pipeline's name.
