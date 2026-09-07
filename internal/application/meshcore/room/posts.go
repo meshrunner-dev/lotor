@@ -300,7 +300,7 @@ func (s *service) pushToLocked(now time.Time, key [mesh.PubKeySize]byte) bool {
 	}
 	var priority int
 	if c.Out != nil {
-		priority = meshcorehost.RouteDirect(pkt, c.Out, mesh.TransportKey{})
+		priority = meshcorehost.RouteDirect(pkt, c.Out)
 		m.ackDeadline = now.Add(pushAckBase + pushAckPerHop*time.Duration(mesh.PathHops(c.Out.PathLen)+1))
 	} else {
 		// No route taught yet: the reference floods the push under

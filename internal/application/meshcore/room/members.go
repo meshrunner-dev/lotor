@@ -66,15 +66,11 @@ func routeOf(pkt *mesh.Packet) origin.Route {
 	}
 }
 
-// replyScope is the scope a composed reply travels under: the
-// reference's chooseReplyScope when the reply floods — a PATH return
-// to a flooded question, or a flood for want of a route — and none
-// when it goes down a taught route, because the reference's sendDirect
-// never scopes.
-func (s *service) replyScope(inbound *mesh.Packet, out *meshcorehost.OutPath) mesh.TransportKey {
-	if out != nil && !inbound.IsRouteFlood() {
-		return mesh.TransportKey{}
-	}
+// replyScope is the scope a composed reply floods under — the
+// reference's chooseReplyScope for a PATH return to a flooded question
+// or a flood for want of a route. The kernel never scopes a direct
+// send, as the reference's sendDirect never does.
+func (s *service) replyScope(inbound *mesh.Packet) mesh.TransportKey {
 	return meshcorehost.ReplyScope(inbound, s.p.scope())
 }
 
@@ -246,7 +242,7 @@ func (s *service) handleLogin(ctx context.Context, pkt *mesh.Packet, corr correl
 		zap.String("pubkey", hex.EncodeToString(c.PubKey[:6])), zap.Uint32("since", login.SyncSince))
 	s.replyLocked(ctx, pkt, meshcorehost.Answer{
 		DestHash: c.PubKey[:mesh.PathHashSize], Secret: c.Secret, Tag: clock, Body: rest, Out: c.Out,
-		Scope: s.replyScope(pkt, c.Out),
+		Scope: s.replyScope(pkt),
 	}, "login-resp", corr)
 }
 
@@ -360,18 +356,12 @@ func (s *service) acceptPostLocked(ctx context.Context, pkt *mesh.Packet, c *mes
 		// the ACK proper, on the direct route alone, so a post's ACK
 		// survives one lost frame. The flood fallback sends one ACK.
 		if multi, err := mesh.BuildMultiAck(ack.Payload, 1); err == nil {
-			meshcorehost.RouteDirect(multi, c.Out, mesh.TransportKey{})
+			meshcorehost.RouteDirect(multi, c.Out)
 			s.sendLocked(multi, "post-multi-ack", meshcorehost.PrioDirect, delay, corr)
 			delay += multiAckSpacing
 		}
 	}
-	// Down a taught route the ACK travels plainly, as the reference's
-	// sendDirect does; the flood fallback is scoped by chooseReplyScope.
-	scope := mesh.TransportKey{}
-	if c.Out == nil {
-		scope = meshcorehost.ReplyScope(pkt, s.p.scope())
-	}
-	priority, source := meshcorehost.RouteHome(ack, pkt, c.Out, scope)
+	priority, source := meshcorehost.RouteHome(ack, pkt, c.Out, s.replyScope(pkt))
 	s.sendLocked(ack, "post-ack", uint8(priority), delay, corr)
 	logging.Trace(s.log, "post acknowledged", zap.String("corr", corr.Short()),
 		zap.String("route", source), zap.Bool("retry", retry))
@@ -434,7 +424,7 @@ func (s *service) handleRequest(ctx context.Context, pkt *mesh.Packet, corr corr
 	}
 	s.replyLocked(ctx, pkt, meshcorehost.Answer{
 		DestHash: c.PubKey[:mesh.PathHashSize], Secret: c.Secret, Tag: ts, Body: answer, Out: c.Out,
-		Scope: s.replyScope(pkt, c.Out),
+		Scope: s.replyScope(pkt),
 	}, "req-resp", corr)
 }
 
@@ -457,7 +447,7 @@ func (s *service) keepAliveLocked(c *meshcorehost.Client, m *member, plain, body
 	if err != nil {
 		return
 	}
-	meshcorehost.RouteDirect(ack, c.Out, mesh.TransportKey{})
+	meshcorehost.RouteDirect(ack, c.Out)
 	s.sendLocked(ack, "keepalive-ack", meshcorehost.PrioDirect, s.delays.response, corr)
 }
 

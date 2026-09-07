@@ -344,7 +344,11 @@ func TestReplyRouteDebugDistinguishesAllSources(t *testing.T) {
 			a.Out = &outPath{PathLen: 1, Path: []byte{0x22}}
 			return a
 		}()},
-		{name: "flood", inbound: direct, answer: base},
+		{name: "flood", inbound: direct, answer: func() meshcorehost.Answer {
+			a := base
+			a.Scope = meshwire.TransportKeyForName("lab")
+			return a
+		}()},
 	}
 	for _, test := range cases {
 		e.reply(test.inbound, test.answer, "route-"+test.name, correlation.New())
@@ -368,8 +372,14 @@ func TestReplyRouteDebugDistinguishesAllSources(t *testing.T) {
 			t.Errorf("route source %q missing from %+v", source, seen)
 		}
 	}
-	if scoped, ok := seen["supplied"]["scoped"].(bool); !ok || !scoped {
-		t.Errorf("scoped supplied route = %+v", seen["supplied"])
+	// A scope rides the flood and never the direct route, as the
+	// reference's sendFloodReply scopes and its sendDirect does not —
+	// and the debug line says which.
+	if scoped, ok := seen["supplied"]["scoped"].(bool); !ok || scoped {
+		t.Errorf("a supplied direct route carried a scope: %+v", seen["supplied"])
+	}
+	if scoped, ok := seen["flood"]["scoped"].(bool); !ok || !scoped {
+		t.Errorf("a scoped flood reply lost its scope: %+v", seen["flood"])
 	}
 }
 

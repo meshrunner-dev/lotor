@@ -23,8 +23,9 @@ type Answer struct {
 	Secret   []byte // what seals the content to them alone
 	Tag      uint32 // the timestamp the asker matches answers by
 	Body     []byte // the content, after the tag
-	// Scope is the transport scope this answer travels under; a zero
-	// key travels plain.
+	// Scope is the transport scope this answer floods under — a PATH
+	// return to a flooded question, a flood for want of a route. A
+	// direct answer never carries one, and a zero key floods plain.
 	Scope meshcore.TransportKey
 	// Supplied says the question carried its own route home, and
 	// PathLen/Path are it. A supplied path of zero hops is not the
@@ -89,7 +90,7 @@ func ComposeReply(inbound *meshcore.Packet, a Answer, srcHash []byte,
 		if a.Supplied {
 			source = "supplied"
 		}
-		priority = RouteDirect(pkt, home, a.Scope)
+		priority = RouteDirect(pkt, home)
 		return pkt, priority, source, nil
 	}
 	priority = RouteFlood(pkt, inbound, a.Scope)
@@ -97,11 +98,15 @@ func ComposeReply(inbound *meshcore.Packet, a Answer, srcHash []byte,
 }
 
 // RouteDirect sends a composed packet straight down a taught route and
-// reports the priority it earns.
-func RouteDirect(pkt *meshcore.Packet, home *OutPath, scope meshcore.TransportKey) int {
+// reports the priority it earns. Never scoped, as the reference's
+// sendDirect never is: a scope bounds where a flood may spread, and a
+// direct packet's spread is its path — every hop forwards it on its own
+// hash alone and reads no code. Codes on a direct would be four bytes
+// of airtime per answer for a shape the reference never emits.
+func RouteDirect(pkt *meshcore.Packet, home *OutPath) int {
 	pkt.Header = meshcore.MakeHeader(meshcore.RouteDirect, pkt.PayloadType(), meshcore.PayloadVer1)
 	pkt.Path, pkt.PathLen = home.Path, home.PathLen
-	scope.Scope(pkt)
+	pkt.TransportCodes = [2]uint16{}
 	return PrioDirect
 }
 
@@ -116,10 +121,11 @@ func RouteFlood(pkt, inbound *meshcore.Packet, scope meshcore.TransportKey) int 
 
 // RouteHome routes an already-composed packet — an ACK, a text reply —
 // down the client's taught route when there is one, flooded otherwise,
-// and names the route for the journal.
+// and names the route for the journal. The scope applies to the flood
+// alone.
 func RouteHome(pkt, inbound *meshcore.Packet, out *OutPath, scope meshcore.TransportKey) (priority int, source string) {
 	if out != nil {
-		return RouteDirect(pkt, out, scope), "learned"
+		return RouteDirect(pkt, out), "learned"
 	}
 	return RouteFlood(pkt, inbound, scope), "flood"
 }

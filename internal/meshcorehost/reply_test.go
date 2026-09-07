@@ -23,6 +23,50 @@ func TestASuppliedPathOutranksTheStoredOne(t *testing.T) {
 	}
 }
 
+// A scope travels with what floods — the PATH return to a flooded
+// question, the flood for want of a route — and never with a direct
+// send, as the reference's sendDirect never carries one.
+func TestAScopeRidesTheFloodsAndNeverTheDirects(t *testing.T) {
+	client, _ := meshcore.NewLocalIdentity(rand.Reader)
+	server, _ := meshcore.NewLocalIdentity(rand.Reader)
+	secret, _ := server.SharedSecret(client.PubKey[:])
+	src := server.PubKey[:meshcore.PathHashSize]
+	scope := meshcore.TransportKeyForName("lyon")
+	scoped := Answer{DestHash: client.PubKey[:meshcore.PathHashSize], Secret: secret, Tag: 7, Body: []byte{1}, Scope: scope}
+
+	flooded := &meshcore.Packet{
+		Header: meshcore.MakeHeader(meshcore.RouteFlood, meshcore.PayloadTypeReq, meshcore.PayloadVer1),
+		Path:   []byte{0x11}, PathLen: 1,
+	}
+	if pkt, _, _, err := ComposeReply(flooded, scoped, src); err != nil || !scope.Matches(pkt) {
+		t.Fatalf("path return: scoped %t, %v", err == nil && scope.Matches(pkt), err)
+	}
+	direct := &meshcore.Packet{
+		Header: meshcore.MakeHeader(meshcore.RouteDirect, meshcore.PayloadTypeReq, meshcore.PayloadVer1),
+	}
+	if pkt, _, _, err := ComposeReply(direct, scoped, src); err != nil || !scope.Matches(pkt) {
+		t.Fatalf("flood for want of a route: scoped %t, %v", err == nil && scope.Matches(pkt), err)
+	}
+	taught := scoped
+	taught.Out = &OutPath{PathLen: 1, Path: []byte{0xAA}}
+	pkt, _, _, err := ComposeReply(direct, taught, src)
+	if err != nil || pkt.Route() != meshcore.RouteDirect || pkt.HasTransportCodes() {
+		t.Fatalf("direct answer = %v, codes %t, %v", pkt.Route(), pkt.HasTransportCodes(), err)
+	}
+
+	// The same rule for an already-composed packet, and a packet that
+	// was once scoped is stripped when it goes direct.
+	ack, _ := meshcore.BuildAck([]byte{1, 2, 3, 4})
+	scope.Scope(ack)
+	if prio, source := RouteHome(ack, direct, taught.Out, scope); prio != PrioDirect || source != "learned" ||
+		ack.Route() != meshcore.RouteDirect || ack.HasTransportCodes() {
+		t.Fatalf("routed home direct = %v, codes %t (%d, %s)", ack.Route(), ack.HasTransportCodes(), prio, source)
+	}
+	if prio, source := RouteHome(ack, flooded, nil, scope); prio != PrioFloodReply || source != "flood" || !scope.Matches(ack) {
+		t.Fatalf("routed home flooded = %v, scoped %t (%d, %s)", ack.Route(), scope.Matches(ack), prio, source)
+	}
+}
+
 // The four routes, in the reference's order: a flooded question earns
 // a path return; a supplied path, then a taught one, a direct answer;
 // nothing at all, a flood.
