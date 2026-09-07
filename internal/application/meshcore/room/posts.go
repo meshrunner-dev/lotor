@@ -54,14 +54,7 @@ type post struct {
 // uniqueNowLocked is the reference's getCurrentTimeUnique: the room's
 // clock, strictly increasing within a run, because two posts stamped
 // alike would be one post to a client's cursor.
-func (s *service) uniqueNowLocked() uint32 {
-	now := uint32(time.Now().Unix())
-	if now <= s.lastUnique {
-		now = s.lastUnique + 1
-	}
-	s.lastUnique = now
-	return now
-}
+func (s *service) uniqueNowLocked() uint32 { return s.clock.Now(time.Now()) }
 
 // storePostLocked keeps one post: on disk first when history persists —
 // a post acknowledged is a post kept — then in the ring, the oldest
@@ -111,17 +104,38 @@ func (s *service) loadHistory(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if len(posts) > s.p.History {
+		// A memory shortened since these were kept: the surplus leaves
+		// the store now rather than waiting for the next post to make
+		// room, so the store and the ring agree from the first minute.
+		posts = posts[len(posts)-s.p.History:]
+		if err := s.store.PruneRoomPosts(ctx, s.name, s.p.History); err != nil {
+			s.log.Warn("the store kept more history than configured", zap.Error(err))
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(posts) > s.p.History {
-		posts = posts[len(posts)-s.p.History:]
-	}
 	s.posts = s.posts[:0]
 	for _, p := range posts {
-		s.posts = append(s.posts, post{at: p.At, author: p.Author, text: p.Text})
-		s.lastUnique = max(s.lastUnique, p.At)
+		// A post keeps the correlation it was received under, so the
+		// journal follows it from reception to every push across a
+		// restart; a row without one is a row from before.
+		corr, err := correlation.Parse(p.Correlation)
+		if err != nil {
+			s.log.Warn("a stored post carries an unreadable correlation", zap.Error(err))
+		}
+		s.posts = append(s.posts, post{at: p.At, author: p.Author, text: p.Text, corr: corr})
+		s.clock.Observe(p.At)
 	}
 	for _, c := range cursors {
+		// A cursor is a member's: a row whose key a durable table no
+		// longer holds — its member evicted while the room was down — is
+		// not resurrected as a phantom the push clock would serve. A
+		// memory-only table knows nobody yet, and keeps every cursor
+		// for the members who will log back in.
+		if s.table.Durable() && s.table.Get(c.PubKey[:]) == nil {
+			continue
+		}
 		s.member(c.PubKey).syncSince = c.SyncSince
 	}
 	return nil
@@ -149,15 +163,17 @@ func (s *service) flushCursors(ctx context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, storeWait)
 	defer cancel()
-	for _, c := range dirty {
-		if err := s.store.SaveRoomCursor(ctx, s.name, c); err != nil {
-			s.log.Warn("a member's cursor did not reach the store", zap.Error(err))
-			s.mu.Lock()
+	// One transaction for the flush: one fsync for the batch, and a
+	// refusal re-dirties every cursor it carried — none of them landed.
+	if err := s.store.SaveRoomCursors(ctx, s.name, dirty); err != nil {
+		s.log.Warn("the members' cursors did not reach the store", zap.Error(err), zap.Int("cursors", len(dirty)))
+		s.mu.Lock()
+		for _, c := range dirty {
 			if m := s.members[c.PubKey]; m != nil && m.syncSince == c.SyncSince {
 				m.cursorDirty = true
 			}
-			s.mu.Unlock()
 		}
+		s.mu.Unlock()
 	}
 }
 

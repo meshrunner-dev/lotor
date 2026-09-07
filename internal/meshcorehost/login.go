@@ -44,7 +44,8 @@ func Skewed(ts uint32, now time.Time) bool {
 }
 
 // Admit resolves a password attempt into the session it earns, or nil
-// with the reason it earned silence.
+// with the reason it earned silence: a timestamp too far from now — a
+// recording, not a request — a word no door opens for, a replay.
 //
 // Everything is composed on a candidate and nothing touches the live
 // session: a refused attempt — a wrong word, a replay — must leave
@@ -62,7 +63,12 @@ func Skewed(ts uint32, now time.Time) bool {
 // ClientACL::putClient returns a known entry untouched, and only a new
 // one is blanked. A successful login is also the one operation that
 // reopens an operator-closed durable session.
-func Admit(live *Client, senderPub, secret []byte, password string, ts uint32, doors Doors) (*Client, Refusal) {
+func Admit(live *Client, senderPub, secret []byte, password string, ts uint32, now time.Time,
+	doors Doors,
+) (*Client, Refusal) {
+	if Skewed(ts, now) {
+		return nil, RefusedSkew
+	}
 	var c Client
 	if live != nil {
 		// A shallow copy: Out is replaced, never written through, so
@@ -96,8 +102,13 @@ func Admit(live *Client, senderPub, secret []byte, password string, ts uint32, d
 // answer at. markGuests is the room's dialect of the legacy role byte
 // — 2 for a client whose permission byte is wholly zero — which the
 // repeater never writes.
-func LoginReply(c *Client, firmwareLevel uint8, now time.Time, markGuests bool) ([]byte, error) {
-	return meshcore.FrameLoginReply(meshcore.LoginReply{
+//
+// A login reply echoes no tag: the reference puts its own clock in
+// that position. The frame is returned split the way an Answer
+// carries it — the clock as the tag, the rest as the body — so the
+// owner composes its reply without unframing what the library framed.
+func LoginReply(c *Client, firmwareLevel uint8, now time.Time, markGuests bool) (clock uint32, body []byte, err error) {
+	framed, err := meshcore.FrameLoginReply(meshcore.LoginReply{
 		Clock:         uint32(now.Unix()),
 		Result:        meshcore.LoginOK,
 		KeepAlive:     0, // legacy hint, in units of sixteen seconds
@@ -106,4 +117,8 @@ func LoginReply(c *Client, firmwareLevel uint8, now time.Time, markGuests bool) 
 		Permissions:   c.Perms,
 		FirmwareLevel: firmwareLevel,
 	})
+	if err != nil {
+		return 0, nil, err
+	}
+	return meshcore.UnframeAdmin(framed)
 }

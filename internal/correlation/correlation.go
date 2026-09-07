@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 )
 
 type contextKey struct{}
@@ -41,6 +42,26 @@ func New() ID {
 
 // String returns the full 32-character hex form.
 func (id ID) String() string { return hex.EncodeToString(id[:]) }
+
+// Parse reads an ID back from its String form — what a store keeps —
+// so a thing restored after a restart keeps the correlation it was
+// received under. An empty string is the zero ID, not an error: a row
+// written before correlations were kept has none.
+func Parse(s string) (ID, error) {
+	var id ID
+	if s == "" {
+		return id, nil
+	}
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		return id, err
+	}
+	if len(raw) != len(id) {
+		return id, fmt.Errorf("correlation: %d bytes, want %d", len(raw), len(id))
+	}
+	copy(id[:], raw)
+	return id, nil
+}
 
 // Short returns the displayed form: the first ShortLen hex characters,
 // a prefix of String so grep finds either from the other.

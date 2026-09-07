@@ -65,17 +65,24 @@ func doors(word string) (byte, bool) {
 
 func TestAdmitComposesOnACandidate(t *testing.T) {
 	k := key(0x11)
+	// The bench's clock sits on the small timestamps below, so only
+	// the one login stamped a window away reads as a recording.
+	at := time.Unix(200, 0)
 	live := &Client{PubKey: k, Perms: meshcore.PermAdmin, Granted: true, LastTimestamp: 100, Closed: true}
 	// A wrong word touches nothing, and says which refusal it earned.
-	if c, why := Admit(live, k[:], []byte("s"), "nope", 200, doors); c != nil || why != RefusedWord {
+	if c, why := Admit(live, k[:], []byte("s"), "nope", 200, at, doors); c != nil || why != RefusedWord {
 		t.Fatalf("wrong word = %+v, %q", c, why)
 	}
 	if !live.Closed || live.LastTimestamp != 100 {
 		t.Fatal("a refused word touched the live session")
 	}
+	// A login stamped a window away from our clock is a recording.
+	if c, why := Admit(live, k[:], []byte("s"), "guest", 200, at.Add(2*LoginMaxSkew), doors); c != nil || why != RefusedSkew {
+		t.Fatalf("skewed = %+v, %q", c, why)
+	}
 	// A replay is judged after the role, so an old guest login cannot
 	// demote the admin it replays against.
-	if c, why := Admit(live, k[:], []byte("s"), "guest", 50, doors); c != nil || why != RefusedReplay {
+	if c, why := Admit(live, k[:], []byte("s"), "guest", 50, at, doors); c != nil || why != RefusedReplay {
 		t.Fatalf("replay = %+v, %q", c, why)
 	}
 	if live.Perms != meshcore.PermAdmin || !live.Granted {
@@ -83,23 +90,23 @@ func TestAdmitComposesOnACandidate(t *testing.T) {
 	}
 	// A blank word from a known key rechecks: role and grant kept,
 	// the session reopened.
-	c, why := Admit(live, k[:], []byte("s"), "", 200, doors)
+	c, why := Admit(live, k[:], []byte("s"), "", 200, at, doors)
 	if why != "" || c.Perms != meshcore.PermAdmin || !c.Granted || c.Closed {
 		t.Fatalf("recheck = %+v, %q", c, why)
 	}
 	// A blank word from a stranger opens nothing.
-	if c, why := Admit(nil, k[:], []byte("s"), "", 200, doors); c != nil || why != RefusedWord {
+	if c, why := Admit(nil, k[:], []byte("s"), "", 200, at, doors); c != nil || why != RefusedWord {
 		t.Fatalf("blank stranger = %+v, %q", c, why)
 	}
 	// The guest word rewrites the role and drops the grant — the
 	// reference rewrites the bits on every password login.
-	c, why = Admit(live, k[:], []byte("s2"), "guest", 300, doors)
+	c, why = Admit(live, k[:], []byte("s2"), "guest", 300, at, doors)
 	if why != "" || c.Perms != meshcore.PermGuest || c.Granted || string(c.Secret) != "s2" {
 		t.Fatalf("guest login = %+v, %q", c, why)
 	}
 	// The route a client taught survives its next login.
 	live.Out = &OutPath{PathLen: 1, Path: []byte{0xAA}}
-	if c, _ := Admit(live, k[:], []byte("s"), "admin", 400, doors); c.Out == nil || c.Out.Path[0] != 0xAA {
+	if c, _ := Admit(live, k[:], []byte("s"), "admin", 400, at, doors); c.Out == nil || c.Out.Path[0] != 0xAA {
 		t.Fatal("a login lost the taught route")
 	}
 }

@@ -284,9 +284,10 @@ func asks(cfg map[string]any) (application.RadioDemand, error) {
 type store interface {
 	LoadRoomPosts(ctx context.Context, app string) ([]confdb.RoomPost, error)
 	SaveRoomPost(ctx context.Context, app string, p confdb.RoomPost, keep int) (int64, error)
+	PruneRoomPosts(ctx context.Context, app string, keep int) error
 	LoadRoomCursors(ctx context.Context, app string) ([]confdb.RoomCursor, error)
-	SaveRoomCursor(ctx context.Context, app string, c confdb.RoomCursor) error
-	ForgetRoomCursor(ctx context.Context, app string, pubKey []byte) error
+	SaveRoomCursors(ctx context.Context, app string, cursors []confdb.RoomCursor) error
+	ForgetRoomCursor(ctx context.Context, app string, pubKey [mesh.PubKeySize]byte) error
 }
 
 // service is one room. Everything below mu is read by Info from any
@@ -343,7 +344,12 @@ type service struct {
 	posts      []post
 	nextClient int
 	nextPush   time.Time
-	lastUnique uint32
+	clock      meshcorehost.UniqueClock
+
+	// delays are the reference's pauses before an answer and before a
+	// post ACK, set from the constants at build; the bench zeroes them
+	// so a test does not wait out the reference's radio turnaround.
+	delays struct{ response, ack time.Duration }
 }
 
 func build(spec application.Spec) (application.Service, error) {
@@ -374,6 +380,7 @@ func build(spec application.Spec) (application.Service, error) {
 		members:   map[[mesh.PubKeySize]byte]*member{},
 		posts:     make([]post, 0, p.History),
 	}
+	s.delays.response, s.delays.ack = serverResponseDelay, textAckDelay
 	// A nil pointer boxed in an interface is not a nil interface: the
 	// memory-only posture has to be kept as one on purpose.
 	if spec.Store != nil {
@@ -492,6 +499,7 @@ func (s *service) advertDue(kind string) {
 	}
 	s.mu.Lock()
 	s.advertsDue++
+	s.composed++
 	s.mu.Unlock()
 	if s.gate() == config.TXDry {
 		s.log.Debug("advert due, gate is dry", zap.String("kind", kind),
@@ -510,8 +518,10 @@ func (s *service) advertDue(kind string) {
 		Frame: raw, Route: routeOf(pkt), Correlation: correlation.New(), Kind: kind, Priority: priority,
 		Expires: time.Now().Add(advertLife),
 	}
-	if !s.pipeline.Queue.Offer(item) {
-		s.pipeline.Drop(item, "queue-full")
+	if out := s.pipeline.Submit(item); out.Dropped != "" {
+		s.mu.Lock()
+		s.dropped++
+		s.mu.Unlock()
 	}
 }
 
@@ -683,6 +693,15 @@ func (s *service) RadioDemand() application.RadioDemand {
 func (s *service) Info() application.Info {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	pending, stalled := 0, 0
+	for _, m := range s.members {
+		if m.pendingAck != 0 {
+			pending++
+		}
+		if m.failures >= maxPushFailures {
+			stalled++
+		}
+	}
 	return application.Info{
 		Name: s.name, Protocol: protocolName, Type: typeName, Radio: s.radioName,
 		State: s.state, Cause: s.cause, RF: s.rf, RFCause: s.rfCause,
@@ -702,7 +721,12 @@ func (s *service) Info() application.Info {
 			"members":     strconv.Itoa(len(s.table.Entries())),
 			"sessions":    strconv.Itoa(len(s.table.Sessions())),
 			"posts":       strconv.Itoa(len(s.posts)) + " / " + strconv.Itoa(s.p.History),
+			"posted":      strconv.FormatUint(s.posted, 10),
 			"pushes":      strconv.FormatUint(s.pushes, 10),
+			// The push clock's two states a member can be in: waiting
+			// on an ACK, or stalled after three that never came.
+			"pushes pending":  strconv.Itoa(pending),
+			"members stalled": strconv.Itoa(stalled),
 		},
 	}
 }

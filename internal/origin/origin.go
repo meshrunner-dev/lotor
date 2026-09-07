@@ -294,9 +294,11 @@ func (p *Pipeline) clearChannel(ctx context.Context, dev radio.Device, policy Po
 	}
 }
 
-// Requeue puts an emission back for a later turn; a frame whose next
-// turn falls past its expiry, and a full queue, drop it — counted.
-func (p *Pipeline) Requeue(item Emission) Outcome {
+// Submit offers an emission to the queue for its turn; a frame whose
+// turn would fall past its expiry, and a full queue, drop it — counted
+// and announced, so an owner never writes the offer-or-drop pair
+// itself.
+func (p *Pipeline) Submit(item Emission) Outcome {
 	if item.expired(item.NotBefore) {
 		return p.drop(item, "expired")
 	}
@@ -305,6 +307,9 @@ func (p *Pipeline) Requeue(item Emission) Outcome {
 	}
 	return Outcome{Requeued: true}
 }
+
+// Requeue puts an emission back for a later turn, under Submit's rules.
+func (p *Pipeline) Requeue(item Emission) Outcome { return p.Submit(item) }
 
 // Drop refuses one emission for a reason the journal records — what an
 // owner calls for the frames it gives up on itself, a queue drained

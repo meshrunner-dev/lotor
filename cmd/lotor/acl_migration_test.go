@@ -83,7 +83,7 @@ func TestACLDurabilityMigrationDropsGuestsAndConstrainsTheTable(t *testing.T) {
 	if err != nil || len(cursors) != 1 || cursors[0].PubKey != author || cursors[0].SyncSince != 5 {
 		t.Fatalf("room cursors after migration = %+v, %v", cursors, err)
 	}
-	if err := store.ForgetRoomCursor(ctx, "lobby", author[:]); err != nil {
+	if err := store.ForgetRoomCursor(ctx, "lobby", author); err != nil {
 		t.Fatal(err)
 	}
 	if cursors, err = store.LoadRoomCursors(ctx, "lobby"); err != nil || len(cursors) != 0 {

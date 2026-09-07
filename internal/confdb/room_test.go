@@ -42,11 +42,25 @@ func TestRoomPostsKeepTheRingAndCursorsTheirMember(t *testing.T) {
 	if err != nil || len(cursors) != 1 || cursors[0].SyncSince != 103 || cursors[0].PubKey != alice {
 		t.Fatalf("cursors = %+v, %v", cursors, err)
 	}
-	if err := s.ClearRoomHistory(ctx, "lobby"); err != nil {
+	// A shortened memory prunes to the newest keep; a keep of zero
+	// prunes nothing.
+	if err := s.PruneRoomPosts(ctx, "lobby", 0); err != nil {
 		t.Fatal(err)
 	}
-	if posts, _ := s.LoadRoomPosts(ctx, "lobby"); len(posts) != 0 {
-		t.Errorf("history survived the clear: %+v", posts)
+	if posts, _ := s.LoadRoomPosts(ctx, "lobby"); len(posts) != 3 {
+		t.Errorf("a keep of zero pruned: %+v", posts)
+	}
+	if err := s.PruneRoomPosts(ctx, "lobby", 1); err != nil {
+		t.Fatal(err)
+	}
+	if posts, _ := s.LoadRoomPosts(ctx, "lobby"); len(posts) != 1 || posts[0].Text != "four" {
+		t.Errorf("pruned history = %+v, want the newest one", posts)
+	}
+	if err := s.ForgetRoomCursor(ctx, "lobby", alice); err != nil {
+		t.Fatal(err)
+	}
+	if cursors, _ := s.LoadRoomCursors(ctx, "lobby"); len(cursors) != 0 {
+		t.Errorf("a forgotten cursor remains: %+v", cursors)
 	}
 }
 

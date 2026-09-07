@@ -201,6 +201,11 @@ func (t *Table) spared(newcomer, seated *Client) bool {
 // owner does when the store arrives later than the table.
 func (t *Table) SetStore(store SessionStore) { t.store = store }
 
+// Durable reports whether the table remembers its members across a
+// restart — whether there is a store behind it. A memory-only table
+// knows nobody when it comes up, so nothing it lacks can be a phantom.
+func (t *Table) Durable() bool { return t.store != nil }
+
 // Save mirrors one durable access entry to the store. Guests stop
 // here: their replay guards and routes belong to the live session and
 // disappear with it. The refusal is the caller's to judge, and the

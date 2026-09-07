@@ -60,8 +60,8 @@ const (
 	// airtime. An answer down a taught route costs one directed
 	// emission and is never charged, exactly as freely as the
 	// reference serves it. session_limit moves the figure.
-	sessionLimitMax    = 6
-	sessionLimitWindow = time.Minute
+	sessionLimitMax    = meshcorehost.SessionLimit
+	sessionLimitWindow = meshcorehost.SessionLimitWindow
 
 	// sessionIdle and loginMaxSkew are the kernel's clocks, spelled
 	// the way this engine always has.
@@ -99,18 +99,6 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 		e.responseSuppressed(origin, "login", "malformed")
 		return
 	}
-	// A session that does not survive a restart is a session an
-	// attacker can resurrect by replaying the login that made it,
-	// rolling its replay clock back to the capture. Nothing in the
-	// packet says how old it is, so our own clock does: a login
-	// stamped far from now is a recording, not a request. The window
-	// is generous — a companion's clock is its own — but finite,
-	// which is the part the reference's RTC-less nodes cannot afford.
-	if meshcorehost.Skewed(ts, time.Now()) {
-		e.log.Debug("login refused: stale or future timestamp",
-			zap.String("corr", origin.Short()), zap.Uint32("timestamp", ts))
-		return
-	}
 	c := e.admitLogin(senderPub, secret, password, ts, origin)
 	if c == nil {
 		return
@@ -118,7 +106,7 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	// Built before the session moves: a failure here would otherwise
 	// leave the client logged in at a timestamp it never heard back
 	// from, and its retry refused as a replay.
-	body, err := loginReply(c)
+	clock, rest, err := loginReply(c)
 	if err != nil {
 		e.log.Warn("login reply abandoned", zap.String("corr", origin.Short()), zap.Error(err))
 		return
@@ -144,13 +132,6 @@ func (e *engine) respondLogin(rx *reception, senderPub, secret, plain []byte, or
 	}
 	e.log.Info(role+" logged in", zap.String("corr", origin.Short()),
 		zap.String("pubkey", shortKey(c.PubKey[:])))
-	// A login reply echoes no tag: the reference puts its own clock in
-	// that position, so the frame's timestamp is the clock and the
-	// body is what follows it.
-	clock, rest, err := meshcore.UnframeAdmin(body)
-	if err != nil {
-		return
-	}
 	e.reply(pkt, meshcorehost.Answer{
 		DestHash: c.PubKey[:meshcore.PathHashSize], Secret: c.Secret,
 		Tag: clock, Body: rest, Scope: e.replyScope(rx), Out: c.Out,
@@ -177,23 +158,25 @@ func (e *engine) admitLogin(senderPub, secret []byte, password string,
 		}
 		return 0, false
 	}
-	c, refusal := meshcorehost.Admit(e.acl.Get(senderPub), senderPub, secret, password, ts, doors)
+	c, refusal := meshcorehost.Admit(e.acl.Get(senderPub), senderPub, secret, password, ts, time.Now(), doors)
 	switch refusal {
 	case meshcorehost.RefusedWord:
 		e.log.Debug("login refused", zap.String("corr", origin.Short()))
 	case meshcorehost.RefusedReplay:
 		e.log.Debug("login replay refused", zap.String("corr", origin.Short()))
 	case meshcorehost.RefusedSkew:
-		// Judged before admission, in respondLogin; named here so the
-		// switch says every refusal the kernel can pronounce.
-		e.log.Debug("login refused: stale or future timestamp", zap.String("corr", origin.Short()))
+		// A session that does not survive a restart is a session an
+		// attacker can resurrect by replaying the login that made it;
+		// nothing in the packet says how old it is, so our clock does.
+		e.log.Debug("login refused: stale or future timestamp",
+			zap.String("corr", origin.Short()), zap.Uint32("timestamp", ts))
 	}
 	return c
 }
 
 // loginReply composes what the reference sends back, at the reply
 // level this engine answers at.
-func loginReply(c *client) ([]byte, error) {
+func loginReply(c *client) (uint32, []byte, error) {
 	return meshcorehost.LoginReply(c, firmwareVerLevel, time.Now(), false)
 }
 

@@ -101,15 +101,14 @@ func (e *engine) accessListBody(bodyMax int) []byte {
 	sort.Slice(rows, func(i, j int) bool {
 		return bytes.Compare(rows[i].PubKey[:], rows[j].PubKey[:]) < 0
 	})
-	body := make([]byte, 0, min(len(rows), bodyMax/entrySize)*entrySize)
-	for _, r := range rows {
-		if len(body)+entrySize > bodyMax {
-			break
-		}
-		body = append(body, r.PubKey[:6]...)
-		body = append(body, r.Perms)
+	entries := make([]meshcore.AccessEntry, 0, min(len(rows), bodyMax/entrySize))
+	for _, r := range rows[:min(len(rows), bodyMax/entrySize)] {
+		var row meshcore.AccessEntry
+		copy(row.PubKeyPrefix[:], r.PubKey[:])
+		row.Permissions = r.Perms
+		entries = append(entries, row)
 	}
-	return body
+	return meshcore.FrameAccessList(entries)
 }
 
 // drainACLAsk serves a pending grant or revoke, on the pipeline's

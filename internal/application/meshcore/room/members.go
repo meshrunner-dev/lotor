@@ -8,10 +8,12 @@ package room
 // console read the same tables.
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"sort"
 	"time"
 
 	"go.uber.org/zap"
@@ -27,14 +29,17 @@ import (
 )
 
 const (
-	// The reference room server's constants, by name.
+	// The reference room server's constants, by name. maxPostText is
+	// the wire's maximum — 9 bytes of header and 151 of text fill the
+	// 160 a TXT_MSG may carry; the reference's strncpy then keeps 150
+	// of them and drops the last, where the room keeps all 151.
 	maxPostText         = 151
-	serverResponseDelay = 300 * time.Millisecond
+	serverResponseDelay = meshcorehost.ServerResponseDelay
 	textAckDelay        = 200 * time.Millisecond
 	multiAckSpacing     = 300 * time.Millisecond
 	pushNotifyDelay     = 2 * time.Second
-	sessionLimitMax     = 6
-	sessionLimitWindow  = time.Minute
+	sessionLimitMax     = meshcorehost.SessionLimit
+	sessionLimitWindow  = meshcorehost.SessionLimitWindow
 	firmwareVerLevel    = 1
 
 	// How long what the room composes is still worth the air. An
@@ -201,14 +206,10 @@ func (s *service) handleLogin(ctx context.Context, pkt *mesh.Packet, corr correl
 		return
 	}
 	now := time.Now()
-	if meshcorehost.Skewed(login.Timestamp, now) {
-		s.log.Debug("login refused: stale or future timestamp", zap.String("corr", corr.Short()))
-		return
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, refusal := meshcorehost.Admit(s.table.Get(a.Sender), a.Sender, a.Secret, login.Password,
-		login.Timestamp, s.doors)
+		login.Timestamp, now, s.doors)
 	if c == nil {
 		s.log.Debug("login refused", zap.String("corr", corr.Short()), zap.String("why", string(refusal)))
 		return
@@ -235,11 +236,7 @@ func (s *service) handleLogin(ctx context.Context, pkt *mesh.Packet, corr correl
 	// which is the sharp edge that strands a returning admin.
 	m.syncSince, m.pendingAck, m.failures, m.cursorDirty = login.SyncSince, 0, 0, true
 	s.nextPush = now.Add(pushNotifyDelay)
-	body, err := meshcorehost.LoginReply(c, firmwareVerLevel, now, true)
-	if err != nil {
-		return
-	}
-	clock, rest, err := mesh.UnframeAdmin(body)
+	clock, rest, err := meshcorehost.LoginReply(c, firmwareVerLevel, now, true)
 	if err != nil {
 		return
 	}
@@ -274,7 +271,7 @@ func (s *service) evictedLocked(ctx context.Context, victim [mesh.PubKeySize]byt
 	if s.store != nil {
 		forgetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), storeWait)
 		defer cancel()
-		if err := s.store.ForgetRoomCursor(forgetCtx, s.name, victim[:]); err != nil {
+		if err := s.store.ForgetRoomCursor(forgetCtx, s.name, victim); err != nil {
 			s.log.Warn("an evicted member's cursor did not leave the store", zap.Error(err))
 		}
 	}
@@ -355,7 +352,7 @@ func (s *service) acceptPostLocked(ctx context.Context, pkt *mesh.Packet, c *mes
 	if err != nil {
 		return
 	}
-	delay := textAckDelay
+	delay := s.delays.ack
 	if c.Out != nil && s.p.MultiAcks {
 		// The reference's multi.acks: a redundant copy 300 ms ahead of
 		// the ACK proper, on the direct route alone, so a post's ACK
@@ -459,7 +456,7 @@ func (s *service) keepAliveLocked(c *meshcorehost.Client, m *member, plain, body
 		return
 	}
 	meshcorehost.RouteDirect(ack, c.Out, mesh.TransportKey{})
-	s.sendLocked(ack, "keepalive-ack", meshcorehost.PrioDirect, serverResponseDelay, corr)
+	s.sendLocked(ack, "keepalive-ack", meshcorehost.PrioDirect, s.delays.response, corr)
 }
 
 // answerLocked composes the body of an authenticated answer: the
@@ -479,7 +476,8 @@ func (s *service) answerLocked(c *meshcorehost.Client, body []byte) ([]byte, boo
 	}
 }
 
-// accessListLocked is the reference's answer: the admins alone, by key.
+// accessListLocked is the reference's answer: the admins alone, by
+// key — sorted, so two asks read alike where the table is a map.
 func (s *service) accessListLocked() []byte {
 	var entries []mesh.AccessEntry
 	for _, e := range s.table.Entries() {
@@ -491,6 +489,9 @@ func (s *service) accessListLocked() []byte {
 		row.Permissions = e.Perms
 		entries = append(entries, row)
 	}
+	sort.Slice(entries, func(i, j int) bool {
+		return bytes.Compare(entries[i].PubKeyPrefix[:], entries[j].PubKeyPrefix[:]) < 0
+	})
 	return mesh.FrameAccessList(entries)
 }
 
@@ -563,7 +564,7 @@ func (s *service) replyLocked(_ context.Context, inbound *mesh.Packet, a meshcor
 	}
 	logging.Trace(s.log, "reply route selected", zap.String("corr", corr.Short()),
 		zap.String("kind", kind), zap.String("route_source", source))
-	s.sendLocked(pkt, kind, uint8(priority), serverResponseDelay, corr)
+	s.sendLocked(pkt, kind, uint8(priority), s.delays.response, corr)
 }
 
 // sendLocked hands one composed packet to the pipeline. A dry gate
@@ -587,8 +588,7 @@ func (s *service) sendLocked(pkt *mesh.Packet, kind string, priority uint8, dela
 		Frame: raw, Route: routeOf(pkt), Correlation: corr, Kind: kind, Priority: priority,
 		NotBefore: now.Add(delay), Expires: now.Add(answerLife),
 	}
-	if !s.pipeline.Queue.Offer(item) {
-		s.pipeline.Drop(item, "queue-full")
+	if out := s.pipeline.Submit(item); out.Dropped != "" {
 		s.dropped++
 	}
 }

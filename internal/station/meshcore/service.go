@@ -17,6 +17,7 @@ import (
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
 	"meshrunner.dev/lotor/internal/meshcorecfg"
+	"meshrunner.dev/lotor/internal/meshcorehost"
 	"meshrunner.dev/lotor/internal/origin"
 	"meshrunner.dev/lotor/internal/product"
 	"meshrunner.dev/lotor/internal/radio"
@@ -333,7 +334,7 @@ type service struct {
 	disconnect   uint64
 	remote       string
 	clockDelta   time.Duration
-	lastUnique   uint32
+	clock        meshcorehost.UniqueClock
 	appVersion   uint8
 	autoFlags    uint8
 	autoHops     uint8
@@ -748,7 +749,7 @@ func (s *service) restoreFactoryLocked() []companion.Response {
 
 func (s *service) resetRuntimeLocked() []emission {
 	dropped := s.outbound.Drain()
-	s.lastUnique = 0
+	s.clock = meshcorehost.UniqueClock{}
 	s.appVersion = 0
 	s.sendScope = [16]byte{}
 	s.sendUnscoped = false
@@ -914,14 +915,9 @@ func (s *service) setDeviceTime(seconds uint32) []companion.Response {
 	return okResponses()
 }
 
-func (s *service) uniqueTimestampLocked() uint32 {
-	now := uint32(time.Now().Add(s.clockDelta).Unix())
-	if now <= s.lastUnique {
-		now = s.lastUnique + 1
-	}
-	s.lastUnique = now
-	return now
-}
+// uniqueTimestampLocked is the reference's getCurrentTimeUnique on the
+// clock this station follows — its companion's, by clockDelta.
+func (s *service) uniqueTimestampLocked() uint32 { return s.clock.Now(time.Now().Add(s.clockDelta)) }
 
 func okResponses() []companion.Response {
 	return []companion.Response{companion.StatusResponse(companion.ResponseOK)}

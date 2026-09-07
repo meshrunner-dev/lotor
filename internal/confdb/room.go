@@ -70,19 +70,18 @@ func (s *Store) SaveRoomPost(ctx context.Context, app string, p RoomPost, keep i
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	res, err := tx.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO room_posts(app, seq, at, author, text, corr)
 		 VALUES(?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM room_posts WHERE app = ?), ?, ?, ?, ?)`,
-		app, app, int64(p.At), p.Author[:], p.Text, p.Correlation)
-	if err != nil {
+		app, app, int64(p.At), p.Author[:], p.Text, p.Correlation); err != nil {
 		return 0, fmt.Errorf("save room %q post: %w", app, err)
 	}
+	// The sequence the row took: LastInsertId would be the rowid.
 	var seq int64
 	if err := tx.QueryRowContext(ctx,
 		"SELECT MAX(seq) FROM room_posts WHERE app = ?", app).Scan(&seq); err != nil {
 		return 0, err
 	}
-	_ = res
 	if keep > 0 {
 		if _, err := tx.ExecContext(ctx,
 			"DELETE FROM room_posts WHERE app = ? AND seq <= ?", app, seq-int64(keep)); err != nil {
@@ -92,10 +91,21 @@ func (s *Store) SaveRoomPost(ctx context.Context, app string, p RoomPost, keep i
 	return seq, tx.Commit()
 }
 
-// ClearRoomHistory forgets everything a room said.
-func (s *Store) ClearRoomHistory(ctx context.Context, app string) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM room_posts WHERE app = ?", app)
-	return err
+// PruneRoomPosts forgets every post beyond the newest keep — what a
+// room whose history was shortened asks on its way up, so the surplus
+// does not wait in the store for the next post to make room.
+func (s *Store) PruneRoomPosts(ctx context.Context, app string, keep int) error {
+	if keep <= 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM room_posts WHERE app = ?
+		   AND seq <= (SELECT COALESCE(MAX(seq), 0) FROM room_posts WHERE app = ?) - ?`,
+		app, app, int64(keep))
+	if err != nil {
+		return fmt.Errorf("prune room %q posts: %w", app, err)
+	}
+	return nil
 }
 
 // LoadRoomCursors reads every member's cursor.
@@ -123,19 +133,37 @@ func (s *Store) LoadRoomCursors(ctx context.Context, app string) ([]RoomCursor, 
 
 // SaveRoomCursor records how far one member has read.
 func (s *Store) SaveRoomCursor(ctx context.Context, app string, c RoomCursor) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO room_cursors(app, pubkey, sync_since, updated) VALUES(?, ?, ?, ?)
-		 ON CONFLICT(app, pubkey) DO UPDATE SET sync_since = excluded.sync_since, updated = excluded.updated`,
-		app, c.PubKey[:], int64(c.SyncSince), time.Now().UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return fmt.Errorf("save room %q cursor: %w", app, err)
-	}
-	return nil
+	return s.SaveRoomCursors(ctx, app, []RoomCursor{c})
 }
 
-// ForgetRoomCursor drops one member's cursor — what a revocation does.
-func (s *Store) ForgetRoomCursor(ctx context.Context, app string, pubKey []byte) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM room_cursors WHERE app = ? AND pubkey = ?", app, pubKey)
+// SaveRoomCursors records a flush of cursors in one transaction — one
+// fsync for the batch, where a write per cursor would cost one each on
+// a store that commits synchronously.
+func (s *Store) SaveRoomCursors(ctx context.Context, app string, cursors []RoomCursor) error {
+	if len(cursors) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	updated := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, c := range cursors {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO room_cursors(app, pubkey, sync_since, updated) VALUES(?, ?, ?, ?)
+			 ON CONFLICT(app, pubkey) DO UPDATE SET sync_since = excluded.sync_since, updated = excluded.updated`,
+			app, c.PubKey[:], int64(c.SyncSince), updated); err != nil {
+			return fmt.Errorf("save room %q cursor: %w", app, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// ForgetRoomCursor drops one member's cursor — what an eviction does,
+// and what a revocation will do when the room grows one.
+func (s *Store) ForgetRoomCursor(ctx context.Context, app string, pubKey [roomKeySize]byte) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM room_cursors WHERE app = ? AND pubkey = ?", app, pubKey[:])
 	return err
 }
 

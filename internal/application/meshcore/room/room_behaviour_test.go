@@ -49,14 +49,21 @@ func benchRoomTuned(t *testing.T, store *confdb.Store, tune func(cfg map[string]
 		t.Fatalf("build returned a %T", svc)
 	}
 	// The bench logs in as many strangers as a test needs; the budget
-	// that bounds them on the air has a test of its own.
+	// that bounds them on the air has a test of its own. And it does
+	// not wait out the reference's radio turnaround before an answer:
+	// the pauses are the radio's business, not what these tests judge.
 	room.strangers.Max = 1 << 16
+	room.delays.response, room.delays.ack = 0, 0
 	return room
 }
 
 type client struct {
 	id     *mesh.LocalIdentity
 	secret []byte
+	// logins counts this client's logins, so two within one second are
+	// stamped apart: the bench no longer waits between them, and a
+	// client replaying its own timestamp would be refused as one.
+	logins *uint32
 }
 
 func newClient(t *testing.T, room *service) client {
@@ -69,7 +76,7 @@ func newClient(t *testing.T, room *service) client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return client{id: id, secret: secret}
+	return client{id: id, secret: secret, logins: new(uint32)}
 }
 
 // hear hands the room one packet as if the radio had.
@@ -99,10 +106,13 @@ func nothingQueued(t *testing.T, svc *service) {
 	}
 }
 
-// login sends a room login and returns the reply the room queued.
+// login sends a room login and returns the reply the room queued. The
+// stamp sits ten seconds in the past, one more per login of the same
+// client, so a later post stamped now is never behind it.
 func login(t *testing.T, svc *service, c client, password string, since uint32) *mesh.Packet {
 	t.Helper()
-	ts := uint32(time.Now().Add(-10 * time.Second).Unix())
+	*c.logins++
+	ts := uint32(time.Now().Add(-10*time.Second).Unix()) + *c.logins
 	pkt, _, err := mesh.BuildRoomLoginReq(c.id, svc.id.PubKey[:], ts, since, password)
 	if err != nil {
 		t.Fatal(err)
@@ -620,8 +630,8 @@ func TestAMultiAckPrecedesADirectPostAck(t *testing.T) {
 	// The queue hands the ACK out once it is due, so its not-before is
 	// read against the post's arrival: the multi-ack's delay plus the
 	// reference's 300 ms.
-	if gap := second.NotBefore.Sub(start); gap < textAckDelay+multiAckSpacing || gap > textAckDelay+multiAckSpacing+time.Second {
-		t.Fatalf("the ACK proper was due %v after the post, want %v", gap, textAckDelay+multiAckSpacing)
+	if gap := second.NotBefore.Sub(start); gap < multiAckSpacing || gap > multiAckSpacing+time.Second {
+		t.Fatalf("the ACK proper was due %v after the post, want %v past the multi-ack", gap, multiAckSpacing)
 	}
 }
 

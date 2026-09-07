@@ -29,9 +29,8 @@ const (
 	anonLimitWindow = 3 * time.Minute
 
 	// serverResponseDelay is the reference's fixed pause before a
-	// server-style reply (SERVER_RESPONSE_DELAY) — the asker's radio
-	// needs a beat to turn around after transmitting.
-	serverResponseDelay = 300 * time.Millisecond
+	// server-style reply, the kernel's figure under this engine's name.
+	serverResponseDelay = meshcorehost.ServerResponseDelay
 )
 
 // anonVerdict judges an ANON_REQ. handled is false when the request is
