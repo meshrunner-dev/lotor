@@ -1051,10 +1051,10 @@ func TestProfileMovesBeforeItsOverrides(t *testing.T) {
 			Protocol: "meshcore", Radio: "r",
 			Layered: config.Layered{Profile: "eu-868-narrow"},
 		}}}
-		change, err := applyRelayChanges(next, "mc", map[string]any{
+		change, err := applyInstanceChanges(next.Relays, "mc", map[string]any{
 			"profile":   "custom",
 			"node_name": "new name",
-		}, nil)
+		}, nil, setRelayAttr, unsetRelayAttr)
 		if err != nil {
 			t.Fatal(err)
 		}

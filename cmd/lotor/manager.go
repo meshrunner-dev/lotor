@@ -2814,21 +2814,21 @@ func applyChanges(next *config.File, kind, name string,
 		change, err := applyMQTTChanges(next, name, typed, unset)
 		return change, "", err
 	case confdb.KindRelay:
-		change, err := applyRelayChanges(next, name, typed, unset)
+		change, err := applyInstanceChanges(next.Relays, name, typed, unset, setRelayAttr, unsetRelayAttr)
 		return change, name, err
 	case confdb.KindStation:
-		change, err := applyStationChanges(next, name, typed, unset)
+		change, err := applyInstanceChanges(next.Stations, name, typed, unset, setStationAttr, unsetStationAttr)
 		return change, "", err
 	case confdb.KindApplication:
-		change, err := applyApplicationChanges(next, name, typed, unset)
+		change, err := applyInstanceChanges(next.Applications, name, typed, unset, setApplicationAttr, unsetApplicationAttr)
 		return change, "", err
 	case confdb.KindSensor:
 		// No relay restarts for a sensor: its sampler is the daemon's,
 		// and the relays that read its cache never held it.
-		change, err := applySensorChanges(next, name, typed, unset)
+		change, err := applyInstanceChanges(next.Sensors, name, typed, unset, setSensorAttr, unsetSensorAttr)
 		return change, "", err
 	case confdb.KindRadio:
-		change, err := applyRadioChanges(next, name, typed, unset)
+		change, err := applyInstanceChanges(next.Radios, name, typed, unset, setRadioAttr, unsetRadioAttr)
 		if err != nil {
 			return nil, "", err
 		}
@@ -2843,119 +2843,41 @@ func applyChanges(next *config.File, kind, name string,
 	return nil, "", fmt.Errorf("%q is not configurable from here yet", kind)
 }
 
-func applyRelayChanges(next *config.File, name string,
-	typed map[string]any, unset []string,
+// applyInstanceChanges is the mutation half of what createHosted is to
+// creation: one instance of any kind, its set attributes written in
+// stable order through the kind's own setter and its unset ones through
+// the kind's own unsetter, each recorded as a change with what it held,
+// and the finished object put back in its map.
+func applyInstanceChanges[T any](into map[string]T, name string, typed map[string]any, unset []string,
+	set func(obj *T, attr string, v any) (any, error), unsetAttr func(obj *T, attr string) (any, error),
 ) (map[string]confdb.Change, error) {
 	change := map[string]confdb.Change{}
-	rc := next.Relays[name]
+	obj := into[name]
 	for _, attr := range orderedAttrs(typed) {
-		old, err := setRelayAttr(&rc, attr, typed[attr])
+		old, err := set(&obj, attr, typed[attr])
 		if err != nil {
 			return nil, err
 		}
 		change[attr] = confdb.Change{Old: old, New: typed[attr]}
 	}
 	for _, attr := range unset {
-		old, err := unsetRelayAttr(&rc, attr)
+		old, err := unsetAttr(&obj, attr)
 		if err != nil {
 			return nil, err
 		}
 		change[attr] = confdb.Change{Old: old}
 	}
-	next.Relays[name] = rc
+	into[name] = obj
 	return change, nil
 }
 
-func applyStationChanges(next *config.File, name string,
-	typed map[string]any, unset []string,
-) (map[string]confdb.Change, error) {
-	change := map[string]confdb.Change{}
-	sc := next.Stations[name]
-	for _, attr := range orderedAttrs(typed) {
-		old, err := setStationAttr(&sc, attr, typed[attr])
-		if err != nil {
-			return nil, err
-		}
-		change[attr] = confdb.Change{Old: old, New: typed[attr]}
-	}
-	for _, attr := range unset {
-		old, err := unsetStationAttr(&sc, attr)
-		if err != nil {
-			return nil, err
-		}
-		change[attr] = confdb.Change{Old: old}
-	}
-	next.Stations[name] = sc
-	return change, nil
+// The sensor and the radio carry no attributes of their own to unset:
+// only their layered overrides come off.
+func unsetSensorAttr(sn *config.Sensor, attr string) (any, error) {
+	return unsetOverride(&sn.Layered, attr)
 }
-
-func applyApplicationChanges(next *config.File, name string,
-	typed map[string]any, unset []string,
-) (map[string]confdb.Change, error) {
-	change := map[string]confdb.Change{}
-	ac := next.Applications[name]
-	for _, attr := range orderedAttrs(typed) {
-		old, err := setApplicationAttr(&ac, attr, typed[attr])
-		if err != nil {
-			return nil, err
-		}
-		change[attr] = confdb.Change{Old: old, New: typed[attr]}
-	}
-	for _, attr := range unset {
-		old, err := unsetApplicationAttr(&ac, attr)
-		if err != nil {
-			return nil, err
-		}
-		change[attr] = confdb.Change{Old: old}
-	}
-	next.Applications[name] = ac
-	return change, nil
-}
-
-func applySensorChanges(next *config.File, name string,
-	typed map[string]any, unset []string,
-) (map[string]confdb.Change, error) {
-	change := map[string]confdb.Change{}
-	sn := next.Sensors[name]
-	for _, attr := range orderedAttrs(typed) {
-		old, err := setSensorAttr(&sn, attr, typed[attr])
-		if err != nil {
-			return nil, err
-		}
-		change[attr] = confdb.Change{Old: old, New: typed[attr]}
-	}
-	for _, attr := range unset {
-		old, err := unsetOverride(&sn.Layered, attr)
-		if err != nil {
-			return nil, err
-		}
-		change[attr] = confdb.Change{Old: old}
-	}
-	next.Sensors[name] = sn
-	return change, nil
-}
-
-func applyRadioChanges(next *config.File, name string,
-	typed map[string]any, unset []string,
-) (map[string]confdb.Change, error) {
-	change := map[string]confdb.Change{}
-	rd := next.Radios[name]
-	for _, attr := range orderedAttrs(typed) {
-		old, err := setRadioAttr(&rd, attr, typed[attr])
-		if err != nil {
-			return nil, err
-		}
-		change[attr] = confdb.Change{Old: old, New: typed[attr]}
-	}
-	for _, attr := range unset {
-		old, err := unsetOverride(&rd.Layered, attr)
-		if err != nil {
-			return nil, err
-		}
-		change[attr] = confdb.Change{Old: old}
-	}
-	next.Radios[name] = rd
-	return change, nil
+func unsetRadioAttr(rd *config.Radio, attr string) (any, error) {
+	return unsetOverride(&rd.Layered, attr)
 }
 
 // setRelayAttr writes one relay attribute and reports what it held.
