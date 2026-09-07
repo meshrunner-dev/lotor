@@ -99,6 +99,28 @@ identity, and a small `Summary map[string]string` the type fills for
 its own status line (members, posts, pending pushes), so the console
 and the web snapshot need no per-type knowledge to show it.
 
+**What the two seams share is said once.** Mirroring shape for shape
+left `internal/station` and `internal/application` each owning a copy
+of `State`, `RFState`, `RadioAttacher`, `RadioRequester`, `RadioDemand`
+and `TXPolicy`, and left the manager keeping two copies of every
+hosting path in step by hand. `internal/hosted` is where those shapes
+live now; both seams alias them, so a call site keeps reading in its
+own vocabulary. `config.Host` is the same idea one layer down — the
+protocol, the radio, the layered attributes and the origination gate a
+station and an application declare alike, projected by value from
+either struct. On that, the manager hosts either down one path
+(`cmd/lotor/hosted.go`): a two-row table names what tells them apart —
+the kind word, the radio role, where the file keeps the entries, which
+registry answers, what the provenance head says — and start, stop,
+attach, rebind, traces, the alone check and the duty preflight are
+written once against it. What genuinely differs stays with each kind
+and is the whole of its start: the `Spec` its builder is given, the
+`Info` a failure reports. A third hosted kind is a third row, a `Spec`
+and an `Info`. The two `Service` and `Info` types were deliberately not
+merged: a station's snapshot says `Listen`, an application's says
+`Type`, and the console and the API render them differently — a common
+`Info` would either carry both fields or lose the typing the views use.
+
 **Configuration.** A new kind, `applications:`, with instances by
 name. Two structural attributes select the implementation:
 `protocol` (the mesh it speaks) and `type` (what it does on it), so
