@@ -69,6 +69,16 @@ func testDeps(t *testing.T) Deps {
 				SyncWord: 0x12, CRC: true,
 			},
 		}},
+		Applications: []ApplicationInfo{{
+			Name: "lobby", Protocol: "meshcore", Type: "meshcore-room",
+			State: "running", RF: "detached",
+			Waveform: radio.Waveform{
+				FrequencyHz: 869_618_000, SpreadingFactor: 8,
+				BandwidthHz: 62_500, CodingRate: 8, Preamble: 32,
+				SyncWord: 0x12, CRC: true,
+			},
+			Summary: map[string]string{"members": "3", "posts": "7 / 32"},
+		}},
 		Sentinel: sen,
 		Radios: []RadioInfo{{
 			Name: "slot1", Driver: "sx126x-spi", Relay: "meshcore-868",
@@ -131,6 +141,13 @@ func testKinds() []schema.Kind {
 			Attrs: []schema.Attr{
 				{Name: "protocol", Type: schema.String, Enum: []string{"meshcore"}},
 				{Name: "listen", Type: schema.String},
+			},
+		},
+		{
+			Name: "application", Doc: "one hosted mesh identity", ChoiceAttr: "type",
+			Attrs: []schema.Attr{
+				{Name: "protocol", Type: schema.String, Enum: []string{"meshcore"}},
+				{Name: "type", Type: schema.String, Enum: []string{"meshcore-room"}},
 			},
 		},
 		{

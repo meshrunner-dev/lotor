@@ -267,6 +267,78 @@ func TestPushesGoDownATaughtRouteAndThreeTimeoutsStallAMember(t *testing.T) {
 	}
 }
 
+// A stranger's blank word reaches the doors and, with allow_read_only,
+// earns a guest — the reference's behaviour; an empty admin_password
+// is a closed door, not the open one the reference's strcmp("", "")
+// leaves.
+func TestABlankWordOpensOnlyTheReadOnlyDoor(t *testing.T) {
+	open := benchRoomTuned(t, nil, func(cfg map[string]any) { cfg["admin_password"] = "" })
+	stranger := newClient(t, open)
+	if lr, _ := mesh.ParseLoginReply(openReply(t, stranger, login(t, open, stranger, "", 0))); lr.Result != mesh.LoginOK ||
+		!lr.Guest || lr.IsAdmin {
+		t.Fatalf("a blank word under allow_read_only = %+v, want a guest", lr)
+	}
+	closed := benchRoomTuned(t, nil, func(cfg map[string]any) {
+		cfg["admin_password"], cfg["allow_read_only"] = "", false
+	})
+	other := newClient(t, closed)
+	pkt, _, err := mesh.BuildRoomLoginReq(other.id, closed.id.PubKey[:], uint32(time.Now().Unix())-10, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hear(t, closed, pkt)
+	nothingQueued(t, closed)
+	closed.mu.Lock()
+	defer closed.mu.Unlock()
+	if closed.table.Get(other.id.PubKey[:]) != nil {
+		t.Fatal("a blank word opened a closed admin door")
+	}
+}
+
+// The push clock runs on its own goroutine: a post old enough is pushed
+// without anyone calling the clock, and the flush tick writes the
+// cursors the logins dirtied.
+func TestThePushClockRunsAndTheFlushTickWritesCursors(t *testing.T) {
+	ctx := context.Background()
+	store := memoryStore(t)
+	svc := benchRoom(t, store)
+	svc.delays.flush = 20 * time.Millisecond
+	alice, bob := newClient(t, svc), newClient(t, svc)
+	login(t, svc, alice, "welcome", 0)
+	login(t, svc, bob, "welcome", 0)
+	sendPost(t, svc, alice, "hello", time.Now())
+	svc.mu.Lock()
+	// Aged past the settling delay, and the clock told not to wait
+	// out the notify pause a login buys.
+	svc.posts[0].at -= uint32(2 * postSyncDelay / time.Second)
+	svc.nextPush = time.Time{}
+	svc.mu.Unlock()
+
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = svc.Run(runCtx)
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		s := svc.Info().Summary
+		cursors, err := store.LoadRoomCursors(ctx, "lobby")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s["pushes"] == "1" && s["pushes pending"] == "1" && len(cursors) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("summary = %v, cursors %d — want one push in flight and two cursors flushed", s, len(cursors))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+}
+
 // roomRadio is a device the room can be attached to on the bench: it
 // hands out the frames a test feeds it, and reports what it was asked.
 type roomRadio struct {

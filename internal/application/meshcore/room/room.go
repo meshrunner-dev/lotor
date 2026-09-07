@@ -347,9 +347,10 @@ type service struct {
 	clock      meshcorehost.UniqueClock
 
 	// delays are the reference's pauses before an answer and before a
-	// post ACK, set from the constants at build; the bench zeroes them
-	// so a test does not wait out the reference's radio turnaround.
-	delays struct{ response, ack time.Duration }
+	// post ACK, and the cursor flush cadence, set from the constants at
+	// build; the bench shortens them so a test does not wait out the
+	// reference's radio turnaround or its lazy five seconds.
+	delays struct{ response, ack, flush time.Duration }
 }
 
 func build(spec application.Spec) (application.Service, error) {
@@ -380,7 +381,7 @@ func build(spec application.Spec) (application.Service, error) {
 		members:   map[[mesh.PubKeySize]byte]*member{},
 		posts:     make([]post, 0, p.History),
 	}
-	s.delays.response, s.delays.ack = serverResponseDelay, textAckDelay
+	s.delays.response, s.delays.ack, s.delays.flush = serverResponseDelay, textAckDelay, cursorFlushDelay
 	// A nil pointer boxed in an interface is not a nil interface: the
 	// memory-only posture has to be kept as one on purpose.
 	if spec.Store != nil {

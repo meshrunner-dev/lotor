@@ -166,9 +166,11 @@ func (s *service) tallyReceptionLocked(pkt *mesh.Packet, frame radio.Frame, dupl
 
 // doors is the room's word-to-role map, the reference's: the admin
 // word earns admin, the room word earns a member who may post,
-// allow_read_only admits any other word as a guest who may only read.
-// An empty word opens nothing here — the recheck a known key makes
-// with a blank password never reaches the doors.
+// allow_read_only admits any other word — a stranger's blank one
+// included, as the reference does — as a guest who may only read. A
+// known key's blank recheck never reaches the doors. An empty
+// admin_password closes the admin door where the reference's
+// strcmp("", "") would open it to anyone.
 func (s *service) doors(word string) (byte, bool) {
 	switch {
 	case s.p.AdminPassword != "" && subtle.ConstantTimeCompare([]byte(word), []byte(s.p.AdminPassword)) == 1:

@@ -75,6 +75,23 @@ func TestStationCollectionAndStatusKeepTCPSeparateFromRF(t *testing.T) {
 	}
 }
 
+// The application scope lists the hosted identities with their type
+// and their RF door, and a status prints the state, the door, and every
+// line the type's own summary contributes.
+func TestApplicationCollectionAndStatusShowTheTypeAndItsSummary(t *testing.T) {
+	out := run(t, testDeps(t), "/application", "print", "lobby", "status")
+	for _, want := range []string{"lobby", "meshcore-room", "meshcore", "running", "detached", "none"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("application listing lacks %q:\n%s", want, out)
+		}
+	}
+	for _, want := range []string{"members", "3", "posts", "7 / 32", "869.618 MHz"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("application status lacks %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestTreeAbsoluteCommandFromInsideAContext(t *testing.T) {
 	out := run(t, testDeps(t), "/relay meshcore-868", "/status", "?")
 	if !strings.Contains(out, "daemon") {

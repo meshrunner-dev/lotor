@@ -99,10 +99,15 @@ func queued(t *testing.T, svc *service) origin.Emission {
 	return item
 }
 
+// nothingQueued asserts the room composed nothing. The dispatcher is
+// synchronous — whatever a frame earns is in the queue before hear
+// returns — so the backlog is read, not waited for: exact, instant, and
+// blind to no emission however far in the future its turn falls.
 func nothingQueued(t *testing.T, svc *service) {
 	t.Helper()
-	if item, ok := svc.pipeline.Queue.TakeUntil(context.Background(), time.Now().Add(2*serverResponseDelay)); ok {
-		t.Fatalf("the room composed %s when silence was owed", item.Kind)
+	if n := svc.pipeline.Queue.Len(); n != 0 {
+		item, _ := svc.pipeline.Queue.TakeUntil(context.Background(), time.Now().Add(time.Second))
+		t.Fatalf("the room composed %d emission(s) when silence was owed, first %s", n, item.Kind)
 	}
 }
 
@@ -163,6 +168,12 @@ func TestTheRoomAdmitsByItsDoorsAndAnswersTheReferenceReply(t *testing.T) {
 		!lr.Guest || lr.IsAdmin {
 		t.Fatalf("guest role = %+v", lr)
 	}
+	// A login stamped at or before the member's last is a recording,
+	// answered with silence.
+	stale := uint32(time.Now().Add(-10*time.Second).Unix()) + *member.logins - 5
+	replay, _, _ := mesh.BuildRoomLoginReq(member.id, svc.id.PubKey[:], stale, 0, "welcome")
+	hear(t, svc, replay)
+	nothingQueued(t, svc)
 	svc.mu.Lock()
 	if len(svc.table.Entries()) != 2 || len(svc.table.Sessions()) != 3 {
 		t.Errorf("table = %d durable, %d live", len(svc.table.Entries()), len(svc.table.Sessions()))
@@ -326,10 +337,11 @@ func TestAPostIsKeptAcknowledgedAndPushedToTheOthers(t *testing.T) {
 	ackPkt, _ := mesh.BuildAck(ackBody)
 	hear(t, svc, ackPkt)
 	svc.mu.Lock()
-	m := svc.members[reader.id.PubKey]
+	m := *svc.members[reader.id.PubKey]
+	postAt := svc.posts[0].at
 	svc.mu.Unlock()
-	if m.pendingAck != 0 || m.syncSince != svc.posts[0].at {
-		t.Fatalf("after the ACK, member = %+v (post at %d)", m, svc.posts[0].at)
+	if m.pendingAck != 0 || m.syncSince != postAt {
+		t.Fatalf("after the ACK, member = %+v (post at %d)", m, postAt)
 	}
 	// The cursor reaches the store on the lazy flush, and a rebuilt
 	// room restores both the history and the cursor.
@@ -391,12 +403,13 @@ func TestAKeepAliveMovesTheCursorAndIsAnsweredDirectWithTheCount(t *testing.T) {
 	if err != nil || crc != want || unsynced != 2 {
 		t.Fatalf("keep-alive ack = %08x %d %v, want %08x 2", crc, unsynced, err, want)
 	}
-	// A cursor the client forces is taken as its word.
+	// A cursor the client forces is taken as its word: past the first
+	// post, one is left to read.
 	svc.mu.Lock()
-	second := svc.posts[0].at
+	first := svc.posts[0].at
 	svc.mu.Unlock()
 	ts++
-	req, _ = mesh.BuildRequest(bob.id, svc.id.PubKey[:], bob.secret, ts, mesh.FrameKeepAliveRequest(second))
+	req, _ = mesh.BuildRequest(bob.id, svc.id.PubKey[:], bob.secret, ts, mesh.FrameKeepAliveRequest(first))
 	req.Header = mesh.MakeHeader(mesh.RouteDirect, mesh.PayloadTypeReq, mesh.PayloadVer1)
 	hear(t, svc, req)
 	ack = emissionPacket(queued(t, svc))
@@ -406,7 +419,9 @@ func TestAKeepAliveMovesTheCursorAndIsAnsweredDirectWithTheCount(t *testing.T) {
 }
 
 func TestAFullRoomUnseatsTheIdlestMemberNeverAnAdmin(t *testing.T) {
-	svc := benchRoom(t, nil)
+	ctx := context.Background()
+	store := memoryStore(t)
+	svc := benchRoom(t, store)
 	admin := newClient(t, svc)
 	login(t, svc, admin, "sesame", 0)
 	members := make([]client, 0, defaultMembers)
@@ -422,6 +437,11 @@ func TestAFullRoomUnseatsTheIdlestMemberNeverAnAdmin(t *testing.T) {
 	svc.mu.Lock()
 	svc.table.Get(admin.id.PubKey[:]).LastActive = time.Now().Add(-24 * time.Hour)
 	svc.mu.Unlock()
+	// Every login dirtied a cursor; the flush puts them all in the store.
+	svc.flushCursors(ctx)
+	if cursors, err := store.LoadRoomCursors(ctx, "lobby"); err != nil || len(cursors) != defaultMembers {
+		t.Fatalf("cursors before the eviction = %d, %v", len(cursors), err)
+	}
 	newcomer := newClient(t, svc)
 	if lr, _ := mesh.ParseLoginReply(openReply(t, newcomer, login(t, svc, newcomer, "welcome", 0))); lr.Result != mesh.LoginOK {
 		t.Fatalf("the twenty-first login was refused: %+v", lr)
@@ -439,6 +459,16 @@ func TestAFullRoomUnseatsTheIdlestMemberNeverAnAdmin(t *testing.T) {
 	}
 	if _, remembered := svc.members[members[0].id.PubKey]; remembered {
 		t.Error("the evicted member's cursor was kept")
+	}
+	// The victim's cursor left the store with it; a witness's survived.
+	cursors, err := store.LoadRoomCursors(ctx, "lobby")
+	if err != nil || len(cursors) != defaultMembers-1 {
+		t.Fatalf("cursors after the eviction = %d, %v", len(cursors), err)
+	}
+	for _, c := range cursors {
+		if c.PubKey == members[0].id.PubKey {
+			t.Fatal("the evicted member's cursor is still in the store")
+		}
 	}
 }
 

@@ -196,7 +196,7 @@ func (s *service) unsyncedLocked(key [mesh.PubKeySize]byte, m *member) uint8 {
 // pushes, so, as in the reference, a member stays until the table
 // makes room for a newer one.
 func (s *service) runPush(ctx context.Context) {
-	flush := time.NewTicker(cursorFlushDelay)
+	flush := time.NewTicker(s.delays.flush)
 	defer flush.Stop()
 	for {
 		s.mu.Lock()
