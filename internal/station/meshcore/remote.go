@@ -230,7 +230,7 @@ func (s *service) sendRawPacket(command companion.SendRawPacket) []companion.Res
 		return errorResponses(companion.ErrIllegalArgument)
 	}
 	kind := fmt.Sprintf("station-raw-packet-p%d", command.Priority)
-	if responses := s.submitAtPriorityLocked(packet, kind, time.Time{}, command.Priority); responses != nil {
+	if responses := s.submitAtPriorityLocked(packet, kind, time.Time{}, command.Priority, time.Time{}); responses != nil {
 		return responses
 	}
 	return okResponses()

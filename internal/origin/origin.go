@@ -5,8 +5,10 @@
 // the frame is on the air, the listen-before-talk ladder with its
 // bounded retries, and the gate that keys the radio, journals a shadow,
 // or refuses. An emission is bytes, a priority and an instant: nothing
-// here knows what the bytes say, and the owner keeps whatever it needs
-// to know about them in Subject.
+// here knows what the bytes say. An owner labels what it composed —
+// what the journal calls it, how it travels, when it stops being worth
+// keying — and the pipeline carries those labels without ever reading
+// the frame.
 //
 // The relay keeps its own transmit queue: its ladder is the reference
 // repeater's, with forwarding semantics origination has no business in.
@@ -36,6 +38,20 @@ const (
 	DefaultDutyWait = 10 * time.Minute
 )
 
+// Route is how a frame travels — flooded to whoever hears it, or down
+// a path to one node. The pipeline never decides it and never reads
+// the frame to find it: the owner classifies what it composed, and
+// gets the label back to keep its own tally.
+type Route uint8
+
+// The routes an owner may declare; the zero value is the one an owner
+// that keeps no such tally leaves behind.
+const (
+	RouteUnclassified Route = iota
+	RouteFlood
+	RouteDirect
+)
+
 // Emission is one frame waiting to go on the air.
 type Emission struct {
 	// Frame is the packet as it will be keyed, marshalled once at
@@ -49,10 +65,16 @@ type Emission struct {
 	// BusySince starts the continuous busy spell a reception in
 	// progress opened; zero until the first refusal.
 	BusySince time.Time
-	// Subject is the owner's own handle on what is being sent — the
-	// packet it composed, typically — carried untouched, for the
-	// statistics the owner keeps about what it emitted.
-	Subject any
+	// Expires is when this frame stops being worth keying: the instant
+	// its moment passes — an answer the asker has stopped waiting for,
+	// an advert whose signed timestamp has gone stale. Zero never
+	// expires. Past it the frame is dropped as "expired" rather than
+	// held in front of what is behind it, which is what a bounded
+	// queue with a ten-minute duty patience would otherwise do.
+	Expires time.Time
+	// Route is how the owner composed this frame to travel, carried
+	// untouched for the tally the owner keeps about what it emitted.
+	Route Route
 }
 
 // Policy is the origination gate and channel politeness, the
@@ -139,6 +161,9 @@ func (p *Pipeline) Emit(ctx context.Context, item Emission, dev radio.Device,
 	if dev == nil || ledger == nil {
 		return p.drop(item, "radio-down")
 	}
+	if item.expired(time.Now()) {
+		return p.drop(item, "expired")
+	}
 	airtime := dev.Airtime(len(item.Frame))
 	reservation, outcome := p.reserveDuty(ctx, ledger, airtime, item)
 	if reservation == nil {
@@ -180,14 +205,21 @@ func (p *Pipeline) Emit(ctx context.Context, item Emission, dev radio.Device,
 }
 
 // reserveDuty waits for the shared ledger to admit the airtime, up to
-// the configured patience; a budget that will never free, or not in
+// the configured patience or the emission's own expiry, whichever
+// comes first; a budget that will never free, or not in
 // time, drops the frame as duty, and a wait the owner cancelled drops
 // it as cancelled — each counted under its own name, so a shutdown
 // never reads as a saturated ledger.
 func (p *Pipeline) reserveDuty(ctx context.Context, ledger *radio.AirtimeLedger,
 	airtime time.Duration, item Emission,
 ) (*radio.AirtimeReservation, Outcome) {
-	deadline := time.Now().Add(p.cfg.DutyWait)
+	deadline, exhausted := time.Now().Add(p.cfg.DutyWait), "duty"
+	if !item.Expires.IsZero() && item.Expires.Before(deadline) {
+		// Its own moment ends before the pipeline's patience does: the
+		// wait is cut there, and the drop is named for what actually
+		// ended it.
+		deadline, exhausted = item.Expires, "expired"
+	}
 	for {
 		now := time.Now()
 		reservation, freeAt, never := ledger.Reserve(now, airtime)
@@ -195,7 +227,7 @@ func (p *Pipeline) reserveDuty(ctx context.Context, ledger *radio.AirtimeLedger,
 			return reservation, Outcome{}
 		}
 		if never || freeAt.After(deadline) {
-			return nil, p.drop(item, "duty")
+			return nil, p.drop(item, exhausted)
 		}
 		select {
 		case <-ctx.Done():
@@ -262,9 +294,12 @@ func (p *Pipeline) clearChannel(ctx context.Context, dev radio.Device, policy Po
 	}
 }
 
-// Requeue puts an emission back for a later turn; a full queue drops
-// it, counted.
+// Requeue puts an emission back for a later turn; a frame whose next
+// turn falls past its expiry, and a full queue, drop it — counted.
 func (p *Pipeline) Requeue(item Emission) Outcome {
+	if item.expired(item.NotBefore) {
+		return p.drop(item, "expired")
+	}
 	if !p.Queue.Offer(item) {
 		return p.drop(item, "queue-full")
 	}
@@ -284,4 +319,10 @@ func (p *Pipeline) drop(item Emission, reason string) Outcome {
 			Correlation: item.Correlation, At: time.Now(), Reason: reason, Kind: item.Kind})
 	}
 	return Outcome{Dropped: reason}
+}
+
+// expired reports whether this emission's moment has passed at the
+// given instant. An emission with no expiry keeps its turn forever.
+func (e Emission) expired(at time.Time) bool {
+	return !e.Expires.IsZero() && !at.Before(e.Expires)
 }

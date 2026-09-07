@@ -20,17 +20,17 @@ func TestTraceUsesPayloadRouteAndSNRPath(t *testing.T) {
 	if !ok || sent.Flood || sent.ExpectedACK != command.Tag || sent.TimeoutMillis != 3_050 {
 		t.Fatalf("trace sent = %#v", responses)
 	}
-	emission := takeEmission(t, svc)
-	if emissionPacket(emission).PayloadType() != mesh.PayloadTypeTrace || emissionPacket(emission).PathHashCount() != 0 ||
-		!bytes.Equal(emissionPacket(emission).Payload[9:], command.Path) {
-		t.Fatalf("trace emission = %#v", emissionPacket(emission))
+	packet := emissionPacket(takeEmission(t, svc))
+	if packet.PayloadType() != mesh.PayloadTypeTrace || packet.PathHashCount() != 0 ||
+		!bytes.Equal(packet.Payload[9:], command.Path) {
+		t.Fatalf("trace emission = %#v", packet)
 	}
 
-	emissionPacket(emission).SetPathHashSizeAndCount(1, 2)
-	emissionPacket(emission).Path = []byte{4, 8}
+	packet.SetPathHashSizeAndCount(1, 2)
+	packet.Path = []byte{4, 8}
 	app := attachApplication(t, svc)
 	got := readPushAfter(t, app, func() {
-		svc.receiveTrace(emissionPacket(emission), radio.Frame{SNR: 3})
+		svc.receiveTrace(packet, radio.Frame{SNR: 3})
 	})
 	want := []byte{byte(companion.PushTraceData), 0, 4, 1,
 		0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55,

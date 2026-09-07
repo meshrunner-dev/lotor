@@ -1086,9 +1086,10 @@ func exchange(t *testing.T, conn net.Conn, command companion.Command) []byte {
 	return frame.Payload
 }
 
-// emissionPacket is the packet an emission carries as its subject.
+// emissionPacket reads back what the air would carry: the frame, not
+// the composer's object.
 func emissionPacket(e emission) *mesh.Packet {
-	packet, _ := e.Subject.(*mesh.Packet)
+	packet, _ := mesh.ParsePacket(e.Frame)
 	return packet
 }
 
@@ -1099,7 +1100,7 @@ func testEmission(t *testing.T, packet *mesh.Packet, kind string) emission {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return emission{Frame: raw, Subject: packet, Correlation: correlation.New(), Kind: kind}
+	return emission{Frame: raw, Route: routeOf(packet), Correlation: correlation.New(), Kind: kind}
 }
 
 func takeEmission(t *testing.T, svc *service) emission {

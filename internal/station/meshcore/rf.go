@@ -12,6 +12,7 @@ import (
 
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
+	"meshrunner.dev/lotor/internal/origin"
 	"meshrunner.dev/lotor/internal/radio"
 
 	mesh "meshrunner.dev/pkg/meshcore"
@@ -368,7 +369,7 @@ func (s *service) sendPathReturn(identity *mesh.LocalIdentity, contact contactEn
 	}
 	s.mu.Lock()
 	s.routeFlood(packet)
-	_ = s.submitAtLocked(packet, "station-path-return", time.Now().Add(200*time.Millisecond))
+	s.submitAtLocked(packet, "station-path-return", time.Now().Add(200*time.Millisecond))
 	s.mu.Unlock()
 }
 
@@ -382,7 +383,7 @@ func (s *service) sendACK(contact contactEntry, ack []byte) {
 			return
 		}
 		s.routeFlood(packet)
-		_ = s.submitAtLocked(packet, "station-ack-flood", time.Now().Add(200*time.Millisecond))
+		s.submitAtLocked(packet, "station-ack-flood", time.Now().Add(200*time.Millisecond))
 		return
 	}
 	path := contact.info.Path[:pathByteLen(pathLen)]
@@ -391,14 +392,14 @@ func (s *service) sendACK(contact contactEntry, ack []byte) {
 		packet, err := mesh.BuildMultiAck(ack, 1)
 		if err == nil {
 			s.routeDirect(packet, pathLen, path)
-			_ = s.submitAtLocked(packet, "station-multi-ack", time.Now().Add(delay))
+			s.submitAtLocked(packet, "station-multi-ack", time.Now().Add(delay))
 		}
 		delay += 300 * time.Millisecond
 	}
 	packet, err := mesh.BuildAck(ack)
 	if err == nil {
 		s.routeDirect(packet, pathLen, path)
-		_ = s.submitAtLocked(packet, "station-ack-direct", time.Now().Add(delay))
+		s.submitAtLocked(packet, "station-ack-direct", time.Now().Add(delay))
 	}
 }
 
@@ -531,7 +532,7 @@ func (s *service) sendReciprocalPath(identity *mesh.LocalIdentity, contact conta
 	}
 	s.mu.Lock()
 	s.routeDirect(packet, returned.PathLen, returned.Path)
-	_ = s.submitAtLocked(packet, "station-path-reciprocal", time.Now().Add(500*time.Millisecond))
+	s.submitAtLocked(packet, "station-path-reciprocal", time.Now().Add(500*time.Millisecond))
 	s.mu.Unlock()
 }
 
@@ -729,20 +730,20 @@ func (s *service) transmit(ctx context.Context, item emission) {
 	if !out.Sent {
 		return
 	}
-	if packet, ok := item.Subject.(*mesh.Packet); ok {
-		s.recordTransmission(packet, out.Airtime)
-	}
+	s.recordTransmission(item.Route, out.Airtime)
 }
 
-func (s *service) recordTransmission(packet *mesh.Packet, airtime time.Duration) {
+func (s *service) recordTransmission(route origin.Route, airtime time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stats.sent++
 	s.stats.txAir += max(time.Duration(0), airtime)
-	if packet.IsRouteFlood() {
+	switch route {
+	case origin.RouteFlood:
 		s.stats.sentFlood++
-	} else if packet.IsRouteDirect() {
+	case origin.RouteDirect:
 		s.stats.sentDirect++
+	case origin.RouteUnclassified:
 	}
 }
 

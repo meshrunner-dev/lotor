@@ -35,7 +35,30 @@ const (
 	sessionLimitMax     = 6
 	sessionLimitWindow  = time.Minute
 	firmwareVerLevel    = 1
+
+	// How long what the room composes is still worth the air. An
+	// answer's asker waits four seconds plus two per hop for a direct
+	// ACK, twelve for a flooded one, then re-asks: past half a minute
+	// a queued answer only delays the fresh one behind it. An advert
+	// that has waited a minute is older than the local clock's period.
+	answerLife = 30 * time.Second
+	advertLife = time.Minute
 )
+
+// routeOf is how the pipeline's neutral tally names the way a packet
+// was composed to travel. Four lines rather than a shared helper on
+// purpose: they turn a MeshCore header into a label origin defines,
+// and neither package may learn about the other.
+func routeOf(pkt *mesh.Packet) origin.Route {
+	switch {
+	case pkt.IsRouteFlood():
+		return origin.RouteFlood
+	case pkt.IsRouteDirect():
+		return origin.RouteDirect
+	default:
+		return origin.RouteUnclassified
+	}
+}
 
 // member is the room's own state about one client, beside what the
 // kernel's table holds: how far it has read and the push in flight.
@@ -498,9 +521,10 @@ func (s *service) sendLocked(pkt *mesh.Packet, kind string, priority uint8, dela
 		s.log.Warn("emission not marshalled", zap.String("kind", kind), zap.Error(err))
 		return
 	}
+	now := time.Now()
 	item := origin.Emission{
-		Frame: raw, Subject: pkt, Correlation: corr, Kind: kind, Priority: priority,
-		NotBefore: time.Now().Add(delay),
+		Frame: raw, Route: routeOf(pkt), Correlation: corr, Kind: kind, Priority: priority,
+		NotBefore: now.Add(delay), Expires: now.Add(answerLife),
 	}
 	if !s.pipeline.Queue.Offer(item) {
 		s.pipeline.Drop(item, "queue-full")

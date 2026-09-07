@@ -102,8 +102,10 @@ func login(t *testing.T, svc *service, c client, password string, since uint32) 
 	return emissionPacket(queued(t, svc))
 }
 
+// emissionPacket reads back what the air would carry: the frame, not
+// the composer's object.
 func emissionPacket(e origin.Emission) *mesh.Packet {
-	pkt, _ := e.Subject.(*mesh.Packet)
+	pkt, _ := mesh.ParsePacket(e.Frame)
 	return pkt
 }
 

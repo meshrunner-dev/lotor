@@ -260,6 +260,9 @@ type service struct {
 	corrupt    uint64
 	advertsDue uint64
 	sent       uint64
+	sentFlood  uint64
+	sentDirect uint64
+	txAir      time.Duration
 	dropped    uint64
 	composed   uint64
 	refused    uint64
@@ -432,7 +435,13 @@ func (s *service) advertDue(kind string) {
 		s.log.Warn("advert not marshalled", zap.String("kind", kind), zap.Error(err))
 		return
 	}
-	item := origin.Emission{Frame: raw, Subject: pkt, Correlation: correlation.New(), Kind: kind, Priority: priority}
+	// An advert carries the instant it was signed at: one that waited
+	// out a saturated budget arrives claiming a moment that has passed,
+	// and the clock will have composed a fresh one by then.
+	item := origin.Emission{
+		Frame: raw, Route: routeOf(pkt), Correlation: correlation.New(), Kind: kind, Priority: priority,
+		Expires: time.Now().Add(advertLife),
+	}
 	if !s.pipeline.Queue.Offer(item) {
 		s.pipeline.Drop(item, "queue-full")
 	}
@@ -456,6 +465,14 @@ func (s *service) runTX(ctx context.Context) {
 		switch {
 		case out.Sent:
 			s.sent++
+			s.txAir += max(time.Duration(0), out.Airtime)
+			switch item.Route {
+			case origin.RouteFlood:
+				s.sentFlood++
+			case origin.RouteDirect:
+				s.sentDirect++
+			case origin.RouteUnclassified:
+			}
 		case out.Dropped != "":
 			s.dropped++
 		}

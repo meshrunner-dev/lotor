@@ -307,11 +307,14 @@ func (s *service) pushToLocked(now time.Time, key [mesh.PubKeySize]byte) bool {
 // statsLocked is the reference's ServerStats about this room.
 func (s *service) statsLocked() mesh.RoomStats {
 	stats := mesh.RoomStats{
-		PacketsRecv: uint32(min(s.heard, 1<<32-1)),
-		PacketsSent: uint32(min(s.sent, 1<<32-1)),
-		UptimeSecs:  uint32(time.Since(s.started) / time.Second),
-		Posted:      uint16(min(s.posted, 1<<16-1)),
-		PostPushes:  uint16(min(s.pushes, 1<<16-1)),
+		PacketsRecv:   uint32(min(s.heard, 1<<32-1)),
+		PacketsSent:   uint32(min(s.sent, 1<<32-1)),
+		SentFlood:     uint32(min(s.sentFlood, 1<<32-1)),
+		SentDirect:    uint32(min(s.sentDirect, 1<<32-1)),
+		TxAirtimeSecs: uint32(min(s.txAir/time.Second, 1<<32-1)),
+		UptimeSecs:    uint32(time.Since(s.started) / time.Second),
+		Posted:        uint16(min(s.posted, 1<<16-1)),
+		PostPushes:    uint16(min(s.pushes, 1<<16-1)),
 	}
 	if s.rfDevice != nil {
 		if nf, ok := s.rfDevice.NoiseFloor(); ok {

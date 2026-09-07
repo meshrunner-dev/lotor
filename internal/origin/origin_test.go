@@ -138,3 +138,47 @@ func TestTheLBTLadderRequeuesAReceptionAndDropsWhenToldTo(t *testing.T) {
 		t.Errorf("ledger usage %s: only the frame sent anyway should have spent", ledger.Usage(time.Now()))
 	}
 }
+
+func TestAnExpiredEmissionIsDroppedByNameAndNeverHeldForDuty(t *testing.T) {
+	dev := &fakeRadio{airtime: time.Second}
+	// Already past its moment when its turn comes: dropped as expired,
+	// before any duty is asked for.
+	p := New(Config{SourceKind: "test", Source: "t", DutyWait: time.Hour}, 4)
+	stale := emission("stale")
+	stale.Expires = time.Now().Add(-time.Millisecond)
+	free := radio.NewAirtimeLedger(time.Hour, nil)
+	if out := p.Emit(context.Background(), stale, dev, free, Policy{Mode: config.TXOnAir}, 10); out.Dropped != "expired" {
+		t.Fatalf("stale frame: %+v", out)
+	}
+	// A budget that frees only after the expiry: the pipeline's own
+	// hour of patience does not apply, the wait is cut at the expiry,
+	// and the drop is named for what ended it.
+	waiting := radio.NewAirtimeLedger(2*time.Second, []radio.AirtimeStamp{{At: time.Now().Add(-59 * time.Minute), Airtime: 2 * time.Second}})
+	soon := emission("soon")
+	soon.Expires = time.Now().Add(20 * time.Millisecond)
+	start := time.Now()
+	if out := p.Emit(context.Background(), soon, dev, waiting, Policy{Mode: config.TXOnAir}, 10); out.Dropped != "expired" {
+		t.Fatalf("expiring wait: %+v", out)
+	}
+	if waited := time.Since(start); waited > time.Second {
+		t.Fatalf("the wait outlived the expiry: %v", waited)
+	}
+	// A frame with no expiry keeps the old contract: it is the ledger
+	// that refuses it, under the ledger's name.
+	brief := New(Config{SourceKind: "test", Source: "t", DutyWait: 50 * time.Millisecond}, 4)
+	if out := brief.Emit(context.Background(), emission("patient"), dev,
+		radio.NewAirtimeLedger(time.Second, []radio.AirtimeStamp{{At: time.Now(), Airtime: time.Second}}),
+		Policy{Mode: config.TXOnAir}, 10); out.Dropped != "duty" {
+		t.Fatalf("no expiry: %+v", out)
+	}
+	// Requeueing past the expiry drops instead of taking a turn.
+	late := emission("late")
+	late.Expires = time.Now().Add(time.Second)
+	late.NotBefore = late.Expires.Add(time.Millisecond)
+	if out := p.Requeue(late); out.Dropped != "expired" || p.Queue.Len() != 0 {
+		t.Fatalf("late requeue: %+v, backlog %d", out, p.Queue.Len())
+	}
+	if dev.transmits != 0 {
+		t.Error("a refused frame was keyed")
+	}
+}

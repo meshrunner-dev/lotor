@@ -9,6 +9,7 @@ import (
 
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/correlation"
+	"meshrunner.dev/lotor/internal/origin"
 
 	mesh "meshrunner.dev/pkg/meshcore"
 	"meshrunner.dev/pkg/meshcore/companion"
@@ -18,6 +19,13 @@ const (
 	stationMaxText      = 10 * mesh.CipherBlockSize
 	stationMaxGroupData = mesh.MaxPacketPayload - mesh.CipherBlockSize - 3
 	stationTimeoutBase  = 500 * time.Millisecond
+	// stationAnswerLife is how long an answer this station composes on
+	// its own — an ACK, a path return — is still worth the air. The
+	// reference's asker waits four seconds plus two per hop for a
+	// direct ACK, twelve for a flooded one: past half a minute it has
+	// given up and re-asked, and a queue holding the stale answer is
+	// holding up the fresh one behind it.
+	stationAnswerLife = 30 * time.Second
 )
 
 func (s *service) handleTransmission(command companion.Command) ([]companion.Response, bool) {
@@ -246,20 +254,26 @@ func pathByteLen(pathLen uint8) int {
 	return int(pathLen&63) * (int(pathLen>>6) + 1)
 }
 
+// submitLocked queues what a companion ordered. Such a frame never
+// expires: the user asked for it, and only the user withdraws it.
 func (s *service) submitLocked(packet *mesh.Packet, kind string) []companion.Response {
-	return s.submitAtLocked(packet, kind, time.Time{})
+	return s.submitAtPriorityLocked(packet, kind, time.Time{}, referencePriority(packet), time.Time{})
 }
 
-func (s *service) submitAtLocked(packet *mesh.Packet, kind string, notBefore time.Time) []companion.Response {
-	return s.submitAtPriorityLocked(packet, kind, notBefore, referencePriority(packet))
+// submitAtLocked queues an answer this station composed itself, which
+// stops being one once its asker has given up: see stationAnswerLife.
+// No companion is waiting on a verdict for it, so it returns none.
+func (s *service) submitAtLocked(packet *mesh.Packet, kind string, notBefore time.Time) {
+	s.submitAtPriorityLocked(packet, kind, notBefore, referencePriority(packet),
+		time.Now().Add(stationAnswerLife))
 }
 
 func (s *service) submitAtPriorityLocked(packet *mesh.Packet, kind string, notBefore time.Time,
-	priority uint8,
+	priority uint8, expires time.Time,
 ) []companion.Response {
 	item := emission{
-		Subject: packet, Correlation: correlation.New(), Kind: kind,
-		NotBefore: notBefore, Priority: priority,
+		Route: routeOf(packet), Correlation: correlation.New(), Kind: kind,
+		NotBefore: notBefore, Priority: priority, Expires: expires,
 	}
 	raw, err := packet.MarshalBinary()
 	if err != nil {
@@ -290,6 +304,21 @@ func (s *service) refuseSubmission(item emission, reason string) []companion.Res
 	s.log.Debug("station frame refused", zap.String("corr", item.Correlation.Short()),
 		zap.String("kind", item.Kind), zap.Uint8("priority", item.Priority), zap.String("reason", reason))
 	return errorResponses(companion.ErrBadState)
+}
+
+// routeOf is how the pipeline's neutral tally names the way this
+// packet was composed to travel. The mapping is four lines rather than
+// a shared helper on purpose: it turns a MeshCore header into a label
+// origin defines, and neither package may learn about the other.
+func routeOf(packet *mesh.Packet) origin.Route {
+	switch {
+	case packet.IsRouteFlood():
+		return origin.RouteFlood
+	case packet.IsRouteDirect():
+		return origin.RouteDirect
+	default:
+		return origin.RouteUnclassified
+	}
 }
 
 func referencePriority(packet *mesh.Packet) uint8 {
