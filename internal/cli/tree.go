@@ -1356,9 +1356,7 @@ func (s *session) repaint(ctx context.Context, every time.Duration, draw func() 
 			// The line that stopped the view still runs, so a session
 			// never loses the command that ended it.
 			done()
-			if ok && line != "" {
-				s.command(ctx, line)
-			}
+			s.afterWatchCommand(ctx, line, ok)
 			return nil
 		case <-tick.C:
 			if err := frame(); err != nil {
@@ -1372,12 +1370,11 @@ func (s *session) repaint(ctx context.Context, every time.Duration, draw func() 
 // capture runs a draw against a buffer instead of the transport, so a
 // frame can be measured before any of it is sent.
 func (s *session) capture(draw func() error) (string, error) {
-	var b strings.Builder
-	was := s.out
-	s.out = &b
-	err := draw()
-	s.out = was
-	return b.String(), err
+	out, ok := s.out.(*syncWriter)
+	if !ok {
+		return "", errors.New("session output does not support capture")
+	}
+	return out.capture(draw)
 }
 
 // printDetail unfolds a collection: one paragraph per instance, every

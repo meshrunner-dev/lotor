@@ -1358,7 +1358,7 @@ func TestACommandThatTakesARelayIsReachableFromInsideOne(t *testing.T) {
 func TestIntervalRedrawsWhereItStood(t *testing.T) {
 	lines := make(chan string, 1)
 	var b strings.Builder
-	s := &session{deps: testDeps(t), colors: true, out: &b, lines: lines}
+	s := &session{deps: testDeps(t), colors: true, out: syncOut(&b), lines: lines}
 	frames := 0
 	err := s.repaint(t.Context(), time.Millisecond, func() error {
 		frames++

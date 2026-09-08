@@ -372,6 +372,44 @@ escape sequences are parsed across reads; network packet boundaries have
 no meaning to the editor. Sessions are visible during negotiation and
 receive shutdown notices even before their first command.
 
+The command lexer owns token spans and quote state for parsing, colouring,
+help and completion. Completion returns a replacement span at the cursor,
+so editing an earlier value retains the arguments that follow it. The
+schema supplies the value vocabulary: booleans derive their typed values,
+enums restrict validation, and open suggestions guide completion without
+restricting accepted values. Contextual suggestions refine a choice's
+vocabulary; profiles, drawers and live references enter through the same
+candidate resolver. Encoded commands unwrap their choices for resolution
+and encode their value candidates before insertion.
+
+A bounded decoder turns terminal bytes into editing events before either
+ordinary editing or reverse search sees them. Both modes use the same
+UTF-8 byte budget and grapheme boundaries. Painted text has one layout
+model for wrapping, cursor placement and viewport clipping: a wide glyph
+moves whole to the next row, and a draft taller than the terminal scrolls
+within a window that follows its cursor. The bundled client reports live
+width and height on SIGWINCH; metadata frames and escaped input writes are
+serialized as whole writes. A resize reanchors by clearing the visible
+screen, preserving the draft and scrollback. Clients that cannot report
+height retain an unbounded viewport; widthless clients retain single-row
+layout as a fallback.
+
+Each edited session has one display owner. It receives decoded keys,
+resizes, command output and prompt transitions; commands run separately
+and still receive lines to stop watches. While a command owns the screen,
+typeahead changes a bounded draft without repainting over progress output.
+The next prompt restores that draft. A bounded queue applies backpressure
+to pasted commands. A stable output writer separates captured command
+frames from visible shutdown notices, so a farewell cannot disappear into
+an in-progress watch capture. Plain and edited sessions dispatch through
+the same command loop.
+
+CLI regression tests include the real `buildKinds()` vocabulary, fragmented
+input, bounded buffers, cursor-span edits and deterministic command/output
+coordination. `TestTerminalScreenEditor` also checks tmux's actual screen
+and cursor for wrapped identities, wide glyphs, tall drafts and resize; it
+runs in an isolated terminal without a daemon and skips when tmux is absent.
+
 MeshCore's over-the-air client table has two deliberately separate
 views. **Sessions** are principals that have authenticated traffic in
 the current process; a guest exists only there, expires on idle and is

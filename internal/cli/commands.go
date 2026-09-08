@@ -869,9 +869,7 @@ func (s *session) discover(ctx context.Context, in input) error {
 			// neighbourhood behind us.
 			answered += s.drainAnswers(found)
 			fmt.Fprintf(s.out, "%d answered so far — the scan runs on\r\n", answered)
-			if ok && line != "" {
-				s.command(ctx, line)
-			}
+			s.afterWatchCommand(ctx, line, ok)
 			return nil
 		case n, ok := <-found:
 			if !ok {
@@ -1767,9 +1765,7 @@ func (s *session) watch(ctx context.Context, opts map[string]string) error {
 		case <-ctx.Done():
 			return nil
 		case line, ok := <-s.lines:
-			if ok && line != "" {
-				s.command(ctx, line)
-			}
+			s.afterWatchCommand(ctx, line, ok)
 			return nil
 		case ev, ok := <-sub.C:
 			if !ok {

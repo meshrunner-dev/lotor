@@ -45,8 +45,8 @@ type editor struct {
 	viewRows      int
 	suspended     bool // a command owns the screen; keep typeahead in the buffer
 
-	// The session's hooks, all optional. They run on the transport's
-	// goroutine — the session guards its own state against the REPL's.
+	// The session's hooks, all optional. They run on the display owner's
+	// goroutine; the session guards its command context against the REPL.
 	prompt     func(search string) string                       // what to repaint before the line
 	complete   func(line string) (add string, hints []string)   // legacy end-of-line hook
 	completeAt func(line string, cursorByte int) completionEdit // TAB at the cursor
@@ -59,8 +59,14 @@ type editor struct {
 	helpLevel int
 }
 
+// A nil reader selects the event-driven seam: the display owner supplies
+// decoded inputs and does not need a second stream buffer.
 func newEditor(r io.Reader, w io.Writer) *editor {
-	return &editor{in: bufio.NewReader(r), out: w, walk: -1}
+	e := &editor{out: w, walk: -1}
+	if r != nil {
+		e.in = bufio.NewReader(r)
+	}
+	return e
 }
 
 var errLineTooLong = errors.New("line too long")

@@ -427,9 +427,8 @@ type Deps struct {
 // newline exhausts this, not the daemon's memory.
 const maxLineBytes = 4096
 
-// session is one connected operator. Lines arrive on a channel fed by
-// a single reader goroutine, so features like watch can select on
-// input without fighting over the reader.
+// session is one connected operator. Lines arrive from a single input
+// owner, so watches can select on commands without competing for reads.
 type session struct {
 	deps  Deps
 	lines <-chan string
@@ -474,25 +473,6 @@ func (s *session) servePlain(ctx context.Context, r io.Reader) {
 	s.repl(ctx)
 }
 
-// syncWriter serialises everything a session may say. The REPL owns
-// the prompt and the editor stays silent until a keystroke, so those
-// two never overlap by design — but the daemon's farewell arrives
-// from the shutdown path, on nobody's schedule, and a message that
-// interleaved with a half-drawn line would be the last thing an
-// operator saw.
-type syncWriter struct {
-	mu sync.Mutex
-	w  io.Writer
-}
-
-func syncOut(w io.Writer) *syncWriter { return &syncWriter{w: w} }
-
-func (s *syncWriter) Write(b []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.w.Write(b)
-}
-
 // terminalGrace bounds the wait before the banner becomes visible.
 // Silence is not proof of a pipe: mode selection remains open until a
 // cursor report, a terminal capability, or the first complete line.
@@ -517,7 +497,7 @@ func ServeAuto(ctx context.Context, rw io.ReadWriter, deps Deps) {
 	if ctx.Err() != nil {
 		return
 	}
-	input := io.MultiReader(bytes.NewReader(eaten), rw)
+	input := &replayedTerminal{Reader: io.MultiReader(bytes.NewReader(eaten), rw), source: rw}
 	if terminal {
 		s.mu.Lock()
 		s.colors = true
@@ -753,38 +733,8 @@ func serveEdited(ctx context.Context, rw io.ReadWriter, deps Deps, width int) {
 }
 
 func (s *session) serveEdited(ctx context.Context, r io.Reader, width int) {
-	// Buffered keystrokes can repaint immediately. Put the greeting on
-	// screen before starting their reader, so it cannot overtake them.
-	if !s.greeted {
-		s.greet()
-	}
-	lines := make(chan string)
-	done := make(chan struct{})
-	defer close(done)
-	s.lines = lines
-	ed := newEditor(r, s.out)
-	ed.width = width
-	// The editor's hooks read the session's context from the transport
-	// goroutine; the session guards that state itself.
-	ed.prompt = s.promptWith
-	ed.complete = s.complete
-	ed.helpFor = s.helpForLine
-	ed.paint = s.paintLine
-	go func() {
-		defer close(lines)
-		for {
-			line, err := ed.readLine()
-			if err != nil {
-				return
-			}
-			select {
-			case lines <- line:
-			case <-done:
-				return
-			}
-		}
-	}()
-	s.repl(ctx)
+	defer s.register()()
+	s.serveTerminal(ctx, r, width)
 }
 
 func (s *session) greet() {
@@ -793,19 +743,25 @@ func (s *session) greet() {
 	s.greeted = true
 }
 
-// repl is the loop both entrances share. It owns the prompt: printed
-// after the banner and after every command, so it always lands below
-// the output it follows.
+// repl presents a plain transcript. Edited sessions use the same
+// runCommands loop and ask their display owner to present each prompt.
 func (s *session) repl(ctx context.Context) {
 	defer s.register()()
 	if !s.greeted {
-		banner(s.out, s.deps.Version, s.systemName(), s.deps.Privilege)
+		s.greet()
 	}
+	s.greeted = false
+	s.runCommands(ctx, func() bool {
+		fmt.Fprint(s.out, s.prompt())
+		return true
+	})
+}
+
+// runCommands is shared by transcript and terminal sessions. The caller
+// owns presentation of the next prompt; watch still receives from the
+// same line channel and can run the command that ends it.
+func (s *session) runCommands(ctx context.Context, nextPrompt func() bool) {
 	for ctx.Err() == nil {
-		if !s.greeted {
-			fmt.Fprint(s.out, s.prompt())
-		}
-		s.greeted = false
 		select {
 		case <-ctx.Done():
 			return
@@ -813,11 +769,25 @@ func (s *session) repl(ctx context.Context) {
 			if !ok {
 				return
 			}
-			if s.command(ctx, line); s.quitting {
+			s.command(ctx, line)
+			if s.quitting || ctx.Err() != nil || !nextPrompt() {
 				return
 			}
 		}
 	}
+}
+
+// afterWatchCommand echoes an interactive watch's terminating command
+// after the view has finished its cleanup, then executes the same line.
+// Plain transcripts already supplied their own input and need no echo.
+func (s *session) afterWatchCommand(ctx context.Context, line string, ok bool) {
+	if !ok || line == "" {
+		return
+	}
+	if out, supported := s.out.(*syncWriter); supported {
+		out.echoCommand(line)
+	}
+	s.command(ctx, line)
 }
 
 // command runs one line; quit reports itself through s.quitting.

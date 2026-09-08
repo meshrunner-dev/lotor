@@ -78,6 +78,10 @@ func (t *Sessions) Farewell(text string) {
 // zero, so the shell that gets the terminal back starts where it
 // should rather than beside a dangling prompt.
 func (s *session) farewell(text string) {
+	if out, ok := s.out.(*syncWriter); ok {
+		out.notice(text, s.hasTerminal())
+		return
+	}
 	if s.hasTerminal() {
 		fmt.Fprintf(s.out, "\r\x1b[K%s\r\n", text)
 		return
