@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-
-	"github.com/mattn/go-runewidth"
 )
 
 // editor is a character-mode line editor: the transport delivers raw
@@ -39,15 +37,13 @@ type editor struct {
 	// keystrokes build the query instead of the line.
 	search *searchState
 
-	// width is the terminal's measured columns; 0 means unknown, and
-	// the editor stays wrap-blind the way it always was. screenRow is
-	// which visual row of the edit block the cursor sits on, and
-	// promptCells the last prompt's visible width — both what a
-	// repaint needs to climb back to the block's first row instead of
-	// repainting from the middle and scrolling the top rows away.
-	width       int
-	screenRow   int
-	promptCells int
+	// The display owns these dimensions and the visible edit block. A tall
+	// draft scrolls within its viewport, keeping the logical cursor visible.
+	width, height int
+	screenRow     int
+	viewTop       int
+	viewRows      int
+	suspended     bool // a command owns the screen; keep typeahead in the buffer
 
 	// The session's hooks, all optional. They run on the transport's
 	// goroutine — the session guards its own state against the REPL's.
@@ -440,7 +436,10 @@ func (e *editor) insertRune(r rune) error {
 	if !e.insert(r) {
 		return errLineTooLong
 	}
-	if atEnd && e.paint == nil {
+	if e.suspended {
+		return nil
+	}
+	if atEnd && e.paint == nil && e.width <= 0 {
 		fmt.Fprint(e.out, string(r))
 	} else {
 		e.render()
@@ -455,123 +454,75 @@ func (e *editor) set(line string) {
 	}
 }
 
-// render repaints the line and parks the cursor, width-aware — the
-// mesh's emoji count for the cells they occupy here too. The cursor
-// arithmetic runs on the plain text: colours change bytes, never
-// cells.
-//
-// A line longer than the terminal wraps, and a repaint that only
-// returns to the start of its own row repaints from the middle: every
-// keystroke then scrolls the earlier rows away, which is exactly what
-// pasting a long export used to do. With the width known, the repaint
-// climbs to the block's first row and clears down before drawing.
+// render paints only the viewport containing the logical cursor. Layout and
+// cursor placement share grapheme boundaries, wide-glyph wrapping and colour
+// state; they cannot disagree about unused cells at a terminal's right edge.
 func (e *editor) render() {
+	if e.suspended {
+		return
+	}
 	prompt := "> "
 	if e.prompt != nil {
-		query := ""
-		if e.search != nil {
-			query = e.searchText()
-		}
-		prompt = e.prompt(query)
+		prompt = e.prompt(e.searchText())
 	}
-	line := string(e.buf)
-	shown := line
+	shown := string(e.buf)
 	if e.paint != nil {
-		shown = e.paint(line)
+		shown = e.paint(shown)
 	}
+	l := layoutText(prompt+shown, plainBytes(prompt)+e.cursorByte(), e.width)
+	first, last := l.view(e.viewTop, e.height)
+	e.clearBlock()
+	fmt.Fprint(e.out, strings.Join(l.rows[first:last], "\r\n"))
+	// Each row restores its inherited style; stop it at the edit boundary.
+	if strings.Contains(shown+prompt, "\x1b[") {
+		fmt.Fprint(e.out, cReset)
+	}
+	e.viewTop, e.viewRows = first, last-first
+	e.screenRow = l.cursor.row - first
+	if l.cursor != l.end || last != len(l.rows) {
+		if up := last - 1 - l.cursor.row; up > 0 {
+			fmt.Fprintf(e.out, "\x1b[%dA", up)
+		}
+		fmt.Fprint(e.out, "\r")
+		if l.cursor.col > 0 {
+			fmt.Fprintf(e.out, "\x1b[%dC", l.cursor.col)
+		}
+	}
+}
+
+// clearBlock returns to the visible edit block's origin. It never attempts
+// to reach logical rows that have already scrolled out of the viewport.
+func (e *editor) clearBlock() {
 	if e.screenRow > 0 {
 		fmt.Fprintf(e.out, "\x1b[%dA", e.screenRow)
 	}
-	fmt.Fprintf(e.out, "\r\x1b[J%s%s", prompt, shown)
-	e.promptCells = visCells(prompt)
-	if e.width <= 0 {
-		if back := runewidth.StringWidth(line) - runewidth.StringWidth(string(e.buf[:e.cur])); back > 0 {
-			fmt.Fprintf(e.out, "\x1b[%dD", back)
-		}
+	fmt.Fprint(e.out, "\r\x1b[J")
+}
+
+// resize reanchors after terminal reflow, whose treatment of an existing
+// transcript varies between terminal emulators. Clearing the visible screen
+// preserves scrollback and the draft, and avoids guessing where its origin
+// moved. The following repaint always fits the new screen dimensions.
+func (e *editor) resize(width, height int) {
+	if width <= 0 || height <= 0 || (width == e.width && height == e.height) {
 		return
 	}
-	total := e.promptCells + runewidth.StringWidth(line)
-	head := e.promptCells + runewidth.StringWidth(string(e.buf[:e.cur]))
-	endRow := rowOf(total, e.width)
-	if head == total {
-		// The cursor already sits where the drawing left it — moving
-		// it would break the terminal's deferred wrap at an exact
-		// row's end, and the next keystroke would overwrite the last
-		// cell instead of wrapping.
-		e.screenRow = endRow
-		return
-	}
-	// Mid-line the wrap behind the cursor has already happened — more
-	// text followed — so plain division places it, no deferral.
-	curRow, curCol := head/e.width, head%e.width
-	e.screenRow = curRow
-	if up := endRow - curRow; up > 0 {
-		fmt.Fprintf(e.out, "\x1b[%dA", up)
-	}
-	fmt.Fprint(e.out, "\r")
-	if curCol > 0 {
-		fmt.Fprintf(e.out, "\x1b[%dC", curCol)
+	e.width, e.height = width, height
+	e.screenRow, e.viewRows = 0, 0
+	if !e.suspended {
+		fmt.Fprint(e.out, "\x1b[H\x1b[2J")
+		e.render()
 	}
 }
 
-// rowOf is the row a cursor sits on after drawing that many cells,
-// deferred-wrap aware: an exact multiple leaves it on the previous
-// row, which is where a terminal that has not wrapped yet keeps it.
-func rowOf(cells, width int) int {
-	if width <= 0 {
-		return 0
-	}
-	if cells > 0 && cells%width == 0 {
-		return cells/width - 1
-	}
-	return cells / width
-}
-
-// visCells is the cells a string occupies on screen: escape sequences
-// take none, and the rest counts by display width.
-func visCells(s string) int {
-	const (
-		text = iota
-		sawEsc
-		inCSI
-	)
-	var b strings.Builder
-	state := text
-	for _, r := range s {
-		switch state {
-		case sawEsc:
-			if r == '[' {
-				state = inCSI // parameters follow, until a final byte
-			} else {
-				state = text // a two-character escape, spent
-			}
-		case inCSI:
-			if r >= 0x40 && r <= 0x7e {
-				state = text
-			}
-		default:
-			if r == 0x1b {
-				state = sawEsc
-			} else {
-				b.WriteRune(r)
-			}
-		}
-	}
-	return runewidth.StringWidth(b.String())
-}
-
-// endRowNow is the edit block's last row as currently drawn.
-func (e *editor) endRowNow() int {
-	return rowOf(e.promptCells+runewidth.StringWidth(string(e.buf)), e.width)
-}
-
-// dropBelow steps the cursor under the whole edit block, so whatever
-// prints next lands below it rather than into its wrapped rows.
+// dropBelow leaves the visible edit block before a submitted line, help or
+// completion candidates. Hidden draft rows stay in the buffer, not on screen.
 func (e *editor) dropBelow() {
-	if e.width > 0 {
-		if down := e.endRowNow() - e.screenRow; down > 0 {
-			fmt.Fprintf(e.out, "\x1b[%dB", down)
-		}
+	if e.suspended {
+		return
 	}
-	e.screenRow = 0
+	if down := e.viewRows - 1 - e.screenRow; down > 0 {
+		fmt.Fprintf(e.out, "\x1b[%dB", down)
+	}
+	e.screenRow, e.viewRows, e.viewTop = 0, 0, 0
 }

@@ -387,8 +387,8 @@ func TestAWrappedLineRepaintsFromItsFirstRow(t *testing.T) {
 	if !strings.Contains(got, "\x1b[J") {
 		t.Errorf("the repaint did not clear the block: %q", got)
 	}
-	if strings.Contains(got, "\r\n") {
-		t.Errorf("a repaint scrolled: %q", got)
+	if strings.Count(got, "\r\n") != 2 || ed.screenRow != 2 {
+		t.Errorf("the repaint did not lay out exactly three rows: %q", got)
 	}
 }
 
