@@ -319,6 +319,19 @@ If the process remains alive for 90 seconds, it clears the marker and commits
 the update. If it repeatedly fails and the service manager reaches its start
 limit, the rollback service restores the previous executable and restarts it.
 
+During probation, `/update install` (including `force`) reports the remaining
+seconds and explains that the previous binary is reserved for rollback. The
+countdown is recalculated on each attempt from the running daemon's actual
+deadline, rounded up to the next second. A process restart starts a fresh
+90-second grace, regardless of the marker's installation timestamp. Local
+installation guards are checked before contacting the update channel.
+
+The countdown does not release the guard by itself: the daemon must commit
+the update. An elapsed grace awaiting commit, a failed validation, an unreadable
+marker, or a marker without an active check is reported explicitly without a
+countdown. Check the daemon logs for the cause; after repairing a marker that
+could not be read at startup, restart the daemon to start its liveness check.
+
 Rollback is guarded by the pending marker. A crash loop at any other time does
 not replace a known-good binary merely because a backup exists.
 

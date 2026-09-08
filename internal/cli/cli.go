@@ -409,6 +409,9 @@ type Deps struct {
 	// UpdateTrust resolves the verification keys for the update
 	// channels; nil takes the built-in store. Tests inject theirs.
 	UpdateTrust func() ([]update.PublicKey, error)
+	// UpdateProbation reports the running daemon's actual liveness deadline
+	// and any failure. Nil means no check was started by this process.
+	UpdateProbation func() update.ProbationStatus
 	// StateDir is where the daemon may stage an update; DBPath is the
 	// configuration database, which a staged binary's selfcheck
 	// reads. Empty disables installing.

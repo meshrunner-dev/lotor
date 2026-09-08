@@ -47,7 +47,7 @@ func BeginStage(ctx context.Context, stateDir string) (*Staging, error) {
 		if err != nil {
 			return nil, err
 		}
-		return nil, errors.New("an installed update is still on probation")
+		return nil, ErrProbation
 	}
 	work, err := os.MkdirTemp(dir, ".prepare-")
 	if err != nil {

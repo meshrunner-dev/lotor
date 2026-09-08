@@ -43,7 +43,7 @@ func Install(ctx context.Context, stateDir, target string, trusted []PublicKey) 
 		if err != nil {
 			return nil, err
 		}
-		return nil, errors.New("an installed update is still on probation")
+		return nil, ErrProbation
 	}
 	candidate, err := prepareInstall(root, target, trusted)
 	if err != nil {

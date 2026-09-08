@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -395,7 +396,7 @@ func run(dbPath, logLevel string) error {
 	deps := consoleDeps(mgr, b, sen)
 	deps.DBPath = dbPath
 	deps.StateDir = filepath.Dir(dbPath)
-	watchProbation(ctx, deps.StateDir, log)
+	deps.UpdateProbation = watchProbation(ctx, deps.StateDir, log)
 	mgr.Start(ctx)
 
 	var producers sync.WaitGroup
@@ -726,28 +727,38 @@ func openConfig(dbPath string, log *zap.Logger) (*confdb.Store, *config.File, er
 // service up for a while. The marker was armed by the installer just
 // before the restart; surviving the grace is what "the update took"
 // means, and the OnFailure rollback is what happens when it does not.
-func watchProbation(ctx context.Context, stateDir string, log *zap.Logger) {
+func watchProbation(ctx context.Context, stateDir string, log *zap.Logger) func() update.ProbationStatus {
 	p, err := update.ReadPending(stateDir)
 	if err != nil {
 		log.Warn("could not read update probation", zap.Error(err))
-		return
+		return func() update.ProbationStatus { return update.ProbationStatus{Err: err} }
 	}
 	if p == nil {
-		return
+		return nil
 	}
 	const grace = 90 * time.Second
+	// Each process must survive its own grace. The installer's timestamp
+	// describes publication, not when this process began its liveness check.
+	deadline := time.Now().Add(grace)
+	timer := time.NewTimer(time.Until(deadline))
+	var status atomic.Pointer[update.ProbationStatus]
+	status.Store(&update.ProbationStatus{Deadline: deadline})
 	log.Info("update on probation", zap.String("version", p.Version), zap.Time("since", p.Since))
 	go func() {
+		defer timer.Stop()
 		select {
 		case <-ctx.Done():
-		case <-time.After(grace):
+		case <-timer.C:
 			if err := update.ClearPending(stateDir); err != nil {
+				status.Store(&update.ProbationStatus{Deadline: deadline, Err: err})
 				log.Warn("could not commit the update", zap.Error(err))
 				return
 			}
+			status.Store(&update.ProbationStatus{})
 			log.Info("update committed", zap.String("version", p.Version))
 		}
 	}()
+	return func() update.ProbationStatus { return *status.Load() }
 }
 
 // consoleDeps is everything the operator surfaces may consult: the

@@ -1954,6 +1954,14 @@ func (s *session) updateInstall(ctx context.Context, in input) error {
 	if s.deps.StateDir == "" {
 		return errors.New("this daemon keeps no state directory — nowhere to stage")
 	}
+	// Local install guards answer before any network access, including when
+	// force requests the version that is already running. Keep the lease
+	// through verification and publication as before.
+	stage, err := update.BeginStage(ctx, s.deps.StateDir)
+	if err != nil {
+		return s.updateStageError(err)
+	}
+	defer stage.Close()
 	channel, url, token := s.updateConfig()
 	trust := s.deps.UpdateTrust
 	if trust == nil {
@@ -1977,11 +1985,6 @@ func (s *session) updateInstall(ctx context.Context, in input) error {
 	if err != nil {
 		return err
 	}
-	stage, err := update.BeginStage(ctx, s.deps.StateDir)
-	if err != nil {
-		return err
-	}
-	defer stage.Close()
 	fmt.Fprintf(s.out, "fetching %s (%d bytes)…\r\n", m.Version, art.Size)
 	done := s.showFetchProgress(client)
 	staged, err := client.Download(ctx, art, stage.Dir())
@@ -2005,6 +2008,43 @@ func (s *session) updateInstall(ctx context.Context, in input) error {
 		"%s staged — the installer takes it from here, and the daemon will restart\r\n",
 		m.Version)
 	return nil
+}
+
+// updateStageError explains a guard already observed under the stage
+// lease. Only the daemon's live check can promise a countdown: the marker's
+// timestamp predates startup and does not account for subsequent restarts.
+func (s *session) updateStageError(err error) error {
+	if !errors.Is(err, update.ErrProbation) {
+		return err
+	}
+	pending, err := update.ReadPending(s.deps.StateDir)
+	if err != nil {
+		return fmt.Errorf("%w — cannot read probation marker: %w; check daemon logs", update.ErrProbation, err)
+	}
+	if pending == nil {
+		return fmt.Errorf("%w — probation changed while checking; retry the command", update.ErrProbation)
+	}
+	var status update.ProbationStatus
+	if s.deps.UpdateProbation != nil {
+		status = s.deps.UpdateProbation()
+	}
+	if status.Err != nil {
+		if status.Deadline.IsZero() {
+			return fmt.Errorf("%w — validation could not start: %w; resolve the cause and restart the daemon",
+				update.ErrProbation, status.Err)
+		}
+		return fmt.Errorf("%w — validation failed: %w; check daemon logs", update.ErrProbation, status.Err)
+	}
+	if status.Deadline.IsZero() {
+		return fmt.Errorf("%w — validation is not running; check logs, resolve the cause and restart the daemon",
+			update.ErrProbation)
+	}
+	if remaining := time.Until(status.Deadline); remaining > 0 {
+		seconds := (remaining + time.Second - 1) / time.Second
+		return fmt.Errorf("%w — %ds remaining; retry after validation", update.ErrProbation, seconds)
+	}
+	return fmt.Errorf("%w — probation time elapsed, awaiting validation; check daemon logs if this persists",
+		update.ErrProbation)
 }
 
 // showFetchProgress draws a download in place and returns the call

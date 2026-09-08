@@ -2030,6 +2030,12 @@ func TestUpdateInstallStagesAVerifiedUpdate(t *testing.T) {
 	if err != nil || ready.Version != "0.2.0-dev.zz" {
 		t.Fatalf("VerifyStaged = %+v, %v", ready, err)
 	}
+	if refused := run(t, deps, "/update/install force"); !strings.Contains(refused, "already staged") {
+		t.Errorf("the published stage was not protected:\n%s", refused)
+	}
+	if err := update.ClearStage(update.StageDir(deps.StateDir)); err != nil {
+		t.Fatal(err)
+	}
 	// Nothing newer refuses unless forced.
 	deps.Version = "0.2.0-dev.zz"
 	deps.Traces["update"][0].Value = "dev"

@@ -157,11 +157,11 @@ func TestProbationPreservesThePreviousBinary(t *testing.T) {
 	if ready, err := Install(t.Context(), state, target, keys); err != nil || ready == nil {
 		t.Fatalf("install = %+v, %v", ready, err)
 	}
-	if _, err := BeginStage(t.Context(), state); err == nil {
-		t.Fatal("a new preparation began during probation")
+	if _, err := BeginStage(t.Context(), state); !errors.Is(err, ErrProbation) {
+		t.Fatalf("preparation during probation = %v", err)
 	}
 	keys = signedStage(t, StageDir(state), []byte("next fixture"))
-	if ready, err := Install(t.Context(), state, target, keys); err == nil || ready != nil {
+	if ready, err := Install(t.Context(), state, target, keys); !errors.Is(err, ErrProbation) || ready != nil {
 		t.Fatalf("second install during probation = %+v, %v", ready, err)
 	}
 	if got, _ := os.ReadFile(target + ".prev"); string(got) != "old fixture" {
