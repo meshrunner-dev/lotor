@@ -2378,9 +2378,9 @@ func (m *manager) createRadio(next *config.File, name string,
 	return nil
 }
 
-// Remove takes one object out of existence. A relay stops first; a
-// radio somebody claims refuses; the sentinel and the CLI blocks come
-// off at the next daemon start.
+// Remove takes one object out of existence. Runtime writers stop
+// before their state is deleted; a radio somebody claims refuses;
+// the sentinel and the CLI blocks come off at the next daemon start.
 func (m *manager) Remove(ctx context.Context, kind, name, principal string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2409,15 +2409,14 @@ func (m *manager) Remove(ctx context.Context, kind, name, principal string) (str
 	if err := next.Validate(false); err != nil {
 		return "", err
 	}
-	// A room flushes its cursors while stopping. Join it before the
-	// cascade, or that final write can recreate data for a deleted app.
-	restartApplication := kind == confdb.KindApplication && m.applications[name] != nil
-	if restartApplication {
-		m.stopApplication(name)
-	}
+	// Join every writer before the cascade: a command already in
+	// flight, or a room's final cursor flush, must not recreate state
+	// for the object being removed. Until the commit, m.file still
+	// holds the original configuration needed to restore a service.
+	restart := m.stopForRemoval(kind, name)
 	if err := m.store.Remove(ctx, kind, name, principal); err != nil {
-		if restartApplication {
-			m.startApplication(m.ctx, name) //nolint:contextcheck // restored service belongs to the daemon
+		if restart != nil {
+			restart()
 		}
 		return "", err
 	}
@@ -2428,6 +2427,34 @@ func (m *manager) Remove(ctx context.Context, kind, name, principal string) (str
 	m.file = next
 	m.stopRemoved(kind, name)
 	return msg, nil
+}
+
+// stopForRemoval joins a persistent runtime owner and returns how to
+// restore it if the database refuses the removal. A relay's observers
+// captured its old engine doors, so they must follow its successor.
+// The caller holds mu and keeps the original configuration installed.
+func (m *manager) stopForRemoval(kind, name string) func() {
+	switch kind {
+	case confdb.KindRelay:
+		if m.running[name] != nil {
+			m.stopRelay(name)
+			return func() {
+				m.startRelay(m.ctx, name)
+				m.bounceObserversOf(name)
+			}
+		}
+	case confdb.KindStation:
+		if m.stations[name] != nil {
+			m.stopStation(name)
+			return func() { m.startStation(m.ctx, name) }
+		}
+	case confdb.KindApplication:
+		if m.applications[name] != nil {
+			m.stopApplication(name)
+			return func() { m.startApplication(m.ctx, name) }
+		}
+	}
+	return nil
 }
 
 func (m *manager) releaseRemovedAirtime(kind, name string) {
@@ -2455,13 +2482,11 @@ func (m *manager) releaseRemovedAirtime(kind, name string) {
 // object. The caller holds mu.
 func (m *manager) stopRemoved(kind, name string) {
 	if kind == confdb.KindStation {
-		m.stopStation(name)
 		m.viewMu.Lock()
 		delete(m.traces, confdb.KindStation+" "+name)
 		m.viewMu.Unlock()
 	}
 	if kind == confdb.KindApplication {
-		m.stopApplication(name)
 		m.viewMu.Lock()
 		delete(m.traces, confdb.KindApplication+" "+name)
 		m.viewMu.Unlock()
@@ -2477,7 +2502,6 @@ func (m *manager) stopRemoved(kind, name string) {
 		m.stopSampler(name)
 	}
 	if kind == confdb.KindRelay {
-		m.stopRelay(name)
 		m.viewMu.Lock()
 		delete(m.infos, name)
 		delete(m.cfgs, name)

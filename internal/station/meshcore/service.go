@@ -381,27 +381,24 @@ func (s *service) Run(ctx context.Context) error {
 	s.state, s.cause = station.StateRunning, ""
 	s.mu.Unlock()
 	s.log.Info("station listening", zap.String("listen", ln.Addr().String()))
-	rfCtx, cancelRF := context.WithCancel(ctx)
-	rfDone := make(chan struct{})
-	go func() {
-		defer close(rfDone)
-		s.runRF(rfCtx)
-	}()
-	pushDone := make(chan struct{})
-	go func() {
-		defer close(pushDone)
-		s.runPushes(ctx)
-	}()
-	stop := context.AfterFunc(ctx, func() { s.closeIO() })
+	runCtx, cancelRun := context.WithCancel(ctx)
+	var workers sync.WaitGroup
+	workers.Go(func() { s.runRF(runCtx) })
+	workers.Go(func() { s.runPushes(runCtx) })
+	stop := context.AfterFunc(runCtx, func() { s.closeIO() })
 	defer func() {
+		cancelRun()
 		stop()
-		cancelRF()
 		s.closeIO()
+		// Closing a connection interrupts its reads and writes, but a
+		// command may still be persisting outside mu. Join every client,
+		// including replaced connections, before the manager may remove
+		// its state or build a successor. An accept failure cancels the
+		// RF and push workers as well as ordinary daemon shutdown does.
+		workers.Wait()
 		if ctx.Err() != nil {
 			s.setLifecycle(station.StateStopped, nil)
 		}
-		<-rfDone
-		<-pushDone
 	}()
 	for {
 		conn, err := ln.Accept()
@@ -413,7 +410,7 @@ func (s *service) Run(ctx context.Context) error {
 			return err
 		}
 		generation := s.replaceClient(conn)
-		go s.serveClient(ctx, conn, generation)
+		workers.Go(func() { s.serveClient(runCtx, conn, generation) })
 	}
 }
 

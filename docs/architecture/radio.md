@@ -339,6 +339,14 @@ The relay and station lifecycles react differently by design:
 - a station `radio=` mutation unbinds and reattaches RF without closing its TCP
   listener or current application connection.
 
+Removing a relay, station, or application first cancels and joins its runtime,
+then deletes its configuration and durable state together. A refused database
+transaction rebuilds the original service; observers follow a rebuilt relay.
+For a station, joining includes every companion command, even one whose TCP
+connection was replaced while its state write was still in progress. Closing
+the listener alone is not completion. Listener failure also cancels and joins
+the station's RF, push, and client workers before `Run` returns.
+
 Invalid declarative configuration is different from a recoverable device
 failure. Preflight creates a visible stillborn relay or unavailable attachment
 instead of retrying hardware forever with a choice that can never work.
