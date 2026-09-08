@@ -97,12 +97,17 @@ type probeConn struct {
 	pending []byte
 	dead    time.Time
 	mu      sync.Mutex
+	wrote   chan struct{}
 }
 
 func (p *probeConn) Write(b []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.out.Write(b)
+	select {
+	case p.wrote <- struct{}{}:
+	default:
+	}
 	if p.answer && bytes.Contains(b, []byte("\x1b[6n")) {
 		p.pending = append(p.pending, []byte("\x1b[24;1R")...)
 	}
@@ -128,7 +133,11 @@ func (p *probeConn) Read(b []byte) (int, error) {
 		if !ok {
 			return 0, io.EOF
 		}
-		return copy(b, chunk), nil
+		n := copy(b, chunk)
+		p.mu.Lock()
+		p.pending = append(p.pending, chunk[n:]...)
+		p.mu.Unlock()
+		return n, nil
 	case <-timer:
 		return 0, os.ErrDeadlineExceeded
 	}
@@ -183,9 +192,9 @@ func TestASessionDegradesInsteadOfWaiting(t *testing.T) {
 }
 
 func TestTheProbeGivesBackWhatItSwallowed(t *testing.T) {
-	// A peer that starts talking instead of answering must not lose
-	// its first letters to the question — and must not wait for the
-	// grace either, since what it sent can never become an answer.
+	// A peer that sends a complete command instead of answering must
+	// keep every byte and start without waiting for the grace. A line
+	// terminator makes the plain-input choice decisive.
 	p := &probeConn{in: make(chan []byte, 2)}
 	p.in <- []byte("status\nquit\n")
 	close(p.in)

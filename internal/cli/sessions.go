@@ -36,6 +36,8 @@ func (t *Sessions) add(s *session) string {
 	defer t.mu.Unlock()
 	t.next++
 	id := strconv.Itoa(t.next)
+	s.id = id
+	s.began = time.Now()
 	t.open[id] = s
 	return id
 }
@@ -76,7 +78,7 @@ func (t *Sessions) Farewell(text string) {
 // zero, so the shell that gets the terminal back starts where it
 // should rather than beside a dangling prompt.
 func (s *session) farewell(text string) {
-	if s.colors {
+	if s.hasTerminal() {
 		fmt.Fprintf(s.out, "\r\x1b[K%s\r\n", text)
 		return
 	}
@@ -103,12 +105,19 @@ func remoteOf(rw any) string {
 // its life. The id doubles as the row an operator sees in
 // /cli/sessions, and as the word they type to stand on it.
 func (s *session) register() func() {
-	if s.deps.Sessions == nil {
+	if s.deps.Sessions == nil || s.id != "" {
 		return func() {}
 	}
-	s.began = time.Now()
-	s.id = s.deps.Sessions.add(s)
+	s.deps.Sessions.add(s)
 	return func() { s.deps.Sessions.remove(s.id) }
+}
+
+// hasTerminal is for readers outside the session: mode selection can
+// still be in progress while the session is already in the shared table.
+func (s *session) hasTerminal() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.colors
 }
 
 // beginWatch claims the session's one live-view slot, and reports
@@ -172,7 +181,7 @@ func (s *session) sessionView(_ context.Context, _ string, _ frameSelectors) (dr
 			doing += " — this session"
 		}
 		term := "terminal"
-		if !other.colors {
+		if !other.hasTerminal() {
 			term = "plain"
 		}
 		v.keys = append(v.keys, id)

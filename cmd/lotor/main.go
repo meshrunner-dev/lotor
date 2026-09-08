@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -24,7 +23,6 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
-	"golang.org/x/term"
 
 	"meshrunner.dev/pkg/meshcore"
 
@@ -334,54 +332,6 @@ func main() {
 	kctx, err := parser.Parse(args)
 	parser.FatalIfErrorf(err)
 	kctx.FatalIfErrorf(kctx.Run())
-}
-
-// console connects the terminal to a running daemon's CLI — the
-// console-port gesture of network gear. On a real terminal it goes
-// raw: every keystroke reaches the daemon's line editor, which owns
-// echo, history and the cursor. Piped input flows line-wise, and the
-// daemon closing (quit) ends the process immediately — no
-// netcat-variant guesswork.
-func console(addr string) error {
-	network := "tcp"
-	switch {
-	case addr == "":
-		// The local admin socket first — the OS's permissions are the
-		// authentication; a daemon without one falls back to telnet.
-		if _, err := os.Stat(config.DefaultConsoleSocket); err == nil {
-			network, addr = "unix", config.DefaultConsoleSocket
-		} else {
-			addr = config.DefaultCLIListen
-		}
-	case strings.Contains(addr, "/"):
-		network = "unix"
-	}
-	var d net.Dialer
-	conn, err := d.DialContext(context.Background(), network, addr)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close() }()
-
-	if fd := int(os.Stdin.Fd()); term.IsTerminal(fd) {
-		state, err := term.MakeRaw(fd)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = term.Restore(fd, state) }()
-	}
-
-	go func() {
-		// Telnet reserves 0xFF: a data byte that high (8-bit meta
-		// keys, latin-1 pastes) must travel doubled, or the daemon's
-		// stripper eats the keystroke behind it.
-		_, _ = io.Copy(cli.EscapeIAC(conn), os.Stdin)
-		if t, ok := conn.(interface{ CloseWrite() error }); ok {
-			_ = t.CloseWrite() // stdin EOF: let the session finish its goodbye
-		}
-	}()
-	_, _ = io.Copy(os.Stdout, cli.StripIAC(conn))
-	return nil
 }
 
 // openLocked takes the instance lock, then the store: the two doors a

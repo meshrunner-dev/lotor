@@ -35,6 +35,13 @@ type editor struct {
 	// line without a newline is still delivered before it.
 	pending error
 
+	// Escape sequences belong to the byte stream, not to one Read.
+	// Keep only their bounded parameters while fragmented CSI/SS3
+	// input arrives; a bare Escape never reads the next key itself.
+	escapeIntro  byte
+	escapeParams []byte
+	escapeLong   bool
+
 	// search, when non-nil, is a reverse history search in progress:
 	// keystrokes build the query instead of the line.
 	search *searchState
@@ -97,6 +104,9 @@ func (e *editor) readLine() (string, error) {
 // key applies one keystroke; done reports that the edit is over —
 // a finished line, a failure, or the end of the session.
 func (e *editor) key(c byte) (done bool, line string, err error) {
+	if e.escapeByte(c) {
+		return false, "", nil
+	}
 	if e.crSeen {
 		e.crSeen = false
 		if c == '\n' || c == 0 {
@@ -117,10 +127,8 @@ func (e *editor) key(c byte) (done bool, line string, err error) {
 			fmt.Fprint(e.out, "\r\n")
 			return true, "", io.EOF
 		}
-	case c == 0x1b: // escape sequence
-		if err := e.escape(); err != nil {
-			return true, "", err
-		}
+	case c == 0x1b: // start a sequence without consuming the next key
+		e.startEscape()
 	case c < 0x20 || c == 0x7f: // control keys
 		if e.control(c) {
 			line, err = e.finishLine()
@@ -232,9 +240,7 @@ func (e *editor) searchKey(c byte) (done bool, line string, err error) {
 		e.findBack(0)
 	case c == 0x1b: // escape: keep the match, back to editing
 		e.acceptSearch()
-		if err := e.escape(); err != nil {
-			return true, "", err
-		}
+		e.startEscape()
 		e.render()
 		return false, "", nil
 	case c < 0x20:
@@ -371,47 +377,54 @@ func (e *editor) finishLine() (string, error) {
 	return line, nil
 }
 
-// escape handles the arrow keys — CSI (ESC [ A) and the application
-// mode's SS3 (ESC O A) — and swallows every other sequence whole.
-func (e *editor) escape() error {
-	// A lone ESC keypress arrives alone; a terminal's sequence arrives
-	// as one burst. Nothing buffered behind the ESC means there is no
-	// sequence to read — consuming the NEXT keystroke would eat it.
-	if e.in.Buffered() == 0 {
-		return nil
+// startEscape immediately handles the Escape key itself; any CSI or
+// SS3 suffix is parsed as subsequent keystrokes arrive. A lone Escape
+// followed by '[' or 'O' is indistinguishable from a sequence without
+// a timing heuristic; ordinary following keys are always preserved.
+func (e *editor) startEscape() {
+	e.escapeIntro = 0x1b
+	e.escapeParams = e.escapeParams[:0]
+	e.escapeLong = false
+}
+
+// escapeByte consumes one byte of a terminal sequence, regardless of
+// how the transport divided it into reads. Controls that interrupt a
+// sequence are returned to key, so even a truncated report cannot eat
+// Enter, Ctrl+C, Ctrl+D, or a new Escape.
+func (e *editor) escapeByte(c byte) bool {
+	intro := e.escapeIntro
+	if intro == 0 {
+		return false
 	}
-	intro, err := e.in.ReadByte()
-	if err != nil {
-		return err
-	}
-	if intro != '[' && intro != 'O' {
-		return nil
-	}
-	c, err := e.in.ReadByte()
-	if err != nil {
-		return err
-	}
-	// CSI parameter (0x30-0x3F) and intermediate (0x20-0x2F) bytes run
-	// until a final byte; drain them so mouse reports and private-mode
-	// answers neither edit nor leak into the line — but keep the
-	// parameters, since a function key is told apart by them.
-	var params []byte
-	if intro == '[' {
-		for c >= 0x20 && c <= 0x3F {
-			params = append(params, c)
-			if c, err = e.in.ReadByte(); err != nil {
-				return err
-			}
+	if intro == 0x1b {
+		if c == '[' || c == 'O' {
+			e.escapeIntro = c
+			return true
 		}
+		e.escapeIntro = 0
+		return false
 	}
-	// F1 the way every console family sends it: SS3 P, and the CSI
-	// form older terminals use.
-	if (intro == 'O' && c == 'P') || (intro == '[' && c == '~' && string(params) == "11") {
+	if intro == '[' && c >= 0x20 && c <= 0x3f {
+		if len(e.escapeParams) < cursorReportMax {
+			e.escapeParams = append(e.escapeParams, c)
+		} else {
+			e.escapeLong = true
+		}
+		return true
+	}
+	e.escapeIntro = 0
+	if c < 0x40 || c > 0x7e {
+		return false
+	}
+	if e.escapeLong {
+		return true
+	}
+	if (intro == 'O' && c == 'P') || (intro == '[' && c == '~' && string(e.escapeParams) == "11") {
 		e.help()
-		return nil
+	} else {
+		e.arrow(c)
 	}
-	e.arrow(c)
-	return nil
+	return true
 }
 
 // help answers the help key, whichever one was pressed: describe

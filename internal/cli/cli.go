@@ -437,6 +437,9 @@ type session struct {
 	// colors says the transport is a raw terminal that renders ANSI;
 	// piped sessions read plain text.
 	colors bool
+	// greeted is set when negotiation already displayed the plain
+	// banner and prompt while waiting for the peer's first input.
+	greeted bool
 	// The introspection fields: who this session is when another one
 	// looks at it through /cli/sessions. id and began are set once at
 	// registration, remote at construction; watching travels under mu
@@ -446,6 +449,8 @@ type session struct {
 	began  time.Time
 	// mu guards path — the editor's hooks read it from the transport
 	// goroutine while commands move it from the REPL's — and watching.
+	// It also protects colors while initial negotiation is visible to
+	// other sessions; the mode is immutable once the REPL starts.
 	mu       sync.Mutex
 	path     []string
 	watching bool
@@ -453,11 +458,16 @@ type session struct {
 
 // Serve runs the REPL on plain line input — pipes, scripts, tests.
 func Serve(ctx context.Context, rw io.ReadWriter, deps Deps) {
+	s := &session{deps: deps, out: syncOut(rw), remote: remoteOf(rw)}
+	s.servePlain(ctx, rw)
+}
+
+func (s *session) servePlain(ctx context.Context, r io.Reader) {
 	lines := make(chan string)
 	done := make(chan struct{})
 	defer close(done)
-	go readLines(rw, lines, done)
-	s := &session{deps: deps, lines: lines, out: syncOut(rw), remote: remoteOf(rw)}
+	go readLines(r, lines, done)
+	s.lines = lines
 	s.repl(ctx)
 }
 
@@ -480,75 +490,196 @@ func (s *syncWriter) Write(b []byte) (int, error) {
 	return s.w.Write(b)
 }
 
-// terminalGrace bounds how long a session waits to learn whether it is
-// talking to a terminal. A local one answers in microseconds; the wait
-// is only ever paid by something that is not a terminal, once, and it
-// is short enough that a script does not notice.
+// terminalGrace bounds the wait before the banner becomes visible.
+// Silence is not proof of a pipe: mode selection remains open until a
+// cursor report, a terminal capability, or the first complete line.
 const terminalGrace = 300 * time.Millisecond
 
-// ServeAuto chooses how to speak to whoever connected, and never
-// blocks waiting to find out.
-//
-// A terminal is asked to report its cursor position — the same
-// question a network console asks. The difference that matters is
-// what happens when no answer comes: the session degrades to plain
-// line input instead of waiting forever. Something that cannot answer
-// is something that cannot use the editor either, and a pipe deserves
-// its transcript without the repaints and the colours.
+// ServeAuto chooses a session's mode once, before dispatching input.
+// A client can identify its raw terminal with NAWS; legacy terminals
+// can answer the cursor query. Typing ahead of that answer is retained,
+// and a silent peer sees the banner after terminalGrace. Pipes need no
+// negotiation: their first line or EOF selects plain input immediately.
 func ServeAuto(ctx context.Context, rw io.ReadWriter, deps Deps) {
-	terminal, eaten := terminalAnswers(rw)
-	width, alsoEaten := 0, []byte(nil)
-	if terminal {
-		// A terminal that answered the first question answers this
-		// one: how wide it is, learned the way the first was — push
-		// the cursor to the right edge and ask where it landed. The
-		// editor's wrapped-line repaints need the figure.
-		width, alsoEaten = measureWidth(rw)
-	}
-	// Whatever the probes swallowed that was not an answer belongs to
-	// the session: a peer that sends its first command instead of a
-	// cursor report must not lose its first letters to the question.
-	session := &probedConn{
-		Reader: io.MultiReader(bytes.NewReader(eaten), bytes.NewReader(alsoEaten), rw),
-		Writer: rw, orig: rw,
-	}
-	if terminal {
-		serveEdited(ctx, session, deps, width)
+	s := &session{deps: deps, out: syncOut(rw), remote: remoteOf(rw)}
+	defer s.register()()
+	conn, clocked := rw.(interface {
+		SetReadDeadline(deadline time.Time) error
+	})
+	if !clocked {
+		s.servePlain(ctx, rw)
 		return
 	}
-	Serve(ctx, session, deps)
+	terminal, width, eaten := s.negotiateTerminal(ctx, rw, conn)
+	if ctx.Err() != nil {
+		return
+	}
+	input := io.MultiReader(bytes.NewReader(eaten), rw)
+	if terminal {
+		s.mu.Lock()
+		s.colors = true
+		s.mu.Unlock()
+		if s.greeted {
+			// The plain prompt may already be on screen. Repaint its
+			// one line with the chosen terminal palette, once.
+			fmt.Fprint(s.out, "\r\x1b[K", s.prompt())
+		}
+		s.serveEdited(ctx, input, width)
+		return
+	}
+	s.servePlain(ctx, input)
 }
 
-// measureWidth asks the terminal how many columns it has: the cursor
-// is pushed far right, asked where it landed, and brought home. The
-// answer is trusted for the session — a resize mid-session is not
-// seen, and costs at worst a clumsy repaint.
+// negotiateTerminal owns the transport's probe state and deadlines only
+// until it returns. No cleanup may mutate that state after the session's
+// reader goroutine starts using the same stream.
+func (s *session) negotiateTerminal(ctx context.Context, rw io.ReadWriter,
+	conn interface {
+		SetReadDeadline(deadline time.Time) error
+	},
+) (bool, int, []byte) {
+	// Wake the initial read too: unlike the reader goroutines used by
+	// an established session, negotiation runs before repl can select
+	// on cancellation. Wait for an already-running callback before
+	// clearing the deadline so cancellation cannot strand the read.
+	wakeDone := make(chan struct{})
+	wake := context.AfterFunc(ctx, func() {
+		_ = conn.SetReadDeadline(time.Now())
+		close(wakeDone)
+	})
+	defer func() {
+		if !wake() {
+			<-wakeDone
+		}
+		_ = conn.SetReadDeadline(time.Time{})
+	}()
+	if probe, ok := rw.(interface{ terminalProbe(enabled bool) }); ok {
+		probe.terminalProbe(true)
+		defer probe.terminalProbe(false)
+	}
+	_, _ = rw.Write([]byte("\x1b[6n"))
+	_ = conn.SetReadDeadline(time.Now().Add(terminalGrace))
+	terminal, width, eaten := awaitTerminal(ctx, rw, func() {
+		s.greet()
+		_ = conn.SetReadDeadline(time.Time{})
+	})
+	if ctx.Err() != nil {
+		return false, 0, nil
+	}
+	if probe, ok := rw.(interface{ terminalProbe(enabled bool) }); ok {
+		probe.terminalProbe(false)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	announced, _ := terminalSizeOf(rw)
+	if terminal && !announced {
+		var more []byte
+		width, more = measureWidth(rw)
+		eaten = append(eaten, more...)
+	}
+	return terminal, width, eaten
+}
+
+// awaitTerminal holds at most one command plus a bounded report prefix.
+// A read timeout only makes the greeting visible; it does not turn a
+// late terminal answer into a command. An entire first line is decisive
+// for a legacy peer, keeping scripts independent of the probe timeout.
+func awaitTerminal(ctx context.Context, rw io.Reader, idle func()) (terminal bool, width int, eaten []byte) {
+	var input terminalInput
+	var buf [1]byte
+	for len(input.typed) < maxLineBytes && ctx.Err() == nil {
+		n, err := rw.Read(buf[:])
+		if n > 0 && input.accept(buf[0]) {
+			return true, 0, input.typed
+		}
+		if terminal, columns := terminalSizeOf(rw); terminal {
+			return true, columns, input.replay()
+		}
+		if n > 0 && (buf[0] == '\r' || buf[0] == '\n') {
+			break
+		}
+		var timeout net.Error
+		if errors.As(err, &timeout) && timeout.Timeout() && ctx.Err() == nil && idle != nil {
+			idle()
+			idle = nil
+			continue
+		}
+		if n == 0 || err != nil {
+			break
+		}
+	}
+	return false, 0, input.replay()
+}
+
+// terminalInput separates a possible cursor report from the command
+// prefix without assigning terminal meaning to any ordinary keystroke.
+type terminalInput struct {
+	typed  []byte
+	report []byte
+}
+
+func (p *terminalInput) accept(c byte) bool {
+	if c == 0x1b {
+		p.typed = append(p.typed, p.report...)
+		p.report = p.report[:0]
+	}
+	if len(p.report) == 0 && c != 0x1b {
+		p.typed = append(p.typed, c)
+		return false
+	}
+	p.report = append(p.report, c)
+	if couldBeCursorReport(p.report) {
+		return c == 'R'
+	}
+	p.typed = append(p.typed, p.report...)
+	p.report = p.report[:0]
+	return false
+}
+
+func (p *terminalInput) replay() []byte { return append(p.typed, p.report...) }
+
+func terminalSizeOf(r any) (terminal bool, width int) {
+	if peer, ok := r.(interface{ terminalSize() (int, bool) }); ok {
+		width, terminal = peer.terminalSize()
+	}
+	return terminal, width
+}
+
+// measureWidth is only used by legacy terminals without NAWS. Input
+// before the report is replayed, while the editor will absorb any report
+// that arrives after this bounded measurement. Restore the cursor even
+// on timeout: it was moved before the question was sent.
 func measureWidth(rw io.ReadWriter) (width int, eaten []byte) {
-	conn, ok := rw.(interface{ SetReadDeadline(t time.Time) error })
+	conn, ok := rw.(interface {
+		SetReadDeadline(deadline time.Time) error
+	})
 	if !ok {
 		return 0, nil
 	}
 	if _, err := rw.Write([]byte("\x1b[9999C\x1b[6n")); err != nil {
 		return 0, nil
 	}
-	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	defer func() {
+		_ = conn.SetReadDeadline(time.Time{})
+		_, _ = rw.Write([]byte("\r"))
+	}()
 	if err := conn.SetReadDeadline(time.Now().Add(terminalGrace)); err != nil {
 		return 0, nil
 	}
 	var got []byte
-	buf := make([]byte, 1)
+	var buf [1]byte
 	for len(got) < cursorReportMax {
-		n, err := rw.Read(buf)
+		n, err := rw.Read(buf[:])
+		if n > 0 {
+			got = append(got, buf[0])
+			if !couldBeCursorReport(got) {
+				return 0, got
+			}
+			if buf[0] == 'R' {
+				return reportColumns(got), nil
+			}
+		}
 		if n == 0 || err != nil {
 			return 0, got
-		}
-		got = append(got, buf[0])
-		if !couldBeCursorReport(got) {
-			return 0, got
-		}
-		if buf[0] == 'R' {
-			_, _ = rw.Write([]byte("\r"))
-			return reportColumns(got), nil
 		}
 	}
 	return 0, got
@@ -568,84 +699,39 @@ func reportColumns(report []byte) int {
 	return cols
 }
 
-// terminalAnswers asks for the cursor position and reports whether a
-// terminal answered, along with whatever it read that was not the
-// answer — those bytes are the peer's, and the caller hands them back
-// to the session.
-//
-// It reads one byte at a time and stops the moment what it has cannot
-// become a cursor report, so a peer that starts talking straight away
-// pays neither the grace nor a lost keystroke.
-func terminalAnswers(rw io.ReadWriter) (terminal bool, eaten []byte) {
-	conn, ok := rw.(interface{ SetReadDeadline(t time.Time) error })
-	if !ok {
-		return false, nil // a transport with no clock cannot be waited on
-	}
-	if _, err := rw.Write([]byte("\x1b[6n")); err != nil {
-		return false, nil
-	}
-	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
-	if err := conn.SetReadDeadline(time.Now().Add(terminalGrace)); err != nil {
-		return false, nil
-	}
-	var got []byte
-	buf := make([]byte, 1)
-	for len(got) < cursorReportMax {
-		n, err := rw.Read(buf)
-		if n == 0 || err != nil {
-			return false, got
-		}
-		got = append(got, buf[0])
-		if !couldBeCursorReport(got) {
-			return false, got
-		}
-		if buf[0] == 'R' {
-			return true, nil
-		}
-	}
-	return false, got
-}
-
-// cursorReportMax bounds the answer: ESC [ rows ; cols R is far
-// shorter, and a peer feeding digits forever is not a terminal.
+// cursorReportMax bounds both report detection and editor parameters.
 const cursorReportMax = 32
 
-// couldBeCursorReport reports whether the bytes so far can still grow
-// into ESC [ rows ; cols R.
+// couldBeCursorReport accepts only prefixes of ESC [ row ; column R,
+// with positive decimal coordinates. Other CSI sequences remain input.
 func couldBeCursorReport(b []byte) bool {
-	if b[0] != 0x1b {
+	if len(b) == 0 || len(b) > cursorReportMax || b[0] != 0x1b {
 		return false
 	}
-	if len(b) > 1 && b[1] != '[' {
+	if len(b) == 1 {
+		return true
+	}
+	if b[1] != '[' {
 		return false
 	}
-	if len(b) < 3 {
-		return true // still just the introducer
-	}
-	for _, c := range b[2:] {
-		if (c < '0' || c > '9') && c != ';' && c != 'R' {
+	row, col, separator := false, false, false
+	for i, c := range b[2:] {
+		switch {
+		case c >= '0' && c <= '9':
+			if separator {
+				col = col || c != '0'
+			} else {
+				row = row || c != '0'
+			}
+		case c == ';' && row && !separator:
+			separator = true
+		case c == 'R':
+			return row && col && separator && i == len(b)-3
+		default:
 			return false
 		}
 	}
 	return true
-}
-
-// probedConn is what the probe hands the session: the swallowed bytes
-// given back ahead of the stream, with the transport's address still
-// visible through it.
-type probedConn struct {
-	io.Reader
-	io.Writer
-
-	orig any
-}
-
-func (p *probedConn) RemoteAddr() net.Addr {
-	c, ok := p.orig.(interface{ RemoteAddr() net.Addr })
-	if !ok {
-		return nil
-	}
-	return c.RemoteAddr()
 }
 
 // ServeEdited runs the REPL behind the character-mode line editor:
@@ -659,12 +745,21 @@ func ServeEdited(ctx context.Context, rw io.ReadWriter, deps Deps) {
 // serveEdited is ServeEdited told how wide the terminal is; zero
 // leaves the editor wrap-blind.
 func serveEdited(ctx context.Context, rw io.ReadWriter, deps Deps, width int) {
+	s := &session{deps: deps, out: syncOut(rw), colors: true, remote: remoteOf(rw)}
+	s.serveEdited(ctx, rw, width)
+}
+
+func (s *session) serveEdited(ctx context.Context, r io.Reader, width int) {
+	// Buffered keystrokes can repaint immediately. Put the greeting on
+	// screen before starting their reader, so it cannot overtake them.
+	if !s.greeted {
+		s.greet()
+	}
 	lines := make(chan string)
 	done := make(chan struct{})
 	defer close(done)
-	out := syncOut(rw)
-	s := &session{deps: deps, lines: lines, out: out, colors: true, remote: remoteOf(rw)}
-	ed := newEditor(rw, out)
+	s.lines = lines
+	ed := newEditor(r, s.out)
 	ed.width = width
 	// The editor's hooks read the session's context from the transport
 	// goroutine; the session guards that state itself.
@@ -689,14 +784,25 @@ func serveEdited(ctx context.Context, rw io.ReadWriter, deps Deps, width int) {
 	s.repl(ctx)
 }
 
+func (s *session) greet() {
+	banner(s.out, s.deps.Version, s.systemName(), s.deps.Privilege)
+	fmt.Fprint(s.out, s.prompt())
+	s.greeted = true
+}
+
 // repl is the loop both entrances share. It owns the prompt: printed
 // after the banner and after every command, so it always lands below
 // the output it follows.
 func (s *session) repl(ctx context.Context) {
 	defer s.register()()
-	banner(s.out, s.deps.Version, s.systemName(), s.deps.Privilege)
+	if !s.greeted {
+		banner(s.out, s.deps.Version, s.systemName(), s.deps.Privilege)
+	}
 	for ctx.Err() == nil {
-		fmt.Fprint(s.out, s.prompt())
+		if !s.greeted {
+			fmt.Fprint(s.out, s.prompt())
+		}
+		s.greeted = false
 		select {
 		case <-ctx.Done():
 			return

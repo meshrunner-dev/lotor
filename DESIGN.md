@@ -361,6 +361,17 @@ contextual errors and descriptions remain ordinary errors and text.
   the distinction exists so the first admin command lands on a
   contract, not a retrofit.
 
+The bundled console keeps local signal handling while connecting, then
+sets its TTY raw and announces its dimensions through Telnet NAWS before
+forwarding keystrokes. Legacy
+clients can still answer a cursor-position query. The short initial wait
+bounds when the greeting appears, not when a terminal must answer: late
+or fragmented reports and early typing are retained until mode selection.
+A complete first line or EOF selects plain input for scripts. Terminal
+escape sequences are parsed across reads; network packet boundaries have
+no meaning to the editor. Sessions are visible during negotiation and
+receive shutdown notices even before their first command.
+
 MeshCore's over-the-air client table has two deliberately separate
 views. **Sessions** are principals that have authenticated traffic in
 the current process; a guest exists only there, expires on idle and is

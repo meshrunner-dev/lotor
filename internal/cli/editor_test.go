@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 const (
@@ -93,9 +94,9 @@ func TestLatin1NoiseCannotEatTheEnter(t *testing.T) {
 }
 
 func TestLoneEscDoesNotEatTheNextKey(t *testing.T) {
-	// An ESC with nothing buffered behind it is a keypress, not a
-	// sequence: it must not block waiting for an intro byte, and the
-	// line already typed still comes through.
+	// An ESC with no suffix must not discard the draft at EOF. The
+	// parser waits for subsequent input through the ordinary read loop,
+	// without consuming a following keystroke inside escape handling.
 	got := edit(t, "ok\x1b")
 	if len(got) != 1 || got[0] != "ok" {
 		t.Fatalf("lines = %q", got)
@@ -444,5 +445,55 @@ func TestVisCellsIgnoresTheEscapes(t *testing.T) {
 	}
 	if got := visCells("[admin@lab] > "); got != 14 {
 		t.Errorf("plain prompt = %d", got)
+	}
+}
+
+func TestFragmentedTerminalSequencesPreserveKeystrokes(t *testing.T) {
+	for _, tc := range []struct {
+		name, input, want string
+	}{
+		{"cursor report", "sta\x1b[30;1Rtus\r", "status"},
+		{"arrow", "satus\x1b[D\x1b[D\x1b[D\x1b[Dt\r", "status"},
+		{"SS3 arrow", "satus\x1bOD\x1bOD\x1bOD\x1bODt\r", "status"},
+		{"mouse", "sta\x1b[<0;33;21Mtus\r", "status"},
+		{"standalone escape", "sta\x1btus\r", "status"},
+		{"interrupted sequence", "status\x1b[30;\r", "status"},
+		{"unfinished sequence", "status\x1b[30;", "status"},
+		{"oversized parameters", "sta\x1b[" + strings.Repeat("0", 10000) + "Rtus\r", "status"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ed := newEditor(iotest.OneByteReader(strings.NewReader(tc.input)), io.Discard)
+			got, err := ed.readLine()
+			if err != nil || got != tc.want {
+				t.Fatalf("line = %q, error %v; want %q", got, err, tc.want)
+			}
+			if len(ed.escapeParams) > cursorReportMax {
+				t.Fatal("unbounded escape parameters")
+			}
+		})
+	}
+}
+
+func TestFragmentedEscapeLeavesSearchWithoutEatingFollowingKey(t *testing.T) {
+	ed := newEditor(iotest.OneByteReader(strings.NewReader("status\r\x12sta\x1b!\r")), io.Discard)
+	if _, err := ed.readLine(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ed.readLine()
+	if err != nil || got != "status!" {
+		t.Fatalf("search result = %q, error %v", got, err)
+	}
+}
+
+func TestFragmentedHelpKeysRemainConsecutive(t *testing.T) {
+	ed := newEditor(iotest.OneByteReader(strings.NewReader("\x1bOP\x1b[11~exit\r")), io.Discard)
+	var levels []int
+	ed.helpFor = func(_ string, level int) string {
+		levels = append(levels, level)
+		return "help"
+	}
+	got, err := ed.readLine()
+	if err != nil || got != "exit" || len(levels) != 2 || levels[0] != 0 || levels[1] != 1 {
+		t.Fatalf("line = %q, levels = %v, error %v", got, levels, err)
 	}
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -77,6 +78,9 @@ func ServeListener(ctx context.Context, ln net.Listener, deps Deps) error {
 			if _, unix := conn.(*net.UnixConn); !unix {
 				_, _ = conn.Write([]byte{iacByte, iacWill, optEcho, iacByte, iacWill, optSGA})
 			}
+			// Local console and telnet both carry IAC. NAWS lets a
+			// raw client declare its mode before forwarding keystrokes.
+			_, _ = conn.Write([]byte{iacByte, iacDo, optNAWS})
 			ServeAuto(ctx, &sessionConn{
 				Reader: &iacStripper{r: conn},
 				// A client that stops reading while a watch floods
@@ -102,6 +106,19 @@ type sessionConn struct {
 
 func (s *sessionConn) SetReadDeadline(t time.Time) error { return s.conn.SetReadDeadline(t) }
 
+func (s *sessionConn) terminalProbe(enabled bool) {
+	if reader, ok := s.Reader.(*iacStripper); ok {
+		reader.probing = enabled
+	}
+}
+
+func (s *sessionConn) terminalSize() (int, bool) {
+	if reader, ok := s.Reader.(*iacStripper); ok {
+		return reader.width, reader.hasSize
+	}
+	return 0, false
+}
+
 // RemoteAddr names the far end, for the session table.
 func (s *sessionConn) RemoteAddr() net.Addr { return s.conn.RemoteAddr() }
 
@@ -109,11 +126,13 @@ func (s *sessionConn) RemoteAddr() net.Addr { return s.conn.RemoteAddr() }
 const (
 	iacByte  = 255 // IAC — interpret as command
 	iacWill  = 251 // WILL..DONT carry one option byte
+	iacDo    = 253
 	iacDont  = 254
 	iacSubBg = 250 // SB — subnegotiation until IAC SE
 	iacSubEn = 240 // SE
 	optEcho  = 1   // the daemon echoes
 	optSGA   = 3   // suppress go-ahead: character-at-a-time
+	optNAWS  = 31  // RFC 1073: terminal width and height
 )
 
 // writeTimeout bounds one session write; a peer deaf for that long
@@ -164,6 +183,26 @@ func (e *iacEscaper) Write(p []byte) (int, error) {
 	return written, nil
 }
 
+// SendTerminalSize announces a raw terminal and its dimensions before
+// user input is forwarded. This optimistic WILL + NAWS prelude uses the
+// RFC 1073 layout; older Lotor servers ignore it through their IAC filter.
+// The server also requests NAWS, but this small console client does not
+// wait for a full Telnet option exchange. Zero means an unknown dimension.
+func SendTerminalSize(w io.Writer, width, height int) error {
+	var dimensions [4]byte
+	binary.BigEndian.PutUint16(dimensions[:2], uint16(max(0, min(width, 65535))))
+	binary.BigEndian.PutUint16(dimensions[2:], uint16(max(0, min(height, 65535))))
+	var prelude bytes.Buffer
+	prelude.Write([]byte{iacByte, iacWill, optNAWS, iacByte, iacSubBg, optNAWS})
+	_, _ = EscapeIAC(&prelude).Write(dimensions[:])
+	prelude.Write([]byte{iacByte, iacSubEn})
+	n, err := w.Write(prelude.Bytes())
+	if err == nil && n != prelude.Len() {
+		return io.ErrShortWrite
+	}
+	return err
+}
+
 // iacStripper state machine.
 const (
 	stNormal    = iota
@@ -179,18 +218,33 @@ const (
 type iacStripper struct {
 	r     io.Reader
 	state int
+	// A NAWS body is the option and four dimension bytes. Any other
+	// subnegotiation is drained with the same constant memory bound.
+	subneg  [5]byte
+	subLen  int
+	width   int
+	hasSize bool
+	probing bool
 }
+
+// errTerminalSize yields control to mode selection after metadata alone,
+// so a raw terminal need not send a keystroke to receive its first prompt.
+var errTerminalSize = errors.New("terminal size received")
 
 func (f *iacStripper) Read(p []byte) (int, error) {
 	buf := make([]byte, len(p))
 	for {
 		n, err := f.r.Read(buf)
 		out := 0
+		hadSize := f.hasSize
 		for _, b := range buf[:n] {
 			if keep, c := f.step(b); keep {
 				p[out] = c
 				out++
 			}
+		}
+		if f.probing && !hadSize && f.hasSize {
+			return out, errTerminalSize
 		}
 		if out > 0 || err != nil {
 			return out, err
@@ -215,6 +269,7 @@ func (f *iacStripper) step(b byte) (keep bool, c byte) {
 			return true, b
 		case b == iacSubBg:
 			f.state = stSubneg
+			f.subLen = 0
 		case b >= iacWill && b <= iacDont:
 			f.state = stOption
 		default: // two-byte command
@@ -225,13 +280,35 @@ func (f *iacStripper) step(b byte) (keep bool, c byte) {
 	case stSubneg:
 		if b == iacByte {
 			f.state = stSubnegIAC
+		} else {
+			f.subByte(b)
 		}
 	case stSubnegIAC:
-		if b == iacSubEn {
+		switch b {
+		case iacSubEn:
 			f.state = stNormal
-		} else {
+			if f.subLen == len(f.subneg) && f.subneg[0] == optNAWS {
+				f.width = int(binary.BigEndian.Uint16(f.subneg[1:3]))
+				f.hasSize = true
+			}
+		case iacByte:
+			f.subByte(b)
+			f.state = stSubneg
+		default:
+			// An unexpected command cannot turn a malformed body
+			// into a valid NAWS by silently losing its bytes.
+			f.subLen = len(f.subneg) + 1
 			f.state = stSubneg
 		}
 	}
 	return false, 0
+}
+
+func (f *iacStripper) subByte(b byte) {
+	if f.subLen < len(f.subneg) {
+		f.subneg[f.subLen] = b
+	}
+	if f.subLen <= len(f.subneg) {
+		f.subLen++
+	}
 }
