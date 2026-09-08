@@ -7,6 +7,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/schema"
 )
 
@@ -21,6 +22,81 @@ func completionSession() *session {
 		Relays: []RelayInfo{{Name: "r", Protocol: "meshcore"}},
 		Radios: []RadioInfo{{Name: "slot1", Driver: "sx126x-spi"}},
 	}}
+}
+
+func TestCompletionPreservesQuotesAroundKeysAndValues(t *testing.T) {
+	s := completionSession()
+	// Use the real relay's ambiguous on-air/on-air-zero-hop vocabulary.
+	s.deps.Kinds[0].Attrs = append(s.deps.Kinds[0].Attrs, config.RelayAttrs()...)
+	for _, tc := range []struct {
+		name, draft, want string
+	}{
+		{"ambiguous quoted value", `/relay r set tx.mode="on-|air-zero-hop" radio=slot1`, `/relay r set tx.mode="on-air" radio=slot1`},
+		{"ambiguous whole word", `/relay r set "tx.mode=on-|air-zero-hop" radio=slot1`, `/relay r set "tx.mode=on-air" radio=slot1`},
+		{"quoted key middle", `/relay r set "tx.mod|e"=on-air radio=slot1`, `/relay r set "tx.mode"=on-air radio=slot1`},
+		{"quoted key end", `/relay r set "tx.mod"|=on-air radio=slot1`, `/relay r set "tx.mode"=on-air radio=slot1`},
+		{"quoted key before close", `/relay r set "tx.mod|"=on-air radio=slot1`, `/relay r set "tx.mode"=on-air radio=slot1`},
+		{"whole word key", `/relay r set "tx.mod|e=on-air" radio=slot1`, `/relay r set "tx.mode=on-air" radio=slot1`},
+		{"quoted value start", `/relay r set tx.mode="|on-air" radio=slot1`, `/relay r set tx.mode="on-air" radio=slot1`},
+		{"quoted value before close", `/relay r set tx.mode="on-air|" radio=slot1`, `/relay r set tx.mode="on-air" radio=slot1`},
+		{"quoted value after close", `/relay r set tx.mode="on-air"| radio=slot1`, `/relay r set tx.mode="on-air" radio=slot1`},
+		{"quoted key and value", `/relay r set "tx.mode"="on-|air" radio=slot1`, `/relay r set "tx.mode"="on-air" radio=slot1`},
+		{"quote opens in key suffix", `/relay r set tx.mod|"e=on-air" radio=slot1`, `/relay r set tx.mode"=on-air" radio=slot1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cursor := strings.IndexByte(tc.draft, '|')
+			line := strings.Replace(tc.draft, "|", "", 1)
+			edit := s.completeAt(line, cursor)
+			got := applyCompletion(line, edit)
+			if got != tc.want {
+				t.Fatalf("completed %q, want %q (edit %+v)", got, tc.want, edit)
+			}
+			if args := splitArgs(got); !slices.Equal(args, []string{"/relay", "r", "set", "tx.mode=on-air", "radio=slot1"}) {
+				t.Fatalf("completion changed argument boundaries: %q", args)
+			}
+		})
+	}
+}
+
+func TestAmbiguousKeyCompletionKeepsTheExistingValue(t *testing.T) {
+	s := completionSession()
+	s.deps.Kinds[0].Attrs = append(s.deps.Kinds[0].Attrs, config.RelayAttrs()...)
+	for _, draft := range []string{
+		`/relay r set t|x.mode=on-air radio=slot1`,
+		`/relay r set "t|x.mode"=on-air radio=slot1`,
+		`/relay r set t|"x.mode="on-air radio=slot1`,
+	} {
+		cursor := strings.IndexByte(draft, '|')
+		line := strings.Replace(draft, "|", "", 1)
+		edit := s.completeAt(line, cursor)
+		got := applyCompletion(line, edit)
+		if args := splitArgs(got); !slices.Equal(args, []string{"/relay", "r", "set", "tx.=on-air", "radio=slot1"}) {
+			t.Fatalf("ambiguous key completion lost its value or next argument: %q, parsed %q", got, args)
+		}
+		if len(edit.Hints) < 2 {
+			t.Fatal("ambiguous completion lost its candidates")
+		}
+	}
+}
+
+func TestAmbiguousPathCompletionKeepsTheRemainingPath(t *testing.T) {
+	s := completionSession()
+	s.deps.Relays = []RelayInfo{{Name: "r-one"}, {Name: "r-only"}}
+	for _, draft := range []string{
+		`/relay/r-|one/print`,
+		`"/relay/r-|one"/print`,
+	} {
+		cursor := strings.IndexByte(draft, '|')
+		line := strings.Replace(draft, "|", "", 1)
+		edit := s.completeAt(line, cursor)
+		got := applyCompletion(line, edit)
+		if args := splitArgs(got); !slices.Equal(args, []string{"/relay/r-on/print"}) {
+			t.Fatalf("ambiguous path completion lost its suffix: %q, parsed %q", got, args)
+		}
+		if len(edit.Hints) != 2 {
+			t.Fatalf("path candidates = %v, want two instances", edit.Hints)
+		}
+	}
 }
 
 func applyCompletion(line string, edit completionEdit) string {

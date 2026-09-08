@@ -43,6 +43,7 @@ type completionWord struct {
 	prior, after          []string
 	last, raw             string
 	openQuote, pathSuffix bool
+	endQuote, keySuffix   bool
 }
 
 func completionWordAt(line string, cursor int) completionWord {
@@ -54,12 +55,14 @@ func completionWordAt(line string, cursor int) completionWord {
 	if len(before) > 0 && before[len(before)-1].end == cursor {
 		word := before[len(before)-1]
 		out.last, out.raw, out.openQuote = word.text, line[word.start:cursor], word.openQuote
+		out.endQuote = word.openQuote
 		out.edit.Start = word.start
 		out.prior = out.prior[:len(out.prior)-1]
 	}
 	for _, word := range lexLine(line) {
 		if word.start <= out.edit.Start && word.end > cursor {
-			out.edit.End, out.pathSuffix = completionWordEnd(line, word, cursor)
+			out.edit.End, out.pathSuffix, out.keySuffix = completionWordEnd(line, word, cursor)
+			out.endQuote = insideQuoteAt(line, out.edit.End)
 		} else if word.start >= cursor && word.start != out.edit.Start {
 			out.after = append(out.after, word.text)
 		}
@@ -67,19 +70,19 @@ func completionWordAt(line string, cursor int) completionWord {
 	return out
 }
 
-func completionWordEnd(line string, word shellWord, cursor int) (end int, pathSuffix bool) {
+func completionWordEnd(line string, word shellWord, cursor int) (end int, pathSuffix, keySuffix bool) {
 	// Completing a key retains its existing value, with the cursor just
 	// after the '=' supplied by the completion.
 	if equal := strings.IndexByte(line[word.start:word.end], '='); equal >= 0 {
 		if cursor <= word.start+equal {
-			return word.start + equal + 1, false
+			return word.start + equal + 1, false, true
 		}
-		return word.end, false // slashes inside a value are ordinary text
+		return word.end, false, false // slashes inside a value are ordinary text
 	}
 	if slash := strings.IndexByte(line[cursor:word.end], '/'); slash >= 0 {
-		return cursor + slash + 1, true
+		return cursor + slash + 1, true, false
 	}
-	return word.end, false
+	return word.end, false, false
 }
 
 func (word completionWord) finish(line, add string, hints []string) completionEdit {
@@ -89,17 +92,15 @@ func (word completionWord) finish(line, add string, hints []string) completionEd
 		more += "/"
 		finished = false
 	}
-	// A closing quote already typed belongs after the completed value.
-	// An open quote closes before the word separator, never after it.
-	raw := word.raw
-	if !word.openQuote && strings.HasSuffix(raw, "\"") && more != "" {
-		raw = strings.TrimSuffix(raw, "\"") + more + "\""
-	} else {
-		raw += more
-		if word.openQuote && finished {
-			raw += "\""
-		}
+	if word.pathSuffix && !strings.HasSuffix(more, "/") {
+		word.edit.End-- // an ambiguous path prefix has not supplied '/'
 	}
+	if word.keySuffix && !strings.HasSuffix(more, "=") {
+		// A common key prefix has not supplied '=' yet. Keep the
+		// existing separator and value outside the replacement.
+		word.edit.End--
+	}
+	raw := word.spell(more, finished)
 	if finished {
 		raw += " "
 		// Consume one existing separator so completion moves the cursor
@@ -110,6 +111,32 @@ func (word completionWord) finish(line, add string, hints []string) completionEd
 	}
 	word.edit.Text, word.edit.Hints = raw, hints
 	return word.edit
+}
+
+// spell preserves the quote state where the replaced suffix ends,
+// including quotes that open or close inside a key. A retained value
+// then stays in its original quote context. Only a finished value
+// closes a quote the operator has not closed yet.
+func (word completionWord) spell(more string, finished bool) string {
+	equal := strings.HasSuffix(more, "=")
+	key := word.keySuffix || (!strings.Contains(word.last, "=") && equal)
+	if key && equal {
+		more = strings.TrimSuffix(more, "=")
+	}
+	quoted := word.endQuote && (!finished || key)
+	raw := word.raw
+	if !word.openQuote && strings.HasSuffix(raw, "\"") {
+		raw = strings.TrimSuffix(raw, "\"") + more + "\""
+	} else {
+		raw += more
+	}
+	if word.openQuote != quoted {
+		raw += "\""
+	}
+	if key && equal {
+		raw += "="
+	}
+	return raw
 }
 
 // completeWord resolves the words before the cursor, then offers the
