@@ -426,6 +426,13 @@ func writePending(root *os.Root, version string) error {
 	}
 	defer func() { _ = root.Remove(name) }()
 	if _, err = f.Write(append(raw, '\n')); err == nil {
+		// The installer owns this inode, but the unprivileged daemon
+		// must read it before starting its liveness grace. The marker
+		// holds no secret. Set the mode on our private fd, independently
+		// of the installer's umask, before the atomic publication.
+		err = f.Chmod(0o644)
+	}
+	if err == nil {
 		err = f.Sync()
 	}
 	if cerr := f.Close(); err == nil {
@@ -452,17 +459,22 @@ func syncRoot(root *os.Root) error {
 	return err
 }
 
-// ReadPending reports the probation in force, or nil.
-func ReadPending(stateDir string) *Pending {
+// ReadPending reports the probation in force, or nil only when no
+// marker exists. An unreadable or malformed marker remains a guard
+// against replacing the rollback binary and must not look absent.
+func ReadPending(stateDir string) (*Pending, error) {
 	raw, err := os.ReadFile(filepath.Join(StageDir(stateDir), pendingMarker))
+	if os.IsNotExist(err) {
+		return nil, nil //nolint:nilnil // no marker means no update is on probation
+	}
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var p Pending
-	if json.Unmarshal(raw, &p) != nil {
-		return nil
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("update probation marker: %w", err)
 	}
-	return &p
+	return &p, nil
 }
 
 // ClearPending commits the update: the new binary has held.

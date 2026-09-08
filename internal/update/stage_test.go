@@ -246,18 +246,21 @@ func TestInstallKeepsTheOldBinaryAndRollbackRestoresIt(t *testing.T) {
 
 func TestProbationMarkersRoundTrip(t *testing.T) {
 	state := t.TempDir()
-	if p := ReadPending(state); p != nil {
-		t.Fatal("a fresh state is on probation")
+	if p, err := ReadPending(state); err != nil || p != nil {
+		t.Fatalf("fresh probation = %+v, %v", p, err)
 	}
 	if err := WritePending(state, "1.2.3"); err != nil {
 		t.Fatal(err)
 	}
-	p := ReadPending(state)
-	if p == nil || p.Version != "1.2.3" {
-		t.Fatalf("pending = %+v", p)
+	p, err := ReadPending(state)
+	if err != nil || p == nil || p.Version != "1.2.3" {
+		t.Fatalf("pending = %+v, %v", p, err)
 	}
-	if err := ClearPending(state); err != nil || ReadPending(state) != nil {
-		t.Fatal("the probation did not clear")
+	if err := ClearPending(state); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := ReadPending(state); err != nil || p != nil {
+		t.Fatalf("cleared probation = %+v, %v", p, err)
 	}
 	if err := ClearPending(state); err != nil {
 		t.Fatal("clearing twice is not an error")

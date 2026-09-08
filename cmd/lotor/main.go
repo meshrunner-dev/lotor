@@ -149,7 +149,11 @@ func (c *updateRollbackCmd) Run() error {
 	// Fired by OnFailure, which knows only that the service died —
 	// not why. Without an update on probation the binary is not the
 	// suspect, and rolling it back would punish it for a radio fault.
-	if update.ReadPending(c.State) == nil {
+	pending, err := update.ReadPending(c.State)
+	if err != nil {
+		return fmt.Errorf("read update probation before rollback: %w", err)
+	}
+	if pending == nil {
 		fmt.Println("no update on probation — leaving the binary alone")
 		return nil
 	}
@@ -773,7 +777,11 @@ func openConfig(dbPath string, log *zap.Logger) (*confdb.Store, *config.File, er
 // before the restart; surviving the grace is what "the update took"
 // means, and the OnFailure rollback is what happens when it does not.
 func watchProbation(ctx context.Context, stateDir string, log *zap.Logger) {
-	p := update.ReadPending(stateDir)
+	p, err := update.ReadPending(stateDir)
+	if err != nil {
+		log.Warn("could not read update probation", zap.Error(err))
+		return
+	}
 	if p == nil {
 		return
 	}

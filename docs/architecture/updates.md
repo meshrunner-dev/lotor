@@ -308,6 +308,13 @@ resulting service runs with the same unprivileged account and sandbox as before.
 Installation preserves the previous executable and arms a pending-update
 marker. The new daemon detects that marker at startup.
 
+The installer publishes the marker as a new inode with mode `0644`, set before
+the atomic rename regardless of its umask. It stays owned by the installer;
+the daemon's different account can read its version and timestamp, then remove
+it through the daemon-owned staging directory. The marker contains no secret,
+and no other account gains write access to it. An unreadable or malformed
+marker is reported explicitly and remains in place to protect rollback.
+
 If the process remains alive for 90 seconds, it clears the marker and commits
 the update. If it repeatedly fails and the service manager reaches its start
 limit, the rollback service restores the previous executable and restarts it.
@@ -321,6 +328,28 @@ immediate crash loops. It does not judge radio health, network reachability,
 mesh behavior or application-level correctness. A defective release that keeps
 the process alive for 90 seconds is committed and requires an explicit
 subsequent update or downgrade.
+
+An older installer that published a root-owned `0600` pending marker can leave
+the daemon unable to start probation. The console then keeps reporting
+`an installed update is still on probation`, even after 90 seconds. On a
+standard systemd installation, first check that the marker is a regular file
+owned by root with that mode:
+
+```sh
+sudo stat -c '%F %U:%G %a %n' /var/lib/lotor/updates/pending
+```
+
+Restore its readable mode and restart the same installed daemon:
+
+```sh
+sudo chmod 0644 /var/lib/lotor/updates/pending
+sudo systemctl restart lotor.service
+```
+
+After 90 seconds of uninterrupted service, the journal should report
+`update committed` and the daemon removes the marker itself. Leave `pending`
+and the `.prev` executable in place until then: this recovery preserves the
+normal probation and crash-loop rollback, without forcing another installation.
 
 ## Build provenance and publication
 

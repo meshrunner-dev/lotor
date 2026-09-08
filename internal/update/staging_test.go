@@ -82,7 +82,10 @@ func TestPendingPublicationReplacesALinkWithoutChangingItsTarget(t *testing.T) {
 	if got, _ := os.ReadFile(other); string(got) != "fixture" {
 		t.Fatal("marker publication changed another file")
 	}
-	if p := ReadPending(state); p == nil || p.Version != "1.2.3" {
-		t.Fatalf("pending = %+v", p)
+	if info, err := os.Stat(other); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("marker publication changed its old symlink target's permissions: %v, %v", info, err)
+	}
+	if p, err := ReadPending(state); err != nil || p == nil || p.Version != "1.2.3" {
+		t.Fatalf("pending = %+v, %v", p, err)
 	}
 }

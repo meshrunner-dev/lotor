@@ -86,8 +86,8 @@ func TestInstallRefusesChangedStageWithoutReplacingTheTarget(t *testing.T) {
 	if got, _ := os.ReadFile(target); string(got) != "current fixture" {
 		t.Fatal("refused installation changed the target")
 	}
-	if ReadPending(state) != nil {
-		t.Fatal("refused installation armed probation")
+	if p, err := ReadPending(state); err != nil || p != nil {
+		t.Fatalf("refused installation probation = %+v, %v", p, err)
 	}
 	entries, err := os.ReadDir(bindir)
 	if err != nil || len(entries) != 1 {
@@ -189,8 +189,8 @@ func TestInstallReportsCommittedReplacementWhenCleanupFails(t *testing.T) {
 	if got, _ := os.ReadFile(target); string(got) != "new fixture" {
 		t.Fatal("committed result does not name the installed binary")
 	}
-	if p := ReadPending(state); p == nil || p.Version != ready.Version {
-		t.Fatal("installed binary lost probation after cleanup failure")
+	if p, err := ReadPending(state); err != nil || p == nil || p.Version != ready.Version {
+		t.Fatalf("installed binary probation after cleanup failure = %+v, %v", p, err)
 	}
 	if got, _ := os.ReadFile(target + ".prev"); string(got) != "old fixture" {
 		t.Fatal("cleanup failure lost the rollback binary")
