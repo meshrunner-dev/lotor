@@ -243,7 +243,10 @@ a validly structured but incorrectly described archive from filling the
 filesystem during unpacking.
 
 Before completing the stage, the daemon executes the new binary as its own
-unprivileged user. The candidate runs a self-check which:
+unprivileged user. The self-check has a two-minute deadline, also respects daemon
+shutdown, and retains at most 64 KiB of diagnostic output. Each probe creates its
+own temporary database directory, so probes cannot overwrite one another's copy.
+The candidate runs a self-check which:
 
 - proves the executable can run on the host architecture;
 - copies the live configuration database;

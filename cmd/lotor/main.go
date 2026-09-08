@@ -181,19 +181,18 @@ func (c *updateSelfcheckCmd) Run() error {
 	if err != nil {
 		return err
 	}
-	probe := c.DB + ".selfcheck"
-	_ = os.Remove(probe)
+	probeDir, err := os.MkdirTemp(filepath.Dir(c.DB), ".selfcheck-")
+	if err != nil {
+		_ = source.Close()
+		return err
+	}
+	defer func() { _ = os.RemoveAll(probeDir) }()
+	probe := filepath.Join(probeDir, "config.db")
 	err = source.CopyTo(ctx, probe)
 	_ = source.Close()
 	if err != nil {
 		return err
 	}
-	defer func() {
-		matches, _ := filepath.Glob(probe + "*")
-		for _, m := range matches {
-			_ = os.Remove(m)
-		}
-	}()
 	store, f, err := openConfig(probe, zap.NewNop())
 	if err != nil {
 		return err

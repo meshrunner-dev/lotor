@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os/exec"
 	"runtime"
 	"slices"
 	"sort"
@@ -1992,13 +1991,12 @@ func (s *session) updateInstall(ctx context.Context, in input) error {
 	}
 	fmt.Fprint(s.out, "hash verified — proving the new binary starts…\r\n")
 	if s.deps.DBPath != "" {
-		// The staged binary proves it starts before the installer is asked.
-		//nolint:gosec // the verified staged binary is the subject
-		probe := exec.CommandContext(ctx, staged, "update", "selfcheck", "--db", s.deps.DBPath)
-		if out, err := probe.CombinedOutput(); err != nil {
-			return fmt.Errorf("the new binary fails its selfcheck: %s (%w)",
-				strings.TrimSpace(string(out)), err)
+		if err := update.Selfcheck(ctx, staged, s.deps.DBPath); err != nil {
+			return err
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := stage.Publish(checked, update.Platform()); err != nil {
 		return err
