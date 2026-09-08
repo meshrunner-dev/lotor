@@ -70,7 +70,7 @@ type FrameJudged struct {
 	Correlation correlation.ID
 	Binding     string
 	CausedBy    correlation.ID
-	Verdict     string
+	Verdict     Verdict
 	// The reception the verdict is about, as FrameHeard carried it.
 	At         time.Time
 	Bytes      int

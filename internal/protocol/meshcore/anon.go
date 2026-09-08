@@ -40,35 +40,35 @@ const (
 // decrypt. A request we could read is consumed here whatever its type:
 // the reference marks it do-not-retransmit the moment decryption
 // succeeds.
-func (e *engine) anonVerdict(rx *reception) (verdict, why string, handled bool) {
+func (e *engine) anonVerdict(rx *reception) (verdict bus.Verdict, why string, handled bool) {
 	a, short, ok := meshcorehost.OpenAnon(e.id, rx.pkt.Payload)
 	if short {
 		// The reference releases an incomplete anon packet unrouted.
-		return verdictIgnored, "anon request too short", true
+		return bus.VerdictIgnored, "anon request too short", true
 	}
 	if !ok {
-		return "", "", false
+		return bus.VerdictNone, "", false
 	}
 	// What this cost — one scalar multiplication and a MAC sweep — is
 	// kept for the answer rather than paid again.
 	req, err := meshcore.ParseAnonRequest(a.Plain)
 	if errors.Is(err, meshcore.ErrIsLogin) {
 		rx.opened = &opened{sender: a.Sender, secret: a.Secret, plain: a.Plain}
-		return verdictAnon, "login request", true
+		return bus.VerdictAnon, "login request", true
 	}
 	if err != nil {
-		return verdictIgnored, "anon request truncated", true
+		return bus.VerdictIgnored, "anon request truncated", true
 	}
 	rx.opened = &opened{sender: a.Sender, secret: a.Secret, plain: a.Plain, req: req}
 	switch req.Kind {
 	case meshcore.AnonReqOwner:
-		return verdictAnon, "owner request — the name behind the key", true
+		return bus.VerdictAnon, "owner request — the name behind the key", true
 	case meshcore.AnonReqScopes:
-		return verdictAnon, "scopes request", true
+		return bus.VerdictAnon, "scopes request", true
 	case meshcore.AnonReqClock:
-		return verdictAnon, "clock request", true
+		return bus.VerdictAnon, "clock request", true
 	default:
-		return verdictAnon, "unknown anonymous request", true
+		return bus.VerdictAnon, "unknown anonymous request", true
 	}
 }
 

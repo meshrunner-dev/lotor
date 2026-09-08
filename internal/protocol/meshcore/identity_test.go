@@ -84,10 +84,10 @@ func TestDirectAddressingJudgedWithIdentity(t *testing.T) {
 	e.judge(newFakeDevice(), frame(notUs))
 
 	judged := drainJudged(t, sub)
-	if judged[0].Verdict != "would-relay-direct" {
+	if judged[0].Verdict != bus.VerdictRelayDirect {
 		t.Errorf("addressed to us = %q", judged[0].Verdict)
 	}
-	if judged[1].Verdict != "direct-not-addressed" {
+	if judged[1].Verdict != bus.VerdictNotAddressed {
 		t.Errorf("addressed elsewhere = %q", judged[1].Verdict)
 	}
 }
@@ -126,9 +126,9 @@ func TestFloodLoopThresholds(t *testing.T) {
 		0xDD, 0xEE, 0x11, 0x22, 0x06}
 	e.judge(newFakeDevice(), frame(wide))
 
-	want := []string{
-		"would-relay-flood", "would-relay-flood", "would-drop-flood-loop",
-		"would-drop-flood-loop", "would-relay-flood", "would-drop-flood-loop",
+	want := []bus.Verdict{
+		bus.VerdictRelayFlood, bus.VerdictRelayFlood, bus.VerdictDropLoop,
+		bus.VerdictDropLoop, bus.VerdictRelayFlood, bus.VerdictDropLoop,
 	}
 	judged := drainJudged(t, sub)
 	if len(judged) != len(want) {
@@ -157,7 +157,7 @@ func TestSelfAdvertRecognised(t *testing.T) {
 	e.judge(newFakeDevice(), frame(raw))
 
 	judged := drainJudged(t, sub)
-	if judged[0].Verdict != "self-advert" {
+	if judged[0].Verdict != bus.VerdictSelfAdvert {
 		t.Errorf("own echo = %q", judged[0].Verdict)
 	}
 	if judged[0].Node != "" {
@@ -181,10 +181,10 @@ func TestTraceNextHopJudgedWithIdentity(t *testing.T) {
 	e.judge(newFakeDevice(), frame(notUs))
 
 	judged := drainJudged(t, sub)
-	if judged[0].Verdict != "would-relay-trace" {
+	if judged[0].Verdict != bus.VerdictRelayTrace {
 		t.Errorf("trace next hop us = %q", judged[0].Verdict)
 	}
-	if judged[1].Verdict != "trace-not-addressed" {
+	if judged[1].Verdict != bus.VerdictTraceNotUs {
 		t.Errorf("trace next hop elsewhere = %q", judged[1].Verdict)
 	}
 }

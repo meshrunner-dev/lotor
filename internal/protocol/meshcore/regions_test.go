@@ -203,10 +203,10 @@ func TestUnscopedHopLimitBitesPlainFloodsAlone(t *testing.T) {
 		}
 		return rxOf(e, pkt)
 	}
-	if v, why := e.floodVerdict(build(false, 3), true); v != verdictDropFloodHops {
+	if v, why := e.floodVerdict(build(false, 3), true); v != bus.VerdictDropFloodHops {
 		t.Errorf("plain flood at 3 hops = %q (%s), want the unscoped limit to stop it", v, why)
 	}
-	if v, _ := e.floodVerdict(build(true, 3), true); v != verdictRelayFlood {
+	if v, _ := e.floodVerdict(build(true, 3), true); v != bus.VerdictRelayFlood {
 		t.Errorf("scoped flood at 3 hops = %q, want the unscoped limit not to touch it", v)
 	}
 }

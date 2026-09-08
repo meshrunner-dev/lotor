@@ -20,6 +20,7 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/correlation"
 )
 
@@ -33,10 +34,10 @@ import (
 // that shares the code path: a repeater teaches its own route through
 // its adverts, and answering a route with a route would double the
 // exchange for nothing.
-func (e *engine) pathVerdict(rx *reception) (verdict, why string, handled bool) {
+func (e *engine) pathVerdict(rx *reception) (verdict bus.Verdict, why string, handled bool) {
 	d, err := meshcore.ParseDatagram(rx.pkt.Payload)
 	if err != nil || e.id == nil || d.DestHash[0] != e.id.PubKey[0] {
-		return "", "", false
+		return bus.VerdictNone, "", false
 	}
 	for _, c := range e.acl.Matching(d.SrcHash[0]) {
 		plain, err := d.Open(c.Secret)
@@ -47,13 +48,13 @@ func (e *engine) pathVerdict(rx *reception) (verdict, why string, handled bool) 
 		if err != nil {
 			// Opened, so it was addressed to us and is ours to
 			// consume; unreadable, so there is nothing to learn.
-			return verdictIgnored, "route home badly encoded", true
+			return bus.VerdictIgnored, "route home badly encoded", true
 		}
 		e.learnOutPath(c, pr, rx.id)
-		return verdictClientPath, fmt.Sprintf("route home, %d hops",
+		return bus.VerdictClientPath, fmt.Sprintf("route home, %d hops",
 			meshcore.PathHops(pr.PathLen)), true
 	}
-	return "", "", false
+	return bus.VerdictNone, "", false
 }
 
 // learnOutPath records the route and refreshes the session on it. The

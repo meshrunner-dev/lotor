@@ -380,7 +380,7 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 			SignalRSSI: e.SignalRSSI, FreqErrHz: e.FreqErrHz,
 			Binding: e.Binding, CausedBy: causedBy, Airtime: e.Airtime,
 			Type: e.Type, Route: e.Route, Scope: e.Scope, PathLen: e.PathLen,
-			Verdict: e.Verdict, DuplicateOf: e.DuplicateOf,
+			Verdict: e.Verdict.String(), DuplicateOf: e.DuplicateOf,
 			Node: e.Node, PubKey: e.PubKey, Detail: e.Detail,
 		})
 	case bus.FrameCorrupt:

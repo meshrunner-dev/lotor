@@ -1817,7 +1817,7 @@ func watchMatch(j bus.FrameJudged, opts map[string]string) bool {
 	if v, ok := opts[scopeRelay]; ok && j.Relay != v {
 		return false
 	}
-	if v, ok := opts[optVerdict]; ok && j.Verdict != v {
+	if v, ok := opts[optVerdict]; ok && j.Verdict.String() != v {
 		return false
 	}
 	return true
@@ -1825,7 +1825,7 @@ func watchMatch(j bus.FrameJudged, opts map[string]string) bool {
 
 func watchLine(j bus.FrameJudged) string {
 	line := fmt.Sprintf("%s  %s %s /%d  %s",
-		j.Correlation.Short(), j.Type, j.Route, j.PathLen, j.Verdict)
+		j.Correlation.Short(), j.Type, j.Route, j.PathLen, j.Verdict.String())
 	if j.DuplicateOf != "" {
 		line += " → " + j.DuplicateOf
 	}

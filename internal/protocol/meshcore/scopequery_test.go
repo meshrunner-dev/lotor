@@ -7,6 +7,7 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/correlation"
 )
 
@@ -181,7 +182,7 @@ func TestScopeAnswerRetiresItsReceiveDeadline(t *testing.T) {
 	resp.Header = meshcore.MakeHeader(meshcore.RouteDirect,
 		meshcore.PayloadTypeResponse, meshcore.PayloadVer1)
 	rx := &reception{pkt: resp, id: correlation.New()}
-	if verdict, _, handled := e.scopeAnswer(rx); !handled || verdict != verdictScopeAnswer {
+	if verdict, _, handled := e.scopeAnswer(rx); !handled || verdict != bus.VerdictScopeAnswer {
 		t.Fatalf("answer = %q/%v", verdict, handled)
 	}
 	if e.pendingScope != nil {

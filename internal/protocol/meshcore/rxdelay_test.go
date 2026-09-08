@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/radio"
 )
 
@@ -100,7 +101,7 @@ func TestFloodHeldUntilDue(t *testing.T) {
 		t.Fatalf("still holding %d frames past due", len(e.held))
 	}
 	judged := drainJudged(t, sub)
-	if len(judged) != 1 || judged[0].Verdict != "would-drop-invalid-advert" {
+	if len(judged) != 1 || judged[0].Verdict != bus.VerdictDropBadAdvert {
 		t.Fatalf("judged %+v after the hold", judged)
 	}
 

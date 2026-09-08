@@ -118,7 +118,7 @@ func TestUnreadableAnonTrafficRoutesOn(t *testing.T) {
 	}
 	pkt.Header = meshcore.MakeHeader(meshcore.RouteFlood,
 		meshcore.PayloadTypeAnonReq, meshcore.PayloadVer1)
-	if v, _ := e.verdict(rxOf(e, pkt)); v != verdictDropFloodType && v != verdictRelayFlood {
+	if v, _ := e.verdict(rxOf(e, pkt)); v != bus.VerdictDropFloodType && v != bus.VerdictRelayFlood {
 		t.Fatalf("verdict = %q, want plain flood routing", v)
 	}
 
@@ -131,7 +131,7 @@ func TestUnreadableAnonTrafficRoutesOn(t *testing.T) {
 	}
 	pkt.Header = meshcore.MakeHeader(meshcore.RouteFlood,
 		meshcore.PayloadTypeAnonReq, meshcore.PayloadVer1)
-	if v, _ := e.verdict(rxOf(e, pkt)); v != verdictAnon {
+	if v, _ := e.verdict(rxOf(e, pkt)); v != bus.VerdictAnon {
 		t.Fatalf("verdict = %q, want anon-request", v)
 	}
 	before := len(e.queue.entries)

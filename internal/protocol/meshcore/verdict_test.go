@@ -7,11 +7,13 @@ import (
 	"time"
 
 	"meshrunner.dev/pkg/meshcore"
+
+	"meshrunner.dev/lotor/internal/bus"
 )
 
 // Reference gates, walked one by one. Raw frames:
 // [header][transport?][path_len][path…][payload…].
-func judgeOne(t *testing.T, raw []byte) string {
+func judgeOne(t *testing.T, raw []byte) bus.Verdict {
 	t.Helper()
 	e, sub := testEngine(t)
 	e.judge(newFakeDevice(), frame(raw))
@@ -24,14 +26,14 @@ func judgeOne(t *testing.T, raw []byte) string {
 
 func TestFloodGates(t *testing.T) {
 	// CONTROL and TRACE are never re-flooded by the reference.
-	if v := judgeOne(t, []byte{0x01 | 0x0B<<2, 0x00, 0x80}); v != "would-drop-flood-type" {
+	if v := judgeOne(t, []byte{0x01 | 0x0B<<2, 0x00, 0x80}); v != bus.VerdictDropFloodType {
 		t.Errorf("flood CONTROL = %q", v)
 	}
-	if v := judgeOne(t, []byte{0x01 | 0x09<<2, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 0}); v != "would-drop-flood-type" {
+	if v := judgeOne(t, []byte{0x01 | 0x09<<2, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 0}); v != bus.VerdictDropFloodType {
 		t.Errorf("flood TRACE = %q", v)
 	}
 	// RAW_CUSTOM: "don't flood route these".
-	if v := judgeOne(t, []byte{0x01 | 0x0F<<2, 0x00, 0xAA}); v != "would-drop-flood-type" {
+	if v := judgeOne(t, []byte{0x01 | 0x0F<<2, 0x00, 0xAA}); v != bus.VerdictDropFloodType {
 		t.Errorf("flood RAW_CUSTOM = %q", v)
 	}
 }
@@ -43,7 +45,7 @@ func TestFloodPathCapacity(t *testing.T) {
 	full = append(full, 0x01|0x05<<2, 32|0x40)
 	full = append(full, make([]byte, 64)...) // 32 × 2-byte hashes
 	full = append(full, 0xDD, 0xEE, 0x11, 0x22, 0x33)
-	if v := judgeOne(t, full); v != "would-drop-flood-path-full" {
+	if v := judgeOne(t, full); v != bus.VerdictDropPathFull {
 		t.Errorf("full path = %q", v)
 	}
 	// 31 hops of 2 bytes still fits one more.
@@ -51,14 +53,14 @@ func TestFloodPathCapacity(t *testing.T) {
 	fits = append(fits, 0x01|0x05<<2, 31|0x40)
 	fits = append(fits, make([]byte, 62)...)
 	fits = append(fits, 0xDD, 0xEE, 0x11, 0x22, 0x33)
-	if v := judgeOne(t, fits); v != "would-relay-flood" {
+	if v := judgeOne(t, fits); v != bus.VerdictRelayFlood {
 		t.Errorf("path with room = %q", v)
 	}
 }
 
 func TestUnsupportedVersion(t *testing.T) {
 	// Version bits 01: the reference dispatcher rejects at parse.
-	if v := judgeOne(t, []byte{0x40 | 0x01 | 0x05<<2, 0x00, 0xDD}); v != "unsupported-version" {
+	if v := judgeOne(t, []byte{0x40 | 0x01 | 0x05<<2, 0x00, 0xDD}); v != bus.VerdictBadVersion {
 		t.Errorf("version 1 = %q", v)
 	}
 }
@@ -73,12 +75,12 @@ func TestTraceWalk(t *testing.T) {
 	}
 	// Nothing walked yet: in transit.
 	transit := append([]byte{0x02 | 0x09<<2, 0x00}, tracePayload()...)
-	if v := judgeOne(t, transit); v != "trace-transit" {
+	if v := judgeOne(t, transit); v != bus.VerdictTraceTransit {
 		t.Errorf("trace at hop 0 = %q", v)
 	}
 	// Two SNR bytes accumulated: the whole target path is walked.
 	arrived := append([]byte{0x02 | 0x09<<2, 0x02, 0x10, 0x14}, tracePayload()...)
-	if v := judgeOne(t, arrived); v != "trace-arrived" {
+	if v := judgeOne(t, arrived); v != bus.VerdictTraceArrived {
 		t.Errorf("trace at end = %q", v)
 	}
 }
@@ -100,9 +102,9 @@ func TestSeenRingEvictsOldestByCapacity(t *testing.T) {
 	e.judge(newFakeDevice(), frame(c)) // still remembered: duplicate
 
 	judged := drainJudged(t, sub)
-	want := []string{
-		"would-relay-flood", "would-relay-flood", "would-relay-flood",
-		"would-relay-flood", "duplicate",
+	want := []bus.Verdict{
+		bus.VerdictRelayFlood, bus.VerdictRelayFlood, bus.VerdictRelayFlood,
+		bus.VerdictRelayFlood, bus.VerdictDuplicate,
 	}
 	for i, w := range want {
 		if judged[i].Verdict != w {
@@ -142,11 +144,11 @@ func TestTruncatedFloodsAreNotRelayed(t *testing.T) {
 	}
 	for _, c := range cases {
 		short := append([]byte{0x01 | c.ptype<<2, 0x00}, c.below...)
-		if v := judgeOne(t, short); v != "would-drop-flood-truncated" {
+		if v := judgeOne(t, short); v != bus.VerdictDropFloodShort {
 			t.Errorf("%s one byte short = %q", c.name, v)
 		}
 		whole := append([]byte{0x01 | c.ptype<<2, 0x00}, c.whole...)
-		if v := judgeOne(t, whole); v != "would-relay-flood" {
+		if v := judgeOne(t, whole); v != bus.VerdictRelayFlood {
 			t.Errorf("%s at the boundary = %q", c.name, v)
 		}
 	}
@@ -155,11 +157,11 @@ func TestTruncatedFloodsAreNotRelayed(t *testing.T) {
 	// anonymous path before the flood gate ever sees it, which is the
 	// same refusal under the reference's own word for it.
 	anonShort := append([]byte{0x01 | byte(meshcore.PayloadTypeAnonReq)<<2, 0x00, 0xDD}, make([]byte, 33)...)
-	if v := judgeOne(t, anonShort); v != "ignored" {
+	if v := judgeOne(t, anonShort); v != bus.VerdictIgnored {
 		t.Errorf("anon one byte short = %q", v)
 	}
 	anonWhole := append([]byte{0x01 | byte(meshcore.PayloadTypeAnonReq)<<2, 0x00, 0xDD}, make([]byte, 35)...)
-	if v := judgeOne(t, anonWhole); v != "would-relay-flood" {
+	if v := judgeOne(t, anonWhole); v != bus.VerdictRelayFlood {
 		t.Errorf("anon at the boundary = %q", v)
 	}
 }
@@ -182,7 +184,7 @@ func TestOnlyTheHighBitControlSubsetIsAnswered(t *testing.T) {
 	// High bit set, zero hops: the subset the reference answers.
 	e.judge(newFakeDevice(), frame([]byte{0x02 | 0x0B<<2, 0x00, 0x80, 0x05}))
 
-	want := []string{"ignored", "would-relay-direct", "direct-not-addressed", "heard-zero-hop"}
+	want := []bus.Verdict{bus.VerdictIgnored, bus.VerdictRelayDirect, bus.VerdictNotAddressed, bus.VerdictZeroHop}
 	judged := drainJudged(t, sub)
 	if len(judged) != len(want) {
 		t.Fatalf("judged %d frames, want %d", len(judged), len(want))
@@ -221,7 +223,7 @@ func TestARejectedVersionTouchesNothing(t *testing.T) {
 	e.judge(newFakeDevice(), frame(raw))
 
 	judged := drainJudged(t, sub)
-	if len(judged) != 1 || judged[0].Verdict != "unsupported-version" {
+	if len(judged) != 1 || judged[0].Verdict != bus.VerdictBadVersion {
 		t.Fatalf("judged %+v", judged)
 	}
 	if n := len(e.Neighbours()); n != 0 {
@@ -237,7 +239,7 @@ func TestARejectedVersionTouchesNothing(t *testing.T) {
 	}
 	e.judge(newFakeDevice(), frame(raw))
 	judged = drainJudged(t, sub)
-	if len(judged) != 1 || judged[0].Verdict == "duplicate" {
+	if len(judged) != 1 || judged[0].Verdict == bus.VerdictDuplicate {
 		t.Fatalf("the rejected frame reserved a slot: %+v", judged)
 	}
 }
@@ -263,10 +265,10 @@ func TestATraceVerdictPromisesOnlyWhatTheWalkAllows(t *testing.T) {
 	if len(judged) != 2 {
 		t.Fatalf("judged %d frames", len(judged))
 	}
-	if judged[0].Verdict != "ignored" {
+	if judged[0].Verdict != bus.VerdictIgnored {
 		t.Errorf("a trace the walk would refuse was judged %q", judged[0].Verdict)
 	}
-	if judged[1].Verdict != "would-relay-trace" {
+	if judged[1].Verdict != bus.VerdictRelayTrace {
 		t.Errorf("a walkable trace was judged %q", judged[1].Verdict)
 	}
 	// And what the verdict promised, the transform delivers.

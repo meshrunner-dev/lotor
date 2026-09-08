@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"meshrunner.dev/pkg/meshcore"
+
+	"meshrunner.dev/lotor/internal/bus"
 )
 
 func TestScanningTheNeighbourhood(t *testing.T) {
@@ -104,7 +106,7 @@ func TestLocalAnswerIsNotAnRFNeighbour(t *testing.T) {
 	rx := rxOf(e, resp)
 	rx.frame.Binding = "station:alice"
 	e.pendingSweep = pending
-	if verdict, _, handled := e.sweepAnswer(rx); !handled || verdict != verdictDiscoverAnswer {
+	if verdict, _, handled := e.sweepAnswer(rx); !handled || verdict != bus.VerdictDiscoverAnswer {
 		t.Fatalf("local answer = %q, handled %t", verdict, handled)
 	}
 	if len(e.Neighbours()) != 0 {

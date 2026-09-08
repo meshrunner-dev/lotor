@@ -179,10 +179,10 @@ func seed(t *testing.T, deps Deps) (orig, dup correlation.ID) {
 			Bytes: 132, RSSI: rssi, SNR: 8.5, Airtime: 1295 * time.Millisecond}
 	}
 	judged := judgedAt(orig, -69)
-	judged.Verdict, judged.Type, judged.Route, judged.PathLen = "would-relay-flood", "ADVERT", "FLOOD", 5
+	judged.Verdict, judged.Type, judged.Route, judged.PathLen = bus.VerdictRelayFlood, "ADVERT", "FLOOD", 5
 	judged.Node, judged.PubKey, judged.Detail = "Radio-Club", "17c74bb65391", "repeater"
 	dupJudged := judgedAt(dup, -29)
-	dupJudged.Verdict, dupJudged.DuplicateOf = "duplicate", orig.Short()
+	dupJudged.Verdict, dupJudged.DuplicateOf = bus.VerdictDuplicate, orig.Short()
 	dupJudged.Type, dupJudged.Route, dupJudged.PathLen = "ADVERT", "FLOOD", 5
 	for _, ev := range []bus.Event{judged, dupJudged} {
 		deps.Sentinel.Process(ctx, ev)
@@ -402,7 +402,7 @@ func TestArchivedRelayStaysAddressable(t *testing.T) {
 	id := correlation.New()
 	deps.Sentinel.Process(ctx, bus.FrameJudged{
 		Relay: "meshcore-433", Correlation: id, At: time.Now(), Bytes: 20, RSSI: -90, SNR: 5,
-		Verdict: "would-relay-flood", Type: "ADVERT", Route: "FLOOD"})
+		Verdict: bus.VerdictRelayFlood, Type: "ADVERT", Route: "FLOOD"})
 	deps.Sentinel.Process(ctx, bus.NoiseFloor{
 		Relay: "meshcore-433", At: time.Now(), DBm: -101})
 
@@ -509,7 +509,7 @@ func TestLocalHandOverIsRenderedWithoutInventedRFMeasurements(t *testing.T) {
 	deps.Sentinel.Process(context.Background(), bus.FrameJudged{
 		Relay: "meshcore-868", Correlation: received, Binding: "station:alice", CausedBy: cause,
 		At: time.Now(), Bytes: 32, Type: "GRP_TXT", Route: "FLOOD",
-		Verdict: "heard-on-our-own-radio",
+		Verdict: bus.VerdictSameRadio,
 	})
 
 	listed := run(t, deps, "frames")
@@ -571,7 +571,7 @@ func TestNodesAdmitsAnUnmeasuredRSSI(t *testing.T) {
 	deps := testDeps(t)
 	deps.Sentinel.Process(context.Background(), bus.FrameJudged{
 		Relay: "meshcore-868", Correlation: correlation.New(), At: time.Now(),
-		Verdict: "would-relay-flood",
+		Verdict: bus.VerdictRelayFlood,
 		Type:    "ADVERT", Route: "FLOOD", Node: "Ghost", PubKey: "aabbccddeeff",
 	})
 	out := run(t, deps, "nodes")

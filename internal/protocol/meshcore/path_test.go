@@ -10,6 +10,7 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
 )
@@ -43,7 +44,7 @@ func teachPath(t *testing.T, self, peer *meshcore.LocalIdentity,
 // pipeline would. The engine is not running in these tests: the ACL
 // belongs to the engine's goroutine, and a test that reads it must be
 // the one that wrote it.
-func drive(t *testing.T, e *engine, f radio.Frame) string {
+func drive(t *testing.T, e *engine, f radio.Frame) bus.Verdict {
 	t.Helper()
 	pkt, err := meshcore.ParsePacket(f.Payload)
 	if err != nil {
@@ -51,7 +52,7 @@ func drive(t *testing.T, e *engine, f radio.Frame) string {
 	}
 	rx := rxOf(e, pkt)
 	v, _ := e.verdict(rx)
-	if v == verdictAnon {
+	if v == bus.VerdictAnon {
 		e.respondAnon(rx, correlation.New())
 	}
 	return v
@@ -130,7 +131,7 @@ func TestRouteHomeIsLearnedAndTheNewestWins(t *testing.T) {
 		t.Fatal("a fresh session already knows a route home")
 	}
 
-	if v := drive(t, e, teachPath(t, e.id, peer, 2, []byte{0xAA, 0xBB})); v != verdictClientPath {
+	if v := drive(t, e, teachPath(t, e.id, peer, 2, []byte{0xAA, 0xBB})); v != bus.VerdictClientPath {
 		t.Fatalf("verdict = %q, want the route to be learned", v)
 	}
 	if c.Out == nil || c.Out.PathLen != 2 || string(c.Out.Path) != string([]byte{0xAA, 0xBB}) {
@@ -147,7 +148,7 @@ func TestRouteHomeIsLearnedAndTheNewestWins(t *testing.T) {
 	}
 
 	// The client moved, and says so: the older route no longer reaches.
-	if v := drive(t, e, teachPath(t, e.id, peer, 1, []byte{0xCC})); v != verdictClientPath {
+	if v := drive(t, e, teachPath(t, e.id, peer, 1, []byte{0xCC})); v != bus.VerdictClientPath {
 		t.Fatalf("verdict = %q", v)
 	}
 	if c.Out.PathLen != 1 || string(c.Out.Path) != string([]byte{0xCC}) {
@@ -182,7 +183,7 @@ func TestRouteLearningLogKeepsTheFrameCorrelation(t *testing.T) {
 func TestARouteFromAStrangerIsNotLearned(t *testing.T) {
 	e, _, _, peer := txRig(t, "shadow")
 	// No login: nothing here opens it, and it is not ours to read.
-	if v := drive(t, e, teachPath(t, e.id, peer, 2, []byte{0xAA, 0xBB})); v == verdictClientPath {
+	if v := drive(t, e, teachPath(t, e.id, peer, 2, []byte{0xAA, 0xBB})); v == bus.VerdictClientPath {
 		t.Fatal("a stranger taught us a route home")
 	}
 	if e.acl.Get(peer.PubKey[:]) != nil {

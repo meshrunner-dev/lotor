@@ -44,18 +44,18 @@ func newLimits() limits {
 // only at zero hops and releases the rest (Mesh::onRecvPacket: "just
 // zero-hop control packets allowed"): a subset packet that walked a
 // path is nobody's to carry onward.
-func (e *engine) controlVerdict(rx *reception) (string, string) {
+func (e *engine) controlVerdict(rx *reception) (bus.Verdict, string) {
 	pkt := rx.pkt
 	if pkt.PathHashCount() != 0 {
-		return verdictIgnored, "control outside the zero-hop subset"
+		return bus.VerdictIgnored, "control outside the zero-hop subset"
 	}
 	if v, why, handled := e.sweepAnswer(rx); handled {
 		return v, why
 	}
 	if req, err := meshcore.ParseDiscoverReq(pkt); err == nil {
-		return verdictDiscover, fmt.Sprintf("filter %#02x tag %08x", byte(req.Filter), req.Tag)
+		return bus.VerdictDiscover, fmt.Sprintf("filter %#02x tag %08x", byte(req.Filter), req.Tag)
 	}
-	return verdictZeroHop, ""
+	return bus.VerdictZeroHop, ""
 }
 
 // respondDiscover answers a neighbourhood scan: presence, our key,

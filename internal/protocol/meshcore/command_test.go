@@ -7,6 +7,7 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/radio"
 )
 
@@ -432,7 +433,7 @@ func TestOnlyCommandSubtypesReachTheMutationDoor(t *testing.T) {
 		rx := rxOf(e, pkt)
 		verdict, _ := e.verdict(rx)
 		if c.command {
-			if verdict != verdictCommand {
+			if verdict != bus.VerdictCommand {
 				t.Errorf("%s: verdict %q, want a command", c.name, verdict)
 				continue
 			}
@@ -442,7 +443,7 @@ func TestOnlyCommandSubtypesReachTheMutationDoor(t *testing.T) {
 			}
 			continue
 		}
-		if verdict == verdictCommand {
+		if verdict == bus.VerdictCommand {
 			t.Errorf("%s: judged a command", c.name)
 		}
 		e.runCommand(rx, rx.id)
@@ -556,7 +557,7 @@ func TestALegacyCommandIsAcknowledgedEvenOnRetry(t *testing.T) {
 
 		at := time.Unix(int64(nowTS(10)), 0)
 		first := rxOf(e, typedCommandPacket(t, e.id, peer, at, c.txtType, "ver"))
-		if v, _ := e.verdict(first); v != verdictCommand {
+		if v, _ := e.verdict(first); v != bus.VerdictCommand {
 			t.Fatalf("%s: verdict %q, want a command", c.name, v)
 		}
 		e.runCommand(first, first.id)
@@ -571,7 +572,7 @@ func TestALegacyCommandIsAcknowledgedEvenOnRetry(t *testing.T) {
 		// the answer is silence — but a client owed an ACK gets it.
 		e.queue.entries = nil
 		again := rxOf(e, typedCommandPacket(t, e.id, peer, at, c.txtType, "ver"))
-		if v, _ := e.verdict(again); v != verdictCommand {
+		if v, _ := e.verdict(again); v != bus.VerdictCommand {
 			t.Fatalf("%s: retry verdict %q", c.name, v)
 		}
 		e.runCommand(again, again.id)

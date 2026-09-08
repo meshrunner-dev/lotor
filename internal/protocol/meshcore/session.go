@@ -182,14 +182,14 @@ func loginReply(c *client) (uint32, []byte, error) {
 
 // reqVerdict judges an authenticated request: ours to read only when a
 // live session's MAC verifies over it.
-func (e *engine) reqVerdict(rx *reception) (verdict, why string, handled bool) {
+func (e *engine) reqVerdict(rx *reception) (verdict bus.Verdict, why string, handled bool) {
 	c, plain := e.openReq(rx.pkt)
 	if c == nil {
-		return "", "", false // not ours, or no session: route it on
+		return bus.VerdictNone, "", false // not ours, or no session: route it on
 	}
 	// The MAC sweep this took is kept for the answer.
 	rx.opened = &opened{session: c, secret: c.Secret, plain: plain}
-	return verdictRequest, "authenticated request", true
+	return bus.VerdictRequest, "authenticated request", true
 }
 
 // openReq finds the session that sent a REQ and returns its decrypted

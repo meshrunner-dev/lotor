@@ -19,6 +19,7 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/meshcorehost"
 )
@@ -52,27 +53,27 @@ func commandSubtype(t uint8) bool {
 // every companion in the field, which is the interoperability this
 // daemon exists to keep; the MAC is what says an order is authentic,
 // and the subtype only says which dialect asked.
-func (e *engine) cmdVerdict(rx *reception) (verdict, why string, handled bool) {
+func (e *engine) cmdVerdict(rx *reception) (verdict bus.Verdict, why string, handled bool) {
 	c, plain := e.openText(rx.pkt)
 	if c == nil {
-		return "", "", false
+		return bus.VerdictNone, "", false
 	}
 	if !c.IsAdmin() {
-		return "", "", false
+		return bus.VerdictNone, "", false
 	}
 	text, err := meshcore.ParseTextPlaintext(plain)
 	if err != nil {
-		return "", "", false
+		return bus.VerdictNone, "", false
 	}
 	if !commandSubtype(text.Type) {
 		// Authenticated, addressed here, and not a command: it is the
 		// admin's own traffic, judged like anyone else's.
-		return "", "", false
+		return bus.VerdictNone, "", false
 	}
 	// The decode is kept: running it twice would let the verdict and
 	// the action disagree about what was said.
 	rx.opened = &opened{session: c, secret: c.Secret, plain: plain, text: text}
-	return verdictCommand, "administration from a logged-in admin", true
+	return bus.VerdictCommand, "administration from a logged-in admin", true
 }
 
 // openText finds the session that sent a TXT_MSG and returns its

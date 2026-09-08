@@ -14,6 +14,7 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
 )
@@ -191,32 +192,32 @@ func (e *engine) scopeRequest(q *scopeQuery) (*meshcore.Packet, error) {
 // Anything else routes on untouched — including a response addressed
 // to somebody whose hash prefix happens to match ours, which the MAC
 // is what tells apart.
-func (e *engine) scopeAnswer(rx *reception) (verdict, why string, handled bool) {
+func (e *engine) scopeAnswer(rx *reception) (verdict bus.Verdict, why string, handled bool) {
 	q := e.pendingScope
 	if q == nil || e.id == nil {
-		return "", "", false
+		return bus.VerdictNone, "", false
 	}
 	d, err := meshcore.ParseDatagram(rx.pkt.Payload)
 	if err != nil || d.DestHash[0] != e.id.PubKey[0] || d.SrcHash[0] != q.peer[0] {
-		return "", "", false
+		return bus.VerdictNone, "", false
 	}
 	plain, err := d.Open(q.secret)
 	if err != nil {
-		return "", "", false
+		return bus.VerdictNone, "", false
 	}
 	tag, body, err := meshcore.UnframeAdmin(plain)
 	if err != nil || tag != q.tag {
-		return "", "", false // an answer to a question we did not ask
+		return bus.VerdictNone, "", false // an answer to a question we did not ask
 	}
 	e.pendingScope = nil
 	reply, err := meshcore.ParseAnonReply(body)
 	if err != nil {
-		return "", "", false
+		return bus.VerdictNone, "", false
 	}
 	names := meshcore.ScopeNames(reply.Text)
 	select {
 	case q.answer <- names:
 	default:
 	}
-	return verdictScopeAnswer, fmt.Sprintf("carries %d scopes", len(names)), true
+	return bus.VerdictScopeAnswer, fmt.Sprintf("carries %d scopes", len(names)), true
 }

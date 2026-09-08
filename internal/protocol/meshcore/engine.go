@@ -927,20 +927,20 @@ func (e *engine) finishReceiveWindow() string {
 // other nodes: hops remain, and the head of the path is not ours to
 // serve. Traces and control packets keep their own judgement — their
 // targets do not ride the path head.
-func (e *engine) passingBy(pkt *meshcore.Packet) (string, bool) {
+func (e *engine) passingBy(pkt *meshcore.Packet) (bus.Verdict, bool) {
 	if !pkt.IsRouteDirect() || pkt.PathHashCount() == 0 {
-		return "", false
+		return bus.VerdictNone, false
 	}
 	// A trace's target does not ride the path head, and the high-bit
 	// control subset is answered rather than routed. Every other
 	// control packet is ordinary directed traffic.
 	if pkt.PayloadType() == meshcore.PayloadTypeTrace || highBitControl(pkt) {
-		return "", false
+		return bus.VerdictNone, false
 	}
 	if e.id != nil && e.id.HashMatches(pkt.Path[:min(pkt.PathHashSize(), len(pkt.Path))]) {
-		return "", false // ours to relay: witnessed and judged like anything else
+		return bus.VerdictNone, false // ours to relay: witnessed and judged like anything else
 	}
-	return verdictNotAddressed, true
+	return bus.VerdictNotAddressed, true
 }
 
 // Neighbours reports the nodes heard with no relay in between, newest
@@ -1041,9 +1041,9 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 	id, log := e.heard(frame)
 	pkt, err := meshcore.ParsePacket(frame.Payload)
 	if err != nil {
-		log.Debug("frame judged", zap.String("verdict", verdictMalformed), zap.Error(err))
+		log.Debug("frame judged", zap.String("verdict", bus.VerdictMalformed.String()), zap.Error(err))
 		j := e.judgedEvent(id, frame)
-		j.Verdict = verdictMalformed
+		j.Verdict = bus.VerdictMalformed
 		e.bus.Publish(j)
 		return
 	}
@@ -1054,13 +1054,13 @@ func (e *engine) judge(dev radio.Device, frame radio.Frame) {
 	// wearing a version we reject was still naming neighbours.
 	if unsupportedVersion(pkt) {
 		if log.Core().Enabled(zap.DebugLevel) {
-			log.Debug("frame judged", zap.String("verdict", verdictBadVersion),
+			log.Debug("frame judged", zap.String("verdict", bus.VerdictBadVersion.String()),
 				zap.String("packet_hash", packetHashHex(pkt)),
 				zap.Stringer("type", pkt.PayloadType()), zap.Stringer("route", pkt.Route()),
 				zap.Int("hops", pkt.PathHashCount()))
 		}
 		j := e.judgedEvent(id, frame)
-		j.Verdict = verdictBadVersion
+		j.Verdict = bus.VerdictBadVersion
 		j.Type, j.Route = pkt.PayloadType().String(), pkt.Route().String()
 		j.PathLen = pkt.PathHashCount()
 		e.bus.Publish(j)
@@ -1125,7 +1125,7 @@ func (e *engine) process(dev radio.Device, pkt *meshcore.Packet, frame radio.Fra
 	// arrival.
 	if verdict, passing := e.passingBy(pkt); passing {
 		e.stats.countHeard(pkt, frame, false)
-		log.Debug("frame judged", zap.String("verdict", verdict))
+		log.Debug("frame judged", zap.String("verdict", verdict.String()))
 		judged.Verdict = verdict
 		e.bus.Publish(judged)
 		return
@@ -1133,10 +1133,10 @@ func (e *engine) process(dev radio.Device, pkt *meshcore.Packet, frame radio.Fra
 	if first, dup := e.seen.witness(pkt.Hash(), id, frame.At); dup {
 		e.stats.countHeard(pkt, frame, true)
 		log.Debug("frame judged",
-			zap.String("verdict", verdictDuplicate),
+			zap.String("verdict", bus.VerdictDuplicate.String()),
 			zap.String("duplicate_of", first.Short()),
 		)
-		judged.Verdict, judged.DuplicateOf = verdictDuplicate, first.Short()
+		judged.Verdict, judged.DuplicateOf = bus.VerdictDuplicate, first.Short()
 		e.bus.Publish(judged)
 		return
 	}
@@ -1151,7 +1151,7 @@ func (e *engine) process(dev radio.Device, pkt *meshcore.Packet, frame radio.Fra
 	if why != "" && judged.Detail == "" {
 		judged.Detail = why
 	}
-	log.Debug("frame judged", zap.String("verdict", verdict), zap.String("why", why))
+	log.Debug("frame judged", zap.String("verdict", verdict.String()), zap.String("why", why))
 	e.bus.Publish(judged)
 
 	if e.txEnabled() {

@@ -19,6 +19,7 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/radio"
 )
@@ -156,28 +157,28 @@ func (e *engine) drainSweepAsk(dev radio.Device, now time.Time) {
 // sweepAnswer harvests a discovery answer that belongs to our own
 // scan. The reference trusts one only on those terms — tag, window,
 // and not our own key coming back at us — and anything else routes on.
-func (e *engine) sweepAnswer(rx *reception) (verdict, why string, handled bool) {
+func (e *engine) sweepAnswer(rx *reception) (verdict bus.Verdict, why string, handled bool) {
 	s := e.pendingSweep
 	if s == nil || time.Now().After(s.until) {
-		return "", "", false
+		return bus.VerdictNone, "", false
 	}
 	resp, err := meshcore.ParseDiscoverResp(rx.pkt)
 	if err != nil || resp.Tag != s.tag {
-		return "", "", false
+		return bus.VerdictNone, "", false
 	}
 	if !rx.frame.HasRFMeasurements() {
-		return verdictDiscoverAnswer, rx.frame.Binding + " answered on our own radio", true
+		return bus.VerdictDiscoverAnswer, rx.frame.Binding + " answered on our own radio", true
 	}
 	if resp.NodeType != meshcore.AdvTypeRepeater || len(resp.PubKey) != meshcore.PubKeySize {
-		return verdictDiscoverAnswer, "an answer we cannot use", true
+		return bus.VerdictDiscoverAnswer, "an answer we cannot use", true
 	}
 	var key [meshcore.PubKeySize]byte
 	copy(key[:], resp.PubKey)
 	if e.id != nil && key == e.id.PubKey {
-		return verdictDiscoverAnswer, "our own answer echoing back", true
+		return bus.VerdictDiscoverAnswer, "our own answer echoing back", true
 	}
 	if s.seen[key] {
-		return verdictDiscoverAnswer, "already answered", true
+		return bus.VerdictDiscoverAnswer, "already answered", true
 	}
 	s.seen[key] = true
 
@@ -193,5 +194,5 @@ func (e *engine) sweepAnswer(rx *reception) (verdict, why string, handled bool) 
 	case s.found <- n:
 	default:
 	}
-	return verdictDiscoverAnswer, "a neighbour answering our scan", true
+	return bus.VerdictDiscoverAnswer, "a neighbour answering our scan", true
 }

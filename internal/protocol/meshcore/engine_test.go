@@ -143,9 +143,9 @@ func TestVerdicts(t *testing.T) {
 	e.judge(newFakeDevice(), frame([]byte{0x01})) // truncated
 
 	judged := drainJudged(t, sub)
-	want := []string{
-		"would-drop-invalid-advert", "heard-zero-hop", "direct-not-addressed",
-		"would-drop-flood-scoped", "direct-not-addressed", "malformed",
+	want := []bus.Verdict{
+		bus.VerdictDropBadAdvert, bus.VerdictZeroHop, bus.VerdictNotAddressed,
+		bus.VerdictDropScoped, bus.VerdictNotAddressed, bus.VerdictMalformed,
 	}
 	if len(judged) != len(want) {
 		t.Fatalf("judged %d frames, want %d", len(judged), len(want))
@@ -167,7 +167,7 @@ func TestDuplicateChainsToFirstCorrelation(t *testing.T) {
 	if len(judged) != 2 {
 		t.Fatalf("judged %d frames", len(judged))
 	}
-	if judged[1].Verdict != "duplicate" {
+	if judged[1].Verdict != bus.VerdictDuplicate {
 		t.Fatalf("second copy verdict = %q", judged[1].Verdict)
 	}
 	if judged[1].DuplicateOf != judged[0].Correlation.Short() {
@@ -186,7 +186,7 @@ func TestSeenTableExpires(t *testing.T) {
 	e.judge(newFakeDevice(), frame(grpTxt))
 
 	judged := drainJudged(t, sub)
-	if judged[1].Verdict != "would-relay-flood" {
+	if judged[1].Verdict != bus.VerdictRelayFlood {
 		t.Errorf("expired hash still judged %q", judged[1].Verdict)
 	}
 }

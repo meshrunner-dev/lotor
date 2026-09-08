@@ -596,14 +596,14 @@ func TestATransitCopyMustNotDeduplicateTheDelivery(t *testing.T) {
 
 	frame, _ := login(t, e.id, peer, nowTS(400), "raccoon", false)
 	e.judge(dev, withHops(t, frame, 0x77, 0x33))
-	if v := awaitJudged(t, sub); v.Verdict != verdictNotAddressed {
-		t.Fatalf("the transit copy was judged %q, want %q", v.Verdict, verdictNotAddressed)
+	if v := awaitJudged(t, sub); v.Verdict != bus.VerdictNotAddressed {
+		t.Fatalf("the transit copy was judged %q, want %q", v.Verdict, bus.VerdictNotAddressed)
 	}
 	e.judge(dev, frame)
 	v := awaitJudged(t, sub)
-	if v.Verdict != verdictAnon {
+	if v.Verdict != bus.VerdictAnon {
 		t.Fatalf("the delivery was judged %q, want %q — the transit copy poisoned the table",
-			v.Verdict, verdictAnon)
+			v.Verdict, bus.VerdictAnon)
 	}
 	if n := len(e.queue.entries); n != 1 {
 		t.Fatalf("%d replies queued, want the login answered once", n)
@@ -614,12 +614,12 @@ func TestATransitCopyMustNotDeduplicateTheDelivery(t *testing.T) {
 	frame2, _ := login(t, e.id, peer, nowTS(401), "raccoon", false)
 	relayed := withHops(t, frame2, e.id.PubKey[0], 0x33)
 	e.judge(dev, relayed)
-	if v := awaitJudged(t, sub); v.Verdict != verdictRelayDirect {
-		t.Fatalf("the next-hop copy was judged %q, want %q", v.Verdict, verdictRelayDirect)
+	if v := awaitJudged(t, sub); v.Verdict != bus.VerdictRelayDirect {
+		t.Fatalf("the next-hop copy was judged %q, want %q", v.Verdict, bus.VerdictRelayDirect)
 	}
 	e.judge(dev, relayed)
-	if v := awaitJudged(t, sub); v.Verdict != verdictDuplicate {
-		t.Fatalf("the echo of a relayed packet was judged %q, want %q", v.Verdict, verdictDuplicate)
+	if v := awaitJudged(t, sub); v.Verdict != bus.VerdictDuplicate {
+		t.Fatalf("the echo of a relayed packet was judged %q, want %q", v.Verdict, bus.VerdictDuplicate)
 	}
 }
 

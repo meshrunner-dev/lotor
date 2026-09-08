@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"meshrunner.dev/pkg/meshcore"
+
+	"meshrunner.dev/lotor/internal/bus"
 )
 
 func signedAdvert(t *testing.T, name string) []byte {
@@ -45,7 +47,7 @@ func TestAdvertsAreNamedAndVerified(t *testing.T) {
 	if len(j.PubKey) != keyPrefixLen {
 		t.Errorf("pubkey prefix = %q", j.PubKey)
 	}
-	if j.Verdict != "would-relay-flood" {
+	if j.Verdict != bus.VerdictRelayFlood {
 		t.Errorf("verdict = %q", j.Verdict)
 	}
 }
@@ -97,7 +99,7 @@ func TestDiscoveryRequestIsDescribed(t *testing.T) {
 		!strings.Contains(j.Detail, "repeaters") {
 		t.Errorf("detail = %q", j.Detail)
 	}
-	if j.Verdict != verdictDiscover {
+	if j.Verdict != bus.VerdictDiscover {
 		t.Errorf("verdict = %q — a scan deserves its own verdict now", j.Verdict)
 	}
 }

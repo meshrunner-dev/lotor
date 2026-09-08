@@ -60,7 +60,7 @@ func TestHeardThenJudgedBecomesOneRow(t *testing.T) {
 		Relay: "meshcore-868", Correlation: id, At: at,
 		Bytes: 132, RSSI: -69, SNR: 8.5, SignalRSSI: -74, FreqErrHz: 112,
 		Airtime: 1295 * time.Millisecond,
-		Verdict: "would-relay-flood", Type: "ADVERT", Route: "FLOOD", PathLen: 6,
+		Verdict: bus.VerdictRelayFlood, Type: "ADVERT", Route: "FLOOD", PathLen: 6,
 		Node: "Wanadoo", PubKey: "de1234567890", Detail: "repeater",
 	})
 
@@ -86,7 +86,7 @@ func TestLocalHandOverKeepsProvenanceAndCausalCorrelation(t *testing.T) {
 	s.Process(context.Background(), bus.FrameJudged{
 		Relay: "mc", Correlation: id, Binding: "station:alice", CausedBy: cause,
 		At: time.Now(), Bytes: 42, RSSI: -40, FreqErrHz: 120,
-		Type: "ADVERT", PubKey: "abc123", Verdict: "heard-on-our-own-radio",
+		Type: "ADVERT", PubKey: "abc123", Verdict: bus.VerdictSameRadio,
 	})
 
 	frames, err := s.RecentFrames(context.Background(), FrameQuery{Limit: 5})
@@ -347,7 +347,7 @@ func TestOrphanJudgementIsRecovered(t *testing.T) {
 	// The heard event was dropped by the bus; only the judgement lands.
 	s.Process(context.Background(), bus.FrameJudged{
 		Relay: "meshcore-868", Correlation: id,
-		Verdict: "would-relay-flood", Type: "ADVERT", Route: "FLOOD",
+		Verdict: bus.VerdictRelayFlood, Type: "ADVERT", Route: "FLOOD",
 	})
 
 	frames, err := s.RecentFrames(context.Background(), FrameQuery{Limit: 5})
@@ -366,7 +366,7 @@ func TestRedeliveredHeardPreservesJudgement(t *testing.T) {
 	heard := bus.FrameHeard{Relay: "r", Correlation: id, At: time.Now(), Bytes: 10}
 	s.Process(context.Background(), heard)
 	s.Process(context.Background(), bus.FrameJudged{
-		Relay: "r", Correlation: id, Verdict: "would-relay-flood", Type: "GRP_TXT", Route: "FLOOD",
+		Relay: "r", Correlation: id, Verdict: bus.VerdictRelayFlood, Type: "GRP_TXT", Route: "FLOOD",
 	})
 	s.Process(context.Background(), heard) // redelivery must not blank the verdict
 
@@ -384,11 +384,11 @@ func TestChainFindsSiblingsFromADuplicate(t *testing.T) {
 	root, dupA, dupB := correlation.New(), correlation.New(), correlation.New()
 	for _, ev := range []bus.Event{
 		bus.FrameHeard{Relay: "r", Correlation: root, At: time.Now()},
-		bus.FrameJudged{Relay: "r", Correlation: root, Verdict: "would-relay-flood"},
+		bus.FrameJudged{Relay: "r", Correlation: root, Verdict: bus.VerdictRelayFlood},
 		bus.FrameHeard{Relay: "r", Correlation: dupA, At: time.Now()},
-		bus.FrameJudged{Relay: "r", Correlation: dupA, Verdict: "duplicate", DuplicateOf: root.Short()},
+		bus.FrameJudged{Relay: "r", Correlation: dupA, Verdict: bus.VerdictDuplicate, DuplicateOf: root.Short()},
 		bus.FrameHeard{Relay: "r", Correlation: dupB, At: time.Now()},
-		bus.FrameJudged{Relay: "r", Correlation: dupB, Verdict: "duplicate", DuplicateOf: root.Short()},
+		bus.FrameJudged{Relay: "r", Correlation: dupB, Verdict: bus.VerdictDuplicate, DuplicateOf: root.Short()},
 	} {
 		s.Process(context.Background(), ev)
 	}
@@ -414,11 +414,11 @@ func TestNodesDirectoryIsAdvertOnly(t *testing.T) {
 	adv, ctl := correlation.New(), correlation.New()
 	for _, ev := range []bus.Event{
 		bus.FrameHeard{Relay: "r", Correlation: adv, At: time.Now()},
-		bus.FrameJudged{Relay: "r", Correlation: adv, Verdict: "would-relay-flood",
+		bus.FrameJudged{Relay: "r", Correlation: adv, Verdict: bus.VerdictRelayFlood,
 			Type: "ADVERT", Node: "Wanadoo", PubKey: "de247e12757f", Detail: "repeater"},
 		bus.FrameHeard{Relay: "r", Correlation: ctl, At: time.Now()},
 		// A hostile or legacy row: a non-advert frame carrying a key.
-		bus.FrameJudged{Relay: "r", Correlation: ctl, Verdict: "heard-zero-hop",
+		bus.FrameJudged{Relay: "r", Correlation: ctl, Verdict: bus.VerdictZeroHop,
 			Type: "CONTROL", PubKey: "attacker00000", Detail: "discovery response"},
 	} {
 		s.Process(context.Background(), ev)

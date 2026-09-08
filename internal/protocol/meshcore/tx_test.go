@@ -424,10 +424,10 @@ func TestFloodHopLimitsFollowTheReference(t *testing.T) {
 		fill(pkt, hops)
 		return pkt
 	}
-	if v, _ := e.floodVerdict(rxOf(e, advert(7)), true); v != verdictRelayFlood {
+	if v, _ := e.floodVerdict(rxOf(e, advert(7)), true); v != bus.VerdictRelayFlood {
 		t.Errorf("advert at 7 hops = %q, want a relay", v)
 	}
-	if v, why := e.floodVerdict(rxOf(e, advert(8)), true); v != verdictDropFloodHops {
+	if v, why := e.floodVerdict(rxOf(e, advert(8)), true); v != bus.VerdictDropFloodHops {
 		t.Errorf("advert at 8 hops = %q (%s), want the advert limit to stop it", v, why)
 	}
 
@@ -437,7 +437,7 @@ func TestFloodHopLimitsFollowTheReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	fill(txt, 8)
-	if v, _ := e.floodVerdict(rxOf(e, txt), false); v != verdictRelayFlood {
+	if v, _ := e.floodVerdict(rxOf(e, txt), false); v != bus.VerdictRelayFlood {
 		t.Errorf("text at 8 hops = %q, want a relay — only adverts stop that early", v)
 	}
 	// The reference's 64-hop ceiling is a belt: the 6-bit path count
@@ -445,11 +445,11 @@ func TestFloodHopLimitsFollowTheReference(t *testing.T) {
 	// never fire. A site that lowers the limit is what actually bites.
 	e.p.FloodMaxHops = 10
 	fill(txt, 10)
-	if v, _ := e.floodVerdict(rxOf(e, txt), false); v != verdictDropFloodHops {
+	if v, _ := e.floodVerdict(rxOf(e, txt), false); v != bus.VerdictDropFloodHops {
 		t.Errorf("text at 10 hops = %q under a limit of 10, want it stopped", v)
 	}
 	fill(txt, 9)
-	if v, _ := e.floodVerdict(rxOf(e, txt), false); v != verdictRelayFlood {
+	if v, _ := e.floodVerdict(rxOf(e, txt), false); v != bus.VerdictRelayFlood {
 		t.Errorf("text at 9 hops = %q under a limit of 10, want a relay", v)
 	}
 }
@@ -632,8 +632,8 @@ func TestSaturatedPathIsJudgedFull(t *testing.T) {
 	}
 	pkt.Path = make([]byte, maxPathHashes)
 	pkt.SetPathHashSizeAndCount(1, maxPathHashes)
-	if v, _ := e.floodVerdict(rxOf(e, pkt), true); v != verdictDropPathFull {
-		t.Fatalf("verdict = %q, want %q", v, verdictDropPathFull)
+	if v, _ := e.floodVerdict(rxOf(e, pkt), true); v != bus.VerdictDropPathFull {
+		t.Fatalf("verdict = %q, want %q", v, bus.VerdictDropPathFull)
 	}
 }
 
@@ -646,7 +646,7 @@ func TestAbandonedRelayIsCounted(t *testing.T) {
 	}
 	pkt.Path = make([]byte, maxPathHashes)
 	pkt.SetPathHashSizeAndCount(1, maxPathHashes)
-	e.relayFor(dev, rxOf(e, pkt), verdictRelayFlood)
+	e.relayFor(dev, rxOf(e, pkt), bus.VerdictRelayFlood)
 
 	select {
 	case ev := <-sub.C:
@@ -675,7 +675,7 @@ func TestAcksAreRelayedWithoutJitter(t *testing.T) {
 	ack.Path = []byte{e.id.PubKey[0], 0x77}
 	ack.SetPathHashSizeAndCount(1, 2)
 	before := time.Now()
-	e.relayFor(dev, rxOf(e, ack), verdictRelayDirect)
+	e.relayFor(dev, rxOf(e, ack), bus.VerdictRelayDirect)
 
 	if len(e.queue.entries) != 1 {
 		t.Fatalf("%d entries queued", len(e.queue.entries))
@@ -859,11 +859,11 @@ func TestPrioritiesFollowTheReferenceLadder(t *testing.T) {
 	}
 	pkt.Path = []byte{^e.id.PubKey[0], ^e.id.PubKey[0]}
 	pkt.SetPathHashSizeAndCount(1, 2)
-	e.relayFor(dev, rxOf(e, pkt), verdictRelayFlood)
+	e.relayFor(dev, rxOf(e, pkt), bus.VerdictRelayFlood)
 
 	e.advert(dev, time.Now(), "advert-flood", false)
 	e.advert(dev, time.Now(), "advert-local", true)
-	e.relayFor(dev, rxOf(e, traceMustParse(t, e)), verdictRelayTrace)
+	e.relayFor(dev, rxOf(e, traceMustParse(t, e)), bus.VerdictRelayTrace)
 
 	got := map[string]int{}
 	for _, entry := range e.queue.entries {
@@ -902,8 +902,8 @@ func TestScopedFloodMovesOnlyInAnAllowedRegion(t *testing.T) {
 	pkt.Header = meshcore.MakeHeader(meshcore.RouteTransportFlood,
 		meshcore.PayloadTypeAdvert, meshcore.PayloadVer1)
 	meshcore.TransportKeyForName("be").Scope(pkt)
-	if v, why := e.floodVerdict(rxOf(e, pkt), true); v != verdictDropScoped {
-		t.Fatalf("unknown scope = %q (%s), want %q", v, why, verdictDropScoped)
+	if v, why := e.floodVerdict(rxOf(e, pkt), true); v != bus.VerdictDropScoped {
+		t.Fatalf("unknown scope = %q (%s), want %q", v, why, bus.VerdictDropScoped)
 	}
 
 	be, err := e.regions.m.Put("be", 0)
@@ -911,19 +911,19 @@ func TestScopedFloodMovesOnlyInAnAllowedRegion(t *testing.T) {
 		t.Fatal(err)
 	}
 	be.Flags = 0
-	if v, why := e.floodVerdict(rxOf(e, pkt), true); v != verdictRelayFlood {
-		t.Fatalf("allowed scope = %q (%s), want %q", v, why, verdictRelayFlood)
+	if v, why := e.floodVerdict(rxOf(e, pkt), true); v != bus.VerdictRelayFlood {
+		t.Fatalf("allowed scope = %q (%s), want %q", v, why, bus.VerdictRelayFlood)
 	}
 
 	be.Flags = meshcore.RegionDenyFlood
-	if v, _ := e.floodVerdict(rxOf(e, pkt), true); v != verdictDropScoped {
+	if v, _ := e.floodVerdict(rxOf(e, pkt), true); v != bus.VerdictDropScoped {
 		t.Fatalf("a denied scope moved: verdict = %q", v)
 	}
 
 	// Opening or shutting plain traffic cannot change the transport
 	// decision.
 	e.regions.m.Wildcard().Flags = 0
-	if v, _ := e.floodVerdict(rxOf(e, pkt), true); v != verdictDropScoped {
+	if v, _ := e.floodVerdict(rxOf(e, pkt), true); v != bus.VerdictDropScoped {
 		t.Fatalf("the wildcard overrode a named denial: verdict = %q", v)
 	}
 }

@@ -4,41 +4,8 @@ import (
 	"fmt"
 
 	"meshrunner.dev/pkg/meshcore"
-)
 
-// Verdicts. The vocabulary is the dry run's contract: each "would-…"
-// names the action a transmitting relay will take under the same
-// judgement, each "would-drop-…" names the reference gate that stops
-// it. Reference: Mesh::onRecvPacket / Mesh::routeRecvPacket.
-const (
-	verdictRelayFlood     = "would-relay-flood"
-	verdictRelayDirect    = "would-relay-direct"         // our hash heads the path: the reference relays and consumes it
-	verdictRelayTrace     = "would-relay-trace"          // our hash is the trace's next target hop
-	verdictDropFloodType  = "would-drop-flood-type"      // the reference never re-floods this payload type
-	verdictDropFloodShort = "would-drop-flood-truncated" // the payload does not hold the envelope its type declares
-	verdictDropBadAdvert  = "would-drop-invalid-advert"  // flood advert whose signature fails
-	verdictDropPathFull   = "would-drop-flood-path-full" // appending our hash would exceed the path
-	verdictDropFloodHops  = "would-drop-flood-hops"      // the flood travelled past its hop limit
-	verdictDropLoop       = "would-drop-flood-loop"      // our hash already rides the path: we relayed this already
-	verdictDropScoped     = "would-drop-flood-scoped"    // transport-scoped flood into a scope this relay denies
-	verdictSelfAdvert     = "self-advert"                // our own advert echoing back
-	verdictSameRadio      = "heard-on-our-own-radio"     // a binding sharing this antenna: relaying reaches nobody new
-	verdictCommand        = "administration"             // a logged-in admin's command line
-	verdictZeroHop        = "heard-zero-hop"             // direct, empty path: addressed to whoever hears it
-	verdictNotAddressed   = "direct-not-addressed"       // the path's next hop is not us (or no identity exists)
-	verdictDiscover       = "discover-request"           // a zero-hop neighbourhood scan asking who hears it
-	verdictAnon           = "anon-request"               // a question sealed to our key, asker named in the clear
-	verdictDiscoverAnswer = "discover-answer"            // a neighbour answering a scan this node sent
-	verdictScopeAnswer    = "scopes-answer"              // a neighbour telling us what it carries, for our own question
-	verdictRequest        = "authenticated-request"      // a question from a client whose session we hold
-	verdictClientPath     = "client-route-home"          // a client teaching us how to reach it directly
-	verdictTraceTransit   = "trace-transit"              // trace walking its target path, next hop unjudgeable
-	verdictTraceNotUs     = "trace-not-addressed"        // trace walking its target path, next hop is not us
-	verdictTraceArrived   = "trace-arrived"              // trace consumed its whole target path
-	verdictBadVersion     = "unsupported-version"        // the reference dispatcher rejects it at parse
-	verdictIgnored        = "ignored"
-	verdictMalformed      = "malformed"
-	verdictDuplicate      = "duplicate"
+	"meshrunner.dev/lotor/internal/bus"
 )
 
 // maxPathBytes is the reference's path capacity (MAX_PATH_SIZE), and
@@ -153,10 +120,10 @@ func highBitControl(pkt *meshcore.Packet) bool {
 // reach its payload switch: a direct packet still walking a path is
 // somebody else's hop to carry, never ours to open. handled is false
 // for everything the ordinary routing should decide.
-func (e *engine) addressedToUs(rx *reception) (verdict, why string, handled bool) {
+func (e *engine) addressedToUs(rx *reception) (verdict bus.Verdict, why string, handled bool) {
 	pkt := rx.pkt
 	if !pkt.IsRouteFlood() && pkt.PathHashCount() != 0 {
-		return "", "", false
+		return bus.VerdictNone, "", false
 	}
 	switch pkt.PayloadType() {
 	case meshcore.PayloadTypeAnonReq:
@@ -176,14 +143,14 @@ func (e *engine) addressedToUs(rx *reception) (verdict, why string, handled bool
 		// routes on.
 		return e.scopeAnswer(rx)
 	default:
-		return "", "", false
+		return bus.VerdictNone, "", false
 	}
 }
 
-func (e *engine) verdict(rx *reception) (string, string) {
+func (e *engine) verdict(rx *reception) (bus.Verdict, string) {
 	pkt := rx.pkt
 	if unsupportedVersion(pkt) {
-		return verdictBadVersion, ""
+		return bus.VerdictBadVersion, ""
 	}
 	// Requests addressed to us are examined before any routing: the
 	// reference decrypts first and forwards only what it could not
@@ -194,7 +161,7 @@ func (e *engine) verdict(rx *reception) (string, string) {
 	switch {
 	case rx.selfAdvert:
 		// The reference releases its own adverts before any routing.
-		return verdictSelfAdvert, ""
+		return bus.VerdictSelfAdvert, ""
 	case pkt.IsRouteFlood():
 		v, why := e.floodVerdict(rx, rx.advertOK)
 		if scope, _ := e.regionOf(rx); scope != "" && scope != wildcardRegion {
@@ -213,20 +180,20 @@ func (e *engine) verdict(rx *reception) (string, string) {
 			return e.controlVerdict(rx)
 		}
 		if pkt.PathHashCount() == 0 {
-			return verdictZeroHop, ""
+			return bus.VerdictZeroHop, ""
 		}
 		// The reference relays a direct packet only when its own hash
 		// heads the path; consuming it is the transmit path's future.
 		if e.id != nil && e.id.HashMatches(pkt.Path[:min(pkt.PathHashSize(), len(pkt.Path))]) {
-			return verdictRelayDirect, ""
+			return bus.VerdictRelayDirect, ""
 		}
-		return verdictNotAddressed, ""
+		return bus.VerdictNotAddressed, ""
 	default:
-		return verdictIgnored, ""
+		return bus.VerdictIgnored, ""
 	}
 }
 
-func (e *engine) floodVerdict(rx *reception, advertOK bool) (string, string) {
+func (e *engine) floodVerdict(rx *reception, advertOK bool) (bus.Verdict, string) {
 	pkt := rx.pkt
 	// This flood already left through our antenna: a binding on this
 	// controller emitted it, so every node that would hear the relay
@@ -236,30 +203,30 @@ func (e *engine) floodVerdict(rx *reception, advertOK bool) (string, string) {
 	// to carry it, whoever sent it. No reference gate says any of
 	// this, the reference never having two identities on one radio.
 	if rx.frame.Binding != "" {
-		return verdictSameRadio, rx.frame.Binding + " shares our antenna"
+		return bus.VerdictSameRadio, rx.frame.Binding + " shares our antenna"
 	}
 	// A plain flood is governed by the wildcard. A transport flood is
 	// carried only when one flood-allowed named region verifies its
 	// code: the wildcard is the absence of a region, never a fallback
 	// for an unknown one.
 	if _, carried := e.regionOf(rx); !carried {
-		return verdictDropScoped, "unknown transport code or flood denied"
+		return bus.VerdictDropScoped, "unknown transport code or flood denied"
 	}
 	t := pkt.PayloadType()
 	if !floodRoutable[t] {
-		return verdictDropFloodType, ""
+		return bus.VerdictDropFloodType, ""
 	}
 	if t == meshcore.PayloadTypeAdvert && !advertOK {
-		return verdictDropBadAdvert, ""
+		return bus.VerdictDropBadAdvert, ""
 	}
 	if !floodEnvelopeIntact(pkt) {
-		return verdictDropFloodShort, "the payload is shorter than its own envelope"
+		return bus.VerdictDropFloodShort, "the payload is shorter than its own envelope"
 	}
 	// Both halves of what appending our hash requires: the bytes must
 	// fit, and the count must stay inside its 6-bit field. Judging on
 	// the byte length alone promised a relay the append would refuse.
 	if next := pkt.PathHashCount() + 1; next > maxPathHashes || next*pkt.PathHashSize() > maxPathBytes {
-		return verdictDropPathFull, ""
+		return bus.VerdictDropPathFull, ""
 	}
 	// The distance gate the reference applies through
 	// allowPacketForward → isFloodHopLimitExceeded, in the same place:
@@ -267,14 +234,14 @@ func (e *engine) floodVerdict(rx *reception, advertOK bool) (string, string) {
 	hops := pkt.PathHashCount()
 	maxHops, maxUnscopedHops, maxAdvertHops := e.floodHopCaps()
 	if hops >= maxHops {
-		return verdictDropFloodHops, fmt.Sprintf("%d hops, limit %d", hops, maxHops)
+		return bus.VerdictDropFloodHops, fmt.Sprintf("%d hops, limit %d", hops, maxHops)
 	}
 	if !pkt.HasTransportCodes() && hops >= maxUnscopedHops {
-		return verdictDropFloodHops,
+		return bus.VerdictDropFloodHops,
 			fmt.Sprintf("%d unscoped hops, limit %d", hops, maxUnscopedHops)
 	}
 	if t == meshcore.PayloadTypeAdvert && hops >= maxAdvertHops {
-		return verdictDropFloodHops, fmt.Sprintf("%d advert hops, limit %d", hops, maxAdvertHops)
+		return bus.VerdictDropFloodHops, fmt.Sprintf("%d advert hops, limit %d", hops, maxAdvertHops)
 	}
 	// The repeater's orbit gate: count how many times our hash
 	// already rides the path. At narrow widths a match may be another
@@ -291,11 +258,11 @@ func (e *engine) floodVerdict(rx *reception, advertOK bool) (string, string) {
 			}
 		}
 		if n >= limit {
-			return verdictDropLoop, fmt.Sprintf(
+			return bus.VerdictDropLoop, fmt.Sprintf(
 				"our hash rides the path %d times — %s tolerates %d", n, e.p.loopDetect(), limit-1)
 		}
 	}
-	return verdictRelayFlood, ""
+	return bus.VerdictRelayFlood, ""
 }
 
 // The orbit gate's vocabulary and thresholds. loopMaxima[mode][w] is
@@ -325,10 +292,10 @@ var loopMaxima = map[string][4]int{
 // carries the target path (tag, auth, flags, then hashes of
 // 1<<(flags&3) bytes each) and the packet's own path accumulates one
 // SNR byte per hop walked.
-func (e *engine) traceVerdict(pkt *meshcore.Packet) (string, string) {
+func (e *engine) traceVerdict(pkt *meshcore.Packet) (bus.Verdict, string) {
 	tr, err := meshcore.ParseTrace(pkt)
 	if err != nil {
-		return verdictIgnored, "trace payload too short"
+		return bus.VerdictIgnored, "trace payload too short"
 	}
 	// The route is a list of node hashes, one per planned hop; the
 	// walked path is one SNR byte per hop already taken. The hop we
@@ -339,12 +306,12 @@ func (e *engine) traceVerdict(pkt *meshcore.Packet) (string, string) {
 	why := fmt.Sprintf("hop %d of %d", walked, total)
 	switch {
 	case offset >= len(tr.Route):
-		return verdictTraceArrived, fmt.Sprintf("walked %d hops", walked)
+		return bus.VerdictTraceArrived, fmt.Sprintf("walked %d hops", walked)
 	case e.id == nil:
-		return verdictTraceTransit, why
+		return bus.VerdictTraceTransit, why
 	case e.id.HashMatches(tr.Route[offset:min(offset+tr.HashWidth, len(tr.Route))]):
-		return verdictRelayTrace, why
+		return bus.VerdictRelayTrace, why
 	default:
-		return verdictTraceNotUs, why
+		return bus.VerdictTraceNotUs, why
 	}
 }

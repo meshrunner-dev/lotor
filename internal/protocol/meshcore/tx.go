@@ -310,18 +310,18 @@ func (e *engine) scheduleAfter(pkt *meshcore.Packet, kind string, origin correla
 // relayFor turns a judged reception into its scheduled retransmission.
 // The packet is copied — the transforms must not write through the
 // received frame — and the transform follows the verdict.
-func (e *engine) relayFor(dev radio.Device, rx *reception, verdict string) {
+func (e *engine) relayFor(dev radio.Device, rx *reception, verdict bus.Verdict) {
 	pkt, origin, snr := rx.pkt, rx.id, rx.frame.SNR
 	cp := *pkt
 	switch verdict {
-	case verdictRelayFlood:
+	case bus.VerdictRelayFlood:
 		if err := cp.AppendPathHash(e.selfHash(cp.PathHashSize())); err != nil {
 			e.abandonKind(origin, "malformed", "relay-flood", "flood relay path append failed", err)
 			return
 		}
 		// Priority = distance: the hop count with our hash appended.
 		e.enqueueForward(dev, &cp, "relay-flood", origin, cp.PathHashCount(), e.p.txDelayFactor())
-	case verdictRelayDirect:
+	case bus.VerdictRelayDirect:
 		if cp.PayloadType() == meshcore.PayloadTypeMultipart {
 			e.forwardMultipart(&cp, origin)
 			return
@@ -338,15 +338,15 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict string) {
 			jitter = 0
 		}
 		e.enqueueForward(dev, &cp, "relay-direct", origin, prioDirect, jitter)
-	case verdictDiscover:
+	case bus.VerdictDiscover:
 		e.respondDiscover(dev, pkt, origin, snr)
-	case verdictAnon:
+	case bus.VerdictAnon:
 		e.respondAnon(rx, origin)
-	case verdictRequest:
+	case bus.VerdictRequest:
 		e.respondRequest(rx, origin)
-	case verdictCommand:
+	case bus.VerdictCommand:
 		e.runCommand(rx, origin)
-	case verdictRelayTrace:
+	case bus.VerdictRelayTrace:
 		// A trace whose next target hop is us walks on: our SNR
 		// reading — quarter-dB, one raw byte — joins the walked path
 		// (Mesh::onRecvPacket).
@@ -360,6 +360,9 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict string) {
 		// dedup will not absorb it. It is the only forward that tells
 		// a peer something the air did not.
 		e.enqueue(dev, &cp, "relay-trace", origin, prioTrace, e.p.directTxDelayFactor())
+	default:
+		// Heard, dropped and unrecognised judgements schedule nothing.
+		return
 	}
 }
 

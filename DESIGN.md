@@ -319,6 +319,15 @@ says so at startup — traceability includes configuration.
   UI, retained on disk for a long default — and entirely absent when
   no sentinel runs.
 
+Frame judgements carry a compact `bus.Verdict` from the protocol's
+decision through the event bus. Its named constants distinguish an
+action from the free-text explanation that accompanies it. Logs,
+console filters, JSON and the journal use the historical string labels;
+the `iota` values are internal and must never become persisted codes.
+Journal read models remain strings so older or unfamiliar labels stay
+readable. Each finite decision vocabulary owns its type and mapping;
+contextual errors and descriptions remain ordinary errors and text.
+
 ## Interfaces
 
 - **Internal event bus** — the spine. Typed envelopes with provenance
