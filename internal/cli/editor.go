@@ -504,7 +504,13 @@ func (e *editor) clearBlock() {
 // preserves scrollback and the draft, and avoids guessing where its origin
 // moved. The following repaint always fits the new screen dimensions.
 func (e *editor) resize(width, height int) {
-	if width <= 0 || height <= 0 || (width == e.width && height == e.height) {
+	if width <= 0 {
+		width = e.width
+	}
+	if height <= 0 {
+		height = e.height
+	}
+	if width == e.width && height == e.height {
 		return
 	}
 	e.width, e.height = width, height

@@ -107,3 +107,22 @@ func TestEditorSuspendedResizeKeepsTypeaheadWithoutDrawing(t *testing.T) {
 		t.Fatalf("suspended editor = %q, output %q", string(ed.buf), out.String())
 	}
 }
+
+func TestEditorResizeAcceptsPartiallyKnownDimensions(t *testing.T) {
+	var out strings.Builder
+	ed := newEditor(strings.NewReader(""), &out)
+	ed.resize(80, 0)
+	ed.resize(40, 0)
+	if ed.width != 40 || ed.height != 0 {
+		t.Fatalf("width-only resize = %dx%d", ed.width, ed.height)
+	}
+	ed.resize(0, 10)
+	if ed.width != 40 || ed.height != 10 {
+		t.Fatalf("height-only resize = %dx%d", ed.width, ed.height)
+	}
+	out.Reset()
+	ed.resize(0, 0)
+	if out.Len() != 0 || ed.width != 40 || ed.height != 10 {
+		t.Fatalf("unknown dimensions changed layout: %dx%d, output %q", ed.width, ed.height, out.String())
+	}
+}
