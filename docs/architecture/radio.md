@@ -274,8 +274,13 @@ protocol queue → shared duty reservation → optional LBT/CAD
 ```
 
 If a receive is pending when CAD is requested, the driver may return
-`ErrBusyReceiving`; the protocol layer decides when to requeue. Hardware errors
-return through the logical operation and do not create a second physical owner.
+`ErrBusyReceiving`; the protocol layer decides when to requeue. A reception can
+also begin between assessment and transmission, or while CAD is disabled. A `Transmit` refusal with `ErrBusyReceiving` and zero airtime keeps
+the station or application's frame in its paced queue, with the same busy bound
+and expiration policy as a CAD refusal. Cancellation before keying drops it as
+`cancelled`; cancellation after an actual emission still accounts its airtime.
+Hardware errors return through the logical operation and do not create a second
+physical owner.
 `TxReport.Airtime > 0` is the unambiguous radiated boundary: a driver may return
 that report with an error when transmission completed but restoring receive
 mode failed. Such a frame is accounted and handed to co-located bindings just

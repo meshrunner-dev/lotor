@@ -39,8 +39,9 @@ const (
 )
 
 const (
-	reasonDuty    = "duty"
-	reasonExpired = "expired"
+	reasonDuty      = "duty"
+	reasonExpired   = "expired"
+	reasonCancelled = "cancelled"
 )
 
 // Route is how a frame travels — flooded to whoever hears it, or down
@@ -179,6 +180,9 @@ func (p *Pipeline) Emit(ctx context.Context, item Emission, dev radio.Device,
 		return outcome
 	}
 	at := time.Now()
+	if ctx.Err() != nil {
+		return p.drop(item, reasonCancelled)
+	}
 	if item.expired(at) {
 		return p.drop(item, reasonExpired)
 	}
@@ -195,7 +199,7 @@ func (p *Pipeline) Emit(ctx context.Context, item Emission, dev radio.Device,
 			at, actualAir, actualPower = report.At, report.Airtime, report.PowerDBm
 		}
 		if err != nil && report.Airtime == 0 {
-			return p.drop(item, "tx-failed")
+			return p.refusedTransmit(ctx, item, policy, err)
 		}
 	}
 	reservation.Commit(at, actualAir)
@@ -211,6 +215,19 @@ func (p *Pipeline) Emit(ctx context.Context, item Emission, dev radio.Device,
 		zap.Uint8("priority", item.Priority), zap.Duration("airtime", actualAir),
 		zap.Int8("power_dbm", actualPower), zap.Bool("shadow", shadow))
 	return Outcome{Sent: true, Shadow: shadow, At: at, Airtime: actualAir, PowerDBm: actualPower}
+}
+
+// refusedTransmit handles only attempts that radiated nothing. A
+// reception can start after CAD cleared, or while CAD is disabled;
+// that hardware refusal keeps the same paced turn as a CAD refusal.
+func (p *Pipeline) refusedTransmit(ctx context.Context, item Emission, policy Policy, err error) Outcome {
+	if ctx.Err() != nil {
+		return p.drop(item, reasonCancelled)
+	}
+	if errors.Is(err, radio.ErrBusyReceiving) {
+		return p.deferForReception(item, policy)
+	}
+	return p.drop(item, "tx-failed")
 }
 
 // reserveDuty waits for the shared ledger to admit the airtime, up to
@@ -230,6 +247,9 @@ func (p *Pipeline) reserveDuty(ctx context.Context, ledger *radio.AirtimeLedger,
 		deadline, exhausted = item.Expires, reasonExpired
 	}
 	for {
+		if ctx.Err() != nil {
+			return nil, p.drop(item, reasonCancelled)
+		}
 		now := time.Now()
 		if !now.Before(deadline) {
 			return nil, p.drop(item, exhausted)
@@ -243,7 +263,7 @@ func (p *Pipeline) reserveDuty(ctx context.Context, ledger *radio.AirtimeLedger,
 		}
 		select {
 		case <-ctx.Done():
-			return nil, p.drop(item, "cancelled")
+			return nil, p.drop(item, reasonCancelled)
 		case <-time.After(max(0, freeAt.Sub(now))):
 		}
 	}
@@ -273,6 +293,9 @@ func (p *Pipeline) clearChannel(ctx context.Context, dev radio.Device, policy Po
 		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
 		busy, err := dev.AssessChannel(attemptCtx, policy.LBTThresholdDB)
 		cancel()
+		if ctx.Err() != nil {
+			return p.drop(item, reasonCancelled), false
+		}
 		if item.expired(time.Now()) {
 			return p.drop(item, reasonExpired), false
 		}
@@ -299,7 +322,7 @@ func (p *Pipeline) clearChannel(ctx context.Context, dev radio.Device, policy Po
 		}
 		select {
 		case <-ctx.Done():
-			return Outcome{}, false
+			return p.drop(item, reasonCancelled), false
 		case <-time.After(retry):
 		}
 	}
@@ -307,6 +330,9 @@ func (p *Pipeline) clearChannel(ctx context.Context, dev radio.Device, policy Po
 
 func (p *Pipeline) deferForReception(item Emission, policy Policy) Outcome {
 	now := time.Now()
+	if item.expired(now) {
+		return p.drop(item, reasonExpired)
+	}
 	if item.BusySince.IsZero() {
 		item.BusySince = now
 	}
