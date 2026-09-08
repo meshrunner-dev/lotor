@@ -59,9 +59,6 @@ const smallestDutyCyclePct = 100.0 / float64(time.Hour)
 // or, worse, plant a timestamp the real clock must later climb over.
 var clockEpoch = time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
 
-// reasonRateLimited names every limiter refusal in the drop tally.
-const reasonRateLimited = "rate-limited"
-
 // Priorities, the reference's ladder: routed traffic and zero-hop
 // sends go first (0); flood relays carry their hop count after the
 // append — closer sources beat distant ones; a node's own flood
@@ -291,7 +288,7 @@ func (e *engine) scheduleAfter(pkt *meshcore.Packet, kind string, origin correla
 		e.log.Warn("tx queue full, dropping", zap.String("kind", kind),
 			zap.String("corr", origin.Short()))
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Correlation: origin, At: time.Now(), Reason: "queue-full", Kind: kind,
+			Relay: e.relay, Correlation: origin, At: time.Now(), Reason: bus.DropQueueFull, Kind: kind,
 		})
 		return false
 	}
@@ -316,7 +313,7 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict bus.Verdict) 
 	switch verdict {
 	case bus.VerdictRelayFlood:
 		if err := cp.AppendPathHash(e.selfHash(cp.PathHashSize())); err != nil {
-			e.abandonKind(origin, "malformed", "relay-flood", "flood relay path append failed", err)
+			e.abandonKind(origin, bus.DropMalformed, "relay-flood", "flood relay path append failed", err)
 			return
 		}
 		// Priority = distance: the hop count with our hash appended.
@@ -327,7 +324,7 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict bus.Verdict) 
 			return
 		}
 		if _, err := cp.ConsumeNextHop(); err != nil {
-			e.abandonKind(origin, "malformed", "relay-direct", "direct relay hop consume failed", err)
+			e.abandonKind(origin, bus.DropMalformed, "relay-direct", "direct relay hop consume failed", err)
 			return
 		}
 		// The reference forwards ACKs with no delay at all: they are
@@ -351,7 +348,7 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict bus.Verdict) 
 		// reading — quarter-dB, one raw byte — joins the walked path
 		// (Mesh::onRecvPacket).
 		if err := cp.AppendTraceHop(snr); err != nil {
-			e.abandonKind(origin, "malformed", "relay-trace", "trace path could not grow", err)
+			e.abandonKind(origin, bus.DropMalformed, "relay-trace", "trace path could not grow", err)
 			return
 		}
 		// Carried to the peers, unlike every other retransmission: a
@@ -370,7 +367,7 @@ func (e *engine) relayFor(dev radio.Device, rx *reception, verdict bus.Verdict) 
 // ever reached the queue, with the kind its caller was composing: the
 // audit trail must show the refusal, not a judgement that quietly led
 // nowhere.
-func (e *engine) abandonKind(origin correlation.ID, reason, kind, msg string, err error) {
+func (e *engine) abandonKind(origin correlation.ID, reason bus.DropReason, kind, msg string, err error) {
 	e.log.Warn(msg, zap.String("corr", origin.Short()), zap.Error(err))
 	e.bus.Publish(bus.TxDropped{
 		Relay: e.relay, Correlation: origin, At: time.Now(), Reason: reason, Kind: kind,
@@ -384,7 +381,7 @@ func (e *engine) dropOnFault(ctx context.Context, origin correlation.ID, kind st
 	if ctx.Err() != nil {
 		return
 	}
-	e.abandonKind(origin, "tx-failed", kind, "emission lost to a radio fault", err)
+	e.abandonKind(origin, bus.DropTXFailed, kind, "emission lost to a radio fault", err)
 }
 
 // forwardMultipart unwraps a direct MULTIPART into the plain ACK it
@@ -399,24 +396,24 @@ func (e *engine) dropOnFault(ctx context.Context, origin correlation.ID, kind st
 func (e *engine) forwardMultipart(cp *meshcore.Packet, origin correlation.ID) {
 	mp, stripped, err := cp.UnwrapMultipart()
 	if err != nil || mp.Inner != meshcore.PayloadTypeAck || len(mp.Data) < 4 {
-		e.abandonKind(origin, "malformed", "relay-direct", "multipart wraps no ack", err)
+		e.abandonKind(origin, bus.DropMalformed, "relay-direct", "multipart wraps no ack", err)
 		return
 	}
 	// Dedup on the unwrapped shape, exactly as the reference hashes it:
 	// the multipart header over the stripped payload.
 	if _, dup := e.seen.witness(stripped.Hash(), origin, time.Now()); dup {
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Correlation: origin, At: time.Now(), Reason: "duplicate", Kind: "relay-direct",
+			Relay: e.relay, Correlation: origin, At: time.Now(), Reason: bus.DropDuplicate, Kind: "relay-direct",
 		})
 		return
 	}
 	if _, err := stripped.ConsumeNextHop(); err != nil {
-		e.abandonKind(origin, "malformed", "relay-direct", "multipart hop consume failed", err)
+		e.abandonKind(origin, bus.DropMalformed, "relay-direct", "multipart hop consume failed", err)
 		return
 	}
 	ack, err := meshcore.BuildAck(mp.Data[:4])
 	if err != nil {
-		e.abandonKind(origin, "malformed", "relay-direct", "multipart ack rebuild failed", err)
+		e.abandonKind(origin, bus.DropMalformed, "relay-direct", "multipart ack rebuild failed", err)
 		return
 	}
 	// The unwrapped ACK travels the way its multipart did, scope
@@ -768,7 +765,7 @@ func (e *engine) txPhase(ctx context.Context, dev radio.Device) error {
 	if err != nil {
 		log.Warn("tx marshal failed", zap.Error(err))
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Correlation: entry.origin, At: time.Now(), Reason: "malformed", Kind: entry.kind,
+			Relay: e.relay, Correlation: entry.origin, At: time.Now(), Reason: bus.DropMalformed, Kind: entry.kind,
 		})
 		return nil
 	}
@@ -926,7 +923,7 @@ func (e *engine) requeue(entry txEntry) {
 		log.Debug("radio busy receiving past the LBT bound, dropping",
 			zap.Duration("busy_for", now.Sub(e.busySince)))
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Correlation: entry.origin, At: now, Reason: "lbt", Kind: entry.kind,
+			Relay: e.relay, Correlation: entry.origin, At: now, Reason: bus.DropLBT, Kind: entry.kind,
 		})
 		return
 	}
@@ -938,7 +935,7 @@ func (e *engine) requeue(entry txEntry) {
 	entry.notBefore = now.Add(retry)
 	if !e.queue.push(entry) {
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Correlation: entry.origin, At: now, Reason: "queue-full", Kind: entry.kind,
+			Relay: e.relay, Correlation: entry.origin, At: now, Reason: bus.DropQueueFull, Kind: entry.kind,
 		})
 		return
 	}
@@ -1012,7 +1009,7 @@ func (e *engine) resolveLBTExhaustion(log *zap.Logger, origin correlation.ID, ki
 		log.Debug("channel busy past the LBT bound, dropping",
 			zap.Int("attempts", attempts), zap.Duration("elapsed", elapsed))
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Correlation: origin, At: time.Now(), Reason: "lbt", Kind: kind,
+			Relay: e.relay, Correlation: origin, At: time.Now(), Reason: bus.DropLBT, Kind: kind,
 		})
 		return lbtDrop
 	}
@@ -1025,14 +1022,14 @@ func (e *engine) resolveLBTExhaustion(log *zap.Logger, origin correlation.ID, ki
 // session that ended took its moment with it: the frames it was about
 // to relay are stale news by the time the backoff expires, and the
 // mesh has long since carried them past us.
-func (e *engine) dropQueued(reason string) {
+func (e *engine) dropQueued(reason bus.DropReason) {
 	for _, entry := range e.queue.entries {
 		e.bus.Publish(bus.TxDropped{
 			Relay: e.relay, Correlation: entry.origin, At: time.Now(), Reason: reason, Kind: entry.kind,
 		})
 	}
 	if n := len(e.queue.entries); n > 0 {
-		e.log.Info("outbound queue cleared", zap.Int("dropped", n), zap.String("reason", reason))
+		e.log.Info("outbound queue cleared", zap.Int("dropped", n), zap.String("reason", reason.String()))
 	}
 	e.queue.entries = e.queue.entries[:0]
 }
@@ -1073,7 +1070,7 @@ func (e *engine) reserveDuty(dev radio.Device, entry txEntry) (*radio.AirtimeRes
 				zap.Bool("never", never))
 		}
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Correlation: entry.origin, At: time.Now(), Reason: "duty", Kind: entry.kind,
+			Relay: e.relay, Correlation: entry.origin, At: time.Now(), Reason: bus.DropDuty, Kind: entry.kind,
 		})
 		return nil, false
 	}
@@ -1086,7 +1083,7 @@ func (e *engine) reserveDuty(dev radio.Device, entry txEntry) (*radio.AirtimeRes
 	entry.notBefore = freeAt
 	if !e.queue.push(entry) {
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Correlation: entry.origin, At: time.Now(), Reason: "duty", Kind: entry.kind,
+			Relay: e.relay, Correlation: entry.origin, At: time.Now(), Reason: bus.DropDuty, Kind: entry.kind,
 		})
 	}
 	return nil, false

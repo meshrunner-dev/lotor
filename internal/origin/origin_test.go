@@ -86,20 +86,20 @@ func TestThePipelineTellsTheBusWhatItSentAndWhatItDropped(t *testing.T) {
 		t.Fatalf("radiated failure announced as %+v", sent)
 	}
 	for _, c := range []struct {
-		reason string
+		reason bus.DropReason
 		emit   func() Outcome
 	}{
-		{"dry", func() Outcome { return p.Emit(context.Background(), emission("dry"), dev, free, Policy{}, 10) }},
-		{"radio-down", func() Outcome {
+		{bus.DropDry, func() Outcome { return p.Emit(context.Background(), emission("dry"), dev, free, Policy{}, 10) }},
+		{bus.DropRadioDown, func() Outcome {
 			return p.Emit(context.Background(), emission("down"), nil, free, Policy{Mode: config.TXOnAir}, 10)
 		}},
-		{"duty", func() Outcome {
+		{bus.DropDuty, func() Outcome {
 			return p.Emit(context.Background(), emission("duty"), dev, saturated, Policy{Mode: config.TXOnAir}, 10)
 		}},
-		{"tx-failed", func() Outcome {
+		{bus.DropTXFailed, func() Outcome {
 			return p.Emit(context.Background(), emission("dead"), dead, free, Policy{Mode: config.TXOnAir}, 10)
 		}},
-		{"queue-full", func() Outcome {
+		{bus.DropQueueFull, func() Outcome {
 			if !p.Queue.Offer(emission("first")) {
 				t.Fatal("a queue of one refused its first frame")
 			}
@@ -135,7 +135,7 @@ func TestTheGateDecidesWhetherTheRadioIsKeyed(t *testing.T) {
 	// keying would happen, not merely stated.
 	for _, mode := range []string{"", config.TXDry} {
 		out := p.Emit(context.Background(), emission("dry"), dev, ledger, Policy{Mode: mode}, 10)
-		if out.Sent || out.Dropped != "dry" || dev.transmits != 0 {
+		if out.Sent || out.Dropped != bus.DropDry || dev.transmits != 0 {
 			t.Fatalf("mode %q: %+v, transmits %d", mode, out, dev.transmits)
 		}
 	}
@@ -150,7 +150,7 @@ func TestTheGateDecidesWhetherTheRadioIsKeyed(t *testing.T) {
 		t.Fatalf("on-air: %+v, transmits %d", out, dev.transmits)
 	}
 	// No radio, no ledger: refused as radio-down, never as sent.
-	if out := p.Emit(context.Background(), emission("down"), nil, ledger, Policy{Mode: config.TXOnAir}, 10); out.Dropped != "radio-down" {
+	if out := p.Emit(context.Background(), emission("down"), nil, ledger, Policy{Mode: config.TXOnAir}, 10); out.Dropped != bus.DropRadioDown {
 		t.Fatalf("radio-down: %+v", out)
 	}
 }
@@ -161,7 +161,7 @@ func TestDutyWaitsAreBoundedAndACancelledWaitIsNamed(t *testing.T) {
 	// A ledger already full for the hour: the wait would outlast the
 	// patience, and the frame is dropped as duty.
 	ledger := radio.NewAirtimeLedger(time.Second, []radio.AirtimeStamp{{At: time.Now(), Airtime: time.Second}})
-	if out := p.Emit(context.Background(), emission("saturated"), dev, ledger, Policy{Mode: config.TXOnAir}, 10); out.Dropped != "duty" {
+	if out := p.Emit(context.Background(), emission("saturated"), dev, ledger, Policy{Mode: config.TXOnAir}, 10); out.Dropped != bus.DropDuty {
 		t.Fatalf("saturated ledger: %+v", out)
 	}
 	// A wait the owner cancels is its own reason, not a saturated ledger.
@@ -169,7 +169,7 @@ func TestDutyWaitsAreBoundedAndACancelledWaitIsNamed(t *testing.T) {
 	slow := New(Config{SourceKind: "test", Source: "t", DutyWait: time.Hour}, 4)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
-	if out := slow.Emit(ctx, emission("cancelled"), dev, waiting, Policy{Mode: config.TXOnAir}, 10); out.Dropped != "cancelled" {
+	if out := slow.Emit(ctx, emission("cancelled"), dev, waiting, Policy{Mode: config.TXOnAir}, 10); out.Dropped != bus.DropCancelled {
 		t.Fatalf("cancelled wait: %+v", out)
 	}
 	if dev.transmits != 0 {
@@ -195,12 +195,12 @@ func TestTheLBTLadderRequeuesAReceptionAndDropsWhenToldTo(t *testing.T) {
 	}
 	// Past the bound, the exhausted policy decides: drop.
 	item.BusySince = time.Now().Add(-time.Second)
-	if out := p.Emit(context.Background(), item, dev, ledger, policy, 10); out.Dropped != "lbt" {
+	if out := p.Emit(context.Background(), item, dev, ledger, policy, 10); out.Dropped != bus.DropLBT {
 		t.Fatalf("exhausted reception: %+v", out)
 	}
 	// A busy verdict retries in place until the bound, then drops.
 	busy := &fakeRadio{airtime: 10 * time.Millisecond, busy: true}
-	if out := p.Emit(context.Background(), emission("channel-busy"), busy, ledger, policy, 10); out.Dropped != "lbt" || busy.assesses < 2 {
+	if out := p.Emit(context.Background(), emission("channel-busy"), busy, ledger, policy, 10); out.Dropped != bus.DropLBT || busy.assesses < 2 {
 		t.Fatalf("busy channel: %+v, assessments %d", out, busy.assesses)
 	}
 	// ...or transmits anyway when the site chose the mesh's convention.
@@ -211,7 +211,7 @@ func TestTheLBTLadderRequeuesAReceptionAndDropsWhenToldTo(t *testing.T) {
 	}
 	// A failing assessment is its own drop.
 	broken := &fakeRadio{airtime: 10 * time.Millisecond, assessErr: errors.New("cad failed")}
-	if out := p.Emit(context.Background(), emission("broken"), broken, ledger, policy, 10); out.Dropped != "lbt-failed" {
+	if out := p.Emit(context.Background(), emission("broken"), broken, ledger, policy, 10); out.Dropped != bus.DropLBTFailed {
 		t.Fatalf("failing CAD: %+v", out)
 	}
 	if ledger.Usage(time.Now()) != 10*time.Millisecond {
@@ -227,7 +227,7 @@ func TestAnExpiredEmissionIsDroppedByNameAndNeverHeldForDuty(t *testing.T) {
 	stale := emission("stale")
 	stale.Expires = time.Now().Add(-time.Millisecond)
 	free := radio.NewAirtimeLedger(time.Hour, nil)
-	if out := p.Emit(context.Background(), stale, dev, free, Policy{Mode: config.TXOnAir}, 10); out.Dropped != "expired" {
+	if out := p.Emit(context.Background(), stale, dev, free, Policy{Mode: config.TXOnAir}, 10); out.Dropped != bus.DropExpired {
 		t.Fatalf("stale frame: %+v", out)
 	}
 	// A budget that frees only after the expiry: the pipeline's own
@@ -237,7 +237,7 @@ func TestAnExpiredEmissionIsDroppedByNameAndNeverHeldForDuty(t *testing.T) {
 	soon := emission("soon")
 	soon.Expires = time.Now().Add(20 * time.Millisecond)
 	start := time.Now()
-	if out := p.Emit(context.Background(), soon, dev, waiting, Policy{Mode: config.TXOnAir}, 10); out.Dropped != "expired" {
+	if out := p.Emit(context.Background(), soon, dev, waiting, Policy{Mode: config.TXOnAir}, 10); out.Dropped != bus.DropExpired {
 		t.Fatalf("expiring wait: %+v", out)
 	}
 	if waited := time.Since(start); waited > time.Second {
@@ -248,14 +248,14 @@ func TestAnExpiredEmissionIsDroppedByNameAndNeverHeldForDuty(t *testing.T) {
 	brief := New(Config{SourceKind: "test", Source: "t", DutyWait: 50 * time.Millisecond}, 4)
 	if out := brief.Emit(context.Background(), emission("patient"), dev,
 		radio.NewAirtimeLedger(time.Second, []radio.AirtimeStamp{{At: time.Now(), Airtime: time.Second}}),
-		Policy{Mode: config.TXOnAir}, 10); out.Dropped != "duty" {
+		Policy{Mode: config.TXOnAir}, 10); out.Dropped != bus.DropDuty {
 		t.Fatalf("no expiry: %+v", out)
 	}
 	// Requeueing past the expiry drops instead of taking a turn.
 	late := emission("late")
 	late.Expires = time.Now().Add(time.Second)
 	late.NotBefore = late.Expires.Add(time.Millisecond)
-	if out := p.Requeue(late); out.Dropped != "expired" || p.Queue.Len() != 0 {
+	if out := p.Requeue(late); out.Dropped != bus.DropExpired || p.Queue.Len() != 0 {
 		t.Fatalf("late requeue: %+v, backlog %d", out, p.Queue.Len())
 	}
 	if dev.transmits != 0 {
@@ -310,13 +310,13 @@ func TestExpiryDuringPreparationNeverKeysOrSpendsDuty(t *testing.T) {
 					item := emission("expiring-answer")
 					item.Expires = time.Now().Add(10 * time.Millisecond)
 					out := p.Emit(t.Context(), item, dev, ledger, policy, 10)
-					if out.Dropped != "expired" || out.Sent || out.Requeued || dev.transmits != 0 {
+					if out.Dropped != bus.DropExpired || out.Sent || out.Requeued || dev.transmits != 0 {
 						t.Fatalf("expired during %s: %+v, transmits=%d", phase, out, dev.transmits)
 					}
 					if policy.CAD && !dev.assessDeadline.Equal(item.Expires) {
 						t.Errorf("CAD deadline=%s, want expiry=%s", dev.assessDeadline, item.Expires)
 					}
-					if event, ok := (<-sub.C).(bus.TxDropped); !ok || event.Reason != "expired" || len(sub.C) != 0 {
+					if event, ok := (<-sub.C).(bus.TxDropped); !ok || event.Reason != bus.DropExpired || len(sub.C) != 0 {
 						t.Errorf("expiry event=%+v, unread events=%d", event, len(sub.C))
 					}
 					if ledger.Usage(time.Now()) != 0 || p.Queue.Len() != 0 {
@@ -342,7 +342,7 @@ func TestBusyChannelWaitStopsAtExpiry(t *testing.T) {
 		item.Expires = time.Now().Add(50 * time.Millisecond)
 		out := p.Emit(t.Context(), item, dev, ledger,
 			Policy{Mode: config.TXOnAir, CAD: true, LBTExhausted: config.LBTTransmit}, 10)
-		if out.Dropped != "expired" || !time.Now().Equal(item.Expires) || dev.transmits != 0 {
+		if out.Dropped != bus.DropExpired || !time.Now().Equal(item.Expires) || dev.transmits != 0 {
 			t.Fatalf("busy channel outlived expiry: %+v, time=%s, transmits=%d", out, time.Now(), dev.transmits)
 		}
 	})

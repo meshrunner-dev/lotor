@@ -152,7 +152,7 @@ func (e *engine) respondAnon(rx *reception, origin correlation.ID) {
 	if !e.limits.anon.Allow(time.Now()) {
 		e.log.Debug("anonymous reply rate-limited", zap.String("corr", origin.Short()))
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Correlation: origin, At: time.Now(), Reason: reasonRateLimited,
+			Relay: e.relay, Correlation: origin, At: time.Now(), Reason: bus.DropRateLimited,
 			Kind: "anon-reply",
 		})
 		return

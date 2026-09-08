@@ -442,8 +442,8 @@ func TestTxLedgerAndDrops(t *testing.T) {
 		Relay: "meshcore-868", Correlation: id, At: at, Kind: "relay-flood",
 		Airtime: 1200 * time.Millisecond, PowerDBm: -5, Shadow: true,
 	})
-	s.Process(ctx, bus.TxDropped{Relay: "meshcore-868", Correlation: id, At: at, Reason: "lbt"})
-	s.Process(ctx, bus.TxDropped{Relay: "meshcore-868", Correlation: correlation.New(), At: at, Reason: "lbt"})
+	s.Process(ctx, bus.TxDropped{Relay: "meshcore-868", Correlation: id, At: at, Reason: bus.DropLBT})
+	s.Process(ctx, bus.TxDropped{Relay: "meshcore-868", Correlation: correlation.New(), At: at, Reason: bus.DropLBT})
 
 	sent, err := s.SentFor(ctx, id.String())
 	if err != nil {
@@ -693,8 +693,8 @@ func TestDropsKeepTheirCorrelation(t *testing.T) {
 	ctx := context.Background()
 	id := correlation.New()
 	at := time.Now()
-	s.Process(ctx, bus.TxDropped{Relay: "r", Correlation: id, At: at, Reason: "duty", Kind: "relay-flood"})
-	s.Process(ctx, bus.TxDropped{Relay: "r", Correlation: correlation.New(), At: at, Reason: "duty", Kind: "advert-flood"})
+	s.Process(ctx, bus.TxDropped{Relay: "r", Correlation: id, At: at, Reason: bus.DropDuty, Kind: "relay-flood"})
+	s.Process(ctx, bus.TxDropped{Relay: "r", Correlation: correlation.New(), At: at, Reason: bus.DropDuty, Kind: "advert-flood"})
 
 	events, err := s.DropsFor(ctx, id.Short())
 	if err != nil || len(events) != 1 {

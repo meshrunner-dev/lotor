@@ -397,7 +397,7 @@ func (s *Sentinel) Process(ctx context.Context, ev bus.Event) {
 			s.commitTxWindow(source, e.At, e.Airtime, expired)
 		}
 	case bus.TxDropped:
-		err = s.store.recordTxDrop(ctx, e.At, e.SourceKey(), e.Correlation.String(), e.Reason, e.Kind)
+		err = s.store.recordTxDrop(ctx, e.At, e.SourceKey(), e.Correlation.String(), e.Reason.String(), e.Kind)
 	case bus.RelayState:
 		err = s.store.insertRelayState(ctx, e.At, e.Relay, e.State, e.Err)
 	case bus.ObserverState:

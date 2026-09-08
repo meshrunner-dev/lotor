@@ -7,6 +7,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/origin"
@@ -267,7 +268,7 @@ func (s *service) submitAtPriorityLocked(packet *mesh.Packet, kind string, notBe
 	}
 	raw, err := packet.MarshalBinary()
 	if err != nil {
-		return s.refuseSubmission(item, "malformed")
+		return s.refuseSubmission(item, bus.DropMalformed)
 	}
 	item.Frame = raw
 	// DISABLED is reserved by the reference for commands compiled out of the
@@ -277,11 +278,11 @@ func (s *service) submitAtPriorityLocked(packet *mesh.Packet, kind string, notBe
 	// though it never entered the TX queue.
 	switch {
 	case s.txPolicy.Mode == "" || s.txPolicy.Mode == config.TXDry:
-		return s.refuseSubmission(item, "dry")
+		return s.refuseSubmission(item, bus.DropDry)
 	case s.rfDevice == nil:
-		return s.refuseSubmission(item, "radio-down")
+		return s.refuseSubmission(item, bus.DropRadioDown)
 	case s.duty == nil:
-		return s.refuseSubmission(item, "duty-unavailable")
+		return s.refuseSubmission(item, bus.DropDutyUnavailable)
 	}
 	if s.pipeline.Queue.Offer(item) {
 		s.seen.mark(packet.Hash())
@@ -290,9 +291,9 @@ func (s *service) submitAtPriorityLocked(packet *mesh.Packet, kind string, notBe
 	return errorResponses(companion.ErrTableFull)
 }
 
-func (s *service) refuseSubmission(item emission, reason string) []companion.Response {
+func (s *service) refuseSubmission(item emission, reason bus.DropReason) []companion.Response {
 	s.log.Debug("station frame refused", zap.String("corr", item.Correlation.Short()),
-		zap.String("kind", item.Kind), zap.Uint8("priority", item.Priority), zap.String("reason", reason))
+		zap.String("kind", item.Kind), zap.Uint8("priority", item.Priority), zap.String("reason", reason.String()))
 	return errorResponses(companion.ErrBadState)
 }
 

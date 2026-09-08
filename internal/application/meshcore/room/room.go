@@ -560,7 +560,7 @@ func (s *service) advertDue(kind string) {
 		Frame: raw, Route: routeOf(pkt), Correlation: correlation.New(), Kind: kind, Priority: priority,
 		Expires: time.Now().Add(advertLife),
 	}
-	if out := s.pipeline.Submit(item); out.Dropped != "" {
+	if out := s.pipeline.Submit(item); out.Dropped != bus.DropNone {
 		s.mu.Lock()
 		s.dropped++
 		s.mu.Unlock()
@@ -596,7 +596,7 @@ func (s *service) runTX(ctx context.Context) {
 				s.sentDirect++
 			case origin.RouteUnclassified:
 			}
-		case out.Dropped != "":
+		case out.Dropped != bus.DropNone:
 			s.dropped++
 		}
 		s.mu.Unlock()

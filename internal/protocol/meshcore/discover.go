@@ -83,7 +83,7 @@ func (e *engine) respondDiscover(dev radio.Device, pkt *meshcore.Packet, origin 
 		// Debug, not Warn: the volume here is attacker-controlled.
 		e.log.Debug("discovery response rate-limited", zap.String("corr", origin.Short()))
 		e.bus.Publish(bus.TxDropped{
-			Relay: e.relay, Correlation: origin, At: time.Now(), Reason: reasonRateLimited,
+			Relay: e.relay, Correlation: origin, At: time.Now(), Reason: bus.DropRateLimited,
 			Kind: "discover-response",
 		})
 		return

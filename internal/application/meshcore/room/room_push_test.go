@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"meshrunner.dev/lotor/internal/application"
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/origin"
@@ -114,8 +115,18 @@ func TestAPushWaitsForEmissionBeforeStartingItsAckClock(t *testing.T) {
 }
 
 func TestLocalPushRefusalsDoNotSpendTheReadersRetries(t *testing.T) {
-	for _, reason := range []string{"radio-down", "duty", "expired", "tx-failed", "cancelled", "shadow"} {
-		t.Run(reason, func(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reason bus.DropReason
+	}{
+		{"radio-down", bus.DropRadioDown},
+		{"duty", bus.DropDuty},
+		{"expired", bus.DropExpired},
+		{"tx-failed", bus.DropTXFailed},
+		{"cancelled", bus.DropCancelled},
+		{"shadow", bus.DropNone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			svc, bob := pushRoom(t)
 			dev := &pushRadio{}
 			var device radio.Device = dev
@@ -125,7 +136,7 @@ func TestLocalPushRefusalsDoNotSpendTheReadersRetries(t *testing.T) {
 			defer cancel()
 			for range maxPushFailures + 1 {
 				item := queuePush(t, svc, bob)
-				switch reason {
+				switch tc.name {
 				case "radio-down":
 					device = nil
 				case "duty":
@@ -146,12 +157,12 @@ func TestLocalPushRefusalsDoNotSpendTheReadersRetries(t *testing.T) {
 					policy.Mode = config.TXShadow
 				}
 				out := svc.pipeline.Emit(ctx, item, device, ledger, policy, 0)
-				if reason == "shadow" {
+				if tc.name == "shadow" {
 					if !out.Sent || !out.Shadow {
 						t.Fatalf("expected shadow accounting: %+v", out)
 					}
-				} else if out.Dropped != reason {
-					t.Fatalf("expected %s: %+v", reason, out)
+				} else if out.Dropped != tc.reason {
+					t.Fatalf("expected %s: %+v", tc.name, out)
 				}
 				finishPush(svc, item, out)
 				if m := pushState(svc, bob); m.pendingAck != 0 || m.failures != 0 || !m.ackDeadline.IsZero() {

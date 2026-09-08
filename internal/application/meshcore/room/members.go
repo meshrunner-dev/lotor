@@ -18,6 +18,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/logging"
@@ -606,7 +607,7 @@ func (s *service) sendLocked(pkt *mesh.Packet, kind string, priority uint8, dela
 	raw, err := pkt.MarshalBinary()
 	if err != nil {
 		s.log.Warn("emission not marshalled", zap.String("kind", kind), zap.Error(err))
-		return origin.Outcome{Dropped: "compose-failed"}
+		return origin.Outcome{Dropped: bus.DropComposeFailed}
 	}
 	now := time.Now()
 	item := origin.Emission{
@@ -614,7 +615,7 @@ func (s *service) sendLocked(pkt *mesh.Packet, kind string, priority uint8, dela
 		NotBefore: now.Add(delay), Expires: now.Add(answerLife),
 	}
 	out := s.pipeline.Submit(item)
-	if out.Dropped != "" {
+	if out.Dropped != bus.DropNone {
 		s.dropped++
 	}
 	return out

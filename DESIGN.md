@@ -320,8 +320,10 @@ says so at startup — traceability includes configuration.
   no sentinel runs.
 
 Frame judgements carry a compact `bus.Verdict` from the protocol's
-decision through the event bus. Its named constants distinguish an
-action from the free-text explanation that accompanies it. Logs,
+decision through the event bus. Transmit refusals share `bus.DropReason`
+across relay, station, hosted applications and the origin pipeline;
+`DropNone` is the absence of a refusal in an `origin.Outcome`. These
+named constants distinguish a decision from its free-text explanation. Logs,
 console filters, JSON and the journal use the historical string labels;
 the `iota` values are internal and must never become persisted codes.
 Journal read models remain strings so older or unfamiliar labels stay

@@ -329,7 +329,7 @@ func (e *engine) queueLen() int {
 // dropRateLimited counts a refusal that never became a packet.
 func (e *engine) dropRateLimited(origin correlation.ID) {
 	e.bus.Publish(bus.TxDropped{
-		Relay: e.relay, Correlation: origin, At: time.Now(), Reason: reasonRateLimited,
+		Relay: e.relay, Correlation: origin, At: time.Now(), Reason: bus.DropRateLimited,
 		Kind: "answer",
 	})
 }
@@ -343,6 +343,6 @@ func (e *engine) storeRefused(origin correlation.ID, what string, err error) {
 	e.bus.Publish(bus.TxDropped{
 		// Keep the recorded reason stable for existing journal and
 		// metrics consumers; only the log prose adopts the clearer name.
-		Relay: e.relay, Correlation: origin, At: time.Now(), Reason: "session-store", Kind: "answer",
+		Relay: e.relay, Correlation: origin, At: time.Now(), Reason: bus.DropSessionStore, Kind: "answer",
 	})
 }

@@ -38,12 +38,6 @@ const (
 	DefaultDutyWait = 10 * time.Minute
 )
 
-const (
-	reasonDuty      = "duty"
-	reasonExpired   = "expired"
-	reasonCancelled = "cancelled"
-)
-
 // Route is how a frame travels — flooded to whoever hears it, or down
 // a path to one node. The pipeline never decides it and never reads
 // the frame to find it: the owner classifies what it composed, and
@@ -145,7 +139,7 @@ type Outcome struct {
 	Airtime  time.Duration
 	PowerDBm int8
 	Requeued bool
-	Dropped  string
+	Dropped  bus.DropReason
 }
 
 // Emit carries one emission through the pipeline on the owner's turn:
@@ -162,13 +156,13 @@ func (p *Pipeline) Emit(ctx context.Context, item Emission, dev radio.Device,
 		// A dry gate reaches no radio: whatever reached this queue under
 		// it is refused here, so the contract "empty reads as dry" is
 		// enforced where the keying would happen and not merely stated.
-		return p.drop(item, "dry")
+		return p.drop(item, bus.DropDry)
 	}
 	if dev == nil || ledger == nil {
-		return p.drop(item, "radio-down")
+		return p.drop(item, bus.DropRadioDown)
 	}
 	if item.expired(time.Now()) {
-		return p.drop(item, reasonExpired)
+		return p.drop(item, bus.DropExpired)
 	}
 	airtime := dev.Airtime(len(item.Frame))
 	reservation, outcome := p.reserveDuty(ctx, ledger, airtime, item)
@@ -181,10 +175,10 @@ func (p *Pipeline) Emit(ctx context.Context, item Emission, dev radio.Device,
 	}
 	at := time.Now()
 	if ctx.Err() != nil {
-		return p.drop(item, reasonCancelled)
+		return p.drop(item, bus.DropCancelled)
 	}
 	if item.expired(at) {
-		return p.drop(item, reasonExpired)
+		return p.drop(item, bus.DropExpired)
 	}
 	shadow := policy.Mode == config.TXShadow
 	actualAir, actualPower := airtime, power
@@ -222,12 +216,12 @@ func (p *Pipeline) Emit(ctx context.Context, item Emission, dev radio.Device,
 // that hardware refusal keeps the same paced turn as a CAD refusal.
 func (p *Pipeline) refusedTransmit(ctx context.Context, item Emission, policy Policy, err error) Outcome {
 	if ctx.Err() != nil {
-		return p.drop(item, reasonCancelled)
+		return p.drop(item, bus.DropCancelled)
 	}
 	if errors.Is(err, radio.ErrBusyReceiving) {
 		return p.deferForReception(item, policy)
 	}
-	return p.drop(item, "tx-failed")
+	return p.drop(item, bus.DropTXFailed)
 }
 
 // reserveDuty waits for the shared ledger to admit the airtime, up to
@@ -239,16 +233,16 @@ func (p *Pipeline) refusedTransmit(ctx context.Context, item Emission, policy Po
 func (p *Pipeline) reserveDuty(ctx context.Context, ledger *radio.AirtimeLedger,
 	airtime time.Duration, item Emission,
 ) (*radio.AirtimeReservation, Outcome) {
-	deadline, exhausted := time.Now().Add(p.cfg.DutyWait), reasonDuty
+	deadline, exhausted := time.Now().Add(p.cfg.DutyWait), bus.DropDuty
 	if !item.Expires.IsZero() && item.Expires.Before(deadline) {
 		// Its own moment ends before the pipeline's patience does: the
 		// wait is cut there, and the drop is named for what actually
 		// ended it.
-		deadline, exhausted = item.Expires, reasonExpired
+		deadline, exhausted = item.Expires, bus.DropExpired
 	}
 	for {
 		if ctx.Err() != nil {
-			return nil, p.drop(item, reasonCancelled)
+			return nil, p.drop(item, bus.DropCancelled)
 		}
 		now := time.Now()
 		if !now.Before(deadline) {
@@ -263,7 +257,7 @@ func (p *Pipeline) reserveDuty(ctx context.Context, ledger *radio.AirtimeLedger,
 		}
 		select {
 		case <-ctx.Done():
-			return nil, p.drop(item, reasonCancelled)
+			return nil, p.drop(item, bus.DropCancelled)
 		case <-time.After(max(0, freeAt.Sub(now))):
 		}
 	}
@@ -288,29 +282,29 @@ func (p *Pipeline) clearChannel(ctx context.Context, dev radio.Device, policy Po
 	}
 	for {
 		if item.expired(time.Now()) {
-			return p.drop(item, reasonExpired), false
+			return p.drop(item, bus.DropExpired), false
 		}
 		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
 		busy, err := dev.AssessChannel(attemptCtx, policy.LBTThresholdDB)
 		cancel()
 		if ctx.Err() != nil {
-			return p.drop(item, reasonCancelled), false
+			return p.drop(item, bus.DropCancelled), false
 		}
 		if item.expired(time.Now()) {
-			return p.drop(item, reasonExpired), false
+			return p.drop(item, bus.DropExpired), false
 		}
 		if errors.Is(err, radio.ErrBusyReceiving) {
 			return p.deferForReception(item, policy), false
 		}
 		if err != nil {
-			return p.drop(item, "lbt-failed"), false
+			return p.drop(item, bus.DropLBTFailed), false
 		}
 		if !busy {
 			return Outcome{}, true
 		}
 		if time.Now().After(deadline) {
 			if policy.LBTExhausted == config.LBTDrop {
-				return p.drop(item, "lbt"), false
+				return p.drop(item, bus.DropLBT), false
 			}
 			p.cfg.Log.Warn("channel busy past the LBT bound, transmitting anyway",
 				zap.String("corr", item.Correlation.Short()))
@@ -322,7 +316,7 @@ func (p *Pipeline) clearChannel(ctx context.Context, dev radio.Device, policy Po
 		}
 		select {
 		case <-ctx.Done():
-			return p.drop(item, reasonCancelled), false
+			return p.drop(item, bus.DropCancelled), false
 		case <-time.After(retry):
 		}
 	}
@@ -331,14 +325,14 @@ func (p *Pipeline) clearChannel(ctx context.Context, dev radio.Device, policy Po
 func (p *Pipeline) deferForReception(item Emission, policy Policy) Outcome {
 	now := time.Now()
 	if item.expired(now) {
-		return p.drop(item, reasonExpired)
+		return p.drop(item, bus.DropExpired)
 	}
 	if item.BusySince.IsZero() {
 		item.BusySince = now
 	}
 	busyFor := now.Sub(item.BusySince)
 	if busyFor >= p.cfg.LBTBound && policy.LBTExhausted == config.LBTDrop {
-		return p.drop(item, "lbt")
+		return p.drop(item, bus.DropLBT)
 	}
 	retry := p.cfg.LBTRetry/2 + rand.N(p.cfg.LBTRetry) //nolint:gosec // timing jitter, not security
 	item.NotBefore = now.Add(retry)
@@ -354,10 +348,10 @@ func (p *Pipeline) deferForReception(item Emission, policy Policy) Outcome {
 // itself.
 func (p *Pipeline) Submit(item Emission) Outcome {
 	if item.expired(item.NotBefore) {
-		return p.drop(item, reasonExpired)
+		return p.drop(item, bus.DropExpired)
 	}
 	if !p.Queue.Offer(item) {
-		return p.drop(item, "queue-full")
+		return p.drop(item, bus.DropQueueFull)
 	}
 	return Outcome{Requeued: true}
 }
@@ -368,11 +362,11 @@ func (p *Pipeline) Requeue(item Emission) Outcome { return p.Submit(item) }
 // Drop refuses one emission for a reason the journal records — what an
 // owner calls for the frames it gives up on itself, a queue drained
 // by a reset.
-func (p *Pipeline) Drop(item Emission, reason string) Outcome { return p.drop(item, reason) }
+func (p *Pipeline) Drop(item Emission, reason bus.DropReason) Outcome { return p.drop(item, reason) }
 
-func (p *Pipeline) drop(item Emission, reason string) Outcome {
+func (p *Pipeline) drop(item Emission, reason bus.DropReason) Outcome {
 	p.cfg.Log.Debug("frame dropped", zap.String("corr", item.Correlation.Short()),
-		zap.String("kind", item.Kind), zap.Uint8("priority", item.Priority), zap.String("reason", reason))
+		zap.String("kind", item.Kind), zap.Uint8("priority", item.Priority), zap.String("reason", reason.String()))
 	if p.cfg.Bus != nil {
 		p.cfg.Bus.Publish(bus.TxDropped{SourceKind: p.cfg.SourceKind, Source: p.cfg.Source,
 			Correlation: item.Correlation, At: time.Now(), Reason: reason, Kind: item.Kind})

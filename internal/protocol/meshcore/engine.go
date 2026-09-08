@@ -702,7 +702,7 @@ func (e *engine) Run(ctx context.Context, dev radio.Device) error {
 	if e.txEnabled() {
 		// A previous session's queue holds frames the mesh has moved on
 		// from: the backoff alone outlived their usefulness.
-		e.dropQueued("session-restart")
+		e.dropQueued(bus.DropSessionRestart)
 		e.scheduleAdverts(time.Now())
 		// The CAD line is announced rather than assumed: leaving it on
 		// is this daemon's own posture, one step politer than the

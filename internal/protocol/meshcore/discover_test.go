@@ -139,7 +139,7 @@ func TestScanFloodIsRateLimited(t *testing.T) {
 		select {
 		case ev := <-sub.C:
 			if d, ok := ev.(bus.TxDropped); ok {
-				if d.Reason != "rate-limited" {
+				if d.Reason != bus.DropRateLimited {
 					t.Fatalf("dropped for %q, want rate-limited", d.Reason)
 				}
 				dropped++

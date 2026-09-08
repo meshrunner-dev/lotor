@@ -91,7 +91,7 @@ func TestAnonRepliesAreRateLimited(t *testing.T) {
 	for done := false; !done; {
 		select {
 		case ev := <-sub.C:
-			if d, ok := ev.(bus.TxDropped); ok && d.Reason == "rate-limited" {
+			if d, ok := ev.(bus.TxDropped); ok && d.Reason == bus.DropRateLimited {
 				dropped++
 			}
 		default:

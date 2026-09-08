@@ -5,6 +5,7 @@ import (
 
 	"meshrunner.dev/pkg/meshcore"
 
+	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/correlation"
 	"meshrunner.dev/lotor/internal/meshcorehost"
 )
@@ -50,7 +51,7 @@ func (e *engine) reply(inbound *meshcore.Packet, a meshcorehost.Answer, kind str
 		// and for an authenticated question the replay guard is
 		// already spent — so the refusal is counted against its
 		// correlation rather than logged and lost.
-		e.abandonKind(origin, "malformed", "answer", "reply too large to compose ("+kind+")", err)
+		e.abandonKind(origin, bus.DropMalformed, "answer", "reply too large to compose ("+kind+")", err)
 		return
 	}
 	e.logReplyRoute(pkt, origin, kind, source, priority)

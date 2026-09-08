@@ -241,7 +241,7 @@ func TestLBTDropWhenSiteChoosesIt(t *testing.T) {
 		select {
 		case ev := <-sub.C:
 			if d, ok := ev.(bus.TxDropped); ok {
-				if d.Reason != "lbt" {
+				if d.Reason != bus.DropLBT {
 					t.Fatalf("dropped for %q, want lbt", d.Reason)
 				}
 				return
@@ -267,7 +267,7 @@ func TestQueueRefusesTheOverflow(t *testing.T) {
 		select {
 		case ev := <-sub.C:
 			if d, ok := ev.(bus.TxDropped); ok {
-				if d.Reason != "queue-full" {
+				if d.Reason != bus.DropQueueFull {
 					t.Fatalf("dropped for %q, want queue-full", d.Reason)
 				}
 				return
@@ -350,7 +350,7 @@ func TestDutyDropsWhatCannotWait(t *testing.T) {
 		select {
 		case ev := <-sub.C:
 			if d, ok := ev.(bus.TxDropped); ok {
-				if d.Reason != "duty" {
+				if d.Reason != bus.DropDuty {
 					t.Fatalf("dropped for %q, want duty", d.Reason)
 				}
 				return
@@ -565,7 +565,7 @@ func TestSessionRestartClearsTheQueue(t *testing.T) {
 		select {
 		case ev := <-sub.C:
 			if d, ok := ev.(bus.TxDropped); ok {
-				if d.Reason != "session-restart" {
+				if d.Reason != bus.DropSessionRestart {
 					t.Fatalf("dropped for %q, want session-restart", d.Reason)
 				}
 				dropped++
@@ -651,7 +651,7 @@ func TestAbandonedRelayIsCounted(t *testing.T) {
 	select {
 	case ev := <-sub.C:
 		d, ok := ev.(bus.TxDropped)
-		if !ok || d.Reason != "malformed" {
+		if !ok || d.Reason != bus.DropMalformed {
 			t.Fatalf("event = %+v, want a malformed drop", ev)
 		}
 		if d.Correlation.Short() == (correlation.ID{}).Short() {
@@ -729,7 +729,7 @@ func TestRadioFaultCountsTheLostEmission(t *testing.T) {
 		select {
 		case ev := <-sub.C:
 			if d, ok := ev.(bus.TxDropped); ok {
-				if d.Reason != "tx-failed" {
+				if d.Reason != bus.DropTXFailed {
 					t.Fatalf("dropped for %q, want tx-failed", d.Reason)
 				}
 				if d.Correlation.Short() == (correlation.ID{}).Short() {
@@ -1002,7 +1002,7 @@ func TestMultipartUnwrapsToOneAck(t *testing.T) {
 	for done := false; !done; {
 		select {
 		case ev := <-sub.C:
-			if d, ok := ev.(bus.TxDropped); ok && d.Reason == "duplicate" {
+			if d, ok := ev.(bus.TxDropped); ok && d.Reason == bus.DropDuplicate {
 				drop = true
 			}
 		default:
@@ -1078,7 +1078,7 @@ func TestRequeueAgesOutUnderTheDropPolicy(t *testing.T) {
 	select {
 	case ev := <-sub.C:
 		d, ok := ev.(bus.TxDropped)
-		if !ok || d.Reason != "lbt" {
+		if !ok || d.Reason != bus.DropLBT {
 			t.Fatalf("published %#v, want a TxDropped for lbt", ev)
 		}
 	default:

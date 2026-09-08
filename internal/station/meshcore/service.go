@@ -617,7 +617,7 @@ func (s *service) handle(ctx context.Context, cmd companion.Command) []companion
 	}
 	s.mu.Unlock()
 	for _, item := range dropped {
-		s.pipeline.Drop(item, "station-restart")
+		s.pipeline.Drop(item, bus.DropStationRestart)
 	}
 	return responses
 }

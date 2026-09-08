@@ -160,7 +160,7 @@ type TxDropped struct {
 	Source      string
 	Correlation correlation.ID
 	At          time.Time
-	Reason      string
+	Reason      DropReason
 	// Kind names what was refused — the queue entry's kind, or the
 	// would-be answer's for refusals that never composed a packet.
 	// Empty when the pipeline gave up before it knew.

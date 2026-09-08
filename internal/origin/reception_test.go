@@ -34,7 +34,7 @@ func TestReceptionAtKeyingKeepsTheFrameAndReleasesDuty(t *testing.T) {
 				item.Expires = time.Now().Add(time.Minute)
 				started := time.Now()
 				out := p.Emit(t.Context(), item, dev, ledger, policy, 10)
-				if !out.Requeued || out.Sent || out.Dropped != "" || dev.transmits != 1 {
+				if !out.Requeued || out.Sent || out.Dropped != bus.DropNone || dev.transmits != 1 {
 					t.Fatalf("keying refusal: %+v, transmits=%d", out, dev.transmits)
 				}
 				if (dev.assesses == 1) != cad || len(sub.C) != 0 {
@@ -55,7 +55,7 @@ func TestReceptionAtKeyingKeepsTheFrameAndReleasesDuty(t *testing.T) {
 				}
 				dev.txErr = nil
 				out = p.Emit(t.Context(), retry, dev, ledger, policy, 10)
-				if !out.Sent || out.Requeued || out.Dropped != "" || dev.transmits != 2 ||
+				if !out.Sent || out.Requeued || out.Dropped != bus.DropNone || dev.transmits != 2 ||
 					ledger.Usage(time.Now()) != time.Millisecond {
 					t.Fatalf("retry on a free radio: %+v, transmits=%d, duty=%s", out, dev.transmits, ledger.Usage(time.Now()))
 				}
@@ -92,13 +92,13 @@ func TestReceptionAtKeyingHonoursDropExpiryAndQueueLimits(t *testing.T) {
 		lifetime      time.Duration
 		transmitDelay time.Duration
 		full          bool
-		wantDrop      string
+		wantDrop      bus.DropReason
 	}{
-		{name: "bound-drop", exhausted: config.LBTDrop, busyFor: DefaultLBTBound, wantDrop: "lbt"},
+		{name: "bound-drop", exhausted: config.LBTDrop, busyFor: DefaultLBTBound, wantDrop: bus.DropLBT},
 		{name: "bound-transmit-waits-for-reception", exhausted: config.LBTTransmit, busyFor: 2 * DefaultLBTBound},
-		{name: "retry-past-expiry", lifetime: DefaultLBTRetry / 4, wantDrop: "expired"},
-		{name: "expiry-during-refusal", lifetime: time.Millisecond, transmitDelay: 2 * time.Millisecond, wantDrop: "expired"},
-		{name: "queue-full", full: true, wantDrop: "queue-full"},
+		{name: "retry-past-expiry", lifetime: DefaultLBTRetry / 4, wantDrop: bus.DropExpired},
+		{name: "expiry-during-refusal", lifetime: time.Millisecond, transmitDelay: 2 * time.Millisecond, wantDrop: bus.DropExpired},
+		{name: "queue-full", full: true, wantDrop: bus.DropQueueFull},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -121,11 +121,11 @@ func TestReceptionAtKeyingHonoursDropExpiryAndQueueLimits(t *testing.T) {
 				}
 				out := p.Emit(t.Context(), item, dev, ledger,
 					Policy{Mode: config.TXOnAir, LBTExhausted: tc.exhausted}, 10)
-				if out.Dropped != tc.wantDrop || out.Sent || out.Requeued != (tc.wantDrop == "") {
+				if out.Dropped != tc.wantDrop || out.Sent || out.Requeued != (tc.wantDrop == bus.DropNone) {
 					t.Fatalf("reception limit: %+v, want drop=%q", out, tc.wantDrop)
 				}
 				assertDutyReleased(t, ledger, time.Millisecond)
-				if tc.wantDrop == "" {
+				if tc.wantDrop == bus.DropNone {
 					retry := p.Queue.Drain()
 					if len(retry) != 1 || !retry[0].BusySince.Equal(item.BusySince) || len(sub.C) != 0 {
 						t.Fatalf("continued reception reset its bound or ended: retries=%+v, events=%d", retry, len(sub.C))
@@ -152,7 +152,7 @@ func TestAReceptionErrorAfterRadiatingIsStillAccounted(t *testing.T) {
 	dev := &fakeRadio{airtime: time.Millisecond, txErr: radio.ErrBusyReceiving, txErrAirtime: 2 * time.Millisecond}
 	ledger := radio.NewAirtimeLedger(10*time.Millisecond, nil)
 	out := p.Emit(t.Context(), emission("radiated"), dev, ledger, Policy{Mode: config.TXOnAir}, 10)
-	if !out.Sent || out.Requeued || out.Dropped != "" || out.Airtime != dev.txErrAirtime || p.Queue.Len() != 0 ||
+	if !out.Sent || out.Requeued || out.Dropped != bus.DropNone || out.Airtime != dev.txErrAirtime || p.Queue.Len() != 0 ||
 		ledger.Usage(time.Now()) != dev.txErrAirtime {
 		t.Fatalf("radiated frame was retried or not charged: %+v, queue=%d, duty=%s", out, p.Queue.Len(), ledger.Usage(time.Now()))
 	}
@@ -195,7 +195,7 @@ func TestCancellationBeforeRadiatingHasATerminalOutcome(t *testing.T) {
 				}
 				out := p.Emit(ctx, emission("cancelled"), dev, ledger, policy, 10)
 				if phase == "keying-radiated" {
-					if !out.Sent || out.Requeued || out.Dropped != "" || ledger.Usage(time.Now()) != time.Millisecond {
+					if !out.Sent || out.Requeued || out.Dropped != bus.DropNone || ledger.Usage(time.Now()) != time.Millisecond {
 						t.Fatalf("cancellation lost a radiated frame: %+v", out)
 					}
 					if _, ok := (<-sub.C).(bus.FrameSent); !ok || len(sub.C) != 0 {
@@ -203,11 +203,11 @@ func TestCancellationBeforeRadiatingHasATerminalOutcome(t *testing.T) {
 					}
 					return
 				}
-				if out.Dropped != "cancelled" || out.Sent || out.Requeued || p.Queue.Len() != 0 {
+				if out.Dropped != bus.DropCancelled || out.Sent || out.Requeued || p.Queue.Len() != 0 {
 					t.Fatalf("cancelled emission: %+v, queue=%d", out, p.Queue.Len())
 				}
 				assertDutyReleased(t, ledger, time.Millisecond)
-				if event, ok := (<-sub.C).(bus.TxDropped); !ok || event.Reason != "cancelled" {
+				if event, ok := (<-sub.C).(bus.TxDropped); !ok || event.Reason != bus.DropCancelled {
 					t.Fatalf("cancellation event=%+v", event)
 				}
 				if len(sub.C) != 0 {

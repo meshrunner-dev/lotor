@@ -365,7 +365,7 @@ func TestOneSessionCannotFloodTheMesh(t *testing.T) {
 					answers++
 				}
 			case bus.TxDropped:
-				if v.Reason == "rate-limited" {
+				if v.Reason == bus.DropRateLimited {
 					refused++
 				}
 			}
