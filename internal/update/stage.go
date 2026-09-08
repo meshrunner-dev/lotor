@@ -12,6 +12,7 @@ package update
 import (
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -259,107 +260,128 @@ func WriteStage(dir string, checked *Checked, platform string) error {
 	return writeSynced(filepath.Join(dir, readyMarker), append(ready, '\n'), 0o644)
 }
 
-// VerifyStaged proves a stage from its own files alone, against the
-// caller's trust store: signature over the manifest, manifest hash
-// over the binary. The installer calls this as root with its own
-// keys, which is what makes the boundary real; the daemon calls it
-// too, to refuse a bad stage before bothering anyone.
+// VerifyStaged checks a published stage without installing it. Install makes
+// and verifies its own private copy; this read-only result is never permission
+// to reopen the shared binary and install whatever it contains later.
 func VerifyStaged(dir string, trusted []PublicKey) (*Ready, error) {
-	rawReady, err := os.ReadFile(filepath.Join(dir, readyMarker)) //nolint:gosec // the stage dir is ours
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	ready, art, err := readStage(root, trusted)
+	if err != nil {
+		return nil, err
+	}
+	src, err := root.Open(stagedBinary)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = src.Close() }()
+	if err := copyVerified(io.Discard, src, art); err != nil {
+		return nil, err
+	}
+	return ready, nil
+}
+
+func readStage(root *os.Root, trusted []PublicKey) (*Ready, Artifact, error) {
+	rawReady, err := root.ReadFile(readyMarker)
+	if err != nil {
+		return nil, Artifact{}, err
 	}
 	var ready Ready
 	if err := json.Unmarshal(rawReady, &ready); err != nil {
-		return nil, fmt.Errorf("ready marker: %w", err)
+		return nil, Artifact{}, fmt.Errorf("ready marker: %w", err)
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, stagedManifest)) //nolint:gosec // the stage dir is ours
+	raw, err := root.ReadFile(stagedManifest)
 	if err != nil {
-		return nil, err
+		return nil, Artifact{}, err
 	}
-	sig, err := os.ReadFile(filepath.Join(dir, stagedSig)) //nolint:gosec // the stage dir is ours
+	sig, err := root.ReadFile(stagedSig)
 	if err != nil {
-		return nil, err
+		return nil, Artifact{}, err
 	}
 	key, err := Verify(raw, sig, trusted)
 	if err != nil {
-		return nil, err
+		return nil, Artifact{}, err
 	}
 	m, err := ParseManifest(raw)
 	if err != nil {
-		return nil, err
+		return nil, Artifact{}, err
 	}
-	// The same pin the check enforced, held by the installer's own
-	// hand: a stage signed by a key outside the channel's train is
-	// refused however it got here.
 	if !key.Vouches(m.Channel) {
-		return nil, fmt.Errorf("key %s does not vouch for channel %s", key.Hex(), m.Channel)
+		return nil, Artifact{}, fmt.Errorf("key %s does not vouch for channel %s", key.Hex(), m.Channel)
+	}
+	if ready.Platform != Platform() {
+		return nil, Artifact{}, fmt.Errorf("stage is for %s, this host is %s", ready.Platform, Platform())
 	}
 	art, err := m.ArtifactFor(ready.Platform)
 	if err != nil {
-		return nil, err
+		return nil, Artifact{}, err
 	}
-	bin, err := os.ReadFile(filepath.Join(dir, stagedBinary)) //nolint:gosec // the stage dir is ours
-	if err != nil {
-		return nil, err
-	}
-	// The staged binary answers to the manifest's binary hash: for a
-	// compressed artifact that is the unpacked pair, and the transport
-	// form never reaches this boundary at all.
 	binSum, _ := art.Binary()
-	sum := sha256.Sum256(bin)
-	if hex.EncodeToString(sum[:]) != binSum {
-		return nil, errors.New("staged binary does not hash to what the signed manifest promises")
+	if m.Version != ready.Version || m.Channel != ready.Channel || binSum != ready.SHA256 {
+		return nil, Artifact{}, errors.New("ready marker does not match the signed manifest")
 	}
-	if m.Version != ready.Version {
-		return nil, fmt.Errorf("ready marker says %s, the signed manifest %s", ready.Version, m.Version)
+	return &ready, art, nil
+}
+
+// copyVerified binds the bytes written to the signed binary size and hash.
+// Install's destination is private to the installer throughout this operation.
+func copyVerified(dst io.Writer, src io.Reader, art Artifact) error {
+	sum, size := art.Binary()
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(dst, h), io.LimitReader(src, size))
+	if err != nil {
+		return err
 	}
-	return &ready, nil
+	var extra [1]byte
+	more, err := io.ReadFull(src, extra[:])
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if n != size || more != 0 {
+		return fmt.Errorf("staged binary size does not match the signed size %d", size)
+	}
+	if hex.EncodeToString(h.Sum(nil)) != sum {
+		return errors.New("staged binary does not hash to what the signed manifest promises")
+	}
+	return nil
 }
 
 // ClearStage removes a stage, marker first: whatever interrupts the
 // rest leaves no marker for the installer to act on.
 func ClearStage(dir string) error {
-	if err := os.Remove(filepath.Join(dir, readyMarker)); err != nil && !os.IsNotExist(err) {
+	root, err := os.OpenRoot(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	for _, name := range []string{stagedBinary, stagedFetch, stagedManifest, stagedSig} {
-		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
+	defer func() { _ = root.Close() }()
+	return clearStage(root)
+}
+
+func clearStage(root *os.Root) error {
+	for _, name := range []string{readyMarker, stagedBinary, stagedFetch, stagedManifest, stagedSig} {
+		if err := root.Remove(name); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
-	return nil
-}
-
-// Apply installs a verified stage over the target binary: the old one
-// survives as .prev by hard link, the new arrives by rename on the
-// same filesystem, and there is no instant without a binary at the
-// path. The caller has verified the stage; this only moves bytes.
-func Apply(dir, target string) error {
-	staged := filepath.Join(dir, stagedBinary)
-	next := filepath.Join(filepath.Dir(target), ".lotor.next")
-	if err := copySynced(staged, next); err != nil {
-		return err
-	}
-	prev := target + ".prev"
-	if err := os.Remove(prev); err != nil && !os.IsNotExist(err) {
-		_ = os.Remove(next)
-		return err
-	}
-	if err := os.Link(target, prev); err != nil && !os.IsNotExist(err) {
-		_ = os.Remove(next)
-		return err
-	}
-	if err := os.Rename(next, target); err != nil {
-		_ = os.Remove(next)
-		return err
-	}
-	return syncDir(filepath.Dir(target))
+	return syncRoot(root)
 }
 
 // Rollback puts the previous binary back — the OnFailure unit's one
 // move when a new version cannot hold the service up.
 func Rollback(target string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	release, err := acquireUpdate(ctx, target, true)
+	if err != nil {
+		return err
+	}
+	defer release()
 	prev := target + ".prev"
 	if _, err := os.Stat(prev); err != nil {
 		return fmt.Errorf("nothing to roll back to: %w", err)
@@ -378,15 +400,56 @@ type Pending struct {
 
 // WritePending arms the probation before the restart.
 func WritePending(stateDir, version string) error {
-	raw, err := json.Marshal(Pending{Version: version, Since: time.Now().UTC()})
-	if err != nil {
-		return err
-	}
 	dir := StageDir(stateDir)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	return writeSynced(filepath.Join(dir, pendingMarker), append(raw, '\n'), 0o644)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return writePending(root, version)
+}
+
+func writePending(root *os.Root, version string) error {
+	raw, err := json.Marshal(Pending{Version: version, Since: time.Now().UTC()})
+	if err != nil {
+		return err
+	}
+	// Publish a new inode atomically; never truncate a daemon-controlled
+	// destination or follow its final symlink while running as the installer.
+	name := ".pending-" + rand.Text()
+	f, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Remove(name) }()
+	if _, err = f.Write(append(raw, '\n')); err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if err := root.Rename(name, pendingMarker); err != nil {
+		return err
+	}
+	return syncRoot(root)
+}
+
+func syncRoot(root *os.Root) error {
+	d, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // ReadPending reports the probation in force, or nil.
@@ -420,25 +483,6 @@ func writeSynced(path string, data []byte, mode os.FileMode) error {
 		err = f.Sync()
 	}
 	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	return err
-}
-
-func copySynced(from, to string) error {
-	src, err := os.Open(from) //nolint:gosec // the verified stage
-	if err != nil {
-		return err
-	}
-	defer func() { _ = src.Close() }()
-	dst, err := os.OpenFile(to, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755) //nolint:gosec // a binary
-	if err != nil {
-		return err
-	}
-	if _, err = io.Copy(dst, src); err == nil {
-		err = dst.Sync()
-	}
-	if cerr := dst.Close(); err == nil {
 		err = cerr
 	}
 	return err

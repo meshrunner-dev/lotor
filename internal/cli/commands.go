@@ -1978,27 +1978,29 @@ func (s *session) updateInstall(ctx context.Context, in input) error {
 	if err != nil {
 		return err
 	}
-	dir := update.StageDir(s.deps.StateDir)
+	stage, err := update.BeginStage(ctx, s.deps.StateDir)
+	if err != nil {
+		return err
+	}
+	defer stage.Close()
 	fmt.Fprintf(s.out, "fetching %s (%d bytes)…\r\n", m.Version, art.Size)
 	done := s.showFetchProgress(client)
-	staged, err := client.Download(ctx, art, dir)
+	staged, err := client.Download(ctx, art, stage.Dir())
 	done()
 	if err != nil {
 		return err
 	}
 	fmt.Fprint(s.out, "hash verified — proving the new binary starts…\r\n")
 	if s.deps.DBPath != "" {
-		// The "variable" subprocess is the point: the staged binary
-		// proving it starts, before anyone privileged is asked.
-		//nolint:gosec // the staged binary is the subject
+		// The staged binary proves it starts before the installer is asked.
+		//nolint:gosec // the verified staged binary is the subject
 		probe := exec.CommandContext(ctx, staged, "update", "selfcheck", "--db", s.deps.DBPath)
 		if out, err := probe.CombinedOutput(); err != nil {
-			_ = update.ClearStage(dir)
 			return fmt.Errorf("the new binary fails its selfcheck: %s (%w)",
 				strings.TrimSpace(string(out)), err)
 		}
 	}
-	if err := update.WriteStage(dir, checked, update.Platform()); err != nil {
+	if err := stage.Publish(checked, update.Platform()); err != nil {
 		return err
 	}
 	fmt.Fprintf(s.out,

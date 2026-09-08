@@ -124,19 +124,12 @@ func (c *updateApplyCmd) Run() error {
 	if err != nil {
 		return err
 	}
-	dir := update.StageDir(c.State)
-	ready, err := update.VerifyStaged(dir, trusted)
+	ready, err := update.Install(context.Background(), c.State, c.Target, trusted)
+	if ready == nil {
+		return err
+	}
 	if err != nil {
-		return fmt.Errorf("stage refused: %w", err)
-	}
-	if err := update.Apply(dir, c.Target); err != nil {
-		return err
-	}
-	if err := update.WritePending(c.State, ready.Version); err != nil {
-		return err
-	}
-	if err := update.ClearStage(dir); err != nil {
-		return err
+		fmt.Fprintf(os.Stderr, "installed %s; finalization needs attention: %v\n", ready.Version, err)
 	}
 	fmt.Printf("installed %s over %s — the previous binary stands by as .prev\n",
 		ready.Version, c.Target)

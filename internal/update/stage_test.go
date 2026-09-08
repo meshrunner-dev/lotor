@@ -215,16 +215,15 @@ func TestAStageVerifiesWholeOrNotAtAll(t *testing.T) {
 	}
 }
 
-func TestApplyKeepsTheOldBinaryAndRollbackRestoresIt(t *testing.T) {
-	dir, bindir := t.TempDir(), t.TempDir()
+func TestInstallKeepsTheOldBinaryAndRollbackRestoresIt(t *testing.T) {
+	state, bindir := t.TempDir(), t.TempDir()
+	dir := StageDir(state)
 	target := filepath.Join(bindir, "lotor")
 	if err := os.WriteFile(target, []byte("the old one"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, stagedBinary), []byte("the new one"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := Apply(dir, target); err != nil {
+	keys := signedStage(t, dir, []byte("the new one"))
+	if _, err := Install(t.Context(), state, target, keys); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(target); string(got) != "the new one" {

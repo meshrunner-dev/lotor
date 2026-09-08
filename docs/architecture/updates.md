@@ -219,7 +219,13 @@ a candidate when its version differs from the running one.
 
 ## Download and staging
 
-The running daemon performs staging without elevated privileges.
+The running daemon performs staging without elevated privileges. One operation
+owns a private preparation directory and the update lease through download,
+self-check and publication. A concurrent `/update install` is refused, including
+`force`; an already published stage or an update still on probation is also
+preserved. A failed preparation removes only its own temporary directory.
+The lease uses the same Linux kernel namespace as the daemon instance guard;
+process exit releases it, including after a crash.
 
 For an uncompressed artifact, it streams at most the signed size into the stage
 while calculating SHA-256. A size or hash mismatch removes the candidate.
@@ -250,8 +256,10 @@ runtime subsystem is healthy.”
 
 The exact verified manifest and signature are stored beside the binary. A
 `ready` marker containing the version, channel, platform and binary hash is
-written last, after the other files have been flushed. The privileged side
-ignores every partial stage lacking that marker.
+published last by rename, after the other files and their directory have been
+flushed. The privileged side ignores every partial stage lacking that marker.
+The installer waits for the publisher to release its lease, with a one-minute
+limit, then holds the stage and executable leases through installation and cleanup.
 
 ## The privilege boundary
 
@@ -265,27 +273,31 @@ Before changing the executable, it reconstructs trust independently:
 - it re-verifies the exact staged manifest and signature;
 - it re-parses the strict manifest;
 - it re-checks the key's channel scope;
-- it selects the signed artifact named by the stage platform marker;
-- it hashes the staged binary again against that artifact's signed binary hash.
+- it requires the stage platform to match the running host;
+- it requires the marker's version, channel and hash to match the signed manifest;
+- it streams the binary into an installer-owned private directory beside the
+  executable, checking the exact written bytes against the signed size and hash.
 
-Only then does it copy the candidate into the executable's filesystem, preserve
-the previous executable as a hard link, and rename the candidate over the
-installed path. The final rename is atomic: there is no interval in which the
-service path names no binary.
+The installer never reopens the shared binary after verification. It preserves
+the previous executable as a hard link, arms probation, and renames that exact
+private copy over the installed path. The final rename is atomic: there is no
+interval in which the service path names no binary. Shared stage operations are
+anchored to an open directory; marker publication uses a new file and rename,
+so it never truncates a daemon-provided destination link.
 
-The replacement is then marked as pending, the completed stage is cleared, and
-the service is restarted under its normal unprivileged account. Root never
-executes the candidate binary.
+The completed stage is cleared and the service is restarted under its normal
+unprivileged account. If directory syncing or cleanup fails after replacement,
+the installer reports that finalization needs attention and still restarts into
+the installed binary. Probation prevents a retry from overwriting the rollback
+copy. Root never executes the candidate binary during installation.
 
 This boundary prevents a compromised daemon from turning arbitrary staged bytes
 into code executed by root. It does not make the staging daemon irrelevant to
 policy: the privileged verifier accepts any manifest authorized by the local
 trust set and its channel pin; it does not independently enforce a root-owned
-“this machine follows release only” policy. It also does not compare the stage
-platform marker with the platform on which the installer is running. The normal
-staging path chooses both values before the privilege boundary, but a compromised
-stager could therefore choose any still-valid signed artifact accepted by the
-local trust set. It still cannot turn unsigned bytes into root execution. The
+“this machine follows release only” policy. The normal staging path chooses the
+channel, but a compromised stager could therefore choose any still-valid signed
+artifact for this host accepted by the local trust set. It still cannot turn unsigned bytes into root execution. The
 resulting service runs with the same unprivileged account and sandbox as before.
 
 ## Probation and rollback
