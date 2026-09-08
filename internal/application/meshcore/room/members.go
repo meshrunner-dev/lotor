@@ -241,6 +241,11 @@ func (s *service) handleLogin(ctx context.Context, pkt *mesh.Packet, corr correl
 		s.evictedLocked(ctx, victim, corr)
 	}
 	m := s.member(c.PubKey)
+	if !c.HasAccess() {
+		// A password demotion forgot the durable receipt together with
+		// the access entry. Keep the live acceptance memory in step.
+		m.lastKept = 0
+	}
 	// Applied on every accepted login, the blank recheck included —
 	// the reference leaves a rechecking member's cursor where it was,
 	// which is the sharp edge that strands a returning admin.
@@ -275,11 +280,12 @@ func (s *service) admitStranger(sender []byte) bool {
 }
 
 // evictedLocked lets go of the room's own memory of a member the table
-// unseated: its cursor, in RAM and — best effort — in the store, a
-// stale row costing nothing but a few bytes until a login rewrites it.
+// unseated. The session adapter already removed its durable cursor
+// and receipt in the replacement transaction; a room keeping only
+// its history durably must clean those separately.
 func (s *service) evictedLocked(ctx context.Context, victim [mesh.PubKeySize]byte, corr correlation.ID) {
 	delete(s.members, victim)
-	if s.store != nil {
+	if s.store != nil && !s.table.Durable() {
 		forgetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), storeWait)
 		defer cancel()
 		if err := s.store.ForgetRoomCursor(forgetCtx, s.name, victim); err != nil {

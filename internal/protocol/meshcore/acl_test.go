@@ -27,6 +27,14 @@ func (m *memStore) LoadSessions() ([]PersistedSession, error) {
 func (m *memStore) SaveSession(p PersistedSession) error            { m.rows[p.PubKey] = p; return nil }
 func (m *memStore) ForgetSession(k [meshcore.PubKeySize]byte) error { delete(m.rows, k); return nil }
 
+func (m *memStore) ReplaceSession(k [meshcore.PubKeySize]byte, p *PersistedSession) error {
+	delete(m.rows, k)
+	if p != nil {
+		m.rows[p.PubKey] = *p
+	}
+	return nil
+}
+
 func TestAccessEntriesSurviveABounce(t *testing.T) {
 	store := newMemStore()
 

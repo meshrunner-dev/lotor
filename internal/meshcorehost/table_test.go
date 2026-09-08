@@ -46,6 +46,17 @@ func (s *memStore) ForgetSession(k [meshcore.PubKeySize]byte) error {
 	return nil
 }
 
+func (s *memStore) ReplaceSession(k [meshcore.PubKeySize]byte, p *PersistedSession) error {
+	if s.refuse != nil {
+		return s.refuse
+	}
+	delete(s.rows, k)
+	if p != nil {
+		s.rows[p.PubKey] = *p
+	}
+	return nil
+}
+
 func key(b byte) [meshcore.PubKeySize]byte {
 	var k [meshcore.PubKeySize]byte
 	k[0], k[1] = b, b
@@ -324,4 +335,18 @@ func TestARoomSparesMembersFromGuestsAndAdminsFromEveryone(t *testing.T) {
 // spared from everyone, members from guests.
 func roomSpare(newcomer, seated *Client) bool {
 	return seated.IsAdmin() || (!newcomer.HasAccess() && seated.HasAccess())
+}
+
+func TestRelayGuestChurnDoesNotWaitForTheStore(t *testing.T) {
+	store := newMemStore()
+	store.refuse = errors.New("disk unavailable")
+	table := NewTable(store, 1)
+	for _, k := range []byte{1, 2} {
+		if err := table.Put(&Client{PubKey: key(k)}); err != nil {
+			t.Fatalf("a RAM-only guest asked the failed store: %v", err)
+		}
+	}
+	if table.Live(key(1)) != nil || table.Live(key(2)) == nil {
+		t.Fatal("guest replacement did not update the live table")
+	}
 }

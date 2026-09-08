@@ -46,6 +46,11 @@ type SessionStore interface {
 	LoadSessions() ([]PersistedSession, error)
 	SaveSession(s PersistedSession) error
 	ForgetSession(pubKey [meshcore.PubKeySize]byte) error
+	// ReplaceSession atomically forgets the victim and saves the newcomer.
+	// A nil newcomer is a guest, with no durable access row. State the
+	// owner associates with the victim (room cursors and receipts) must
+	// leave in the same transaction. Failure leaves everything intact.
+	ReplaceSession(victim [meshcore.PubKeySize]byte, newcomer *PersistedSession) error
 }
 
 // OutPath is a route home a client taught us, so an answer can travel
@@ -182,9 +187,13 @@ type Table struct {
 	// members from guests, so those who hold its word fill it the
 	// reference's way while a stranger holding nothing cannot empty
 	// it. Nil spares access entries from everyone.
-	Spare    func(newcomer, seated *Client) bool
-	store    SessionStore // nil keeps the table in memory only
-	capacity int
+	Spare func(newcomer, seated *Client) bool
+	// ForgetGuestState asks the store to clean state beside an evicted
+	// guest's RAM-only session, such as a room delivery cursor. Without
+	// it guest eviction costs no disk operation, as on a relay.
+	ForgetGuestState bool
+	store            SessionStore // nil keeps the table in memory only
+	capacity         int
 }
 
 // NewTable makes an empty table of the given capacity — the
@@ -315,22 +324,21 @@ func (t *Table) PutEvicting(c *Client) (victim [meshcore.PubKeySize]byte, evicti
 			return victim, false, ErrSessionsFull
 		}
 	}
-	// The victim leaves the store before the newcomer enters it: a
-	// store that refuses the second write is then compensated by
-	// forgetting the newcomer again, so the store never holds a row
-	// for a client the table does not seat, and never lacks one for a
-	// client it does — whichever write failed, the two agree.
-	if evicting && t.By[victim].HasAccess() {
-		if err := t.Forget(victim); err != nil {
+	// The durable replacement is one transaction. Separate deletion
+	// and insertion, even with compensation, can lose the victim's
+	// authorisation and replay guard on a refusal or process crash.
+	switch {
+	case evicting && t.store != nil && (t.By[victim].HasAccess() || t.ForgetGuestState):
+		var newcomer *PersistedSession
+		if c.HasAccess() {
+			p := c.Persisted()
+			newcomer = &p
+		}
+		if err := t.store.ReplaceSession(victim, newcomer); err != nil {
 			return victim, false, err
 		}
-	}
-	switch {
 	case c.HasAccess():
 		if err := t.Save(c); err != nil {
-			if evicting && t.By[victim].HasAccess() {
-				_ = t.Save(t.By[victim]) // best effort: put the victim's row back
-			}
 			return victim, false, err
 		}
 	case known && old.HasAccess():

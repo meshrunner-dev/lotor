@@ -439,6 +439,14 @@ What it costs, stated so nobody rediscovers it:
   not a frozen room for as long as the disk sulks. Should a room ever
   become hot, the station's shape is the upgrade: compose and stamp
   under the lock, write outside it, retake it to publish.
+- **Membership replacement is one transaction.** Removing the victim's
+  access row, cursor and receipt and saving the newcomer either all
+  commit or all roll back. A failed login leaves the existing member
+  and its replay guard intact in RAM and on disk; an interruption cannot
+  split deletion from insertion. The application session adapter uses
+  the same three-second budget for that entire transaction. Relay
+  access writes retain their ten-second budget, and relay guest churn
+  remains entirely in RAM.
 - **Cursors are debounced.** The reference's five-second lazy write is
   the right instinct: a cursor lost to a crash costs a re-delivery the
   client's own cursor repairs at its next keep-alive, and the store is
@@ -467,7 +475,8 @@ The split by class therefore lands entirely in `config.db`:
   — the instance-name grammar forbids the colon, so the two can never
   collide and no relay row moves. The relay's semantics carry over
   unchanged: durable roles persist with their replay guard and taught
-  route; guests never touch disk.
+  route; guests never acquire a durable access row. An evicted room
+  guest's delivery cursor is removed by the same membership transaction.
 - **Cursors, history and receipts** → `room_cursors`, `room_posts` and
   `room_receipts`, the in-memory ring the runtime authority and the
   tables its durability,

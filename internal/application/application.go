@@ -101,7 +101,8 @@ type Spec struct {
 	Bus      *bus.Bus
 	// Sessions is the application's durable access list — its members
 	// and their roles — keyed to it in the configuration store; nil
-	// keeps the table in memory.
+	// keeps the table in memory. Removing or replacing a member also
+	// removes the associated cursor and receipt in the same transaction.
 	Sessions meshcorehost.SessionStore
 	// Store is the configuration store itself, for the tables a type
 	// keeps beside the revision trail — a room's posts and cursors.

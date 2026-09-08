@@ -124,3 +124,42 @@ func (s *Store) ForgetACL(ctx context.Context, relay string, pubKey []byte) erro
 		"DELETE FROM acl WHERE relay = ? AND pubkey = ?", relay, pubKey)
 	return err
 }
+
+// ReplaceACL exchanges an evicted entry for its successor in one
+// transaction. A nil newcomer only forgets the victim, for a guest.
+func (s *Store) ReplaceACL(ctx context.Context, owner string, victim []byte, newcomer *ACLRow) error {
+	return s.replaceACL(ctx, owner, "", victim, newcomer)
+}
+
+// ReplaceRoomMember also removes the victim's delivery cursor and
+// accepted-post receipt. A refusal retains all three, so a failed
+// login cannot rewind a seated member's durable state. Posts are room
+// history and remain after their author leaves.
+func (s *Store) ReplaceRoomMember(ctx context.Context, app string, victim []byte, newcomer *ACLRow) error {
+	return s.replaceACL(ctx, ApplicationOwner(app), app, victim, newcomer)
+}
+
+func (s *Store) replaceACL(ctx context.Context, owner, room string, victim []byte, newcomer *ACLRow) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM acl WHERE relay = ? AND pubkey = ?", owner, victim); err != nil {
+		return err
+	}
+	if room != "" {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM room_cursors WHERE app = ? AND pubkey = ?", room, victim); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM room_receipts WHERE app = ? AND author = ?", room, victim); err != nil {
+			return err
+		}
+	}
+	if newcomer != nil {
+		if err := saveACLTx(ctx, tx, owner, *newcomer); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}

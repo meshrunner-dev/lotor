@@ -34,6 +34,14 @@ func (s roomSessions) ForgetSession(key [mesh.PubKeySize]byte) error {
 	return nil
 }
 
+func (s roomSessions) ReplaceSession(key [mesh.PubKeySize]byte, entry *meshcorehost.PersistedSession) error {
+	delete(s, key)
+	if entry != nil {
+		s[entry.PubKey] = *entry
+	}
+	return nil
+}
+
 func persistentRoomBuilder(t *testing.T, db *confdb.Store) func() *service {
 	t.Helper()
 	cfg := baseConfig()

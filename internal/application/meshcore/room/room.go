@@ -406,6 +406,7 @@ func build(spec application.Spec) (application.Service, error) {
 	// free seat or another guest's, never a member's, so a stranger
 	// holding nothing cannot empty a room whose membership is durable.
 	s.table.Spare = roomSpare
+	s.table.ForgetGuestState = true
 	// The members the store remembers, the secret recomputed per
 	// entry; a store that cannot be read is an error, never an empty
 	// room — the entries carry every admin's replay guard.

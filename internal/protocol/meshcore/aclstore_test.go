@@ -80,6 +80,20 @@ func (s *fakeStore) ForgetSession(k [meshcore.PubKeySize]byte) error {
 	return nil
 }
 
+func (s *fakeStore) ReplaceSession(k [meshcore.PubKeySize]byte, p *PersistedSession) error {
+	if s.forgetErr != nil {
+		return s.forgetErr
+	}
+	if p != nil && s.saveErr != nil {
+		return s.saveErr
+	}
+	delete(s.saved, k)
+	if p != nil {
+		s.saved[p.PubKey] = *p
+	}
+	return nil
+}
+
 // key builds a distinct public key from one byte.
 func aclKey(b byte) [meshcore.PubKeySize]byte {
 	var k [meshcore.PubKeySize]byte

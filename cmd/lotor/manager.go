@@ -754,7 +754,7 @@ func (m *manager) accessStore(relay string) enginemc.SessionStore {
 // applicationSessions is the same door for an application, under the
 // owner key that keeps its members apart from every relay's.
 func (m *manager) applicationSessions(name string) enginemc.SessionStore {
-	return &aclStore{store: m.store, owner: confdb.ApplicationOwner(name)}
+	return &aclStore{store: m.store, owner: confdb.ApplicationOwner(name), room: name}
 }
 
 // regionStore hands a relay a persistence door onto the region
@@ -814,6 +814,7 @@ func (a *regionStoreAdapter) SaveRegions(pr enginemc.PersistedRegions) error {
 type aclStore struct {
 	store *confdb.Store
 	owner string
+	room  string // room ownership includes the member's cursor and receipt
 }
 
 // aclStoreWait bounds one access-table operation. The engine's own
@@ -825,13 +826,23 @@ type aclStore struct {
 // timeout, short next to a radio going deaf.
 const aclStoreWait = 10 * time.Second
 
+// Application access writes share the room's three-second store budget.
+const applicationStoreWait = 3 * time.Second
+
 // bounded is one store operation's context.
 func aclStoreCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), aclStoreWait)
 }
 
+func (a *aclStore) context() (context.Context, context.CancelFunc) {
+	if a.room != "" {
+		return context.WithTimeout(context.Background(), applicationStoreWait)
+	}
+	return aclStoreCtx()
+}
+
 func (a *aclStore) LoadSessions() ([]enginemc.PersistedSession, error) {
-	ctx, cancel := aclStoreCtx()
+	ctx, cancel := a.context()
 	defer cancel()
 	rows, err := a.store.LoadACL(ctx, a.owner)
 	if err != nil {
@@ -851,15 +862,32 @@ func (a *aclStore) LoadSessions() ([]enginemc.PersistedSession, error) {
 }
 
 func (a *aclStore) SaveSession(p enginemc.PersistedSession) error {
-	ctx, cancel := aclStoreCtx()
+	ctx, cancel := a.context()
 	defer cancel()
 	return a.store.SaveACL(ctx, a.owner, aclRowOf(p))
 }
 
 func (a *aclStore) ForgetSession(pubKey [meshcore.PubKeySize]byte) error {
-	ctx, cancel := aclStoreCtx()
+	ctx, cancel := a.context()
 	defer cancel()
+	if a.room != "" {
+		return a.store.ReplaceRoomMember(ctx, a.room, pubKey[:], nil)
+	}
 	return a.store.ForgetACL(ctx, a.owner, pubKey[:])
+}
+
+func (a *aclStore) ReplaceSession(victim [meshcore.PubKeySize]byte, newcomer *enginemc.PersistedSession) error {
+	ctx, cancel := a.context()
+	defer cancel()
+	var row *confdb.ACLRow
+	if newcomer != nil {
+		r := aclRowOf(*newcomer)
+		row = &r
+	}
+	if a.room != "" {
+		return a.store.ReplaceRoomMember(ctx, a.room, victim[:], row)
+	}
+	return a.store.ReplaceACL(ctx, a.owner, victim[:], row)
 }
 
 // aclRowOf is one durable access entry in the shape the store keeps it.
