@@ -75,6 +75,24 @@ func (p *progressCounter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+// A progressing artifact may take minutes on a slow uplink. Bound
+// only the initial response and each body read, not the whole transfer
+// or local work such as writing progress to the console and syncing.
+const artifactIdleTimeout = time.Minute
+
+var errArtifactStalled = fmt.Errorf("artifact download made no progress for %s", artifactIdleTimeout)
+
+type artifactReader struct {
+	body  io.Reader
+	timer *time.Timer
+}
+
+func (r *artifactReader) Read(p []byte) (int, error) {
+	r.timer.Reset(artifactIdleTimeout)
+	defer r.timer.Stop()
+	return r.body.Read(p)
+}
+
 // Download fetches one artifact into dir under the staged name,
 // verifying size and sha256 as the bytes arrive, and unpacking the
 // result when the artifact travels compressed. The order is the
@@ -112,7 +130,9 @@ func (c *Client) Download(ctx context.Context, a Artifact, dir string) (string, 
 // fetch brings one artifact's bytes to dest, holding them to the
 // manifest's word — a.Size bytes hashing to a.SHA256 — and syncing
 // before it returns. The caller owns the cleanup either way.
-func (c *Client) fetch(ctx context.Context, a Artifact, dest string, mode os.FileMode) error {
+func (c *Client) fetch(ctx context.Context, a Artifact, dest string, mode os.FileMode) (fetchErr error) {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.URL, nil)
 	if err != nil {
 		return err
@@ -123,7 +143,15 @@ func (c *Client) fetch(ctx context.Context, a Artifact, dest string, mode os.Fil
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
-	resp, err := c.http().Do(req)
+	timer := time.AfterFunc(artifactIdleTimeout, func() { cancel(errArtifactStalled) })
+	defer func() {
+		timer.Stop()
+		if errors.Is(context.Cause(ctx), errArtifactStalled) {
+			fetchErr = errArtifactStalled
+		}
+	}()
+	resp, err := c.http(0).Do(req)
+	timer.Stop()
 	if err != nil {
 		return err
 	}
@@ -140,7 +168,8 @@ func (c *Client) fetch(ctx context.Context, a Artifact, dest string, mode os.Fil
 	if c.Progress != nil {
 		sink = io.MultiWriter(f, h, &progressCounter{total: a.Size, report: c.Progress})
 	}
-	n, err := io.Copy(sink, io.LimitReader(resp.Body, a.Size+1))
+	body := &artifactReader{body: resp.Body, timer: timer}
+	n, err := io.Copy(sink, io.LimitReader(body, a.Size+1))
 	if err == nil {
 		err = f.Sync()
 	}

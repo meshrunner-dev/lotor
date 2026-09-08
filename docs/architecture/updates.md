@@ -148,6 +148,13 @@ Plain artifact transport does not provide confidentiality or availability. An
 intermediary may block a download or feed incorrect bytes, but incorrect bytes
 are rejected.
 
+Manifest and signature requests each have a 30-second total timeout. Artifact
+downloads can run longer while making progress: the initial HTTP response and
+each body read may wait at most one minute. Time spent writing progress to the
+console or syncing local files does not consume that network wait. A stalled
+or cancelled download removes its partial files and never signals a ready
+stage. A caller-supplied HTTP client retains its own timeout as well.
+
 ### Key rotation
 
 Verification against a set of keys permits a non-disruptive rotation:

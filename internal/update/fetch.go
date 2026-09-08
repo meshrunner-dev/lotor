@@ -1,9 +1,8 @@
 package update
 
 // Fetching a channel: the manifest, its signature, and the proof,
-// in one call. This is the only file in the package that touches the
-// network, and it never touches the filesystem — the trust store is
-// handed in, and what comes back is already verified or is an error.
+// in one call. This path never touches the filesystem — the trust
+// store is handed in, and what comes back is already verified or is an error.
 
 import (
 	"context"
@@ -17,7 +16,10 @@ import (
 
 // fetchLimit bounds what a manifest may weigh. A channel statement is
 // a page of JSON; anything heavier is not one.
-const fetchLimit = 1 << 20
+const (
+	fetchLimit      = 1 << 20
+	metadataTimeout = 30 * time.Second
+)
 
 // Client reads channels from one update host.
 type Client struct {
@@ -29,7 +31,9 @@ type Client struct {
 	// Trusted is the verification set; empty refuses everything,
 	// because a channel nobody vouches for is not a channel.
 	Trusted []PublicKey
-	// HTTP serves the requests; nil takes a client with sane bounds.
+	// HTTP serves the requests; nil uses a total timeout for metadata
+	// and bounds each network wait for artifacts. An explicit client's
+	// own timeout is preserved.
 	HTTP *http.Client
 	// Progress, when set, is told how much of an artifact has arrived
 	// as it arrives. It runs on the fetching goroutine, once per
@@ -38,11 +42,11 @@ type Client struct {
 	Progress func(done, total int64)
 }
 
-func (c *Client) http() *http.Client {
+func (c *Client) http(timeout time.Duration) *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return &http.Client{Timeout: 30 * time.Second}
+	return &http.Client{Timeout: timeout}
 }
 
 // Checked is one verified channel statement: the manifest, the key
@@ -138,7 +142,7 @@ func (c *Client) get(ctx context.Context, url, etag string) (body []byte, gotETa
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
-	resp, err := c.http().Do(req)
+	resp, err := c.http(metadataTimeout).Do(req)
 	if err != nil {
 		return nil, "", err
 	}
