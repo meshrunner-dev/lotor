@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/mattn/go-runewidth"
 )
@@ -18,12 +17,13 @@ import (
 // same channel the plain reader feeds — the REPL cannot tell them
 // apart.
 type editor struct {
+	editBuffer
+	inputDecoder
+
 	in   *bufio.Reader
 	out  io.Writer
 	hist history
 
-	buf  []rune
-	cur  int
 	walk int    // history position; -1 = editing a fresh line
 	kept string // the fresh line kept aside while walking history
 	// crSeen pairs cr-lf statefully: a \r ends the line at once (a
@@ -34,13 +34,6 @@ type editor struct {
 	// pending holds the read error once the stream ends, so a final
 	// line without a newline is still delivered before it.
 	pending error
-
-	// Escape sequences belong to the byte stream, not to one Read.
-	// Keep only their bounded parameters while fragmented CSI/SS3
-	// input arrives; a bare Escape never reads the next key itself.
-	escapeIntro  byte
-	escapeParams []byte
-	escapeLong   bool
 
 	// search, when non-nil, is a reverse history search in progress:
 	// keystrokes build the query instead of the line.
@@ -58,10 +51,11 @@ type editor struct {
 
 	// The session's hooks, all optional. They run on the transport's
 	// goroutine — the session guards its own state against the REPL's.
-	prompt   func(search string) string                     // what to repaint before the line
-	complete func(line string) (add string, hints []string) // TAB
-	helpFor  func(line string, level int) string            // the help key
-	paint    func(line string) string                       // colours, same width
+	prompt     func(search string) string                       // what to repaint before the line
+	complete   func(line string) (add string, hints []string)   // legacy end-of-line hook
+	completeAt func(line string, cursorByte int) completionEdit // TAB at the cursor
+	helpFor    func(line string, level int) string              // the help key
+	paint      func(line string) string                         // colours, same width
 
 	// helpLevel is where the help cycle stands. Any other keystroke
 	// puts it back to the start, so the cycle only ever runs while
@@ -83,10 +77,15 @@ func (e *editor) readLine() (string, error) {
 	if e.pending != nil {
 		return "", e.pending
 	}
-	e.buf, e.cur, e.walk = e.buf[:0], 0, -1
+	e.reset()
+	e.walk = -1
 	for {
 		c, err := e.in.ReadByte()
 		if err != nil {
+			if done, line, keyErr := e.applyInput(e.finish()); done {
+				e.pending = err
+				return line, keyErr
+			}
 			// A final line without a newline still counts: deliver it
 			// now, the error on the next call.
 			if len(e.buf) > 0 {
@@ -101,59 +100,90 @@ func (e *editor) readLine() (string, error) {
 	}
 }
 
-// key applies one keystroke; done reports that the edit is over —
-// a finished line, a failure, or the end of the session.
+// key is the byte-stream adapter used by readLine. Decoding happens before
+// editing modes, and never reads ahead: the same events can be delivered
+// by a session's input pump while its display is owned elsewhere.
 func (e *editor) key(c byte) (done bool, line string, err error) {
-	if e.escapeByte(c) {
+	first, next := e.decode(c)
+	if done, line, err := e.applyInput(first); done {
+		return done, line, err
+	}
+	return e.applyInput(next)
+}
+
+func (e *editor) applyInput(input editorInput) (done bool, line string, err error) {
+	if !e.acceptInput(input) {
 		return false, "", nil
 	}
-	if e.crSeen {
-		e.crSeen = false
-		if c == '\n' || c == 0 {
-			return false, "", nil // the \r's partner, already handled
-		}
-	}
 	if e.search != nil {
-		return e.searchKey(c)
+		return e.searchInput(input)
 	}
-	e.trackHelpCycle(c)
-	switch {
-	case c == '\r' || c == '\n':
-		e.crSeen = c == '\r'
-		line, err = e.finishLine()
-		return true, line, err
-	case c == 0x04: // Ctrl+D: end of session on an empty line
-		if len(e.buf) == 0 {
-			fmt.Fprint(e.out, "\r\n")
-			return true, "", io.EOF
+	switch input.kind {
+	case inputRune:
+		return e.runeInput(input.key)
+	case inputControl:
+		return e.controlInput(input.key)
+	case inputArrow:
+		e.arrow(byte(input.key))
+	case inputDelete:
+		if e.cur < len(e.buf) {
+			e.remove(e.cur, e.nextBoundary())
+			e.render()
 		}
-	case c == 0x1b: // start a sequence without consuming the next key
-		e.startEscape()
-	case c < 0x20 || c == 0x7f: // control keys
-		if e.control(c) {
-			line, err = e.finishLine()
-			return true, line, err
-		}
-	case c == '?' && e.helpFor != nil && e.cur == len(e.buf) && !insideQuote(e.buf):
-		// '?' asks the same question F1 does, and is the one a hand
-		// finds without knowing the console. Inside quotes it is text —
-		// a password may carry one.
+	case inputHelp:
 		e.help()
-	default: // printable byte; multi-byte runes assemble
-		if err := e.insertByte(c); err != nil {
-			return true, "", err
-		}
+	case inputEscape, inputNone:
 	}
 	return false, "", nil
 }
 
-// trackHelpCycle keeps the help cycle to consecutive presses: any
-// other keystroke puts it back to the start, so pressing the key twice
-// an hour apart asks the same question twice.
-func (e *editor) trackHelpCycle(c byte) {
-	if c != 0x1b && c != '?' {
+// acceptInput pairs CR-LF independently of read boundaries, and preserves
+// consecutive help presses without letting ignored metadata affect them.
+func (e *editor) acceptInput(input editorInput) bool {
+	if input.kind == inputNone {
+		return false
+	}
+	if e.crSeen {
+		e.crSeen = false
+		if input.kind == inputControl && (input.key == '\n' || input.key == 0) {
+			return false
+		}
+	}
+	if input.kind != inputHelp && input.kind != inputEscape &&
+		(input.kind != inputRune || input.key != '?') {
 		e.helpLevel = 0
 	}
+	return true
+}
+
+func (e *editor) runeInput(key rune) (done bool, line string, err error) {
+	if key == '?' && e.helpFor != nil && e.cur == len(e.buf) &&
+		!insideQuoteAt(string(e.buf), e.cursorByte()) {
+		e.help()
+	} else if err := e.insertRune(key); err != nil {
+		return true, "", err
+	}
+	return false, "", nil
+}
+
+func (e *editor) controlInput(key rune) (done bool, line string, err error) {
+	switch key {
+	case '\r', '\n':
+		e.crSeen = key == '\r'
+		line, err = e.finishLine()
+		return true, line, err
+	case 0x04:
+		if len(e.buf) == 0 {
+			fmt.Fprint(e.out, "\r\n")
+			return true, "", io.EOF
+		}
+	default:
+		if e.control(byte(key)) {
+			line, err = e.finishLine()
+			return true, line, err
+		}
+	}
+	return false, "", nil
 }
 
 // control handles the shell's editing keys. It reports whether the
@@ -165,7 +195,8 @@ func (e *editor) control(c byte) (finished bool) {
 	case 0x03: // Ctrl+C: abandon the line
 		e.dropBelow()
 		fmt.Fprint(e.out, "^C")
-		e.buf, e.cur, e.walk = e.buf[:0], 0, -1
+		e.reset()
+		e.walk = -1
 		return true
 	case 0x7f, 0x08: // backspace
 		e.backspace()
@@ -173,13 +204,12 @@ func (e *editor) control(c byte) (finished bool) {
 		e.killWord()
 	case 0x15: // Ctrl+U: kill to the start of the line
 		if e.cur > 0 {
-			e.buf = append(e.buf[:0], e.buf[e.cur:]...)
-			e.cur = 0
+			e.remove(0, e.cur)
 			e.render()
 		}
 	case 0x0b: // Ctrl+K: kill to the end of the line
 		if e.cur < len(e.buf) {
-			e.buf = e.buf[:e.cur]
+			e.remove(e.cur, len(e.buf))
 			e.render()
 		}
 	case 0x0c: // Ctrl+L: clear the screen, keeping the line being edited
@@ -194,7 +224,7 @@ func (e *editor) control(c byte) (finished bool) {
 	case 0x05: // Ctrl+E: end of line
 		e.cur = len(e.buf)
 		e.render()
-	case 0x09: // TAB: completion, at the end of the line only
+	case 0x09: // TAB: completion at the cursor
 		e.completeLine()
 	case 0x12: // Ctrl+R: reverse history search
 		e.search = &searchState{}
@@ -207,69 +237,66 @@ func (e *editor) control(c byte) (finished bool) {
 // searchState is one reverse search: the query so far and where in
 // the history the current match sits.
 type searchState struct {
-	query []rune
+	query editBuffer
 	at    int  // history index of the match
 	found bool // whether anything matches the query
 }
 
-// searchKey applies one keystroke to the search. Enter takes the
-// match and finishes the line — the shell family's behaviour, where a
-// found command runs. Escape keeps it for editing instead, Ctrl+C or
-// Ctrl+G abandons, another Ctrl+R walks to an older match, and any
-// other control key leaves the search and applies normally.
-func (e *editor) searchKey(c byte) (done bool, line string, err error) {
-	switch {
-	case c == '\r' || c == '\n':
-		e.crSeen = c == '\r'
-		e.acceptSearch()
-		line, err = e.finishLine()
-		return true, line, err
-	case c == 0x12: // older match
-		if e.search.found {
-			e.findBack(e.search.at + 1)
-		}
-	case c == 0x03 || c == 0x07: // Ctrl+C, Ctrl+G: abandon
-		e.search = nil
-		e.buf, e.cur = e.buf[:0], 0
-		e.render()
-		return false, "", nil
-	case c == 0x7f || c == 0x08: // backspace: shrink the query
-		if n := len(e.search.query); n > 0 {
-			e.search.query = e.search.query[:n-1]
+// searchInput receives the same decoded keys as ordinary editing. Terminal
+// reports never reach it; an actual Escape or navigation key accepts the
+// match before normal editing resumes.
+func (e *editor) searchInput(input editorInput) (done bool, line string, err error) {
+	if input.kind == inputRune {
+		if !e.search.query.insert(input.key) {
+			return true, "", errLineTooLong
 		}
 		e.findBack(0)
-	case c == 0x1b: // escape: keep the match, back to editing
-		e.acceptSearch()
-		e.startEscape()
-		e.render()
+		e.renderSearch()
 		return false, "", nil
-	case c < 0x20:
-		// Any other control key ends the search and applies to the
-		// accepted line — Ctrl+A lands at its start, and so on.
-		e.acceptSearch()
-		e.render()
-		return e.key(c)
-	default:
-		raw := []byte{c}
-		for n := runeLen(c) - 1; n > 0; n-- {
-			b, err := e.in.ReadByte()
-			if err != nil {
-				break
-			}
-			raw = append(raw, b)
-		}
-		r, _ := utf8.DecodeRune(raw)
-		e.search.query = append(e.search.query, r)
-		e.findBack(0)
 	}
-	e.renderSearch()
-	return false, "", nil
+	if input.kind == inputControl {
+		switch input.key {
+		case 0x12: // Ctrl+R: older match
+			if e.search.found {
+				e.findBack(e.search.at + 1)
+			}
+			e.renderSearch()
+			return false, "", nil
+		case 0x07: // Ctrl+G: clear the search, keep editing
+			e.search = nil
+			e.reset()
+			e.render()
+			return false, "", nil
+		case 0x7f, 0x08:
+			query := &e.search.query
+			if n := len(query.buf); n > 0 {
+				query.remove(query.prevBoundary(), n)
+			}
+			e.findBack(0)
+			e.renderSearch()
+			return false, "", nil
+		}
+	}
+	// Ctrl+C follows the ordinary cancellation path (including handing
+	// an empty line to a running watch); Enter runs the accepted match.
+	e.acceptSearch()
+	if input.kind != inputControl || (input.key != '\r' && input.key != '\n' && input.key != 0x03) {
+		e.render()
+	}
+	return e.applyInput(input)
+}
+
+func (e *editor) searchText() string {
+	if e.search == nil {
+		return ""
+	}
+	return string(e.search.query.buf)
 }
 
 // findBack looks for the newest history line at or after index from
 // that contains the query, and puts it in the buffer.
 func (e *editor) findBack(from int) {
-	q := string(e.search.query)
+	q := e.searchText()
 	for i := from; ; i++ {
 		line, ok := e.hist.at(i)
 		if !ok {
@@ -278,8 +305,7 @@ func (e *editor) findBack(from int) {
 		}
 		if strings.Contains(line, q) {
 			e.search.at, e.search.found = i, true
-			e.buf = []rune(line)
-			e.cur = len(e.buf)
+			_ = e.setText(line)
 			return
 		}
 	}
@@ -299,55 +325,38 @@ func (e *editor) renderSearch() {
 	e.render()
 }
 
-// completeLine asks the session what the last word could become. One
-// candidate finishes the word; several print below the line and the
-// draft comes back with whatever prefix they share.
+// completeLine applies the grammar's byte span without losing text after
+// the cursor. Both insertion and replacement consume the same buffer budget
+// as typing and search; rejected completions leave the draft untouched.
 func (e *editor) completeLine() {
-	if e.complete == nil || e.cur != len(e.buf) {
+	var edit completionEdit
+	switch {
+	case e.completeAt != nil:
+		edit = e.completeAt(string(e.buf), e.cursorByte())
+	case e.complete != nil && e.cur == len(e.buf):
+		edit.Start, edit.End = e.byteLen(), e.byteLen()
+		edit.Text, edit.Hints = e.complete(string(e.buf))
+	default:
 		return
 	}
-	add, hints := e.complete(string(e.buf))
-	if add != "" && e.byteLen()+len(add) <= maxLineBytes {
-		e.buf = append(e.buf, []rune(add)...)
-		e.cur = len(e.buf)
+	if edit.Text != "" || edit.Start != edit.End {
+		_ = e.replaceBytes(edit.Start, edit.End, edit.Text)
 	}
-	if len(hints) > 0 {
+	if len(edit.Hints) > 0 {
 		e.dropBelow()
-		fmt.Fprint(e.out, "\r\n"+strings.Join(hints, "  ")+"\r\n")
+		fmt.Fprint(e.out, "\r\n"+strings.Join(edit.Hints, "  ")+"\r\n")
 	}
 	e.render()
 }
 
-// insideQuote reports an unclosed double quote before the cursor.
-func insideQuote(buf []rune) bool {
-	open := false
-	for _, r := range buf {
-		if r == '"' {
-			open = !open
-		}
-	}
-	return open
-}
-
-// backspace removes the rune before the cursor; at the end of the
-// line it erases in place, no repaint for the common case.
+// backspace removes one displayed grapheme. Redraw it through the same
+// layout as typing: zero-width marks cannot be erased rune by rune.
 func (e *editor) backspace() {
 	if e.cur == 0 {
 		return
 	}
-	atEnd := e.cur == len(e.buf)
-	erased := runewidth.RuneWidth(e.buf[e.cur-1])
-	wrapped := e.width > 0 &&
-		e.promptCells+runewidth.StringWidth(string(e.buf)) > e.width
-	e.buf = append(e.buf[:e.cur-1], e.buf[e.cur:]...)
-	e.cur--
-	if atEnd && !wrapped {
-		// In place for the common case; a backspace cannot cross a
-		// wrap boundary, so a wrapped line repaints instead.
-		fmt.Fprint(e.out, strings.Repeat("\b \b", erased))
-	} else {
-		e.render()
-	}
+	e.remove(e.prevBoundary(), e.cur)
+	e.render()
 }
 
 // killWord removes the word before the cursor, shell-style: trailing
@@ -363,8 +372,7 @@ func (e *editor) killWord() {
 	for i > 0 && e.buf[i-1] != ' ' {
 		i--
 	}
-	e.buf = append(e.buf[:i], e.buf[e.cur:]...)
-	e.cur = i
+	e.remove(i, e.cur)
 	e.render()
 }
 
@@ -375,56 +383,6 @@ func (e *editor) finishLine() (string, error) {
 	line := strings.TrimSpace(string(e.buf))
 	e.hist.add(line)
 	return line, nil
-}
-
-// startEscape immediately handles the Escape key itself; any CSI or
-// SS3 suffix is parsed as subsequent keystrokes arrive. A lone Escape
-// followed by '[' or 'O' is indistinguishable from a sequence without
-// a timing heuristic; ordinary following keys are always preserved.
-func (e *editor) startEscape() {
-	e.escapeIntro = 0x1b
-	e.escapeParams = e.escapeParams[:0]
-	e.escapeLong = false
-}
-
-// escapeByte consumes one byte of a terminal sequence, regardless of
-// how the transport divided it into reads. Controls that interrupt a
-// sequence are returned to key, so even a truncated report cannot eat
-// Enter, Ctrl+C, Ctrl+D, or a new Escape.
-func (e *editor) escapeByte(c byte) bool {
-	intro := e.escapeIntro
-	if intro == 0 {
-		return false
-	}
-	if intro == 0x1b {
-		if c == '[' || c == 'O' {
-			e.escapeIntro = c
-			return true
-		}
-		e.escapeIntro = 0
-		return false
-	}
-	if intro == '[' && c >= 0x20 && c <= 0x3f {
-		if len(e.escapeParams) < cursorReportMax {
-			e.escapeParams = append(e.escapeParams, c)
-		} else {
-			e.escapeLong = true
-		}
-		return true
-	}
-	e.escapeIntro = 0
-	if c < 0x40 || c > 0x7e {
-		return false
-	}
-	if e.escapeLong {
-		return true
-	}
-	if (intro == 'O' && c == 'P') || (intro == '[' && c == '~' && string(e.escapeParams) == "11") {
-		e.help()
-	} else {
-		e.arrow(c)
-	}
-	return true
 }
 
 // help answers the help key, whichever one was pressed: describe
@@ -465,50 +423,24 @@ func (e *editor) arrow(c byte) {
 		}
 	case 'C': // right
 		if e.cur < len(e.buf) {
-			e.cur++
+			e.cur = e.nextBoundary()
 			e.render()
 		}
 	case 'D': // left
 		if e.cur > 0 {
-			e.cur--
+			e.cur = e.prevBoundary()
 			e.render()
 		}
 	}
 }
 
-// insertByte assembles UTF-8 input at the cursor, strictly: only
-// genuine continuation bytes join a lead byte, anything else is
-// pushed back for its own turn — line noise or a latin-1 terminal
-// yields U+FFFD instead of swallowing the Enter behind it. The echo
-// therefore carries only whole, valid runes.
-func (e *editor) insertByte(c byte) error {
-	raw := []byte{c}
-	for n := runeLen(c) - 1; n > 0; n-- {
-		b, err := e.in.ReadByte()
-		if err != nil {
-			break // the partial rune decays to U+FFFD below
-		}
-		if b&0xC0 != 0x80 { // not a continuation: it is its own input
-			_ = e.in.UnreadByte()
-			break
-		}
-		raw = append(raw, b)
-	}
-	r, size := utf8.DecodeRune(raw)
-	if size != len(raw) {
-		r = utf8.RuneError
-	}
-	if e.byteLen()+utf8.RuneLen(r) > maxLineBytes {
+// insertRune receives only complete decoded runes, in either input mode.
+func (e *editor) insertRune(r rune) error {
+	atEnd := e.cur == len(e.buf)
+	if !e.insert(r) {
 		return errLineTooLong
 	}
-	atEnd := e.cur == len(e.buf)
-	e.buf = append(e.buf[:e.cur], append([]rune{r}, e.buf[e.cur:]...)...)
-	e.cur++
 	if atEnd && e.paint == nil {
-		// Appending at the end just echoes the keystroke: terminals
-		// stay smooth and piped transcripts stay readable. A painted
-		// line repaints instead — the keystroke may have changed what
-		// class every token belongs to.
 		fmt.Fprint(e.out, string(r))
 	} else {
 		e.render()
@@ -516,38 +448,11 @@ func (e *editor) insertByte(c byte) error {
 	return nil
 }
 
-// byteLen is the line's UTF-8 size — the bound is in bytes, the same
-// contract the plain reader enforces.
-func (e *editor) byteLen() int {
-	n := 0
-	for _, r := range e.buf {
-		n += utf8.RuneLen(r)
-	}
-	return n
-}
-
-// runeLen reads a UTF-8 lead byte's promise; invalid leads (stray
-// continuations, 0xF5+) stand alone and decay to U+FFFD.
-func runeLen(c byte) int {
-	switch {
-	case c < 0x80:
-		return 1
-	case c&0xE0 == 0xC0:
-		return 2
-	case c&0xF0 == 0xE0:
-		return 3
-	case c&0xF8 == 0xF0 && c <= 0xF4:
-		return 4
-	default:
-		return 1
-	}
-}
-
 // set replaces the whole line, cursor at the end.
 func (e *editor) set(line string) {
-	e.buf = []rune(line)
-	e.cur = len(e.buf)
-	e.render()
+	if e.setText(line) {
+		e.render()
+	}
 }
 
 // render repaints the line and parks the cursor, width-aware — the
@@ -565,7 +470,7 @@ func (e *editor) render() {
 	if e.prompt != nil {
 		query := ""
 		if e.search != nil {
-			query = string(e.search.query)
+			query = e.searchText()
 		}
 		prompt = e.prompt(query)
 	}
