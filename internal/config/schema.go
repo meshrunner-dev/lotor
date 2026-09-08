@@ -140,7 +140,7 @@ func SystemAttrs() []schema.Attr {
 // itself.
 func UpdateAttrs() []schema.Attr {
 	return []schema.Attr{
-		{Name: "channel", Type: schema.String,
+		{Name: "channel", Type: schema.String, Suggestions: []string{"release", "rc", "beta", "dev"},
 			Doc: "what to follow: release, rc, beta, dev, or a try-<slug>"},
 		{Name: "url", Type: schema.String,
 			Doc: "the manifest tree; empty takes " + DefaultUpdateURL},

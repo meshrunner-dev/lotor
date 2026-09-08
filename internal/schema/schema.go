@@ -49,6 +49,10 @@ type Attr struct {
 	Type Type
 	// Enum, when set, is the closed list of valid values.
 	Enum []string
+	// Suggestions names useful values of an open field. It is only
+	// vocabulary for completion: Parse still uses Type, and never
+	// rejects a value merely because it is absent from this list.
+	Suggestions []string
 	// Doc is one line, shown by the console's help and completion.
 	Doc   string
 	Apply Apply
@@ -75,6 +79,26 @@ type Kind struct {
 	Contributed func(choice string) []Attr
 	// Profiles lists the preset names the named choice offers.
 	Profiles func(choice string) []string
+	// ValueSuggestions optionally narrows an attribute's candidates
+	// to the selected choice. Nil means use the attribute's vocabulary;
+	// an empty non-nil slice means that choice offers no values.
+	// Like Attr.Suggestions, this never changes validation.
+	ValueSuggestions func(choice, attr string) []string
+}
+
+// Candidates is the discoverable vocabulary of an attribute. Booleans
+// derive their canonical words from their type, keeping their parsed
+// values boolean; aliases such as yes/no remain accepted by Parse.
+// Empty values remain valid when declared, but are not offered as a
+// completion: an empty prefix must reveal the available words.
+func (a Attr) Candidates() []string {
+	words := a.Suggestions
+	if len(a.Enum) > 0 {
+		words = a.Enum
+	} else if a.Type == Bool {
+		return []string{"true", "false"}
+	}
+	return slices.DeleteFunc(slices.Clone(words), func(word string) bool { return word == "" })
 }
 
 // AttrsFor resolves a kind's full attribute set for one instance: the

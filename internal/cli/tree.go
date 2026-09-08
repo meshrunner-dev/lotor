@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"meshrunner.dev/lotor/internal/config"
 	"meshrunner.dev/lotor/internal/product"
@@ -1535,60 +1536,6 @@ func (s *session) attrsAt(path []string) []schema.Attr {
 	return k.AttrsFor(s.instances(path[0])[path[1]])
 }
 
-// complete finishes the word under construction: context names,
-// instance names, verbs. It returns what to append when one candidate
-// (or a common prefix) is certain, and the candidates when several
-// remain.
-func (s *session) complete(line string) (add string, hints []string) {
-	tokens := splitArgs(line)
-	last := ""
-	if line != "" && !strings.HasSuffix(line, " ") && len(tokens) > 0 {
-		last = tokens[len(tokens)-1]
-		tokens = tokens[:len(tokens)-1]
-	}
-	// The path so far decides what may come next.
-	prior := append([]string{}, tokens...)
-	if last != "" && strings.HasPrefix(last, "/") {
-		// completing "/rel": resolve nothing, offer from the root
-		prior = append(prior, "/")
-	}
-	path, rest := s.resolveTree(prior)
-	if len(rest) > 0 {
-		return s.completeArgs(path, rest, last)
-	}
-	// The word under construction may carry path steps of its own:
-	// "radio/" stands inside radio, and what follows it is a verb.
-	// Only the word still being read as path is split, so a value
-	// carrying slashes never is.
-	prefix := strings.TrimPrefix(last, "/")
-	if i := strings.LastIndex(prefix, "/"); i >= 0 {
-		next, leftover, ok := s.walkStep(path, prefix[:i])
-		if !ok || leftover != "" {
-			return "", nil // the steps so far name nowhere
-		}
-		path, prefix = next, prefix[i+1:]
-	}
-	cands := s.candidatesAt(path)
-	matched, common := match(prefix, names(cands))
-	switch len(matched) {
-	case 0:
-		return "", nil
-	case 1:
-		// A container is completed up to its separator: the operator
-		// is mid-path, not mid-word, and the next TAB carries on from
-		// there.
-		tail := " "
-		for _, c := range cands {
-			if c.name == matched[0] && c.container {
-				tail = "/"
-			}
-		}
-		return matched[0][len(prefix):] + tail, nil
-	default:
-		return common[len(prefix):], s.listing(matched, cands)
-	}
-}
-
 // term is one word an operator may type at a place: what it is
 // called, which class it belongs to, what it does, and whether typing
 // it leaves them mid-path. One type, because help, completion and the
@@ -1865,7 +1812,7 @@ func (s *session) attrsForAddLine(kind string, rest []string) []schema.Attr {
 		return nil
 	}
 	choice := ""
-	for _, t := range rest {
+	for _, t := range semanticArgs(rest) {
 		if v, ok := strings.CutPrefix(t, k.ChoiceAttr+"="); ok {
 			choice = v
 		}
@@ -2006,51 +1953,15 @@ func humanList(words []string) string {
 // attribute allows, the values a flag declares for itself, or the
 // names of whatever a flag named after a kind takes.
 func (s *session) completeValue(path, rest []string, attr, val string) (string, []string) {
-	for _, a := range s.attrsForLine(path, rest) {
-		if a.Name == attr && len(a.Enum) > 0 {
-			return s.finishPlain(val, a.Enum, cAttr)
+	words, class := s.valueCandidates(path, semanticArgs(rest), attr)
+	if len(rest) > 0 && encodedVerb(rest[0]) {
+		encoded := make([]string, 0, len(words))
+		for _, word := range words {
+			encoded = append(encoded, base64.StdEncoding.EncodeToString([]byte(word)))
 		}
+		words = encoded
 	}
-	if site := s.drawerSiteAt(path); site != nil && site.d.values != nil {
-		if words := site.d.values(s, site.instance, attr); len(words) > 0 {
-			return s.finishPlain(val, words, cAttr)
-		}
-	}
-	// The profile attribute completes from its kind's preset catalog,
-	// resolved against whatever choice the line or the instance has
-	// already made — plus "custom", the empty base every catalog
-	// implies.
-	if attr == "profile" && len(path) >= 1 {
-		if k := s.kindByName(path[0]); k != nil && k.Profiles != nil {
-			words := k.Profiles(s.choiceOn(k, path, rest))
-			if !slices.Contains(words, "custom") {
-				words = append(words, "custom")
-			}
-			sort.Strings(words)
-			return s.finishPlain(val, words, cAttr)
-		}
-	}
-	// A flag that knows its own values completes from them, declared
-	// beside the flag rather than in a second list.
-	if c := lookup(rest[0]); c != nil {
-		if f := c.flag(attr); f != nil && f.values != nil {
-			return s.finishPlain(val, f.values(s, path), cAttr)
-		}
-	}
-	// A flag named after a kind takes that kind's names — relay= wants
-	// a relay — so the names are what completes it. The flag needs no
-	// declaration for this: it is called relay because a relay is what
-	// it takes.
-	if k := s.kindByName(attr); k != nil && !k.Singleton {
-		held := s.instances(attr)
-		words := make([]string, 0, len(held))
-		for name := range held {
-			words = append(words, name)
-		}
-		sort.Strings(words)
-		return s.finishPlain(val, words, cPath)
-	}
-	return "", nil
+	return s.finishPlain(val, words, class)
 }
 
 // choiceOn resolves which choice governs a line: the instance's own
@@ -2065,7 +1976,7 @@ func (s *session) choiceOn(k *schema.Kind, path, rest []string) string {
 	if len(path) == 2 {
 		choice = s.instances(path[0])[path[1]]
 	}
-	for _, t := range rest[1:] {
+	for _, t := range semanticArgs(rest)[1:] {
 		if v, ok := strings.CutPrefix(t, k.ChoiceAttr+"="); ok {
 			choice = v
 		}
@@ -2080,21 +1991,33 @@ func (s *session) completeArgs(path, rest []string, last string) (add string, hi
 		return "", nil
 	}
 	if attr, val, has := strings.Cut(last, "="); has {
-		return s.completeValue(path, rest, attr, val)
+		for _, term := range terms {
+			if term.name == attr && term.container {
+				return s.completeValue(path, rest, attr, val)
+			}
+		}
+		return "", nil
 	}
 	// What the line already says is not offered again: a switch
 	// spoken twice means nothing more, and TAB after "advert flood"
 	// must not stutter flood down the line.
 	used := map[string]bool{}
-	for _, a := range rest[1:] {
-		name, _, _ := strings.Cut(a, "=")
-		used[unquoted(name)] = true
+	for i, a := range rest[1:] {
+		// The created object's name is positional, even when it is also
+		// an attribute name ("add radio ... radio=slot1").
+		if isAddVerb(rest[0]) && i == 0 {
+			continue
+		}
+		name, _, pair := strings.Cut(a, "=")
+		if !pair && takesValue(rest[0]) {
+			continue
+		}
+		used[name] = true
 	}
 	// A term that takes a value completes up to its '=', the way a
 	// context completes up to its slash: the operator is mid-argument,
 	// not mid-word.
 	words := make([]string, 0, len(terms))
-	takesValue := map[string]bool{}
 	for _, t := range terms {
 		if t.placeholder || used[t.name] {
 			continue
@@ -2103,7 +2026,6 @@ func (s *session) completeArgs(path, rest []string, last string) (add string, hi
 		if t.container {
 			word += "="
 		}
-		takesValue[word] = t.container
 		words = append(words, word)
 	}
 	add, hints = s.finishPlain(last, words, cAttr)
@@ -2136,7 +2058,8 @@ func match(prefix string, cands []string) (matched []string, common string) {
 	common = matched[0]
 	for _, m := range matched[1:] {
 		for !strings.HasPrefix(m, common) {
-			common = common[:len(common)-1]
+			_, size := utf8.DecodeLastRuneInString(common)
+			common = common[:len(common)-size]
 		}
 	}
 	return matched, common
@@ -2313,21 +2236,16 @@ type paintSegment struct {
 // redraws the exact line under the operator's fingers.
 func paintSegments(line string) []paintSegment {
 	var out []paintSegment
-	start, inQuote, spacing := 0, false, true
-	for i, r := range line {
-		if r == '"' {
-			inQuote = !inQuote
+	end := 0
+	for _, word := range lexLine(line) {
+		if word.start > end {
+			out = append(out, paintSegment{text: line[end:word.start], space: true})
 		}
-		isSpace := !inQuote && (r == ' ' || r == '	')
-		if isSpace != spacing {
-			if i > start {
-				out = append(out, paintSegment{line[start:i], spacing})
-			}
-			start, spacing = i, isSpace
-		}
+		out = append(out, paintSegment{text: line[word.start:word.end]})
+		end = word.end
 	}
-	if len(line) > start {
-		out = append(out, paintSegment{line[start:], spacing})
+	if end < len(line) {
+		out = append(out, paintSegment{text: line[end:], space: true})
 	}
 	return out
 }
@@ -2336,7 +2254,11 @@ func paintSegments(line string) []paintSegment {
 // their spaces kept — for classifying a token whose painted face
 // keeps them.
 func unquoted(s string) string {
-	return strings.ReplaceAll(s, "\"", "")
+	words := lexLine(s)
+	if len(words) == 1 {
+		return words[0].text
+	}
+	return s
 }
 
 // lineWalk follows a line the way the grammar does, so the painter and
@@ -2378,13 +2300,13 @@ func (w *lineWalk) paintRest(token string) string {
 		w.phase = 1
 		return painted + w.paintRest(leftover)
 	case 1:
-		w.phase, w.verb = 2, token
-		rest := []string{token}
+		w.phase, w.verb = 2, unquoted(token)
+		rest := []string{w.verb}
 		if len(w.fullRest) > 0 && w.fullRest[0] == unquoted(token) {
 			rest = w.fullRest
 		}
 		w.args = names(w.s.argTermsFor(w.path, rest))
-		w.takesValue = takesValue(token)
+		w.takesValue = takesValue(w.verb)
 		cands := w.s.verbsAt(w.path)
 		if len(w.path) == 0 {
 			cands = append(cands, rootCommandNames()...)
@@ -2404,7 +2326,7 @@ func (w *lineWalk) paintPath(token string) (painted, leftover string) {
 	pieces := strings.Split(token, "/")
 	took := 0
 	for _, piece := range pieces {
-		step, ok := w.s.walkPiece(next, piece)
+		step, ok := w.s.walkPiece(next, unquoted(piece))
 		if !ok {
 			break
 		}
@@ -2453,7 +2375,7 @@ func takesValue(verb string) bool {
 // mark paints a word in its class when it names exactly one candidate,
 // and in the unresolved colour while it still names none or several.
 func (s *session) mark(class string, cands []string, word string) string {
-	if resolves(cands, word) {
+	if resolves(cands, unquoted(word)) {
 		return s.color(class, word)
 	}
 	return s.color(cUnres, word)

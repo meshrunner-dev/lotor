@@ -596,9 +596,17 @@ func relayKind() schema.Kind {
 // and declares the protocol it speaks — one word an operator types,
 // resolved against the registry.
 func applicationKind() schema.Kind {
+	attrs := choiceAttrs(config.ApplicationAttrs(), attrType, application.Registered())
+	attrs = choiceAttrs(attrs, attrProtocol, applicationProtocols(""))
 	return schema.Kind{
 		Name: confdb.KindApplication, Doc: "one hosted mesh identity serving peers over the air — a room server",
-		Attrs: choiceAttrs(config.ApplicationAttrs(), attrType, application.Registered()), ChoiceAttr: attrType,
+		Attrs: attrs, ChoiceAttr: attrType,
+		ValueSuggestions: func(choice, attr string) []string {
+			if attr != attrProtocol {
+				return nil
+			}
+			return applicationProtocols(choice)
+		},
 		Contributed: func(choice string) []schema.Attr {
 			builder, err := application.LookupType(choice)
 			if err != nil {
@@ -616,6 +624,28 @@ func applicationKind() schema.Kind {
 			})
 		},
 	}
+}
+
+// applicationProtocols follows each application's declared mesh. A
+// selected type speaks exactly its builder's protocol; before a type
+// is selected, all registered applications contribute their protocols.
+func applicationProtocols(choice string) []string {
+	choices := application.Registered()
+	if choice != "" {
+		choices = []string{choice}
+	}
+	protocols := make(map[string]bool)
+	for _, name := range choices {
+		if builder, err := application.LookupType(name); err == nil {
+			protocols[builder.Protocol] = true
+		}
+	}
+	out := make([]string, 0, len(protocols))
+	for name := range protocols {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func stationKind() schema.Kind {

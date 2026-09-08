@@ -98,7 +98,7 @@ func roomSchema() []schema.Attr {
 			Doc: "room transmit power in dBm; the radio envelope must allow it"},
 		schema.Attr{Name: "duty_cycle_pct", Type: schema.Float,
 			Doc: "accounted airtime budget per sliding hour, percent"},
-		schema.Attr{Name: "identity", Type: schema.String, Secret: true,
+		schema.Attr{Name: "identity", Type: schema.String, Secret: true, Suggestions: []string{"new"},
 			Doc: `the room private key, hex — or "new" to mint one`},
 		schema.Attr{Name: "node_name", Type: schema.String,
 			Doc: "what this room calls itself on the mesh"},

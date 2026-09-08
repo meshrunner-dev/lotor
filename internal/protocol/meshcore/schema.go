@@ -58,7 +58,7 @@ func relayingSchema() []schema.Attr {
 // it hears.
 func policySchema() []schema.Attr {
 	return []schema.Attr{
-		{Name: "tx_power_dbm", Type: schema.String,
+		{Name: "tx_power_dbm", Type: schema.String, Suggestions: []string{"auto"},
 			Doc: `"auto" (the board's cap) or a dBm figure the cap must allow`},
 		{Name: "duty_cycle_pct", Type: schema.Float,
 			Doc: "airtime budget per sliding hour, percent — the band's regulatory ceiling"},
@@ -76,7 +76,7 @@ func policySchema() []schema.Attr {
 			Doc: "what this node calls itself on the air"},
 		{Name: "owner_info", Type: schema.String,
 			Doc: "who answers for this node, served to owner questions"},
-		{Name: "identity", Type: schema.String, Secret: true,
+		{Name: "identity", Type: schema.String, Secret: true, Suggestions: []string{"new"},
 			Doc: `the node's private key, hex — or "new" to mint one; ` +
 				"whoever reads it IS the node"},
 

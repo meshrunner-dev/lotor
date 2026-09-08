@@ -46,7 +46,7 @@ func Schema() []schema.Attr {
 			Doc: "lines held high for the whole session (front-end enables)"},
 		{Name: attrDIO2RF, Type: schema.Bool,
 			Doc: "let the chip steer the RF switch through DIO2"},
-		{Name: attrTCXO, Type: schema.String,
+		{Name: attrTCXO, Type: schema.String, Enum: []string{"", tcxo1V6, tcxo1V8, tcxo3V3},
 			Doc: `TCXO supply on DIO3, volts as text ("1.8"); empty for a crystal`},
 		{Name: attrDCDC, Type: schema.Bool,
 			Doc: "use the DC-DC regulator instead of the LDO"},
