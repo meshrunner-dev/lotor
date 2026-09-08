@@ -5,8 +5,8 @@
 version: "3"
 
 vars:
-  GOLANGCI: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.0
-  GOVULNCHECK: go run golang.org/x/vuln/cmd/govulncheck@latest
+  GOLANGCI: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+  GOVULNCHECK: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0
 
 tasks:
   default:

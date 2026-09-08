@@ -86,6 +86,8 @@ that recreate the whole configuration.
 
 ## Developing
 
+Use Go 1.26.7 or newer.
+
 ```
 go build -o bin/ ./cmd/lotor
 task check     # the gate: formatting, tidy, strict lint, race tests, vuln scan

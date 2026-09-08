@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 
 	"meshrunner.dev/lotor/internal/bus"
 	"meshrunner.dev/lotor/internal/radio"

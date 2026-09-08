@@ -51,10 +51,11 @@ jobs:
       PRODUCT: ${{ needs.build.outputs.slug }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
+          cache-dependency-path: go.sum
       - name: Rebuild every target for the reproducibility proof
         # BEFORE the artifacts land: -buildvcs stamps a tree holding
         # an untracked file as modified, so a rebuild standing beside
@@ -67,7 +68,7 @@ jobs:
             ./scripts/build.sh -o "${RUNNER_TEMP}/repro_${t}" -version "$VERSION" \
               -goos linux -goarch "$t" -goarm "$goarm"
           done
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8.0.1
         with:
           merge-multiple: true
       - name: Refuse to publish unsigned channels
@@ -140,7 +141,7 @@ jobs:
         # repository, commit and workflow — after compression, before
         # anything is published. It complements Minisign; the updater's
         # root of trust stays the embedded key.
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4.2.2
         with:
           subject-path: "*.gz"
       - name: Upload and publish

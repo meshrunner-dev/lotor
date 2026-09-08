@@ -23,7 +23,7 @@ import (
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 
 	"meshrunner.dev/lotor/internal/application"
 	"meshrunner.dev/lotor/internal/bus"

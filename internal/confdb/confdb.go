@@ -20,7 +20,7 @@ import (
 	"strconv"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 	_ "modernc.org/sqlite" // the driver under database/sql
 
 	"meshrunner.dev/lotor/internal/config"

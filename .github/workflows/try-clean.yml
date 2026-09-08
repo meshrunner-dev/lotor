@@ -20,10 +20,11 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
+          cache-dependency-path: go.sum
       - name: Sweep stale try channels and dev versions
         env:
           DEPLOY_KEY: ${{ secrets.UPDATES_DEPLOY_KEY }}
