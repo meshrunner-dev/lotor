@@ -86,7 +86,7 @@ const (
 func init() {
 	application.Register(typeName, application.Builder{
 		Protocol: protocolName,
-		Build:    build, Check: check, Asks: asks,
+		Build:    build, Check: check, CheckStored: checkStored, Asks: asks,
 		Presets: meshcorecfg.Presets(), Schema: roomSchema(),
 	})
 }
@@ -407,6 +407,9 @@ func build(spec application.Spec) (application.Service, error) {
 	// holding nothing cannot empty a room whose membership is durable.
 	s.table.Spare = roomSpare
 	s.table.ForgetGuestState = true
+	s.table.RequiredOnLoad = func(p meshcorehost.PersistedSession) bool {
+		return mesh.Role(p.Perms) == mesh.PermAdmin
+	}
 	// The members the store remembers, the secret recomputed per
 	// entry; a store that cannot be read is an error, never an empty
 	// room — the entries carry every admin's replay guard.
@@ -432,6 +435,33 @@ func build(spec application.Spec) (application.Service, error) {
 // everyone, members from guests.
 func roomSpare(newcomer, seated *meshcorehost.Client) bool {
 	return seated.IsAdmin() || (!newcomer.HasAccess() && seated.HasAccess())
+}
+
+// checkStored keeps a capacity edit from dropping administrators at
+// the next rebuild. The manager repeats it after joining the room;
+// Build enforces the same invariant in Table.Load for startup.
+func checkStored(spec application.Spec) error {
+	if spec.Sessions == nil {
+		return nil
+	}
+	p, _, err := resolve(spec.Config)
+	if err != nil {
+		return err
+	}
+	rows, err := spec.Sessions.LoadSessions()
+	if err != nil {
+		return err
+	}
+	admins := 0
+	for _, r := range rows {
+		if mesh.Role(r.Perms) == mesh.PermAdmin {
+			admins++
+		}
+	}
+	if admins > p.MaxMembers {
+		return fmt.Errorf("max_members %d cannot hold %d existing administrators", p.MaxMembers, admins)
+	}
+	return nil
 }
 
 // Run serves the room until ctx ends: the advert clocks, the outbound

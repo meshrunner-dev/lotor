@@ -120,9 +120,14 @@ type Builder struct {
 	Protocol string
 	Build    func(Spec) (Service, error)
 	Check    func(map[string]any) error
-	Asks     func(map[string]any) (RadioDemand, error)
-	Presets  map[string]map[string]any
-	Schema   []schema.Attr
+	// CheckStored optionally rejects a configuration that cannot
+	// preserve existing durable state, before a live mutation is saved.
+	// It reads only, first during preflight and again after live writers
+	// stop. Build must enforce the same invariant at startup.
+	CheckStored func(Spec) error
+	Asks        func(map[string]any) (RadioDemand, error)
+	Presets     map[string]map[string]any
+	Schema      []schema.Attr
 }
 
 var (

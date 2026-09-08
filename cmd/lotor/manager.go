@@ -1656,11 +1656,15 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 	if err := deepCheck(next, kind, name, relayName); err != nil {
 		return "", err
 	}
-
 	section, err := objectSection(next, kind, name)
 	if err != nil {
 		return "", err
 	}
+	mutation, err := m.prepareStoredMutation(next, kind, name, hostedRadioOnly(typed, unset))
+	if err != nil {
+		return "", err
+	}
+	defer mutation.rollback()
 	if err := m.store.Replace(ctx, kind, name, section, principal, op, change); err != nil {
 		return "", err
 	}
@@ -1668,6 +1672,7 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 		m.logStationConfigMutation(name, op, principal, changeKeys(change))
 	}
 	m.file = next
+	mutation.commit()
 
 	if kind == confdb.KindRadio {
 		m.restartRadio(name)
@@ -1693,6 +1698,66 @@ func (m *manager) applyTyped(ctx context.Context, kind, name string,
 	// waveform — and must follow the successor.
 	m.bounceObserversOf(relayName)
 	return fmt.Sprintf("applied — relay %s restarting", relayName), nil
+}
+
+// storedMutation restores a joined owner until its replacement
+// configuration is committed. Its zero value needs no restoration.
+type storedMutation struct{ restore func() }
+
+func (m *storedMutation) rollback() {
+	if m.restore != nil {
+		restore := m.restore
+		m.restore = nil
+		restore()
+	}
+}
+
+func (m *storedMutation) commit() { m.restore = nil }
+
+// prepareStoredMutation refuses an impossible edit while the old
+// service is still running, then joins its writers and checks again
+// at a stable boundary. A failed final check restores the old service;
+// success returns that restoration for a later configuration-write
+// failure. The caller holds mu and leaves m.file unchanged until commit.
+func (m *manager) prepareStoredMutation(next *config.File, kind, name string, radioOnly bool) (storedMutation, error) {
+	if kind != confdb.KindApplication || radioOnly {
+		return storedMutation{}, nil
+	}
+	checkStored, err := m.applicationStoredCheck(next, name)
+	if err != nil || checkStored == nil {
+		return storedMutation{}, err
+	}
+	if err := checkStored(); err != nil {
+		return storedMutation{}, err
+	}
+	mutation := storedMutation{restore: m.stopForRemoval(kind, name)}
+	if mutation.restore == nil {
+		return mutation, nil
+	}
+	if err := checkStored(); err != nil {
+		mutation.rollback()
+		return storedMutation{}, err
+	}
+	return mutation, nil
+}
+
+// applicationStoredCheck resolves a repeatable read-only check for the
+// same proposed configuration, before and after joining live writers.
+func (m *manager) applicationStoredCheck(next *config.File, name string) (func() error, error) {
+	ac := next.Applications[name]
+	b, err := application.Lookup(ac.Protocol, ac.Type)
+	if err != nil || b.CheckStored == nil {
+		return nil, err
+	}
+	cfg, _, err := ac.Host().Layered.Resolve(b.Presets)
+	if err != nil {
+		return nil, err
+	}
+	spec := application.Spec{
+		Name: name, Protocol: ac.Protocol, Type: ac.Type, Radio: ac.Radio,
+		Config: cfg, Sessions: m.applicationSessions(name), Store: m.store,
+	}
+	return func() error { return b.CheckStored(spec) }, nil
 }
 
 func hostedRadioOnly(typed map[string]any, unset []string) bool {

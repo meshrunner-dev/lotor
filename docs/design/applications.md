@@ -78,6 +78,7 @@ and differ in who they talk to. `internal/application` mirrors
 type Builder struct {
     Build   func(Spec) (Service, error)
     Check   func(map[string]any) error
+    CheckStored func(Spec) error        // optional read-only durable-state preflight
     Asks    func(map[string]any) (RadioDemand, error)
     Presets map[string]map[string]any   // band presets, as stations
     Schema  []schema.Attr               // the type's contributed attrs
@@ -90,6 +91,15 @@ type Service interface {
 // RadioAttacher and RadioRequester as in station: the manager supplies
 // or withdraws RF without stopping the service.
 ```
+
+`CheckStored`, when present, runs before an application's configuration
+edit is persisted or its service is stopped. The room uses it to refuse
+`max_members` below the existing administrator population. `Build`
+enforces the invariant again for startup and imported configurations.
+For a live rebuild, the manager joins the service and repeats the check
+before committing: an administrator admitted during preflight cannot
+invalidate an accepted edit. A failed final check or commit rebuilds
+the retained configuration.
 
 `Spec` carries what a station's does minus `Listen`, plus the door a
 station does not have: the **store** — membership, cursors and history
@@ -320,7 +330,11 @@ bytes:
 - a table made entirely of admins refuses a newcomer, where the
   reference's `putClient` evicts an admin anyway. Refusing is the safer
   reading of "admins are spared", and the room logs it; an operator who
-  wants the reference's behaviour raises `max_members`.
+  wants the reference's behaviour raises `max_members`. A reduction of
+  `max_members` restores administrators before fresher ordinary members;
+  a capacity below the administrator population is refused. The golden
+  firmware has a fixed table size, so this rule belongs to the hosted
+  room's configurable, durable membership.
 
 **Properties of the protocol the room reproduces, and says so** — none
 is lotor's to fix without changing bytes on the air:

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"meshrunner.dev/pkg/meshcore"
@@ -192,8 +193,12 @@ type Table struct {
 	// guest's RAM-only session, such as a room delivery cursor. Without
 	// it guest eviction costs no disk operation, as on a relay.
 	ForgetGuestState bool
-	store            SessionStore // nil keeps the table in memory only
-	capacity         int
+	// RequiredOnLoad identifies entries a capacity reduction must keep.
+	// They load before other entries; too many refuses the load rather
+	// than silently leaving an authorised administrator outside the table.
+	RequiredOnLoad func(PersistedSession) bool
+	store          SessionStore // nil keeps the table in memory only
+	capacity       int
 }
 
 // NewTable makes an empty table of the given capacity — the
@@ -274,6 +279,20 @@ func (t *Table) Load(secret func(pubKey []byte) ([]byte, error), asks func() Rat
 	rows, err := t.store.LoadSessions()
 	if err != nil {
 		return err
+	}
+	if t.RequiredOnLoad != nil {
+		required := 0
+		for _, p := range rows {
+			if t.RequiredOnLoad(p) {
+				required++
+			}
+		}
+		if required > t.capacity {
+			return fmt.Errorf("session capacity %d cannot hold %d protected access entries", t.capacity, required)
+		}
+		sort.SliceStable(rows, func(i, j int) bool {
+			return t.RequiredOnLoad(rows[i]) && !t.RequiredOnLoad(rows[j])
+		})
 	}
 	for _, p := range rows {
 		if meshcore.Role(p.Perms) == meshcore.PermGuest {
