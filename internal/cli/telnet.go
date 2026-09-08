@@ -104,6 +104,8 @@ type sessionConn struct {
 	conn net.Conn
 }
 
+type terminalDimensions struct{ width, height int }
+
 func (s *sessionConn) SetReadDeadline(t time.Time) error { return s.conn.SetReadDeadline(t) }
 
 func (s *sessionConn) terminalProbe(enabled bool) {
@@ -117,6 +119,21 @@ func (s *sessionConn) terminalSize() (int, bool) {
 		return reader.width, reader.hasSize
 	}
 	return 0, false
+}
+
+func (s *sessionConn) terminalDimensions() terminalDimensions {
+	if reader, ok := s.Reader.(*iacStripper); ok {
+		return terminalDimensions{width: reader.width, height: reader.height}
+	}
+	return terminalDimensions{}
+}
+
+// Install the handler before starting the session reader. Valid metadata
+// invokes it on that reader, even when no following key arrives.
+func (s *sessionConn) onTerminalResize(handler func(terminalDimensions)) {
+	if reader, ok := s.Reader.(*iacStripper); ok {
+		reader.resized = handler
+	}
 }
 
 // RemoteAddr names the far end, for the session table.
@@ -223,8 +240,10 @@ type iacStripper struct {
 	subneg  [5]byte
 	subLen  int
 	width   int
+	height  int
 	hasSize bool
 	probing bool
+	resized func(terminalDimensions)
 }
 
 // errTerminalSize yields control to mode selection after metadata alone,
@@ -287,10 +306,7 @@ func (f *iacStripper) step(b byte) (keep bool, c byte) {
 		switch b {
 		case iacSubEn:
 			f.state = stNormal
-			if f.subLen == len(f.subneg) && f.subneg[0] == optNAWS {
-				f.width = int(binary.BigEndian.Uint16(f.subneg[1:3]))
-				f.hasSize = true
-			}
+			f.applySize()
 		case iacByte:
 			f.subByte(b)
 			f.state = stSubneg
@@ -302,6 +318,18 @@ func (f *iacStripper) step(b byte) (keep bool, c byte) {
 		}
 	}
 	return false, 0
+}
+
+func (f *iacStripper) applySize() {
+	if f.subLen != len(f.subneg) || f.subneg[0] != optNAWS {
+		return
+	}
+	f.width = int(binary.BigEndian.Uint16(f.subneg[1:3]))
+	f.height = int(binary.BigEndian.Uint16(f.subneg[3:5]))
+	f.hasSize = true
+	if f.resized != nil {
+		f.resized(terminalDimensions{width: f.width, height: f.height})
+	}
 }
 
 func (f *iacStripper) subByte(b byte) {

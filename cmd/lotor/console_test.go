@@ -26,7 +26,7 @@ func TestConsoleAnnouncesOnlyRawTerminalsBeforeInput(t *testing.T) {
 			_ = server.SetDeadline(time.Now().Add(5 * time.Second))
 			var screen bytes.Buffer
 			done := make(chan error, 1)
-			go func() { done <- copyConsole(client, strings.NewReader("quit\n"), &screen, tc.size) }()
+			go func() { done <- copyConsole(client, strings.NewReader("quit\n"), &screen, tc.size, nil) }()
 			wire, err := bufio.NewReader(server).ReadString('\n')
 			if err != nil || wire != tc.want {
 				t.Fatalf("first input = %q, %v; want %q", wire, err, tc.want)
