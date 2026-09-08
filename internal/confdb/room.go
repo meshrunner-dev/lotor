@@ -1,9 +1,10 @@
 package confdb
 
-// A room server's memory: what was said in it, and how far each member
-// has read. Data tables beside the revision trail, not in it — posts
-// and cursors are not configuration mutations — the one stated
-// exception the design records. Both are keyed by the application's
+// A room server's memory: what was said in it, which client requests
+// were accepted, and how far each member has read. Data tables beside
+// the revision trail, not in it — posts, receipts and cursors are not
+// configuration mutations — the one stated exception the design
+// records. All are keyed by the application's
 // name, so removing the application removes what it remembered.
 
 import (
@@ -29,6 +30,20 @@ type RoomPost struct {
 	Author      [roomKeySize]byte
 	Text        string
 	Correlation string
+	// ClientTimestamp is input to SaveRoomPost: the client's timestamp
+	// of the accepted post. Nonzero records a receipt in the same
+	// transaction, separately from the history ring; LoadRoomReceipts
+	// reads it back. Zero leaves receipts untouched, for posts without
+	// a client request and callers predating receipt tracking.
+	ClientTimestamp uint32
+}
+
+// RoomReceipt records the newest post accepted from one author. Its
+// timestamp is the client's, distinct from the room clock in RoomPost.At,
+// and it survives history pruning so a retry cannot append the post again.
+type RoomReceipt struct {
+	Author          [roomKeySize]byte
+	ClientTimestamp uint32
 }
 
 // RoomCursor is how far one member has read: the room-clock timestamp
@@ -63,7 +78,9 @@ func (s *Store) LoadRoomPosts(ctx context.Context, app string) ([]RoomPost, erro
 
 // SaveRoomPost appends one post and forgets the oldest beyond keep —
 // the ring's semantics, on disk. It returns the sequence the post
-// took. A keep of zero keeps everything.
+// took. A keep of zero keeps everything. The acceptance receipt lands
+// in the same transaction: a failed post must never earn a receipt,
+// and a kept post must not lose its receipt to an interrupted write.
 func (s *Store) SaveRoomPost(ctx context.Context, app string, p RoomPost, keep int) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -82,6 +99,14 @@ func (s *Store) SaveRoomPost(ctx context.Context, app string, p RoomPost, keep i
 		"SELECT MAX(seq) FROM room_posts WHERE app = ?", app).Scan(&seq); err != nil {
 		return 0, err
 	}
+	if p.ClientTimestamp != 0 {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO room_receipts(app, author, client_timestamp) VALUES(?, ?, ?)
+			 ON CONFLICT(app, author) DO UPDATE SET client_timestamp = excluded.client_timestamp`,
+			app, p.Author[:], int64(p.ClientTimestamp)); err != nil {
+			return 0, fmt.Errorf("save room %q post receipt: %w", app, err)
+		}
+	}
 	if keep > 0 {
 		if _, err := tx.ExecContext(ctx,
 			"DELETE FROM room_posts WHERE app = ? AND seq <= ?", app, seq-int64(keep)); err != nil {
@@ -89,6 +114,37 @@ func (s *Store) SaveRoomPost(ctx context.Context, app string, p RoomPost, keep i
 		}
 	}
 	return seq, tx.Commit()
+}
+
+// LoadRoomReceipts reads the acceptance timestamps the room needs to
+// distinguish a retry from a post it never kept, even after a restart.
+func (s *Store) LoadRoomReceipts(ctx context.Context, app string) ([]RoomReceipt, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT author, client_timestamp FROM room_receipts WHERE app = ?", app)
+	if err != nil {
+		return nil, fmt.Errorf("load room %q post receipts: %w", app, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []RoomReceipt
+	for rows.Next() {
+		var r RoomReceipt
+		var author []byte
+		var timestamp int64
+		if err := rows.Scan(&author, &timestamp); err != nil {
+			return nil, err
+		}
+		copy(r.Author[:], author)
+		r.ClientTimestamp = uint32(timestamp)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ForgetRoomReceipt drops an evicted author's acceptance timestamp:
+// the former member no longer has a session whose retry it can prove.
+func (s *Store) ForgetRoomReceipt(ctx context.Context, app string, author [roomKeySize]byte) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM room_receipts WHERE app = ? AND author = ?", app, author[:])
+	return err
 }
 
 // PruneRoomPosts forgets every post beyond the newest keep — what a

@@ -19,13 +19,6 @@ const (
 	stationMaxText      = 10 * mesh.CipherBlockSize
 	stationMaxGroupData = mesh.MaxPacketPayload - mesh.CipherBlockSize - 3
 	stationTimeoutBase  = 500 * time.Millisecond
-	// stationAnswerLife is how long an answer this station composes on
-	// its own — an ACK, a path return — is still worth the air. The
-	// reference's asker waits four seconds plus two per hop for a
-	// direct ACK, twelve for a flooded one: past half a minute it has
-	// given up and re-asked, and a queue holding the stale answer is
-	// holding up the fresh one behind it.
-	stationAnswerLife = 30 * time.Second
 )
 
 func (s *service) handleTransmission(command companion.Command) ([]companion.Response, bool) {
@@ -253,23 +246,24 @@ func (*service) routeDirect(packet *mesh.Packet, pathLen uint8, path []byte) {
 // submitLocked queues what a companion ordered. Such a frame never
 // expires: the user asked for it, and only the user withdraws it.
 func (s *service) submitLocked(packet *mesh.Packet, kind string) []companion.Response {
-	return s.submitAtPriorityLocked(packet, kind, time.Time{}, referencePriority(packet), time.Time{})
+	return s.submitAtPriorityLocked(packet, kind, time.Time{}, referencePriority(packet))
 }
 
-// submitAtLocked queues an answer this station composed itself, which
-// stops being one once its asker has given up: see stationAnswerLife.
-// No companion is waiting on a verdict for it, so it returns none.
+// submitAtLocked queues an answer this station composed itself. Like
+// the reference companion dispatcher, it applies no per-frame expiry:
+// the asker's timeout depends on airtime and path length, and can be
+// longer than a fixed reply lifetime. Duty and LBT still bound waiting.
+// No companion is waiting on a submission verdict, so it returns none.
 func (s *service) submitAtLocked(packet *mesh.Packet, kind string, notBefore time.Time) {
-	s.submitAtPriorityLocked(packet, kind, notBefore, referencePriority(packet),
-		time.Now().Add(stationAnswerLife))
+	s.submitAtPriorityLocked(packet, kind, notBefore, referencePriority(packet))
 }
 
 func (s *service) submitAtPriorityLocked(packet *mesh.Packet, kind string, notBefore time.Time,
-	priority uint8, expires time.Time,
+	priority uint8,
 ) []companion.Response {
 	item := emission{
 		Route: routeOf(packet), Correlation: correlation.New(), Kind: kind,
-		NotBefore: notBefore, Priority: priority, Expires: expires,
+		NotBefore: notBefore, Priority: priority,
 	}
 	raw, err := packet.MarshalBinary()
 	if err != nil {

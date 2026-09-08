@@ -42,11 +42,10 @@ const (
 	sessionLimitWindow  = meshcorehost.SessionLimitWindow
 	firmwareVerLevel    = 1
 
-	// How long what the room composes is still worth the air. An
-	// answer's asker waits four seconds plus two per hop for a direct
-	// ACK, twelve for a flooded one, then re-asks: past half a minute
-	// a queued answer only delays the fresh one behind it. An advert
-	// that has waited a minute is older than the local clock's period.
+	// Hosted queue policy, not the reference's ACK timeout: bound how
+	// long room traffic waits behind other consumers. A push dropped
+	// here spends no reader attempt and can be offered again. Station
+	// ACK/PATH replies have no such expiry, like the companion firmware.
 	answerLife = 30 * time.Second
 	advertLife = time.Minute
 )
@@ -81,13 +80,26 @@ type member struct {
 	pendingAck  uint32
 	pushAt      uint32
 	ackDeadline time.Time
-	failures    uint8
-	cursorDirty bool
+	// The CRC is remembered before emission: a co-hosted client can
+	// return its ACK before Transmit returns. Only the matching
+	// successful emission starts the ACK clock; time in the queue or
+	// waiting for duty says nothing about the client's reachability.
+	pushEmission correlation.ID
+	ackWait      time.Duration
+	failures     uint8
+	cursorDirty  bool
 	// lastKept is the timestamp of the newest post this member had
 	// accepted and kept: the one a retry may claim an ACK for. The
 	// replay guard moves on every attempt, kept or refused, so it
-	// cannot tell the two apart; this can.
+	// cannot tell the two apart; this can. With persistent history it
+	// is restored from the receipt committed atomically with the post.
 	lastKept uint32
+}
+
+func (m *member) clearPush() {
+	m.pendingAck = 0
+	m.pushEmission = correlation.ID{}
+	m.ackDeadline = time.Time{}
 }
 
 func (s *service) member(key [mesh.PubKeySize]byte) *member {
@@ -232,7 +244,8 @@ func (s *service) handleLogin(ctx context.Context, pkt *mesh.Packet, corr correl
 	// Applied on every accepted login, the blank recheck included —
 	// the reference leaves a rechecking member's cursor where it was,
 	// which is the sharp edge that strands a returning admin.
-	m.syncSince, m.pendingAck, m.failures, m.cursorDirty = login.SyncSince, 0, 0, true
+	m.clearPush()
+	m.syncSince, m.failures, m.cursorDirty = login.SyncSince, 0, true
 	s.nextPush = now.Add(pushNotifyDelay)
 	clock, rest, err := meshcorehost.LoginReply(c, firmwareVerLevel, now, true)
 	if err != nil {
@@ -271,6 +284,9 @@ func (s *service) evictedLocked(ctx context.Context, victim [mesh.PubKeySize]byt
 		defer cancel()
 		if err := s.store.ForgetRoomCursor(forgetCtx, s.name, victim); err != nil {
 			s.log.Warn("an evicted member's cursor did not leave the store", zap.Error(err))
+		}
+		if err := s.store.ForgetRoomReceipt(forgetCtx, s.name, victim); err != nil {
+			s.log.Warn("an evicted member's receipt did not leave the store", zap.Error(err))
 		}
 	}
 	s.log.Info("member evicted to make room", zap.String("corr", corr.Short()),
@@ -339,7 +355,7 @@ func (s *service) acceptPostLocked(ctx context.Context, pkt *mesh.Packet, c *mes
 			s.refused++
 			return
 		}
-		if err := s.storePostLocked(ctx, c.PubKey, text, corr); err != nil {
+		if err := s.storePostLocked(ctx, c.PubKey, text, ts, corr); err != nil {
 			s.log.Error("post refused: not persisted", zap.String("corr", corr.Short()), zap.Error(err))
 			s.refused++
 			return
@@ -418,7 +434,11 @@ func (s *service) handleRequest(ctx context.Context, pkt *mesh.Packet, corr corr
 		}
 		return
 	}
-	answer, answered := s.answerLocked(c, body)
+	bodyMax := mesh.ResponseBodyBudget()
+	if pkt.IsRouteFlood() {
+		bodyMax = mesh.PathReturnBodyBudget(len(pkt.Path))
+	}
+	answer, answered := s.answerLocked(c, body, bodyMax)
 	if !answered {
 		return
 	}
@@ -435,7 +455,7 @@ func (s *service) keepAliveLocked(c *meshcorehost.Client, m *member, plain, body
 	if since, err := mesh.ParseKeepAliveRequest(body); err == nil && since > 0 {
 		m.syncSince, m.cursorDirty = since, true
 	}
-	m.pendingAck = 0
+	m.clearPush()
 	if c.Out == nil {
 		return // "RULE: only send keep_alive response DIRECT!"
 	}
@@ -454,7 +474,7 @@ func (s *service) keepAliveLocked(c *meshcorehost.Client, m *member, plain, body
 // answerLocked composes the body of an authenticated answer: the
 // status a companion's page shows, the access list an admin may ask
 // for. answered is false for a question this room does not serve.
-func (s *service) answerLocked(c *meshcorehost.Client, body []byte) ([]byte, bool) {
+func (s *service) answerLocked(c *meshcorehost.Client, body []byte, bodyMax int) ([]byte, bool) {
 	switch body[0] {
 	case mesh.ReqGetStatus:
 		return s.statsLocked().AppendTo(nil), true
@@ -462,7 +482,7 @@ func (s *service) answerLocked(c *meshcorehost.Client, body []byte) ([]byte, boo
 		if !c.IsAdmin() || mesh.ParseAccessListRequest(body) != nil {
 			return nil, false
 		}
-		return s.accessListLocked(), true
+		return s.accessListLocked(bodyMax), true
 	default:
 		return nil, false
 	}
@@ -470,7 +490,7 @@ func (s *service) answerLocked(c *meshcorehost.Client, body []byte) ([]byte, boo
 
 // accessListLocked is the reference's answer: the admins alone, by
 // key — sorted, so two asks read alike where the table is a map.
-func (s *service) accessListLocked() []byte {
+func (s *service) accessListLocked(bodyMax int) []byte {
 	var entries []mesh.AccessEntry
 	for _, e := range s.table.Entries() {
 		if !e.Admin {
@@ -484,7 +504,13 @@ func (s *service) accessListLocked() []byte {
 	sort.Slice(entries, func(i, j int) bool {
 		return bytes.Compare(entries[i].PubKeyPrefix[:], entries[j].PubKeyPrefix[:]) < 0
 	})
-	return mesh.FrameAccessList(entries)
+	// A flooded request is answered inside a PATH return, whose route
+	// takes space from the response. Let the codec measure whole rows;
+	// the room owns the selection, never their wire size or layout.
+	count := sort.Search(len(entries), func(i int) bool {
+		return len(mesh.FrameAccessList(entries[:i+1])) > bodyMax
+	})
+	return mesh.FrameAccessList(entries[:count])
 }
 
 // handlePath learns the route a member taught, and takes the ACK it
@@ -536,7 +562,8 @@ func (s *service) ackReceivedLocked(crc uint32, corr correlation.ID) {
 		if m.pendingAck == 0 || m.pendingAck != crc {
 			continue
 		}
-		m.pendingAck, m.failures = 0, 0
+		m.clearPush()
+		m.failures = 0
 		m.syncSince, m.cursorDirty = m.pushAt, true
 		logging.Trace(s.log, "push acknowledged", zap.String("corr", corr.Short()),
 			zap.String("pubkey", hex.EncodeToString(key[:6])), zap.Uint32("since", m.syncSince))
@@ -564,25 +591,27 @@ func (s *service) replyLocked(_ context.Context, inbound *mesh.Packet, a meshcor
 // backlog, counted.
 func (s *service) sendLocked(pkt *mesh.Packet, kind string, priority uint8, delay time.Duration,
 	corr correlation.ID,
-) {
+) origin.Outcome {
 	s.composed++
 	if s.gate() == config.TXDry {
 		logging.Trace(s.log, "emission composed, gate is dry", zap.String("kind", kind), zap.String("corr", corr.Short()))
-		return
+		return origin.Outcome{}
 	}
 	raw, err := pkt.MarshalBinary()
 	if err != nil {
 		s.log.Warn("emission not marshalled", zap.String("kind", kind), zap.Error(err))
-		return
+		return origin.Outcome{Dropped: "compose-failed"}
 	}
 	now := time.Now()
 	item := origin.Emission{
 		Frame: raw, Route: routeOf(pkt), Correlation: corr, Kind: kind, Priority: priority,
 		NotBefore: now.Add(delay), Expires: now.Add(answerLife),
 	}
-	if out := s.pipeline.Submit(item); out.Dropped != "" {
+	out := s.pipeline.Submit(item)
+	if out.Dropped != "" {
 		s.dropped++
 	}
+	return out
 }
 
 var errNoStore = errors.New("no store behind this room")

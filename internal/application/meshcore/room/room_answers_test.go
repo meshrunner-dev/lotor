@@ -15,6 +15,7 @@ import (
 	"meshrunner.dev/lotor/internal/application"
 	"meshrunner.dev/lotor/internal/confdb"
 	"meshrunner.dev/lotor/internal/correlation"
+	"meshrunner.dev/lotor/internal/origin"
 	"meshrunner.dev/lotor/internal/radio"
 
 	mesh "meshrunner.dev/pkg/meshcore"
@@ -202,7 +203,9 @@ func TestPushesGoDownATaughtRouteAndThreeTimeoutsStallAMember(t *testing.T) {
 	for range 3 {
 		turn()
 		if svc.pipeline.Queue.Len() > 0 {
-			push = emissionPacket(queued(t, svc))
+			item := queued(t, svc)
+			finishPush(svc, item, origin.Outcome{Sent: true, At: now})
+			push = emissionPacket(item)
 			break
 		}
 	}
@@ -238,7 +241,7 @@ func TestPushesGoDownATaughtRouteAndThreeTimeoutsStallAMember(t *testing.T) {
 			if !walkToBob() {
 				t.Fatalf("strike %d: not re-pushed", strike)
 			}
-			queued(t, svc)
+			finishPush(svc, queued(t, svc), origin.Outcome{Sent: true, At: now})
 			if pending, deadline, _ = member(); pending == 0 {
 				t.Fatalf("strike %d: re-pushed without an ACK armed", strike)
 			}
@@ -327,11 +330,11 @@ func TestThePushClockRunsAndTheFlushTickWritesCursors(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s["pushes"] == "1" && s["pushes pending"] == "1" && len(cursors) == 2 {
+		if s["pushes"] != "0" && s["dropped"] != "0" && s["pushes pending"] == "0" && len(cursors) == 2 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("summary = %v, cursors %d — want one push in flight and two cursors flushed", s, len(cursors))
+			t.Fatalf("summary = %v, cursors %d — want a detached push refused and two cursors flushed", s, len(cursors))
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

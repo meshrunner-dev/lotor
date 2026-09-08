@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -232,6 +233,9 @@ func validateAir(p params) error {
 // validateRoom judges what the room says about itself: its name, its
 // doors, its clocks and its memory.
 func validateRoom(p params) error {
+	if strings.HasPrefix(p.DefaultScope, "$") {
+		return errors.New("meshcore room params: private default_scope requires a private keystore — not supported")
+	}
 	if len(p.NodeName) > maxNodeName {
 		return fmt.Errorf("meshcore room params: node_name exceeds %d bytes", maxNodeName)
 	}
@@ -288,6 +292,8 @@ type store interface {
 	LoadRoomCursors(ctx context.Context, app string) ([]confdb.RoomCursor, error)
 	SaveRoomCursors(ctx context.Context, app string, cursors []confdb.RoomCursor) error
 	ForgetRoomCursor(ctx context.Context, app string, pubKey [mesh.PubKeySize]byte) error
+	LoadRoomReceipts(ctx context.Context, app string) ([]confdb.RoomReceipt, error)
+	ForgetRoomReceipt(ctx context.Context, app string, author [mesh.PubKeySize]byte) error
 }
 
 // service is one room. Everything below mu is read by Info from any
@@ -545,6 +551,9 @@ func (s *service) runTX(ctx context.Context) {
 			Mode: s.gate(), LBTThresholdDB: s.tx.LBTThresholdDB, LBTExhausted: s.tx.LBTExhausted, CAD: s.tx.CAD,
 		}, power)
 		s.mu.Lock()
+		if item.Kind == "post-push" {
+			s.pushOutcomeLocked(item.Correlation, out)
+		}
 		switch {
 		case out.Sent:
 			s.sent++

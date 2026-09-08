@@ -82,7 +82,26 @@ func storeMigrations() []confdb.Migration {
 			"for: a name the console cannot spell is renamed, references and " +
 			"runtime state following it",
 		Run: migrateInstanceNames,
-	}, aclDurabilityMigration(), stationStateMigration(), roomTablesMigration()}
+	}, aclDurabilityMigration(), stationStateMigration(), roomTablesMigration(), roomReceiptsMigration()}
+}
+
+// roomReceiptsMigration gives an accepted post a durable receipt apart
+// from the history ring. Existing posts cannot supply one: their time
+// belongs to the room's clock, not to the client's replay guard.
+func roomReceiptsMigration() confdb.Migration {
+	return confdb.Migration{
+		To:  16,
+		Doc: "room post receipts survive a restart and history pruning, so retries do not duplicate posts",
+		Run: func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS room_receipts(
+			   app              TEXT NOT NULL,
+			   author           BLOB NOT NULL,
+			   client_timestamp INTEGER NOT NULL,
+			   PRIMARY KEY(app, author)
+			 )`)
+			return err
+		},
+	}
 }
 
 // roomTablesMigration gives a room server its two tables in stores

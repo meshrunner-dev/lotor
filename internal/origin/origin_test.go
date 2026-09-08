@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"meshrunner.dev/lotor/internal/bus"
@@ -260,4 +261,89 @@ func TestAnExpiredEmissionIsDroppedByNameAndNeverHeldForDuty(t *testing.T) {
 	if dev.transmits != 0 {
 		t.Error("a refused frame was keyed")
 	}
+}
+
+// delayedRadio models time spent outside the pipeline, including a
+// driver that returns a CAD result after the deadline it was given.
+type delayedRadio struct {
+	fakeRadio
+
+	airtimeDelay, assessDelay time.Duration
+	assessDeadline            time.Time
+}
+
+func (r *delayedRadio) Airtime(size int) time.Duration {
+	time.Sleep(r.airtimeDelay)
+	return r.fakeRadio.Airtime(size)
+}
+
+func (r *delayedRadio) AssessChannel(ctx context.Context, threshold float64) (bool, error) {
+	r.assessDeadline, _ = ctx.Deadline()
+	time.Sleep(r.assessDelay)
+	return r.fakeRadio.AssessChannel(ctx, threshold)
+}
+
+func TestExpiryDuringPreparationNeverKeysOrSpendsDuty(t *testing.T) {
+	for _, mode := range []string{config.TXOnAir, config.TXShadow} {
+		for _, phase := range []string{"airtime", "clear", "busy", "receiving", "cad-error"} {
+			t.Run(mode+"/"+phase, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					b := bus.New()
+					sub := b.Subscribe(2)
+					defer sub.Close()
+					p := New(Config{Bus: b}, 1)
+					dev := &delayedRadio{fakeRadio: fakeRadio{airtime: time.Millisecond}}
+					policy := Policy{Mode: mode, CAD: phase != "airtime"}
+					if phase == "airtime" {
+						dev.airtimeDelay = 25 * time.Millisecond
+					} else {
+						dev.assessDelay = 25 * time.Millisecond
+						dev.busy = phase == "busy"
+						switch phase {
+						case "receiving":
+							dev.assessErr = radio.ErrBusyReceiving
+						case "cad-error":
+							dev.assessErr = context.DeadlineExceeded
+						}
+					}
+					ledger := radio.NewAirtimeLedger(time.Millisecond, nil)
+					item := emission("expiring-answer")
+					item.Expires = time.Now().Add(10 * time.Millisecond)
+					out := p.Emit(t.Context(), item, dev, ledger, policy, 10)
+					if out.Dropped != "expired" || out.Sent || out.Requeued || dev.transmits != 0 {
+						t.Fatalf("expired during %s: %+v, transmits=%d", phase, out, dev.transmits)
+					}
+					if policy.CAD && !dev.assessDeadline.Equal(item.Expires) {
+						t.Errorf("CAD deadline=%s, want expiry=%s", dev.assessDeadline, item.Expires)
+					}
+					if event, ok := (<-sub.C).(bus.TxDropped); !ok || event.Reason != "expired" || len(sub.C) != 0 {
+						t.Errorf("expiry event=%+v, unread events=%d", event, len(sub.C))
+					}
+					if ledger.Usage(time.Now()) != 0 || p.Queue.Len() != 0 {
+						t.Error("expiry spent duty or left a queued retry")
+					}
+					reservation, _, _ := ledger.Reserve(time.Now(), time.Millisecond)
+					if reservation == nil {
+						t.Fatal("expired frame kept its duty reservation")
+					}
+					reservation.Cancel()
+				})
+			})
+		}
+	}
+}
+
+func TestBusyChannelWaitStopsAtExpiry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := New(Config{}, 1)
+		dev := &fakeRadio{airtime: time.Millisecond, busy: true}
+		ledger := radio.NewAirtimeLedger(time.Millisecond, nil)
+		item := emission("answer-on-busy-channel")
+		item.Expires = time.Now().Add(50 * time.Millisecond)
+		out := p.Emit(t.Context(), item, dev, ledger,
+			Policy{Mode: config.TXOnAir, CAD: true, LBTExhausted: config.LBTTransmit}, 10)
+		if out.Dropped != "expired" || !time.Now().Equal(item.Expires) || dev.transmits != 0 {
+			t.Fatalf("busy channel outlived expiry: %+v, time=%s, transmits=%d", out, time.Now(), dev.transmits)
+		}
+	})
 }

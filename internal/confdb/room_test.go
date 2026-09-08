@@ -2,6 +2,7 @@ package confdb
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"meshrunner.dev/lotor/internal/config"
@@ -62,6 +63,9 @@ func TestRoomPostsKeepTheRingAndCursorsTheirMember(t *testing.T) {
 	if cursors, _ := s.LoadRoomCursors(ctx, "lobby"); len(cursors) != 0 {
 		t.Errorf("a forgotten cursor remains: %+v", cursors)
 	}
+	if receipts, err := s.LoadRoomReceipts(ctx, "lobby"); err != nil || len(receipts) != 0 {
+		t.Fatalf("posts without client timestamps made receipts: %+v, %v", receipts, err)
+	}
 }
 
 func TestRemovingAnApplicationTakesItsMemoryWithIt(t *testing.T) {
@@ -75,7 +79,7 @@ func TestRemovingAnApplicationTakesItsMemoryWithIt(t *testing.T) {
 	}
 	var bob [32]byte
 	bob[0] = 0xB0
-	if _, err := s.SaveRoomPost(ctx, "lobby", RoomPost{At: 1, Author: bob, Text: "hi"}, 0); err != nil {
+	if _, err := s.SaveRoomPost(ctx, "lobby", RoomPost{At: 1, Author: bob, Text: "hi", ClientTimestamp: 42}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SaveRoomCursor(ctx, "lobby", RoomCursor{PubKey: bob, SyncSince: 1}); err != nil {
@@ -89,8 +93,131 @@ func TestRemovingAnApplicationTakesItsMemoryWithIt(t *testing.T) {
 	}
 	posts, _ := s.LoadRoomPosts(ctx, "lobby")
 	cursors, _ := s.LoadRoomCursors(ctx, "lobby")
+	receipts, _ := s.LoadRoomReceipts(ctx, "lobby")
 	acl, _ := s.LoadACL(ctx, ApplicationOwner("lobby"))
-	if len(posts) != 0 || len(cursors) != 0 || len(acl) != 0 {
-		t.Fatalf("the removal left %d posts, %d cursors, %d members", len(posts), len(cursors), len(acl))
+	if len(posts) != 0 || len(cursors) != 0 || len(receipts) != 0 || len(acl) != 0 {
+		t.Fatalf("the removal left %d posts, %d cursors, %d receipts, %d members", len(posts), len(cursors), len(receipts), len(acl))
+	}
+}
+
+func TestRoomReceiptsSurvivePruningAndRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "config.db")
+	s, err := Open(ctx, path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if s != nil {
+			_ = s.Close()
+		}
+	})
+	alice, bob := [32]byte{1}, [32]byte{2}
+	for i, author := range [][32]byte{alice, bob} {
+		if _, err := s.SaveRoomPost(ctx, "lobby", RoomPost{
+			At: uint32(100 + i), Author: author, Text: "kept", ClientTimestamp: uint32(500 + i),
+		}, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The post ring already lost Alice's post, but her receipt is the
+	// proof her retry still needs after a restart.
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(ctx, path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	posts, err := s.LoadRoomPosts(ctx, "lobby")
+	if err != nil || len(posts) != 1 || posts[0].Author != bob {
+		t.Fatalf("history after restart = %+v, %v", posts, err)
+	}
+	receipts, err := s.LoadRoomReceipts(ctx, "lobby")
+	if err != nil || len(receipts) != 2 {
+		t.Fatalf("receipts after pruning and restart = %+v, %v", receipts, err)
+	}
+	for _, receipt := range receipts {
+		want := uint32(500)
+		if receipt.Author == bob {
+			want++
+		}
+		if receipt.ClientTimestamp != want {
+			t.Fatalf("receipt = %+v, want timestamp %d", receipt, want)
+		}
+	}
+	// A post without a client request does not replace a receipt with
+	// a fabricated zero timestamp.
+	if _, err := s.SaveRoomPost(ctx, "lobby", RoomPost{At: 102, Author: alice, Text: "local"}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PruneRoomPosts(ctx, "lobby", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ForgetRoomReceipt(ctx, "lobby", bob); err != nil {
+		t.Fatal(err)
+	}
+	receipts, err = s.LoadRoomReceipts(ctx, "lobby")
+	if err != nil || len(receipts) != 1 || receipts[0] != (RoomReceipt{Author: alice, ClientTimestamp: 500}) {
+		t.Fatalf("the remaining receipt = %+v, %v", receipts, err)
+	}
+	if other, err := s.LoadRoomReceipts(ctx, "annex"); err != nil || len(other) != 0 {
+		t.Fatalf("another room inherited receipts: %+v, %v", other, err)
+	}
+}
+
+func TestRoomPostAndReceiptCommitTogether(t *testing.T) {
+	for _, failAt := range []struct{ name, trigger string }{
+		{"post", "BEFORE INSERT ON room_posts"},
+		{"receipt", "BEFORE INSERT ON room_receipts"},
+		{"pruning", "BEFORE DELETE ON room_posts"},
+	} {
+		t.Run(failAt.name, func(t *testing.T) {
+			s := openTest(t)
+			ctx := context.Background()
+			author := [32]byte{1}
+			if _, err := s.SaveRoomPost(ctx, "lobby", RoomPost{
+				At: 100, Author: author, Text: "accepted", ClientTimestamp: 200,
+			}, 1); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.ExecContext(ctx, "CREATE TRIGGER refuse_room_write "+failAt.trigger+
+				" BEGIN SELECT RAISE(ABORT, 'write refused'); END"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.SaveRoomPost(ctx, "lobby", RoomPost{
+				At: 101, Author: author, Text: "refused", ClientTimestamp: 201,
+			}, 1); err == nil {
+				t.Fatal("the injected write failure was ignored")
+			}
+			posts, err := s.LoadRoomPosts(ctx, "lobby")
+			if err != nil || len(posts) != 1 || posts[0].Text != "accepted" || posts[0].Seq != 1 {
+				t.Fatalf("a refused write changed the history: %+v, %v", posts, err)
+			}
+			receipts, err := s.LoadRoomReceipts(ctx, "lobby")
+			if err != nil || len(receipts) != 1 || receipts[0].ClientTimestamp != 200 {
+				t.Fatalf("a refused post earned a receipt: %+v, %v", receipts, err)
+			}
+		})
+	}
+}
+
+func TestImportDiscardsRoomReceipts(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	for _, app := range []string{"lobby", "annex"} {
+		if _, err := s.SaveRoomPost(ctx, app, RoomPost{
+			At: 1, Author: [32]byte{1}, Text: "hi", ClientTimestamp: 42,
+		}, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.ImportFile(ctx, &config.File{}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, app := range []string{"lobby", "annex"} {
+		if receipts, err := s.LoadRoomReceipts(ctx, app); err != nil || len(receipts) != 0 {
+			t.Fatalf("import kept %s receipts: %+v, %v", app, receipts, err)
+		}
 	}
 }

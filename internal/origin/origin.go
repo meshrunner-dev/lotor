@@ -38,6 +38,11 @@ const (
 	DefaultDutyWait = 10 * time.Minute
 )
 
+const (
+	reasonDuty    = "duty"
+	reasonExpired = "expired"
+)
+
 // Route is how a frame travels — flooded to whoever hears it, or down
 // a path to one node. The pipeline never decides it and never reads
 // the frame to find it: the owner classifies what it composed, and
@@ -162,7 +167,7 @@ func (p *Pipeline) Emit(ctx context.Context, item Emission, dev radio.Device,
 		return p.drop(item, "radio-down")
 	}
 	if item.expired(time.Now()) {
-		return p.drop(item, "expired")
+		return p.drop(item, reasonExpired)
 	}
 	airtime := dev.Airtime(len(item.Frame))
 	reservation, outcome := p.reserveDuty(ctx, ledger, airtime, item)
@@ -173,8 +178,12 @@ func (p *Pipeline) Emit(ctx context.Context, item Emission, dev radio.Device,
 	if outcome, proceed := p.clearChannel(ctx, dev, policy, item); !proceed {
 		return outcome
 	}
+	at := time.Now()
+	if item.expired(at) {
+		return p.drop(item, reasonExpired)
+	}
 	shadow := policy.Mode == config.TXShadow
-	at, actualAir, actualPower := time.Now(), airtime, power
+	actualAir, actualPower := airtime, power
 	var txErr error
 	if !shadow {
 		txBase := correlation.WithContext(context.WithoutCancel(ctx), item.Correlation)
@@ -213,15 +222,18 @@ func (p *Pipeline) Emit(ctx context.Context, item Emission, dev radio.Device,
 func (p *Pipeline) reserveDuty(ctx context.Context, ledger *radio.AirtimeLedger,
 	airtime time.Duration, item Emission,
 ) (*radio.AirtimeReservation, Outcome) {
-	deadline, exhausted := time.Now().Add(p.cfg.DutyWait), "duty"
+	deadline, exhausted := time.Now().Add(p.cfg.DutyWait), reasonDuty
 	if !item.Expires.IsZero() && item.Expires.Before(deadline) {
 		// Its own moment ends before the pipeline's patience does: the
 		// wait is cut there, and the drop is named for what actually
 		// ended it.
-		deadline, exhausted = item.Expires, "expired"
+		deadline, exhausted = item.Expires, reasonExpired
 	}
 	for {
 		now := time.Now()
+		if !now.Before(deadline) {
+			return nil, p.drop(item, exhausted)
+		}
 		reservation, freeAt, never := ledger.Reserve(now, airtime)
 		if reservation != nil {
 			return reservation, Outcome{}
@@ -251,25 +263,21 @@ func (p *Pipeline) clearChannel(ctx context.Context, dev radio.Device, policy Po
 		return Outcome{}, true
 	}
 	deadline := time.Now().Add(p.cfg.LBTBound)
+	if !item.Expires.IsZero() && item.Expires.Before(deadline) {
+		deadline = item.Expires
+	}
 	for {
+		if item.expired(time.Now()) {
+			return p.drop(item, reasonExpired), false
+		}
 		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
 		busy, err := dev.AssessChannel(attemptCtx, policy.LBTThresholdDB)
 		cancel()
+		if item.expired(time.Now()) {
+			return p.drop(item, reasonExpired), false
+		}
 		if errors.Is(err, radio.ErrBusyReceiving) {
-			now := time.Now()
-			if item.BusySince.IsZero() {
-				item.BusySince = now
-			}
-			busyFor := now.Sub(item.BusySince)
-			if busyFor >= p.cfg.LBTBound && policy.LBTExhausted == config.LBTDrop {
-				return p.drop(item, "lbt"), false
-			}
-			retry := p.cfg.LBTRetry/2 + rand.N(p.cfg.LBTRetry) //nolint:gosec // timing jitter, not security
-			item.NotBefore = now.Add(retry)
-			logging.Trace(p.cfg.Log, "tx requeued for reception",
-				zap.String("corr", item.Correlation.Short()), zap.Duration("retry_in", retry),
-				zap.Duration("busy_for", busyFor))
-			return p.Requeue(item), false
+			return p.deferForReception(item, policy), false
 		}
 		if err != nil {
 			return p.drop(item, "lbt-failed"), false
@@ -286,6 +294,9 @@ func (p *Pipeline) clearChannel(ctx context.Context, dev radio.Device, policy Po
 			return Outcome{}, true
 		}
 		retry := p.cfg.LBTRetry/2 + rand.N(p.cfg.LBTRetry) //nolint:gosec // timing jitter, not security
+		if !item.Expires.IsZero() {
+			retry = min(retry, max(0, time.Until(item.Expires)))
+		}
 		select {
 		case <-ctx.Done():
 			return Outcome{}, false
@@ -294,13 +305,30 @@ func (p *Pipeline) clearChannel(ctx context.Context, dev radio.Device, policy Po
 	}
 }
 
+func (p *Pipeline) deferForReception(item Emission, policy Policy) Outcome {
+	now := time.Now()
+	if item.BusySince.IsZero() {
+		item.BusySince = now
+	}
+	busyFor := now.Sub(item.BusySince)
+	if busyFor >= p.cfg.LBTBound && policy.LBTExhausted == config.LBTDrop {
+		return p.drop(item, "lbt")
+	}
+	retry := p.cfg.LBTRetry/2 + rand.N(p.cfg.LBTRetry) //nolint:gosec // timing jitter, not security
+	item.NotBefore = now.Add(retry)
+	logging.Trace(p.cfg.Log, "tx requeued for reception",
+		zap.String("corr", item.Correlation.Short()), zap.Duration("retry_in", retry),
+		zap.Duration("busy_for", busyFor))
+	return p.Requeue(item)
+}
+
 // Submit offers an emission to the queue for its turn; a frame whose
 // turn would fall past its expiry, and a full queue, drop it — counted
 // and announced, so an owner never writes the offer-or-drop pair
 // itself.
 func (p *Pipeline) Submit(item Emission) Outcome {
 	if item.expired(item.NotBefore) {
-		return p.drop(item, "expired")
+		return p.drop(item, reasonExpired)
 	}
 	if !p.Queue.Offer(item) {
 		return p.drop(item, "queue-full")

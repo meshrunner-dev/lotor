@@ -137,7 +137,9 @@ direct sends are never scoped, as the reference's `sendDirect` is not),
 `path_hash_mode` (the hash width its own floods declare) and
 `multi_acks` (the redundant multi-ack 300 ms ahead of a direct post
 ACK). The room carries one scope, not a region table: the relay engine
-keeps the many-region form beside its regions.
+keeps the many-region form beside its regions. Private names starting
+with `$` are refused until a private keystore exists, as for relay
+regions; their keys cannot be derived from the public name.
 
 ```yaml
 applications:
@@ -224,6 +226,14 @@ the room touches it:
    semantics origination has no business in. Unifying the two is a
    later question, not this one.)
 
+   Expiration is the owner's policy. Station emissions, including
+   automatic ACKs and PATH returns, have none, like the reference
+   companion's outbound queue; its client timeout is not a frame TTL.
+   The room bounds queued answers and pushes to 30 seconds, adverts
+   to one minute. These are hosted queue limits, not reference ACK
+   deadlines. The pipeline checks expiry again after CAD and before
+   keying, and releases any unused duty reservation on a local drop.
+
 The room server is then what is left: the post store, the push
 scheduler, keep-alive handling, and the room's own admin verbs — a few
 hundred lines that are *about rooms*, sitting on kernels that are not.
@@ -282,6 +292,11 @@ bytes:
 - posts survive a restart and the ring may be larger than 32
   (`history`, `persist_history`); the reference's behaviour is one
   setting away;
+- a push's ACK clock starts after actual emission: 4 s plus 2 s per
+  direct hop including the destination, or 12 s flooded. Waiting in
+  the hosted queue or for RF/duty, local drops and shadow simulation
+  do not count against a reader's three attempts. The CRC is held
+  before emission so an immediate co-hosted ACK can still be accepted;
 - every durable role persists — `read-only`, `read-write`, `admin` —
   not admins alone; guests stay in RAM, exactly as the relay's ACL
   already does. A member who logged in yesterday is still a member;
@@ -390,16 +405,19 @@ what was said in it** — which is what a room is for.
 
 What it costs, stated so nobody rediscovers it:
 
-- **Data tables beside the revision trail.** Posts and cursors are
-  data, not configuration mutations; they land in their own tables
-  (`room_posts`, `room_cursors`, keyed by application name) and are
-  not revisioned. "Every mutation is recorded" keeps its meaning for
+- **Data tables beside the revision trail.** Posts, receipts and
+  cursors are data, not configuration mutations; they land in their
+  own tables (`room_posts`, `room_receipts`, `room_cursors`, keyed by
+  application name) and are not revisioned. "Every mutation is recorded" keeps its meaning for
   configuration objects, and this is the one stated exception.
 - **Migrations through the store's own registry.** An application's
   tables are the store's and the daemon's, not the type's: their DDL
   is a `confdb.Migration` in the store's registry like every other
   table, the accessors live in `confdb`, and `Store.Remove` drops the
-  rows of an application it forgets. An earlier draft had each type
+  rows of an application it forgets. The manager stops and joins the
+  application before this cascade, so its final cursor flush cannot
+  recreate orphan rows; a failed deletion restarts the retained
+  configuration. An earlier draft had each type
   contribute a `Builder.Migrations`; it never landed, and it should
   not — a shipped migration stays pinned to its historical DDL, so a
   per-type contribution point would only move frozen text around. The
@@ -425,6 +443,14 @@ What it costs, stated so nobody rediscovers it:
   the right instinct: a cursor lost to a crash costs a re-delivery the
   client's own cursor repairs at its next keep-alive, and the store is
   not asked to fsync on every ACK.
+- **Acceptance receipts survive pruning.** The accepted client's
+  timestamp is stored per author atomically with the post and ring
+  pruning. A retry after restart earns its ACK without appending the
+  post again; a refused write earns no receipt. Migration 16 adds this
+  table without changing migration 15. Earlier posts have only their
+  room timestamp, so their client timestamp cannot be reconstructed:
+  deduplication across restarts applies to posts accepted with receipt
+  tracking. Receipts leave with an evicted member or removed room.
 - **`persist_history: false` stays.** It is the reference's behaviour
   — RAM ring, nothing written — and the escape for a host where even
   this traffic is unwelcome. Membership and identity persist
@@ -442,8 +468,9 @@ The split by class therefore lands entirely in `config.db`:
   collide and no relay row moves. The relay's semantics carry over
   unchanged: durable roles persist with their replay guard and taught
   route; guests never touch disk.
-- **Cursors and history** → `room_cursors` and `room_posts`, the
-  in-memory ring the runtime authority and the tables its durability,
+- **Cursors, history and receipts** → `room_cursors`, `room_posts` and
+  `room_receipts`, the in-memory ring the runtime authority and the
+  tables its durability,
   loaded at start, posts written before they are acknowledged when
   `persist_history` is on.
 
@@ -515,8 +542,8 @@ same thing:
 - **Over-long posts**: refused, not truncated — a post the room would
   have to cut is a post the author did not write, and the retry of a
   refused post is judged afresh rather than acknowledged as kept.
-- **Stalled members**: the reference's shape, kept — three pushes that
-  time out stall a member until it speaks, and the status line counts
+- **Stalled members**: the reference's shape, kept — three emitted
+  pushes that time out stall a member until it speaks, and the status line counts
   them (`members stalled`). No idle eviction: a room's normal member
   says nothing for hours and expects its pushes.
 - **History retention**: by count alone, the ring; the store prunes to

@@ -2409,7 +2409,16 @@ func (m *manager) Remove(ctx context.Context, kind, name, principal string) (str
 	if err := next.Validate(false); err != nil {
 		return "", err
 	}
+	// A room flushes its cursors while stopping. Join it before the
+	// cascade, or that final write can recreate data for a deleted app.
+	restartApplication := kind == confdb.KindApplication && m.applications[name] != nil
+	if restartApplication {
+		m.stopApplication(name)
+	}
 	if err := m.store.Remove(ctx, kind, name, principal); err != nil {
+		if restartApplication {
+			m.startApplication(m.ctx, name) //nolint:contextcheck // restored service belongs to the daemon
+		}
 		return "", err
 	}
 	if kind == confdb.KindStation {

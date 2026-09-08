@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"net"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"go.uber.org/zap"
@@ -259,6 +260,51 @@ func TestFloodedDirectTextQueuesACKPathReturn(t *testing.T) {
 	svc.processRF(t.Context(), radio.Frame{Payload: raw})
 	if duplicate, ok := pollEmission(svc); ok {
 		t.Fatalf("duplicate text queued another reply: %+v", duplicate)
+	}
+}
+
+func TestStationAnswersKeepTheirTurnAfterThirtySeconds(t *testing.T) {
+	for _, kind := range []string{"ack", "path-return"} {
+		t.Run(kind, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				spec := testSpec(t)
+				spec.TX = station.TXPolicy{Mode: config.TXOnAir, QueueDepth: 4}
+				built, err := build(spec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				svc := requireService(t, built)
+				device := &stationRadio{}
+				svc.rfDevice = device
+				svc.duty = radio.NewAirtimeLedger(time.Hour, nil)
+				svc.p.MultiACKs = 0
+				peer, err := mesh.NewLocalIdentity(bytes.NewReader(bytes.Repeat([]byte{8}, 64)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				contact := contactEntry{info: companion.Contact{
+					PublicKey: peer.PubKey, PathLen: 5, Path: [mesh.MaxPathSize]byte{1, 2, 3, 4, 5},
+				}}
+				ack := []byte{1, 2, 3, 4}
+				if kind == "ack" {
+					svc.sendACK(contact, ack)
+				} else {
+					received := &mesh.Packet{PathLen: 5, Path: []byte{1, 2, 3, 4, 5}}
+					svc.sendPathReturn(svc.id, contact, received, ack)
+				}
+
+				// A companion's timeout grows with airtime and path length;
+				// thirty seconds does not mean its answer has become useless.
+				// The reference dispatcher keeps both forms until their turn.
+				time.Sleep(31 * time.Second)
+				item := takeEmission(t, svc)
+				svc.transmit(t.Context(), item)
+				if device.transmits != 1 || svc.stats.sent != 1 || !item.Expires.IsZero() {
+					t.Fatalf("delayed %s: transmissions=%d, sent=%d, expiry=%s",
+						kind, device.transmits, svc.stats.sent, item.Expires)
+				}
+			})
+		})
 	}
 }
 

@@ -122,6 +122,12 @@ CREATE TABLE IF NOT EXISTS room_cursors(
   updated    TEXT NOT NULL,
   PRIMARY KEY(app, pubkey)
 );
+CREATE TABLE IF NOT EXISTS room_receipts(
+  app              TEXT NOT NULL,
+  author           BLOB NOT NULL,
+  client_timestamp INTEGER NOT NULL,
+  PRIMARY KEY(app, author)
+);
 INSERT INTO meta(key, value) VALUES('schema_version', '1')
   ON CONFLICT(key) DO NOTHING;
 `
@@ -479,7 +485,7 @@ func fileObjects(f *config.File) []importObject {
 func purgeRuntimeState(ctx context.Context, tx *sql.Tx) error {
 	for _, stmt := range []string{
 		"DELETE FROM acl", "DELETE FROM regions", "DELETE FROM regions_meta", "DELETE FROM station_state",
-		"DELETE FROM room_posts", "DELETE FROM room_cursors",
+		"DELETE FROM room_posts", "DELETE FROM room_cursors", "DELETE FROM room_receipts",
 	} {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return err
@@ -601,6 +607,7 @@ func (s *Store) Remove(ctx context.Context, kind, name, principal string) error 
 			{"DELETE FROM acl WHERE relay = ?", ApplicationOwner(name)},
 			{"DELETE FROM room_posts WHERE app = ?", name},
 			{"DELETE FROM room_cursors WHERE app = ?", name},
+			{"DELETE FROM room_receipts WHERE app = ?", name},
 		} {
 			if _, err := tx.ExecContext(ctx, stmt.sql, stmt.arg); err != nil {
 				return err
