@@ -58,6 +58,24 @@ func TestLayoutClippedRowsRetainTheirColour(t *testing.T) {
 	}
 }
 
+func TestLayoutHardLineBreaksKeepCursorAndStyle(t *testing.T) {
+	for _, ending := range []string{"\n", "\r\n"} {
+		text := "\x1b[36mabcd" + ending + "e\x1b[0m"
+		before := layoutText(text, 4, 4)
+		after := layoutText(text, 4+len(ending), 4)
+		if len(before.rows) != 2 || before.rows[1] != "\x1b[36me\x1b[0m" {
+			t.Errorf("rows across %q = %#v", ending, before.rows)
+		}
+		if before.cursor != (screenPosition{col: 4}) || after.cursor != (screenPosition{row: 1}) {
+			t.Errorf("cursor across %q = %+v -> %+v", ending, before.cursor, after.cursor)
+		}
+		trailing := layoutText("abcd"+ending, 4+len(ending), 4)
+		if len(trailing.rows) != 2 || trailing.rows[1] != "" || trailing.end != (screenPosition{row: 1}) {
+			t.Errorf("trailing %q = %+v", ending, trailing)
+		}
+	}
+}
+
 func TestEditorKeepsTallDraftCursorInTheViewport(t *testing.T) {
 	var out strings.Builder
 	ed := newEditor(strings.NewReader(""), &out)

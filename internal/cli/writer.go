@@ -15,6 +15,7 @@ type syncWriter struct {
 	mu        sync.Mutex
 	w         io.Writer
 	captureTo io.Writer
+	view      *terminalFrame
 }
 
 func syncOut(w io.Writer) *syncWriter { return &syncWriter{w: w} }
@@ -74,4 +75,35 @@ func (s *syncWriter) echoCommand(line string) {
 	if out, ok := s.w.(interface{ echoCommand(line string) }); ok {
 		out.echoCommand(line)
 	}
+}
+
+func (s *syncWriter) frame(body, footer string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if out, ok := s.w.(interface {
+		frame(body, footer string) error
+	}); ok {
+		return out.frame(body, footer)
+	}
+	// Direct terminal writers have no dimensions or resize events. Keep
+	// the same renderer with unknown bounds for those callers.
+	if s.view == nil {
+		s.view = &terminalFrame{}
+	}
+	s.view.content = frameContent{body: body, footer: footer}
+	return s.view.render(s.w, 0, 0, false)
+}
+
+func (s *syncWriter) endFrame() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if out, ok := s.w.(interface{ endFrame() error }); ok {
+		return out.endFrame()
+	}
+	if s.view == nil {
+		return nil
+	}
+	err := s.view.end(s.w)
+	s.view = nil
+	return err
 }

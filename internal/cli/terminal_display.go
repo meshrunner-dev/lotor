@@ -14,11 +14,14 @@ const (
 	terminalOutput terminalWriteKind = iota
 	terminalNotice
 	terminalCommandEcho
+	terminalFrameDraw
+	terminalFrameEnd
 )
 
 type terminalWrite struct {
 	kind  terminalWriteKind
 	bytes []byte
+	frame *frameContent
 	reply chan terminalWritten
 }
 
@@ -52,6 +55,7 @@ type terminalDisplay struct {
 	done    chan struct{}
 	lines   chan string
 	queue   []queuedLine
+	view    *terminalFrame
 	// readyPrompt is false while a command owns the output. Keystrokes
 	// still edit a bounded draft, but cannot paint over a progress frame.
 	readyPrompt bool
@@ -143,7 +147,7 @@ func (d *terminalDisplay) run(ctx context.Context, commandsDone <-chan struct{})
 		case <-d.ready:
 			d.promptReady()
 		case dimensions := <-d.resizes:
-			d.ed.resize(dimensions.width, dimensions.height)
+			d.resize(dimensions)
 		case lines <- next:
 			d.lineSent(echo)
 		}
@@ -207,6 +211,7 @@ func (d *terminalDisplay) writeRequest(request terminalWrite) (closing bool) {
 	var err error
 	switch request.kind {
 	case terminalNotice:
+		_ = d.finishFrame()
 		if !d.ed.suspended {
 			d.ed.clearBlock()
 		}
@@ -216,6 +221,14 @@ func (d *terminalDisplay) writeRequest(request terminalWrite) (closing bool) {
 		n, err = fmt.Fprint(d.raw, "\r\x1b[K", d.s.prompt(), d.s.paintLine(string(request.bytes)), "\r\n")
 	case terminalOutput:
 		n, err = d.raw.Write(request.bytes)
+	case terminalFrameDraw:
+		if d.view == nil {
+			d.view = &terminalFrame{}
+		}
+		d.view.content = *request.frame
+		err = d.view.render(d.raw, d.ed.width, d.ed.height, false)
+	case terminalFrameEnd:
+		err = d.finishFrame()
 	}
 	request.reply <- terminalWritten{n: n, err: err}
 	return closing
@@ -231,6 +244,33 @@ func (d *terminalDisplay) echoCommand(line string) {
 
 func (d *terminalDisplay) notice(text string) {
 	_, _ = d.request(terminalWrite{kind: terminalNotice, bytes: []byte(text)})
+}
+
+func (d *terminalDisplay) frame(body, footer string) error {
+	_, err := d.request(terminalWrite{kind: terminalFrameDraw, frame: &frameContent{body: body, footer: footer}})
+	return err
+}
+
+func (d *terminalDisplay) endFrame() error {
+	_, err := d.request(terminalWrite{kind: terminalFrameEnd})
+	return err
+}
+
+func (d *terminalDisplay) finishFrame() error {
+	if d.view == nil {
+		return nil
+	}
+	err := d.view.end(d.raw)
+	d.view = nil
+	return err
+}
+
+func (d *terminalDisplay) resize(dimensions terminalDimensions) {
+	width, height := d.ed.width, d.ed.height
+	d.ed.resize(dimensions.width, dimensions.height)
+	if d.view != nil && (width != d.ed.width || height != d.ed.height) {
+		_ = d.view.render(d.raw, d.ed.width, d.ed.height, true)
+	}
 }
 
 func (d *terminalDisplay) request(write terminalWrite) (int, error) {

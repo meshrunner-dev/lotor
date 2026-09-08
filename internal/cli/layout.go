@@ -58,6 +58,16 @@ func (b *layoutBuilder) add(cluster string) {
 		}
 		return
 	}
+	if cluster == "\n" || cluster == "\r\n" {
+		if !b.found && b.target < b.offset+len(cluster) {
+			b.layout.cursor, b.found = b.position, true
+		}
+		b.offset += len(cluster)
+		b.flush()
+		b.position = screenPosition{row: b.position.row + 1}
+		b.line.WriteString(b.style)
+		return
+	}
 	cells := runewidth.StringWidth(cluster)
 	// A one-column terminal cannot display a two-cell glyph. Keep the
 	// original text in the buffer and show one replacement cell instead.

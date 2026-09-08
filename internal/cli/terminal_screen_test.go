@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,13 +37,20 @@ func TestTerminalScreenEditor(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = screen.command("kill-server") })
-	for _, name := range []string{"identity", "wide", "viewport"} {
+	for _, name := range []string{"identity", "wide", "viewport", "watch-narrow", "watch-resize", "watch-tall", "watch-footer"} {
 		t.Run(name, func(t *testing.T) {
 			pane := *screen
 			pane.name, pane.state = name, filepath.Join(dir, name+".json")
 			width, height := 80, 24
-			if name == "viewport" {
+			switch name {
+			case "viewport", "watch-narrow":
 				width, height = 40, 8
+			case "watch-resize":
+				width, height = 80, 8
+			case "watch-tall":
+				width, height = 40, 4
+			case "watch-footer":
+				width, height = 12, 8
 			}
 			pane.start(t, width, height)
 			switch name {
@@ -52,6 +60,8 @@ func TestTerminalScreenEditor(t *testing.T) {
 				pane.wide(t)
 			case "viewport":
 				pane.viewport(t)
+			default:
+				pane.watch(t)
 			}
 		})
 	}
@@ -104,11 +114,17 @@ func (s *terminalScreen) start(t *testing.T, width, height int) {
 	}
 	// Multiple command arguments make tmux exec the helper directly;
 	// paths and environment values never become shell source.
+	helper := "TestTerminalScreenHelper"
+	if strings.HasPrefix(s.name, "watch-") {
+		helper = "TestTerminalWatchScreenHelper"
+	}
 	s.run(t, "new-session", "-d", "-s", s.name, "-x", strconv.Itoa(width), "-y", strconv.Itoa(height),
-		"env", "LOTOR_CLI_SCREEN_HELPER="+s.state, binary, "-test.run=^TestTerminalScreenHelper$", "-test.count=1")
+		"env", "LOTOR_CLI_SCREEN_HELPER="+s.state, "LOTOR_CLI_SCREEN_CASE="+s.name,
+		binary, "-test.run=^"+helper+"$", "-test.count=1")
 	s.waitState(t)
 	s.waitImage(t, func(image terminalScreenImage) bool {
-		return image.width == width && image.height == height && strings.Contains(image.text, strings.TrimSpace(terminalScreenPrompt))
+		return image.width == width && image.height == height &&
+			strings.Contains(strings.ReplaceAll(image.text, "\n", ""), strings.TrimSpace(terminalScreenPrompt))
 	})
 }
 
@@ -230,6 +246,75 @@ func (s *terminalScreen) viewport(t *testing.T) {
 	}
 }
 
+func (s *terminalScreen) watch(t *testing.T) {
+	t.Helper()
+	s.send(t, true, "/screen-watch\r")
+	s.waitImage(t, func(image terminalScreenImage) bool {
+		return strings.Contains(image.text, "FRAME-1-") &&
+			strings.Contains(strings.ReplaceAll(image.text, "\n", ""), intervalStop)
+	})
+	if s.name == "watch-resize" {
+		s.run(t, "resize-window", "-t", s.name+":0", "-x", "40", "-y", "8")
+		s.receipt(t)
+		s.waitImage(t, func(image terminalScreenImage) bool {
+			return image.width == 40 && image.height == 8 && strings.Contains(image.text, "FRAME-1-") &&
+				strings.Contains(image.text, intervalStop)
+		})
+	}
+	// The private helper consumes Ctrl+\ to change the frame's version.
+	// The real repaint timer then redraws through the display owner.
+	s.send(t, false, "C-\\")
+	s.waitImage(t, func(image terminalScreenImage) bool {
+		if strings.Contains(image.text, "FRAME-1-") {
+			return false
+		}
+		if s.name == "watch-tall" {
+			rows := strings.Split(image.text, "\n")
+			return rows[0] == "FRAME-2-00-"+strings.Repeat("x", 27)+"12" &&
+				rows[1] == strings.Repeat("y", 20) && rows[2] == "FRAME-2-01-"+strings.Repeat("x", 27)+"12" &&
+				rows[image.height-1] == "-- ["+intervalStop+"]"
+		}
+		return s.watchBodyMatches(image, "2")
+	})
+	// A third frame catches accumulation after a resize even in terminal
+	// emulators whose first narrow repaint happens to replace the old row.
+	s.send(t, false, "C-\\")
+	s.waitImage(t, func(image terminalScreenImage) bool {
+		return strings.Contains(image.text, "FRAME-3-") && !strings.Contains(image.text, "FRAME-2-") &&
+			!strings.Contains(image.text, "FRAME-1-") &&
+			strings.Contains(strings.ReplaceAll(image.text, "\n", ""), intervalStop)
+	})
+	s.send(t, false, "Enter")
+	s.waitWatchPrompt(t, "")
+	s.send(t, true, "x")
+	s.waitWatchPrompt(t, "x")
+}
+
+func (s *terminalScreen) watchBodyMatches(image terminalScreenImage, version string) bool {
+	var rows []string
+	if s.name == "watch-footer" {
+		rows = []string{"FRAME-" + version + "-xxxx", strings.Repeat("x", 12), strings.Repeat("x", 12),
+			"xx12yyyyyyyy", strings.Repeat("y", 12), "-- [enter st", "ops]"}
+	} else {
+		rows = []string{"FRAME-" + version + "-" + strings.Repeat("x", 30) + "12", strings.Repeat("y", 20), "-- [" + intervalStop + "]"}
+	}
+	// Assert the exact terminal rows, including the distinct last cell in
+	// each full row: EL at a pending wrap must not erase that character.
+	return strings.Count(image.text, "FRAME-"+version+"-") == 1 && strings.Contains(image.text, strings.Join(rows, "\n"))
+}
+
+func (s *terminalScreen) waitWatchPrompt(t *testing.T, draft string) {
+	t.Helper()
+	s.waitImage(t, func(image terminalScreenImage) bool {
+		rows := strings.Split(image.text, "\n")
+		length := len(terminalScreenPrompt) + len(draft)
+		start := image.y - length/image.width
+		return start >= 0 && image.y < len(rows) && image.x == length%image.width &&
+			strings.Join(rows[start:image.y+1], "") == strings.TrimRight(terminalScreenPrompt+draft, " ") &&
+			!strings.Contains(strings.ReplaceAll(image.text, "\n", ""), intervalStop)
+	})
+}
+
 // TestTerminalScreenHelper is selected only by the isolated tmux child.
 // It exposes the editor directly and records accepted text; it has no
 // command dispatcher and cannot mutate a daemon or configuration database.
@@ -286,6 +371,94 @@ func TestTerminalScreenHelper(t *testing.T) {
 			writeScreenState(t, path, state)
 		}
 	}
+}
+
+// This helper runs the normal session dispatcher and the real repaint
+// command. Only its draw callback is synthetic, so long frames need no
+// daemon state, radio, database or network connection.
+func TestTerminalWatchScreenHelper(t *testing.T) {
+	path := os.Getenv("LOTOR_CLI_SCREEN_HELPER")
+	if path == "" {
+		t.Skip("watch terminal helper is launched by TestTerminalScreenEditor")
+	}
+	fd := int(os.Stdin.Fd())
+	old, err := xterm.MakeRaw(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer xterm.Restore(fd, old)
+	terminal := &screenWatchTerminal{path: path, t: t}
+	terminal.version.Store(1)
+	tall := os.Getenv("LOTOR_CLI_SCREEN_CASE") == "watch-tall"
+	commands = append(commands, &command{name: "screen-watch", run: func(s *session, ctx context.Context, _ input) error {
+		return s.repaint(ctx, 50*time.Millisecond, func() error {
+			version := terminal.version.Load()
+			if !tall {
+				_, err := fmt.Fprintf(s.out, "FRAME-%d-%s12%s\r\n", version, strings.Repeat("x", 30), strings.Repeat("y", 20))
+				return err
+			}
+			for i := range 12 {
+				if _, err := fmt.Fprintf(s.out, "FRAME-%d-%02d-%s12%s\r\n", version, i, strings.Repeat("x", 27), strings.Repeat("y", 20)); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}})
+	s := &session{colors: true, out: syncOut(terminal), path: []string{"station", "szer"}, deps: Deps{
+		Privilege: Admin, SystemName: func() string { return "wanadoo" },
+		Stations: []StationInfo{{Name: "szer", Protocol: "meshcore"}},
+		Kinds:    []schema.Kind{{Name: "station", ChoiceAttr: "protocol"}},
+	}}
+	writeScreenState(t, path, terminal.state)
+	s.serveEdited(t.Context(), terminal, terminal.terminalDimensions().width)
+}
+
+type screenWatchTerminal struct {
+	path    string
+	t       *testing.T
+	state   terminalScreenState
+	version atomic.Int64
+	resize  func(terminalDimensions)
+}
+
+func (r *screenWatchTerminal) Read(p []byte) (int, error) {
+	for {
+		n, err := os.Stdin.Read(p)
+		out := 0
+		for _, key := range p[:n] {
+			switch key {
+			case 0x1c:
+				r.version.Add(1)
+			case 0x1d:
+				if r.resize != nil {
+					r.resize(r.terminalDimensions())
+				}
+				r.state.Sequence++
+				writeScreenState(r.t, r.path, r.state)
+			default:
+				p[out] = key
+				out++
+			}
+		}
+		if out > 0 || err != nil {
+			return out, err
+		}
+	}
+}
+
+func (r *screenWatchTerminal) Write(p []byte) (int, error) { return os.Stdout.Write(p) }
+
+func (r *screenWatchTerminal) terminalDimensions() terminalDimensions {
+	width, height, err := xterm.GetSize(int(os.Stdin.Fd()))
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return terminalDimensions{width: width, height: height}
+}
+
+func (r *screenWatchTerminal) onTerminalResize(handler func(terminalDimensions)) {
+	r.resize = handler
 }
 
 func writeScreenState(t *testing.T, path string, state terminalScreenState) {

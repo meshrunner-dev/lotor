@@ -404,6 +404,13 @@ frames from visible shutdown notices, so a farewell cannot disappear into
 an in-progress watch capture. Plain and edited sessions dispatch through
 the same command loop.
 
+A periodically refreshed view submits its complete body and footer to that
+same owner. The shared layout counts physical rows, including wrapping and
+explicit line breaks. The view keeps its footer visible and clips body rows
+that do not fit; a resize recomposes the remembered frame immediately, even
+before the next refresh tick. Stopping a view releases its frame before the
+terminating command is echoed and dispatched.
+
 CLI regression tests include the real `buildKinds()` vocabulary, fragmented
 input, bounded buffers, cursor-span edits and deterministic command/output
 coordination. `TestTerminalScreenEditor` also checks tmux's actual screen

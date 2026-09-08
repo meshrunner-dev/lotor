@@ -1377,10 +1377,10 @@ func TestIntervalRedrawsWhereItStood(t *testing.T) {
 	if !strings.Contains(got, "\x1b[2A") {
 		t.Errorf("the frame did not redraw in place: %q", got)
 	}
-	// Every line is erased to its end, so a value that shrank leaves
-	// nothing of the longer one behind.
-	if strings.Count(got, "\x1b[K\r\n") < 4 {
-		t.Errorf("lines are not erased as they are rewritten: %q", got)
+	// Clear the previous block before drawing its replacement, so a
+	// shorter value or frame cannot leave an old suffix or row behind.
+	if strings.Count(got, "\r\x1b[J") < 2 {
+		t.Errorf("the previous frames were not cleared: %q", got)
 	}
 	if !strings.Contains(got, "-- ["+intervalStop+"]") {
 		t.Errorf("the frame does not say what stops it: %q", got)

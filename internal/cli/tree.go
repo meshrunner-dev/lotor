@@ -1309,42 +1309,29 @@ func (s *session) printOnce(ctx context.Context, path []string, want printArgs) 
 	}
 }
 
-// repaint draws a view over and over in the same place: the cursor
-// goes back up by the frame's own height, and every line is rewritten
-// and erased to its end, so a value that shrank leaves nothing of the
-// longer one behind. A status line sits under the frame, which is
-// where the cursor waits between draws.
+// repaint submits complete views to the display owner. Capturing the body
+// before delivery lets the owner wrap and clip it with the footer, and
+// redraw the last view immediately when the terminal changes size.
 func (s *session) repaint(ctx context.Context, every time.Duration, draw func() error) error {
 	if !s.colors {
 		return fmt.Errorf("%s draws in place, which needs a terminal", argInterval)
 	}
+	out, ok := s.out.(*syncWriter)
+	if !ok {
+		return errors.New("session output does not support capture")
+	}
 	tick := time.NewTicker(every)
 	defer tick.Stop()
-	height := 0
 	frame := func() error {
-		body, err := s.capture(draw)
+		body, err := out.capture(draw)
 		if err != nil {
 			return err
 		}
-		if height > 0 {
-			fmt.Fprintf(s.out, "\x1b[%dA", height)
-		}
-		lines := strings.Split(strings.TrimSuffix(body, "\r\n"), "\r\n")
-		for _, line := range lines {
-			fmt.Fprintf(s.out, "\r%s\x1b[K\r\n", line)
-		}
-		// A frame that shrank leaves rows of the taller one below it,
-		// so they are blanked and stay counted: the next draw has to
-		// climb over them to reach the top.
-		for i := len(lines); i < height; i++ {
-			fmt.Fprint(s.out, "\r\x1b[K\r\n")
-		}
-		height = max(len(lines), height)
-		fmt.Fprintf(s.out, "-- [%s]\x1b[K\r", intervalStop)
-		return nil
+		return out.frame(body, "-- ["+intervalStop+"]")
 	}
-	done := func() { fmt.Fprint(s.out, "\x1b[K\r\n") }
+	done := func() { _ = out.endFrame() }
 	if err := frame(); err != nil {
+		done()
 		return err
 	}
 	for {
