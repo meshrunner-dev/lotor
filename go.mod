@@ -12,7 +12,7 @@ require (
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
 	meshrunner.dev/pkg/lora v0.5.5
-	meshrunner.dev/pkg/meshcore v1.13.0
+	meshrunner.dev/pkg/meshcore v1.14.0
 	modernc.org/sqlite v1.58.0
 )
 

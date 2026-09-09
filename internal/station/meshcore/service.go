@@ -28,8 +28,18 @@ import (
 )
 
 const (
-	protocolName          = "meshcore"
-	protocolVersion       = 13
+	protocolName = "meshcore"
+	// stationModel is what a station calls itself to an application,
+	// in its device info and to the CLI's "board": the reference names
+	// the board its companion runs on, and a station runs on none.
+	stationModel = product.Name + " Virtual Station"
+	// protocolVersion is the level a station declares in its device
+	// info, the reference's FIRMWARE_VER_CODE: it says how far that
+	// answer's fields reach and which commands the node serves. It is
+	// 14 because the station answers the CLI command v14 added; the
+	// application's own level, which it declares in the query and which
+	// only chooses a mailbox layout, is a separate number.
+	protocolVersion       = 14
 	defaultContacts       = 100
 	defaultChannels       = 8
 	defaultMailbox        = 16
@@ -643,7 +653,7 @@ func (s *service) handleQuery(cmd companion.Command) ([]companion.Response, bool
 		return []companion.Response{companion.DeviceInfo{
 			ProtocolVersion: protocolVersion, MaxContacts: uint16(s.p.MaxContacts),
 			MaxChannels: uint8(s.p.MaxChannels), PIN: uint32(s.p.PIN), BuildDate: s.buildDate,
-			Model: product.Name + " Virtual Station", FirmwareVersion: s.buildVersion,
+			Model: stationModel, FirmwareVersion: s.buildVersion,
 			Repeat: false, PathHashMode: uint8(s.p.PathHashMode),
 		}}, true
 	case companion.AppStart:
@@ -713,6 +723,11 @@ func (s *service) handleMutation(cmd companion.Command) []companion.Response {
 		return responses
 	}
 	switch c := cmd.(type) {
+	case companion.RunCLICommand:
+		// A line may rename the station, so the CLI runs on the
+		// mutating side: the snapshot around it persists what changed
+		// and costs nothing when a line only reads.
+		return []companion.Response{s.runCLI(c.Line)}
 	case companion.SetDeviceTime:
 		return s.setDeviceTime(c.UnixSeconds)
 	case companion.SimpleCommand:
