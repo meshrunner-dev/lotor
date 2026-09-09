@@ -34,3 +34,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
+
+replace meshrunner.dev/pkg/meshcore => ../meshcore-go
