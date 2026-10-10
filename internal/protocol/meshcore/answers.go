@@ -9,15 +9,17 @@ import (
 	"errors"
 	"go.uber.org/zap"
 
+	"math"
 	"sort"
 	"time"
 
 	"meshrunner.dev/pkg/meshcore"
 )
 
-// statusBody packs the tally a companion's status page reads. Two
-// fields this node cannot answer honestly are sent as zero: it has no
-// battery to measure, and it keeps no error bitfield.
+// statusBody packs the tally a companion's status page reads. Its
+// battery is the supply the telemetry leads with, zero when nothing
+// measures one. The error bitfield is sent as zero: this node keeps
+// none.
 func (e *engine) statusBody() []byte {
 	s := e.stats.snapshot()
 	nf := int16(0)
@@ -27,23 +29,44 @@ func (e *engine) statusBody() []byte {
 		}
 	}
 	return meshcore.RepeaterStats{
-		TxQueueLen:    uint16(e.queueLen()),
-		NoiseFloor:    nf,
-		LastRSSI:      int16(s.LastRSSI),
-		PacketsRecv:   s.RecvTotal,
-		PacketsSent:   s.SentFlood + s.SentDirect,
-		TxAirtimeSecs: uint32(s.TxAirtime / time.Second),
-		UptimeSecs:    uint32(time.Since(e.started) / time.Second),
-		SentFlood:     s.SentFlood,
-		SentDirect:    s.SentDirect,
-		RecvFlood:     s.RecvFlood,
-		RecvDirect:    s.RecvDirect,
-		LastSNR:       s.LastSNR,
-		DirectDups:    uint16(s.DirectDups),
-		FloodDups:     uint16(s.FloodDups),
-		RxAirtimeSecs: uint32(s.RxAirtime / time.Second),
-		RecvErrors:    s.RecvErrors,
+		BattMilliVolts: milliVolts(e.supplyVolts()),
+		TxQueueLen:     uint16(e.queueLen()),
+		NoiseFloor:     nf,
+		LastRSSI:       int16(s.LastRSSI),
+		PacketsRecv:    s.RecvTotal,
+		PacketsSent:    s.SentFlood + s.SentDirect,
+		TxAirtimeSecs:  uint32(s.TxAirtime / time.Second),
+		UptimeSecs:     uint32(time.Since(e.started) / time.Second),
+		SentFlood:      s.SentFlood,
+		SentDirect:     s.SentDirect,
+		RecvFlood:      s.RecvFlood,
+		RecvDirect:     s.RecvDirect,
+		LastSNR:        s.LastSNR,
+		DirectDups:     uint16(s.DirectDups),
+		FloodDups:      uint16(s.FloodDups),
+		RxAirtimeSecs:  uint32(s.RxAirtime / time.Second),
+		RecvErrors:     s.RecvErrors,
 	}.AppendTo(nil)
+}
+
+// supplyVolts is what this node runs on, the one reading the status
+// page and the telemetry both carry as its battery. Zero when nothing
+// measures the supply: parsable, and honestly empty.
+func (e *engine) supplyVolts() float64 {
+	if e.supply != nil {
+		if v, ok := e.supply(); ok {
+			return v
+		}
+	}
+	return 0
+}
+
+// milliVolts is a supply reading in the status field's unit. The field
+// is sixteen bits wide, and Go leaves a float converted beyond that
+// range undefined, so a reading outside it pins to the edge instead of
+// coming out as some plausible voltage.
+func milliVolts(v float64) uint16 {
+	return uint16(math.Round(max(0, min(v*1000, math.MaxUint16))))
 }
 
 // telemetryBody reports what this node measures about itself, in the
@@ -52,10 +75,9 @@ func (e *engine) statusBody() []byte {
 // The voltage leads and is always present: companion apps show no
 // telemetry at all without it, and every emitter in the reference
 // sends it first and unconditionally, so no companion has met a
-// channel-1 payload lacking one. A mains relay has no battery and
-// this host exposes no rail either, so zero stands in — transparently
-// not measured, the answer statusBody already gives for the same
-// reason.
+// channel-1 payload lacking one. It is the measured supply, the same
+// one statusBody reports, and zero stands in where nothing measures
+// it — transparently not measured.
 func (e *engine) telemetryBody(permMask byte, budget int) []byte {
 	return e.telemetryBodyLogged(e.log, permMask, budget)
 }
@@ -74,16 +96,9 @@ func (e *engine) telemetryBodyLogged(log *zap.Logger, permMask byte, budget int)
 	enc := meshcore.NewLPPEncoderWithin(budget)
 	// The voltage leads, as the reference's does: a companion reads
 	// this field as the node's battery, and a payload without it is
-	// one such a client will not show at all. Zero when nothing
-	// measures the supply — parsable, and honestly empty.
-	volts := float64(0)
-	if e.supply != nil {
-		if v, ok := e.supply(); ok {
-			volts = v
-		}
-	}
+	// one such a client will not show at all.
 	if err := enc.Add(meshcore.LPPReading{
-		Channel: TelemChannelSelf, Type: meshcore.LPPVoltage, Value: volts,
+		Channel: TelemChannelSelf, Type: meshcore.LPPVoltage, Value: e.supplyVolts(),
 	}); err != nil {
 		// A rejected reading leaves its header in the buffer, so the
 		// payload would decode as truncated rather than short.

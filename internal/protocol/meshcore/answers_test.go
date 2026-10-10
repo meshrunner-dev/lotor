@@ -54,6 +54,39 @@ func TestTelemetryAlwaysLeadsWithAVoltage(t *testing.T) {
 	}
 }
 
+func TestStatusCarriesTheSupply(t *testing.T) {
+	// The status page's battery is the supply the telemetry already
+	// leads with: a relay that measures its rail must not report it
+	// on one page and deny it on the other.
+	e, _ := identifiedEngine(t)
+	battery := func() uint16 {
+		s, err := meshcore.ParseRepeaterStats(e.statusBody())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s.BattMilliVolts
+	}
+	if got := battery(); got != 0 {
+		t.Errorf("nothing measures the supply: battery %d mV, want 0", got)
+	}
+	for _, c := range []struct {
+		volts float64
+		read  bool
+		want  uint16
+		what  string
+	}{
+		{14.1375, true, 14138, "the rail, to the nearest millivolt"},
+		{14.1375, false, 0, "a supply that could not be read"},
+		{-0.2, true, 0, "below the field's reach"},
+		{70, true, 65535, "beyond the field's reach"},
+	} {
+		e.AttachSupply(func() (float64, bool) { return c.volts, c.read })
+		if got := battery(); got != c.want {
+			t.Errorf("%s: battery %d mV, want %d", c.what, got, c.want)
+		}
+	}
+}
+
 func TestSensorTelemetryFitsTheRouteItTravels(t *testing.T) {
 	// The dormant hook was the one variable producer left composing
 	// blind: a sensor list that outgrew the packet was refused after
