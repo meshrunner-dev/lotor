@@ -37,14 +37,11 @@ type remoteConnection struct {
 }
 
 func (s *service) sendRawData(command companion.SendRawData) []companion.Response {
-	if len(command.Path) > 63 || len(command.Data) < 4 {
-		return errorResponses(companion.ErrUnsupportedCommand)
-	}
 	packet, err := mesh.BuildRawCustom(command.Data)
 	if err != nil {
 		return errorResponses(companion.ErrTableFull)
 	}
-	s.routeDirect(packet, uint8(len(command.Path)), command.Path)
+	s.routeDirect(packet, command.PathLen, command.Path)
 	if responses := s.submitLocked(packet, "station-raw-data"); responses != nil {
 		return responses
 	}

@@ -390,6 +390,20 @@ func TestRawPacketCommandControlsStationQueuePriority(t *testing.T) {
 	}
 }
 
+func TestRawDataTravelsTheCommandsPathDescriptor(t *testing.T) {
+	svc := testRFService(t)
+	command := companion.SendRawData{PathLen: 0x41, Path: []byte{0xaa, 0xbb}, Data: []byte{1, 2, 3, 4}}
+	responses := svc.handle(t.Context(), command)
+	if len(responses) != 1 || responses[0] != companion.StatusResponse(companion.ResponseOK) {
+		t.Fatalf("raw data response = %#v", responses)
+	}
+	packet := emissionPacket(takeEmission(t, svc))
+	if !packet.IsRouteDirect() || packet.PayloadType() != mesh.PayloadTypeRawCustom ||
+		packet.PathHashSize() != 2 || packet.PathHashCount() != 1 || !bytes.Equal(packet.Path, command.Path) {
+		t.Fatalf("raw data emission = %#v", packet)
+	}
+}
+
 func TestSelfTelemetryAndRawPushes(t *testing.T) {
 	svc := testRFService(t)
 	responses := svc.handle(t.Context(), companion.SendTelemetryRequest{Self: true})
