@@ -29,16 +29,8 @@ import (
 
 const (
 	protocolName = "meshcore"
-	// stationModel is what a station calls itself to an application,
-	// in its device info and to the CLI's "board": the reference names
-	// the board its companion runs on, and a station runs on none.
 	stationModel = product.Name + " Virtual Station"
-	// protocolVersion is the level a station declares in its device
-	// info, the reference's FIRMWARE_VER_CODE: it says how far that
-	// answer's fields reach and which commands the node serves. It is
-	// 14 because the station answers the CLI command v14 added; the
-	// application's own level, which it declares in the query and which
-	// only chooses a mailbox layout, is a separate number.
+	// The reference's FIRMWARE_VER_CODE, not the application's own level.
 	protocolVersion       = 14
 	defaultContacts       = 100
 	defaultChannels       = 8
@@ -724,9 +716,7 @@ func (s *service) handleMutation(cmd companion.Command) []companion.Response {
 	}
 	switch c := cmd.(type) {
 	case companion.RunCLICommand:
-		// A line may rename the station, so the CLI runs on the
-		// mutating side: the snapshot around it persists what changed
-		// and costs nothing when a line only reads.
+		// A line may change the station, so the CLI runs on the mutating side.
 		return []companion.Response{s.runCLI(c.Line)}
 	case companion.SetDeviceTime:
 		return s.setDeviceTime(c.UnixSeconds)

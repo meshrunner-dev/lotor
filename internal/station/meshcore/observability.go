@@ -133,11 +133,7 @@ func mutationSucceeded(command companion.Command, responses []companion.Response
 		return len(responses) == 0
 	}
 	if _, cli := command.(companion.RunCLICommand); cli {
-		// A command line answers prose, never a status, so its own
-		// reply cannot say whether anything moved. The snapshot diff
-		// below is what says it: a line that only read leaves no
-		// attribute and is dropped there, and a rename is journalled
-		// like the one a typed command would have made.
+		// A CLI reply carries no status; the snapshot diff decides what changed.
 		return len(responses) == 1
 	}
 	if len(responses) == 0 {
