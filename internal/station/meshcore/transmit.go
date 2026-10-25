@@ -127,7 +127,9 @@ func (s *service) sendText(command companion.SendText) []companion.Response {
 	if command.TextType == mesh.TxtTypePlain {
 		head := plain[:5+len(text)]
 		expectedACK = mesh.AckCRC(head, s.id.PubKey[:])
-		s.expectedACKs[s.nextACK] = ackExpectation{crc: expectedACK, at: time.Now(), used: true}
+		s.expectedACKs[s.nextACK] = ackExpectation{
+			crc: expectedACK, at: time.Now(), contact: contact.info.PublicKey, used: true,
+		}
 		s.nextACK = (s.nextACK + 1) % len(s.expectedACKs)
 	}
 	return []companion.Response{companion.Sent{

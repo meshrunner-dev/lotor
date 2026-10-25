@@ -190,7 +190,7 @@ func TestRemoteLoginAndStatusRequestRoundTrip(t *testing.T) {
 	}
 	ack := make([]byte, 4)
 	binary.LittleEndian.PutUint32(ack, expectedKeepACK)
-	svc.receiveACK(ack)
+	svc.receiveACK(ack, nil)
 	svc.mu.Lock()
 	remainingKeepACK := svc.connections[peer.PubKey].expectedACK
 	svc.mu.Unlock()
@@ -473,5 +473,91 @@ func TestPathDiscoveryPushDoesNotMutateTheContactPath(t *testing.T) {
 	}
 	if emission, ok := pollEmission(svc); ok {
 		t.Fatalf("discovery queued reciprocal path: %+v", emission)
+	}
+}
+
+func TestFloodAnswerFromADirectContactResendsTheWayBack(t *testing.T) {
+	svc := testRFService(t)
+	direct, flooded := testPeer(t, 51), testPeer(t, 52)
+	addPeer(t, svc, direct, 0x41, []byte{0x1d, 0x90})
+	addPeer(t, svc, flooded, 0xff, nil)
+	answer := func(peer *mesh.LocalIdentity, route mesh.RouteType, body byte) {
+		t.Helper()
+		secret, err := peer.SharedSecret(svc.id.PubKey[:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		packet, err := mesh.BuildDatagram(mesh.PayloadTypeResponse, svc.id.PubKey[:mesh.PathHashSize],
+			peer.PubKey[:mesh.PathHashSize], secret, []byte{1, 2, 3, 4, body})
+		if err != nil {
+			t.Fatal(err)
+		}
+		packet.Header = mesh.MakeHeader(route, packet.PayloadType(), packet.PayloadVer())
+		packet.SetPathHashSizeAndCount(2, 1)
+		packet.Path = []byte{0x3d, 0xb9}
+		raw, _ := packet.MarshalBinary()
+		svc.processRF(t.Context(), radio.Frame{Payload: raw})
+	}
+
+	answer(direct, mesh.RouteTransportFlood, 1)
+	queued := svc.pipeline.Queue.Drain()
+	if len(queued) != 1 || queued[0].Kind != "station-path-retry" ||
+		time.Until(queued[0].NotBefore) < 2*time.Second {
+		t.Fatalf("path retry = %+v", queued)
+	}
+	retry := emissionPacket(queued[0])
+	if !retry.IsRouteDirect() || retry.PathLen != 0x41 || !bytes.Equal(retry.Path, []byte{0x1d, 0x90}) {
+		t.Fatalf("path retry route = %#v", retry)
+	}
+	secret, _ := direct.SharedSecret(svc.id.PubKey[:])
+	datagram, err := mesh.ParseDatagram(retry.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := datagram.Open(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	returned, err := mesh.DecodePathReturn(plain)
+	if err != nil || returned.PathLen != 0x41 || !bytes.Equal(returned.Path, []byte{0x3d, 0xb9}) {
+		t.Fatalf("path retry carries %+v, %v", returned, err)
+	}
+
+	answer(direct, mesh.RouteDirect, 2)
+	answer(flooded, mesh.RouteFlood, 3)
+	if queued := svc.pipeline.Queue.Drain(); len(queued) != 0 {
+		t.Fatalf("unwanted path retries = %+v", queued)
+	}
+}
+
+func TestFloodACKFromADirectContactResendsTheWayBack(t *testing.T) {
+	svc := testRFService(t)
+	peer := testPeer(t, 53)
+	addPeer(t, svc, peer, 0x41, []byte{0x1d, 0x90})
+	var prefix [6]byte
+	copy(prefix[:], peer.PubKey[:])
+	responses := svc.handle(t.Context(), companion.SendText{
+		TextType: mesh.TxtTypePlain, RecipientPrefix: prefix, Text: "hello",
+		UnixSeconds: uint32(time.Now().Unix()),
+	})
+	sent, ok := responses[0].(companion.Sent)
+	if !ok || sent.ExpectedACK == 0 {
+		t.Fatalf("send text = %#v", responses)
+	}
+	svc.pipeline.Queue.Drain()
+	crc := make([]byte, 4)
+	binary.LittleEndian.PutUint32(crc, sent.ExpectedACK)
+	ack, err := mesh.BuildAck(crc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack.SetPathHashSizeAndCount(2, 1)
+	ack.Path = []byte{0x3d, 0xb9}
+	raw, _ := ack.MarshalBinary()
+	svc.processRF(t.Context(), radio.Frame{Payload: raw})
+	queued := svc.pipeline.Queue.Drain()
+	if len(queued) != 1 || queued[0].Kind != "station-path-retry" ||
+		emissionPacket(queued[0]).PathLen != 0x41 {
+		t.Fatalf("path retry after a flood ACK = %+v", queued)
 	}
 }

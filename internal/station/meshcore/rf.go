@@ -112,11 +112,11 @@ func (s *service) processRF(ctx context.Context, frame radio.Frame) {
 	s.logReception(frame, packet)
 	switch packet.PayloadType() {
 	case mesh.PayloadTypeAck:
-		s.receiveACK(packet.Payload, frame.Correlation)
+		s.receiveACK(packet.Payload, packet, frame.Correlation)
 	case mesh.PayloadTypeMultipart:
 		multipart, err := mesh.ParseMultipart(packet.Payload)
 		if err == nil && multipart.Inner == mesh.PayloadTypeAck {
-			s.receiveACK(multipart.Data, frame.Correlation)
+			s.receiveACK(multipart.Data, packet, frame.Correlation)
 		}
 	case mesh.PayloadTypeAdvert:
 		s.receiveAdvert(ctx, packet)
@@ -403,7 +403,9 @@ func (s *service) sendACK(contact contactEntry, ack []byte) {
 	}
 }
 
-func (s *service) receiveACK(payload []byte, correlations ...correlation.ID) {
+// receiveACK settles an expected ACK. via is the packet that carried it,
+// nil when it rode inside a path return, which brings its own reciprocal.
+func (s *service) receiveACK(payload []byte, via *mesh.Packet, correlations ...correlation.ID) {
 	crc, err := mesh.ParseAck(payload)
 	if err != nil {
 		return
@@ -425,6 +427,7 @@ func (s *service) receiveACK(payload []byte, correlations ...correlation.ID) {
 				connection.nextPing = connection.activeAt.Add(connection.keepAlive)
 				s.connections[key] = connection
 				s.mu.Unlock()
+				s.retryReturnPath(key, via)
 				return
 			}
 		}
@@ -433,6 +436,7 @@ func (s *service) receiveACK(payload []byte, correlations ...correlation.ID) {
 	if !matched.used {
 		return
 	}
+	s.retryReturnPath(matched.contact, via)
 	trip := max(0, time.Since(matched.at).Milliseconds())
 	s.push(companion.SendConfirmed{
 		ExpectedACK: crc,
@@ -475,7 +479,7 @@ func (s *service) receivePath(ctx context.Context, packet *mesh.Packet) {
 		}
 		s.push(companion.Push{Code: companion.PushPathUpdated, Body: candidate.info.PublicKey[:]}, corr)
 		if path.ExtraType == uint8(mesh.PayloadTypeAck) {
-			s.receiveACK(path.Extra, corr)
+			s.receiveACK(path.Extra, nil, corr)
 		}
 		// A question we flooded is answered inside the path return
 		// that teaches the way back, so the answer arrives as this
@@ -533,6 +537,35 @@ func (s *service) sendReciprocalPath(identity *mesh.LocalIdentity, contact conta
 	s.mu.Lock()
 	s.routeDirect(packet, returned.PathLen, returned.Path)
 	s.submitAtLocked(packet, "station-path-reciprocal", time.Now().Add(500*time.Millisecond))
+	s.mu.Unlock()
+}
+
+// retryReturnPath is the reference's handleReturnPathRetry: a contact we
+// reach directly that still answers by flood never learnt the way back,
+// so it is sent again, down our path, carrying the one this flood took.
+func (s *service) retryReturnPath(publicKey [mesh.PubKeySize]byte, received *mesh.Packet) {
+	if received == nil || !received.IsRouteFlood() {
+		return
+	}
+	s.mu.Lock()
+	entry, exists := s.contacts[publicKey]
+	identity := s.id
+	s.mu.Unlock()
+	if !exists || entry.info.PathLen == 0xff {
+		return
+	}
+	secret, err := identity.SharedSecret(publicKey[:])
+	if err != nil {
+		return
+	}
+	packet, err := mesh.BuildPathReturn(publicKey[:mesh.PathHashSize], identity.PubKey[:mesh.PathHashSize],
+		secret, received.PathLen, received.Path, 0, nil)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	s.routeDirect(packet, entry.info.PathLen, entry.info.Path[:mesh.PathByteLen(entry.info.PathLen)])
+	s.submitAtLocked(packet, "station-path-retry", time.Now().Add(3*time.Second))
 	s.mu.Unlock()
 }
 

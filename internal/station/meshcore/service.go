@@ -290,9 +290,10 @@ type contactEntry struct {
 }
 
 type ackExpectation struct {
-	crc  uint32
-	at   time.Time
-	used bool
+	crc     uint32
+	at      time.Time
+	contact [mesh.PubKeySize]byte
+	used    bool
 }
 
 type companionPush struct {

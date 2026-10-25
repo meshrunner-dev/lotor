@@ -261,6 +261,7 @@ func (s *service) receiveRemoteResponse(packet *mesh.Packet, correlations ...cor
 		plain, err := datagram.Open(secret)
 		if err == nil {
 			s.consumeRemoteResponse(contact.info.PublicKey, plain, firstCorrelation(correlations))
+			s.retryReturnPath(contact.info.PublicKey, packet)
 			return
 		}
 	}
