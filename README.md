@@ -86,7 +86,7 @@ that recreate the whole configuration.
 
 ## Developing
 
-Use Go 1.26.7 or newer.
+Use Go 1.26.10 or newer.
 
 ```
 go build -o bin/ ./cmd/lotor
